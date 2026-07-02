@@ -1,0 +1,382 @@
+/**
+ * Golden Repository Index Management
+ *
+ * Provides UI functionality for managing indexes on golden repositories:
+ * - Displaying index status (present/not present)
+ * - Adding new indexes with confirmation
+ * - Polling job status and displaying progress
+ * - Handling success/failure feedback
+ */
+
+/**
+ * Show the add index form for a repository
+ * @param {string} alias - Repository alias
+ */
+function showAddIndexForm(alias) {
+    const form = document.getElementById(`add-index-form-${alias}`);
+    if (form) {
+        form.style.display = 'block';
+        // Track open form state for HTMX refresh preservation
+        if (typeof openAddIndexForms !== 'undefined') {
+            openAddIndexForms.add(alias);
+            console.log('[CIDX] Tracking open add-index form for:', alias);
+        }
+    }
+}
+
+/**
+ * Hide the add index form for a repository
+ * @param {string} alias - Repository alias
+ */
+function hideAddIndexForm(alias) {
+    const form = document.getElementById(`add-index-form-${alias}`);
+    if (form) {
+        form.style.display = 'none';
+        // Remove from tracking when form is closed
+        if (typeof openAddIndexForms !== 'undefined') {
+            openAddIndexForms.delete(alias);
+            console.log('[CIDX] Stopped tracking add-index form for:', alias);
+        }
+    }
+}
+
+/**
+ * Submit add index request with confirmation dialog
+ * Supports multiple index type selection via checkboxes
+ * @param {string} alias - Repository alias
+ */
+async function submitAddIndex(alias) {
+    // Collect all checked index types from checkboxes
+    const checkboxes = document.querySelectorAll(`input[name="index-types-${alias}"]:checked`);
+    const indexTypes = Array.from(checkboxes).map(cb => cb.value);
+
+    if (indexTypes.length === 0) {
+        alert('Please select at least one index type');
+        return;
+    }
+
+    // Build confirmation message with selected types
+    const typeLabels = Array.from(checkboxes).map(cb => {
+        const label = document.querySelector(`label[for="${cb.id}"]`);
+        return label ? label.textContent.trim() : cb.value;
+    });
+    const typesDisplay = typeLabels.join(', ');
+
+    // AC7: Confirmation dialog before submission
+    if (!confirm(`Add the following indexes to repository "${alias}"?\n\n${typesDisplay}\n\nThis operation may take several minutes.`)) {
+        return;
+    }
+
+    // Hide the form
+    hideAddIndexForm(alias);
+
+    // Show job progress container with loading indicator
+    const progressContainer = document.getElementById(`job-progress-${alias}`);
+    const statusText = document.getElementById(`job-status-text-${alias}`);
+    const spinner = document.getElementById(`job-spinner-${alias}`);
+
+    if (progressContainer && statusText && spinner) {
+        progressContainer.style.display = 'block';
+        statusText.textContent = 'submitting...';
+        spinner.style.display = 'inline-block';
+    }
+
+    try {
+        // Get CSRF token from page
+        const csrfToken = document.querySelector('input[name="csrf_token"]')?.value || '';
+
+        // Submit POST request to add indexes (supports both single and multiple)
+        // Send index_types array for multiple, index_type string for single (backward compatibility)
+        const requestBody = indexTypes.length === 1
+            ? { index_type: indexTypes[0] }
+            : { index_types: indexTypes };
+
+        // Story #489 + #641: Include selected providers when Semantic or Temporal is selected
+        if (indexTypes.includes('semantic') || indexTypes.includes('temporal')) {
+            const providerCheckboxes = document.querySelectorAll(`input[name="providers-${alias}"]:checked`);
+            const providers = Array.from(providerCheckboxes).map(cb => cb.value);
+            if (providers.length > 0) {
+                requestBody.providers = providers;
+            }
+        }
+
+        const response = await fetch(`/api/admin/golden-repos/${alias}/indexes`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+            },
+            credentials: 'same-origin',  // Include cookies (session_id) in request
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        // Handle both single (job_id) and multi-select (job_ids) responses
+        const jobId = data.job_id || (data.job_ids && data.job_ids[0]);
+
+        // Start polling job status
+        if (jobId) {
+            pollJobStatus(alias, jobId);
+        } else {
+            throw new Error('No job_id returned from server');
+        }
+
+    } catch (error) {
+        console.error('Failed to submit add index request:', error);
+
+        // AC6: Show error feedback
+        if (statusText) {
+            statusText.textContent = 'error';
+            statusText.style.color = 'var(--pico-color-red-550)';
+        }
+        if (spinner) {
+            spinner.style.display = 'none';
+        }
+
+        const progressDetails = document.getElementById(`job-progress-details-${alias}`);
+        if (progressDetails) {
+            progressDetails.innerHTML = `<p class="error-text">Failed to submit job: ${error.message}</p>`;
+        }
+
+        // Show error message and allow retry
+        setTimeout(() => {
+            alert(`Failed to add index: ${error.message}\n\nPlease try again or contact administrator.`);
+            if (progressContainer) {
+                progressContainer.style.display = 'none';
+            }
+        }, 500);
+    }
+}
+
+/**
+ * Poll job status every 5 seconds until completion
+ * @param {string} alias - Repository alias
+ * @param {string} jobId - Job ID to poll
+ */
+function pollJobStatus(alias, jobId) {
+    const progressContainer = document.getElementById(`job-progress-${alias}`);
+    const statusText = document.getElementById(`job-status-text-${alias}`);
+    const spinner = document.getElementById(`job-spinner-${alias}`);
+    const progressDetails = document.getElementById(`job-progress-details-${alias}`);
+
+    if (!progressContainer || !statusText || !spinner || !progressDetails) {
+        console.error(`Progress elements not found for alias: ${alias}`);
+        return;
+    }
+
+    const pollInterval = 5000; // 5 seconds
+    let pollCount = 0;
+    const maxPolls = 360; // 30 minutes max (360 * 5 seconds)
+
+    const poll = async () => {
+        pollCount++;
+
+        if (pollCount > maxPolls) {
+            console.error(`Max polling attempts reached for job ${jobId}`);
+            statusText.textContent = 'timeout';
+            statusText.style.color = 'var(--pico-color-red-550)';
+            spinner.style.display = 'none';
+            progressDetails.innerHTML = '<p class="error-text">Job polling timeout. Please refresh the page.</p>';
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/jobs/${jobId}`);
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const jobStatus = await response.json();
+            updateJobProgress(alias, jobStatus);
+
+            // Continue polling if job is still running
+            if (jobStatus.status === 'pending' || jobStatus.status === 'running') {
+                setTimeout(poll, pollInterval);
+            } else if (jobStatus.status === 'completed') {
+                // AC5: Success feedback - reload page to show updated index status
+                setTimeout(() => {
+                    showSuccessMessage('Index added successfully!');
+                    // Trigger HTMX refresh of repos list
+                    const refreshBtn = document.getElementById('refresh-btn');
+                    if (refreshBtn) {
+                        refreshBtn.click();
+                    }
+                }, 1000);
+            } else if (jobStatus.status === 'failed') {
+                // AC6: Error feedback
+                setTimeout(() => {
+                    alert(`Index addition failed: ${jobStatus.result?.error || 'Unknown error'}\n\nPlease try again or contact administrator.`);
+                }, 500);
+            }
+
+        } catch (error) {
+            console.error('Failed to poll job status:', error);
+            statusText.textContent = 'error';
+            statusText.style.color = 'var(--pico-color-red-550)';
+            spinner.style.display = 'none';
+            progressDetails.innerHTML = `<p class="error-text">Failed to retrieve job status: ${error.message}</p>`;
+        }
+    };
+
+    // Start polling immediately
+    poll();
+}
+
+/**
+ * Update job progress UI with current status
+ * @param {string} alias - Repository alias
+ * @param {object} jobStatus - Job status object from API
+ */
+function updateJobProgress(alias, jobStatus) {
+    const statusText = document.getElementById(`job-status-text-${alias}`);
+    const spinner = document.getElementById(`job-spinner-${alias}`);
+    const progressDetails = document.getElementById(`job-progress-details-${alias}`);
+
+    if (!statusText || !spinner || !progressDetails) {
+        return;
+    }
+
+    // Update status text with color coding
+    statusText.textContent = jobStatus.status;
+
+    if (jobStatus.status === 'completed') {
+        statusText.style.color = 'var(--pico-color-green-550)';
+        spinner.style.display = 'none';
+    } else if (jobStatus.status === 'failed') {
+        statusText.style.color = 'var(--pico-color-red-550)';
+        spinner.style.display = 'none';
+    } else if (jobStatus.status === 'running') {
+        statusText.style.color = 'var(--pico-color-blue-550)';
+        spinner.style.display = 'inline-block';
+    } else {
+        // pending
+        statusText.style.color = 'var(--pico-color-amber-550)';
+        spinner.style.display = 'inline-block';
+    }
+
+    // Build progress details HTML
+    let detailsHtml = '';
+
+    if (jobStatus.created_at) {
+        detailsHtml += `<p><strong>Created:</strong> ${new Date(jobStatus.created_at).toLocaleString()}</p>`;
+    }
+    if (jobStatus.started_at) {
+        detailsHtml += `<p><strong>Started:</strong> ${new Date(jobStatus.started_at).toLocaleString()}</p>`;
+    }
+    if (jobStatus.completed_at) {
+        detailsHtml += `<p><strong>Completed:</strong> ${new Date(jobStatus.completed_at).toLocaleString()}</p>`;
+    }
+    if (jobStatus.progress) {
+        detailsHtml += `<p><strong>Progress:</strong> ${jobStatus.progress}</p>`;
+    }
+    if (jobStatus.result) {
+        if (jobStatus.status === 'completed') {
+            detailsHtml += `<p class="success-text"><strong>Result:</strong> ${JSON.stringify(jobStatus.result, null, 2)}</p>`;
+        } else if (jobStatus.status === 'failed') {
+            detailsHtml += `<p class="error-text"><strong>Error:</strong> ${jobStatus.result.error || JSON.stringify(jobStatus.result)}</p>`;
+        }
+    }
+
+    progressDetails.innerHTML = detailsHtml;
+}
+
+/**
+ * Show success message to user
+ * @param {string} message - Success message to display
+ */
+function showSuccessMessage(message) {
+    const messagesContainer = document.querySelector('.golden-repos-header');
+    if (!messagesContainer) {
+        return;
+    }
+
+    const successArticle = document.createElement('article');
+    successArticle.className = 'message-success';
+    successArticle.innerHTML = `<p>${message}</p>`;
+
+    messagesContainer.insertAdjacentElement('afterend', successArticle);
+
+    // Remove message after 5 seconds
+    setTimeout(() => {
+        successArticle.remove();
+    }, 5000);
+}
+
+/**
+ * Toggle provider checkboxes visibility based on Semantic or Temporal checkbox state (Story #489, #641)
+ * @param {string} alias - Repository alias
+ */
+function toggleProviderCheckboxes(alias) {
+    const semanticCheckbox = document.getElementById(`index-type-semantic-${alias}`);
+    const temporalCheckbox = document.getElementById(`index-type-temporal-${alias}`);
+    const providerDiv = document.getElementById(`provider-checkboxes-${alias}`);
+
+    if (!providerDiv) return;
+
+    if ((semanticCheckbox && semanticCheckbox.checked) || (temporalCheckbox && temporalCheckbox.checked)) {
+        providerDiv.style.display = 'block';
+        loadProviderCheckboxes(alias);
+    } else {
+        providerDiv.style.display = 'none';
+    }
+}
+
+/**
+ * Load provider checkboxes dynamically from server (Story #489)
+ * @param {string} alias - Repository alias
+ */
+async function loadProviderCheckboxes(alias) {
+    const providerList = document.getElementById(`provider-list-${alias}`);
+    if (!providerList) return;
+
+    // Don't reload if already loaded (check for checkboxes)
+    if (providerList.querySelector('input[type="checkbox"]')) return;
+
+    try {
+        // Fetch configured providers
+        const providersResp = await fetch('/api/admin/provider-indexes/providers', {
+            credentials: 'same-origin'
+        });
+        if (!providersResp.ok) throw new Error('Failed to load providers');
+        const providersData = await providersResp.json();
+
+        // Fetch provider index status for this repo
+        const statusResp = await fetch(`/api/admin/provider-indexes/status?alias=${alias}`, {
+            credentials: 'same-origin'
+        });
+        let statusData = {};
+        if (statusResp.ok) {
+            const statusJson = await statusResp.json();
+            statusData = statusJson.provider_indexes || {};
+        }
+
+        if (!providersData.providers || providersData.providers.length === 0) {
+            providerList.innerHTML = '<span style="font-size: 0.85em; color: var(--pico-muted-color);">No providers configured</span>';
+            return;
+        }
+
+        let html = '';
+        for (const provider of providersData.providers) {
+            const pStatus = statusData[provider.name] || {};
+            const hasIndex = pStatus.exists || false;
+            const rebuildLabel = hasIndex ? ' <span class="rebuild-label">(rebuild)</span>' : '';
+
+            html += `<label class="checkbox-label">
+                <input type="checkbox" name="providers-${alias}" value="${provider.name}" checked>
+                ${provider.display_name}${rebuildLabel}
+            </label>`;
+        }
+
+        providerList.innerHTML = html;
+
+    } catch (error) {
+        console.error('Failed to load providers:', error);
+        providerList.innerHTML = '<span style="font-size: 0.85em; color: var(--pico-color-red-550);">Failed to load providers</span>';
+    }
+}

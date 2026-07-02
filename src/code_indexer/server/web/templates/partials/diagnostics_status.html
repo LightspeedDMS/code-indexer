@@ -1,0 +1,278 @@
+<!-- Diagnostics Status Partial - Updated via HTMX Polling -->
+<div class="diagnostics-categories"
+     {% if is_running %}
+     hx-get="/admin/diagnostics/status"
+     hx-trigger="every 2s"
+     hx-swap="innerHTML"
+     hx-target="#diagnostics-results"
+     {% endif %}>
+
+    <!-- Category 1: CLI Tool Dependencies -->
+    <details class="diagnostic-category" {% if categories.CLI_TOOLS in status and status[categories.CLI_TOOLS]|length > 0 %}open{% endif %}>
+        <summary>
+            <h3>CLI Tool Dependencies</h3>
+            {% if categories.CLI_TOOLS in status and status[categories.CLI_TOOLS]|length > 0 %}
+                {% set category_status = status[categories.CLI_TOOLS][0].status.value %}
+                <span class="category-status {{ category_status }}">
+                    {% if category_status == 'running' %}<span class="status-icon spinner"></span>{% endif %}
+                    {% if category_status == 'working' %}<span class="status-icon check"></span>{% endif %}
+                    {% if category_status == 'error' %}<span class="status-icon error"></span>{% endif %}
+                    {% if category_status == 'warning' %}<span class="status-icon info"></span>{% endif %}
+                    {{ category_status|upper|replace('_', ' ') }}
+                </span>
+            {% else %}
+                <span class="category-status not-run">NOT RUN</span>
+            {% endif %}
+        </summary>
+        <div class="category-content">
+            {% if categories.CLI_TOOLS in status %}
+                {% for result in status[categories.CLI_TOOLS] %}
+                <div class="diagnostic-item">
+                    <div class="diagnostic-item-header">
+                        <span class="diagnostic-item-name">{{ result.name }}</span>
+                        <span class="category-status {{ result.status.value }}">{{ result.status.value|upper|replace('_', ' ') }}</span>
+                    </div>
+                    <div class="diagnostic-item-message">{{ result.message }}</div>
+                    {% if result.details %}
+                    <details class="diagnostic-details">
+                        <summary>Details</summary>
+                        <pre>{{ result.details|tojson(indent=2) }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No diagnostics available for this category.</p>
+            {% endif %}
+            <button
+                class="outline"
+                hx-post="/admin/diagnostics/run/cli_tools"
+                hx-target="#diagnostics-results"
+                hx-swap="innerHTML"
+                {% if is_running %}disabled{% endif %}
+            >
+                Re-run CLI Tools
+            </button>
+        </div>
+    </details>
+
+    <!-- Category 2: SDK Prerequisites -->
+    <details class="diagnostic-category" {% if categories.SDK_PREREQUISITES in status and status[categories.SDK_PREREQUISITES]|length > 0 %}open{% endif %}>
+        <summary>
+            <h3>SDK Prerequisites</h3>
+            {% if categories.SDK_PREREQUISITES in status and status[categories.SDK_PREREQUISITES]|length > 0 %}
+                {% set category_status = status[categories.SDK_PREREQUISITES][0].status.value %}
+                <span class="category-status {{ category_status }}">
+                    {% if category_status == 'running' %}<span class="status-icon spinner"></span>{% endif %}
+                    {% if category_status == 'working' %}<span class="status-icon check"></span>{% endif %}
+                    {% if category_status == 'error' %}<span class="status-icon error"></span>{% endif %}
+                    {% if category_status == 'warning' %}<span class="status-icon info"></span>{% endif %}
+                    {{ category_status|upper|replace('_', ' ') }}
+                </span>
+            {% else %}
+                <span class="category-status not-run">NOT RUN</span>
+            {% endif %}
+        </summary>
+        <div class="category-content">
+            {% if categories.SDK_PREREQUISITES in status %}
+                {% for result in status[categories.SDK_PREREQUISITES] %}
+                <div class="diagnostic-item">
+                    <div class="diagnostic-item-header">
+                        <span class="diagnostic-item-name">{{ result.name }}</span>
+                        <span class="category-status {{ result.status.value }}">{{ result.status.value|upper|replace('_', ' ') }}</span>
+                    </div>
+                    <div class="diagnostic-item-message">{{ result.message }}</div>
+                    {% if result.details %}
+                    <details class="diagnostic-details">
+                        <summary>Details</summary>
+                        <pre>{{ result.details|tojson(indent=2) }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No diagnostics available for this category.</p>
+            {% endif %}
+            <button
+                class="outline"
+                hx-post="/admin/diagnostics/run/sdk_prerequisites"
+                hx-target="#diagnostics-results"
+                hx-swap="innerHTML"
+                {% if is_running %}disabled{% endif %}
+            >
+                Re-run SDK Prerequisites
+            </button>
+        </div>
+    </details>
+
+    <!-- Category 3: External API Integrations -->
+    <details class="diagnostic-category" {% if categories.EXTERNAL_APIS in status and status[categories.EXTERNAL_APIS]|length > 0 %}open{% endif %}>
+        <summary>
+            <h3>External API Integrations</h3>
+            {% if categories.EXTERNAL_APIS in status and status[categories.EXTERNAL_APIS]|length > 0 %}
+                {% set category_status = status[categories.EXTERNAL_APIS][0].status.value %}
+                <span class="category-status {{ category_status }}">
+                    {% if category_status == 'running' %}<span class="status-icon spinner"></span>{% endif %}
+                    {% if category_status == 'working' %}<span class="status-icon check"></span>{% endif %}
+                    {% if category_status == 'error' %}<span class="status-icon error"></span>{% endif %}
+                    {% if category_status == 'warning' %}<span class="status-icon info"></span>{% endif %}
+                    {{ category_status|upper|replace('_', ' ') }}
+                </span>
+            {% else %}
+                <span class="category-status not-run">NOT RUN</span>
+            {% endif %}
+        </summary>
+        <div class="category-content">
+            {% if categories.EXTERNAL_APIS in status %}
+                {% for result in status[categories.EXTERNAL_APIS] %}
+                <div class="diagnostic-item">
+                    <div class="diagnostic-item-header">
+                        <span class="diagnostic-item-name">{{ result.name }}</span>
+                        <span class="category-status {{ result.status.value }}">{{ result.status.value|upper|replace('_', ' ') }}</span>
+                    </div>
+                    <div class="diagnostic-item-message">{{ result.message }}</div>
+                    {% if result.details %}
+                    <details class="diagnostic-details">
+                        <summary>Details</summary>
+                        <pre>{{ result.details|tojson(indent=2) }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No diagnostics available for this category.</p>
+            {% endif %}
+            <button
+                class="outline"
+                hx-post="/admin/diagnostics/run/external_apis"
+                hx-target="#diagnostics-results"
+                hx-swap="innerHTML"
+                {% if is_running %}disabled{% endif %}
+            >
+                Re-run External APIs
+            </button>
+        </div>
+    </details>
+
+    <!-- Category 4: Credential & Connectivity -->
+    <details class="diagnostic-category" {% if categories.CREDENTIALS in status and status[categories.CREDENTIALS]|length > 0 %}open{% endif %}>
+        <summary>
+            <h3>Credential & Connectivity</h3>
+            {% if categories.CREDENTIALS in status and status[categories.CREDENTIALS]|length > 0 %}
+                {% set category_status = status[categories.CREDENTIALS][0].status.value %}
+                <span class="category-status {{ category_status }}">
+                    {% if category_status == 'running' %}<span class="status-icon spinner"></span>{% endif %}
+                    {% if category_status == 'working' %}<span class="status-icon check"></span>{% endif %}
+                    {% if category_status == 'error' %}<span class="status-icon error"></span>{% endif %}
+                    {% if category_status == 'warning' %}<span class="status-icon info"></span>{% endif %}
+                    {{ category_status|upper|replace('_', ' ') }}
+                </span>
+            {% else %}
+                <span class="category-status not-run">NOT RUN</span>
+            {% endif %}
+        </summary>
+        <div class="category-content">
+            {% if categories.CREDENTIALS in status %}
+                {% for result in status[categories.CREDENTIALS] %}
+                <div class="diagnostic-item">
+                    <div class="diagnostic-item-header">
+                        <span class="diagnostic-item-name">{{ result.name }}</span>
+                        <span class="category-status {{ result.status.value }}">{{ result.status.value|upper|replace('_', ' ') }}</span>
+                    </div>
+                    <div class="diagnostic-item-message">{{ result.message }}</div>
+                    {% if result.details %}
+                    <details class="diagnostic-details">
+                        <summary>Details</summary>
+                        <pre>{{ result.details|tojson(indent=2) }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No diagnostics available for this category.</p>
+            {% endif %}
+            <button
+                class="outline"
+                hx-post="/admin/diagnostics/run/credentials"
+                hx-target="#diagnostics-results"
+                hx-swap="innerHTML"
+                {% if is_running %}disabled{% endif %}
+            >
+                Re-run Credentials
+            </button>
+        </div>
+    </details>
+
+    <!-- Category 5: Core Infrastructure -->
+    <details class="diagnostic-category" {% if categories.INFRASTRUCTURE in status and status[categories.INFRASTRUCTURE]|length > 0 %}open{% endif %}>
+        <summary>
+            <h3>Core Infrastructure</h3>
+            {% if categories.INFRASTRUCTURE in status and status[categories.INFRASTRUCTURE]|length > 0 %}
+                {% set category_status = status[categories.INFRASTRUCTURE][0].status.value %}
+                <span class="category-status {{ category_status }}">
+                    {% if category_status == 'running' %}<span class="status-icon spinner"></span>{% endif %}
+                    {% if category_status == 'working' %}<span class="status-icon check"></span>{% endif %}
+                    {% if category_status == 'error' %}<span class="status-icon error"></span>{% endif %}
+                    {% if category_status == 'warning' %}<span class="status-icon info"></span>{% endif %}
+                    {{ category_status|upper|replace('_', ' ') }}
+                </span>
+            {% else %}
+                <span class="category-status not-run">NOT RUN</span>
+            {% endif %}
+        </summary>
+        <div class="category-content">
+            {% if categories.INFRASTRUCTURE in status %}
+                {% for result in status[categories.INFRASTRUCTURE] %}
+                <div class="diagnostic-item">
+                    <div class="diagnostic-item-header">
+                        <span class="diagnostic-item-name">{{ result.name }}</span>
+                        <span class="category-status {{ result.status.value }}">{{ result.status.value|upper|replace('_', ' ') }}</span>
+                    </div>
+                    <div class="diagnostic-item-message">{{ result.message }}</div>
+                    {% if result.details %}
+                    <details class="diagnostic-details">
+                        <summary>Details</summary>
+                        <pre>{{ result.details|tojson(indent=2) }}</pre>
+                    </details>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No diagnostics available for this category.</p>
+            {% endif %}
+            <button
+                class="outline"
+                hx-post="/admin/diagnostics/run/infrastructure"
+                hx-target="#diagnostics-results"
+                hx-swap="innerHTML"
+                {% if is_running %}disabled{% endif %}
+            >
+                Re-run Infrastructure
+            </button>
+        </div>
+    </details>
+
+</div>
+
+<script>
+// Polling timeout: Stop polling after 60 seconds (30 polls * 2s = 60s)
+(function() {
+    const MAX_POLLS = 30;
+    let pollCount = 0;
+
+    // Listen for HTMX requests on diagnostics-results
+    document.getElementById('diagnostics-results').addEventListener('htmx:beforeRequest', function(event) {
+        pollCount++;
+
+        if (pollCount >= MAX_POLLS) {
+            // Stop polling by removing hx-get attribute
+            const pollingElement = document.querySelector('[hx-get="/admin/diagnostics/status"]');
+            if (pollingElement) {
+                pollingElement.removeAttribute('hx-get');
+                pollingElement.removeAttribute('hx-trigger');
+                console.log('Polling timeout reached (60 seconds)');
+            }
+        }
+    });
+})();
+</script>

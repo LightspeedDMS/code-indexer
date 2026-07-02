@@ -1,0 +1,2072 @@
+"""
+Background Job System for CIDX Server.
+
+Manages asynchronous operations for golden repositories and other long-running tasks.
+Provides persistence, user isolation, job management, and comprehensive tracking.
+"""
+
+import json
+import logging
+import multiprocessing
+import queue
+import threading
+import uuid
+import inspect
+from datetime import datetime, timezone, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
+from dataclasses import dataclass, asdict
+
+# Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
+# DatabaseConnectionManager instances and proactively closes the worker
+# thread's SQLite connection on each before the thread exits.  Imported
+# at module scope (not under TYPE_CHECKING) because we need the runtime
+# class object, not just the type annotation.
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+if TYPE_CHECKING:
+    from code_indexer.server.utils.config_manager import (
+        ServerResourceConfig,
+        BackgroundJobsConfig,
+        DataRetentionConfig,
+    )
+    from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
+    from code_indexer.server.services.job_tracker import JobTracker
+
+
+class JobStatus(str, Enum):
+    """Job status enumeration."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    COMPLETED_PARTIAL = (
+        "completed_partial"  # Bug #679: some providers succeeded, some failed
+    )
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    RESOLVING_PREREQUISITES = "resolving_prerequisites"  # AC2: SCIP self-healing state
+
+
+class DuplicateJobError(Exception):
+    """Raised when attempting to submit a duplicate job (Bug #133)."""
+
+    def __init__(self, operation_type: str, repo_alias: str, existing_job_id: str):
+        self.operation_type = operation_type
+        self.repo_alias = repo_alias
+        self.existing_job_id = existing_job_id
+        super().__init__(
+            f"A '{operation_type}' job is already running for repository '{repo_alias}' "
+            f"(job_id: {existing_job_id}). Please wait for it to complete."
+        )
+
+
+@dataclass
+class BackgroundJob:
+    """Background job data structure with SCIP self-healing support."""
+
+    job_id: str
+    operation_type: str
+    status: JobStatus
+    created_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    result: Optional[Dict[str, Any]]
+    error: Optional[str]
+    progress: int  # 0-100
+    username: str  # User who submitted the job
+    is_admin: bool = (
+        False  # Job-priority opt-in flag (bypasses username ownership check on
+    )
+    # operations like cancel/get-job). Does NOT reflect the submitter's user role — admin users
+    # submitting through xray_search/xray_explore see is_admin=False because those handlers
+    # never request the priority lane (they omit is_admin from submit_job).
+    cancelled: bool = False  # Cancellation flag
+
+    # SCIP Self-Healing Fields (AC1: Extended BackgroundJob Model)
+    repo_alias: Optional[str] = None  # Repository being processed
+    resolution_attempts: int = 0  # Total Claude Code invocations across all projects
+    claude_actions: Optional[List[str]] = None  # Aggregated actions from all projects
+    failure_reason: Optional[str] = None  # Human-readable failure explanation
+    extended_error: Optional[Dict[str, Any]] = None  # Structured error context
+    language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = (
+        None  # Per-project tracking
+    )
+
+    # Story #480: Real-time phase progress fields
+    current_phase: Optional[str] = (
+        None  # e.g., "semantic", "temporal", "fts", "scip", "cow"
+    )
+    phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
+
+
+# Upper bound for DB fetch when performing client-side dedup/sort/pagination.
+# Large enough to cover realistic workloads; avoids unbounded queries.
+_MAX_DB_FETCH_FOR_PAGINATION = 10000
+
+
+class BackgroundJobManager:
+    """
+    Enhanced background job manager for long-running operations.
+
+    Provides job queuing, execution, status tracking, persistence,
+    user isolation, and comprehensive job management functionality.
+    """
+
+    def __init__(
+        self,
+        storage_path: Optional[str] = None,
+        resource_config: Optional["ServerResourceConfig"] = None,
+        use_sqlite: bool = False,
+        db_path: Optional[str] = None,
+        background_jobs_config: Optional["BackgroundJobsConfig"] = None,
+        job_tracker: Optional["JobTracker"] = None,
+        data_retention_config: Optional["DataRetentionConfig"] = None,
+        storage_backend: Optional[Any] = None,
+    ):
+        """Initialize enhanced background job manager.
+
+        Args:
+            storage_path: Path for persistent job storage (JSON file, optional)
+            resource_config: Resource configuration (limits, timeouts)
+            use_sqlite: Whether to use SQLite backend instead of JSON file
+            db_path: Path to SQLite database file (required if use_sqlite=True)
+            background_jobs_config: Background jobs configuration (concurrency limits)
+            job_tracker: Optional JobTracker for unified job tracking (Story #311).
+                When provided, jobs are also registered with the tracker for
+                cross-service visibility. When None, behavior is unchanged.
+            data_retention_config: Data retention configuration (Story #400).
+                Controls how long completed/failed/cancelled jobs are kept.
+        """
+        self.jobs: Dict[str, BackgroundJob] = {}
+        self._lock = threading.Lock()
+        # Story #311: Optional JobTracker for unified tracking (Epic #261 Story 1B)
+        self._job_tracker: Optional["JobTracker"] = job_tracker
+        self._executor = None
+        self._running_jobs: Dict[str, threading.Thread] = {}
+        self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
+        # Story #26: Queue for pending jobs waiting for a slot
+        self._pending_job_queue: queue.Queue = queue.Queue()
+        # Story #996: Child process tracking for xray_search/xray_explore termination
+        self._child_processes: Dict[str, List] = {}
+        self._child_processes_lock = threading.Lock()
+
+        # Persistence settings
+        self.storage_path = storage_path
+        self.use_sqlite = use_sqlite
+        self.db_path = db_path
+        self._sqlite_backend: Optional["BackgroundJobsSqliteBackend"] = None
+
+        # Initialize storage backend
+        if storage_backend is not None:
+            self._sqlite_backend = storage_backend
+            self.use_sqlite = True
+            logging.info("BackgroundJobManager using injected storage backend")
+        elif self.use_sqlite and self.db_path:
+            from code_indexer.server.storage.sqlite_backends import (
+                BackgroundJobsSqliteBackend,
+            )
+
+            self._sqlite_backend = BackgroundJobsSqliteBackend(self.db_path)
+            logging.info("BackgroundJobManager using SQLite backend")
+
+        # Resource configuration (import here to avoid circular dependency)
+        if resource_config is None:
+            from code_indexer.server.utils.config_manager import ServerResourceConfig
+
+            resource_config = ServerResourceConfig()
+        self.resource_config = resource_config
+
+        # Story #26: Background jobs configuration (concurrency limits)
+        if background_jobs_config is None:
+            from code_indexer.server.utils.config_manager import BackgroundJobsConfig
+
+            background_jobs_config = BackgroundJobsConfig()
+        self._background_jobs_config = background_jobs_config
+
+        # Story #400: Data retention configuration (job history cleanup period)
+        if data_retention_config is None:
+            from code_indexer.server.utils.config_manager import DataRetentionConfig
+
+            data_retention_config = DataRetentionConfig()
+        self._data_retention_config = data_retention_config
+
+        # Story #26: Semaphore for limiting concurrent job execution
+        self._job_semaphore = threading.Semaphore(
+            self._background_jobs_config.max_concurrent_background_jobs
+        )
+
+        # Load persisted jobs
+        self._load_jobs()
+
+        # Background job manager initialized silently
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        """Get the maximum number of concurrent background jobs (Story #26)."""
+        return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+
+    # Bug #467: Staleness threshold for detecting truly stuck jobs.
+    # Since indexing no longer has a timeout, use a generous 24-hour threshold.
+    STALE_JOB_THRESHOLD_SECONDS: int = 86400  # 24 hours
+
+    def _check_operation_conflict(
+        self, operation_type: str, repo_alias: str
+    ) -> Optional[str]:
+        """Check if operation is already running for this repository.
+
+        Bug #133: Prevent duplicate jobs with same (operation_type, repo_alias)
+        from running concurrently.
+
+        Bug #374: Auto-expire stale RUNNING jobs that exceeded the staleness
+        threshold. This handles cases where the job's thread was killed
+        (e.g., by SIGTERM during server restart) but the job status was not
+        persisted as FAILED due to SQLite contention.
+
+        Returns job_id of conflicting job, or None if no conflict.
+        Must be called while holding self._lock.
+
+        Args:
+            operation_type: Type of operation (e.g., 'refresh_golden_repo')
+            repo_alias: Repository alias being processed
+
+        Returns:
+            Job ID of conflicting job if found, None otherwise
+        """
+        stale_threshold = self.STALE_JOB_THRESHOLD_SECONDS
+
+        if self._sqlite_backend is not None:
+            try:
+                running_jobs = self._sqlite_backend.list_jobs(
+                    status="running", operation_type=operation_type
+                )
+                pending_jobs = self._sqlite_backend.list_jobs(
+                    status="pending", operation_type=operation_type
+                )
+                for job_dict in running_jobs + pending_jobs:
+                    if job_dict.get("repo_alias") == repo_alias:
+                        return job_dict.get("job_id", "unknown")  # type: ignore[no-any-return]
+                return None
+            except Exception as e:
+                logging.warning(
+                    "Failed to check operation conflict from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+
+        for job in self.jobs.values():
+            if (
+                job.operation_type == operation_type
+                and job.repo_alias == repo_alias
+                and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
+            ):
+                # Bug #374: Check if job is stale (exceeded timeout + buffer)
+                if job.started_at is not None:
+                    elapsed = (
+                        datetime.now(timezone.utc) - job.started_at
+                    ).total_seconds()
+                    if elapsed > stale_threshold:
+                        logging.warning(
+                            f"Auto-expiring stale job {job.job_id} for {repo_alias} "
+                            f"(running for {elapsed:.0f}s, threshold {stale_threshold}s)"
+                        )
+                        job.status = JobStatus.FAILED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.error = f"Auto-expired: exceeded stale threshold ({elapsed:.0f}s > {stale_threshold}s)"
+                        # Bug #546: Persist to DB so other nodes see the expiry
+                        self._persist_jobs(job_id=job.job_id)
+                        return None  # Allow new submission
+                return job.job_id
+        return None
+
+    def submit_job(
+        self,
+        operation_type: str,
+        func: Callable[[], Dict[str, Any]],
+        *args,
+        submitter_username: str,
+        is_admin: bool = False,
+        repo_alias: Optional[str] = None,  # AC5: Fix unknown repo bug
+        **kwargs,
+    ) -> str:
+        """
+        Submit a job for background execution.
+
+        Args:
+            operation_type: Type of operation (e.g., 'add_golden_repo')
+            func: Function to execute
+            *args: Function arguments
+            submitter_username: Username of the job submitter
+            is_admin: Whether this is an admin job (higher priority)
+            repo_alias: Repository alias being processed (AC5: Fix unknown repo bug)
+            **kwargs: Function keyword arguments
+
+        Returns:
+            Job ID for tracking
+
+        Raises:
+            Exception: If user has exceeded max jobs limit (if configured)
+        """
+        # Check maintenance mode first (Story #734)
+        from code_indexer.server.services.maintenance_service import (
+            get_maintenance_state,
+        )
+        from code_indexer.server.jobs.exceptions import MaintenanceModeError
+
+        if get_maintenance_state().is_maintenance_mode():
+            raise MaintenanceModeError()
+
+        # NOTE: max_jobs_per_user limit has been removed as an artificial constraint
+        # Jobs are no longer limited per user
+
+        # AC5: Validate repo_alias to prevent "unknown" values
+        if repo_alias is None:
+            logging.warning(
+                f"Job submitted without repo_alias for operation '{operation_type}' "
+                f"by user '{submitter_username}'. Consider providing repo_alias."
+            )
+        elif repo_alias.lower() == "unknown":
+            logging.warning(
+                f"Job submitted with repo_alias='unknown' for operation '{operation_type}' "
+                f"by user '{submitter_username}'. This may indicate missing repository context."
+            )
+
+        job_id = str(uuid.uuid4())
+
+        job = BackgroundJob(
+            job_id=job_id,
+            operation_type=operation_type,
+            status=JobStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+            started_at=None,
+            completed_at=None,
+            result=None,
+            error=None,
+            progress=0,
+            username=submitter_username,
+            is_admin=is_admin,
+            repo_alias=repo_alias,  # AC5: Store repo_alias
+        )
+
+        with self._lock:
+            # Bug #133: Check for duplicate operation on same repo
+            # This check MUST be inside the lock to prevent TOCTOU race conditions
+            if repo_alias:
+                conflict_job_id = self._check_operation_conflict(
+                    operation_type, repo_alias
+                )
+                if conflict_job_id:
+                    raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
+
+            self.jobs[job_id] = job
+
+        # Story #267 Component 3-4: Persist outside lock
+        self._persist_jobs(job_id=job_id)
+
+        # Story #311: Register with JobTracker for unified cross-service tracking
+        if self._job_tracker is not None:
+            try:
+                self._job_tracker.register_job(
+                    job_id=job_id,
+                    operation_type=operation_type,
+                    username=submitter_username,
+                    repo_alias=repo_alias,
+                )
+            except Exception:
+                logging.warning(
+                    f"JobTracker.register_job failed for {job_id} — "
+                    "continuing without tracker registration",
+                    exc_info=True,
+                )
+
+        # Execute job in background thread
+        thread = threading.Thread(
+            target=self._execute_job,
+            args=(job_id, func, args, kwargs),
+            daemon=True,  # Bug #549: daemon thread allows graceful shutdown;
+            # orphaned jobs are reclaimed by JobReconciliationService
+        )
+        thread.start()
+
+        # Track running thread
+        with self._lock:
+            self._running_jobs[job_id] = thread
+
+        logging.info(
+            f"Background job {job_id} submitted by {submitter_username}: {operation_type}"
+        )
+        return job_id
+
+    def get_job_status(self, job_id: str, username: str) -> Optional[Dict[str, Any]]:
+        """
+        Get status of a background job with user isolation.
+
+        Story #267 Component 8: Falls back to SQLite when job is not in memory,
+        since completed/failed jobs are removed from memory after persistence.
+
+        Args:
+            job_id: Job ID to check
+            username: Username requesting the status (for authorization)
+
+        Returns:
+            Job status dictionary or None if job not found or not authorized
+        """
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job:
+                if job.username != username:
+                    return None
+                return {
+                    "job_id": job.job_id,
+                    "operation_type": job.operation_type,
+                    "status": job.status.value,
+                    "created_at": job.created_at.isoformat(),
+                    "started_at": (
+                        job.started_at.isoformat() if job.started_at else None
+                    ),
+                    "completed_at": (
+                        job.completed_at.isoformat() if job.completed_at else None
+                    ),
+                    "progress": job.progress,
+                    "result": job.result,
+                    "error": job.error,
+                    "username": job.username,
+                    "repo_alias": job.repo_alias,  # AC5: Include repo_alias in response
+                    # AC6: Extended self-healing fields
+                    "resolution_attempts": job.resolution_attempts,
+                    "claude_actions": job.claude_actions,
+                    "failure_reason": job.failure_reason,
+                    "extended_error": job.extended_error,
+                    "language_resolution_status": job.language_resolution_status,
+                    # Story #480: Real-time phase progress fields
+                    "current_phase": job.current_phase,
+                    "phase_detail": job.phase_detail,
+                }
+
+        # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
+        if self._sqlite_backend:
+            try:
+                db_job = self._sqlite_backend.get_job(job_id)
+                if db_job and db_job.get("username") == username:
+                    # v10.4.6 (Obs 3.2): scrub internal is_admin field from public
+                    # response. The in-memory path above already omits it; the SQLite
+                    # row includes it for internal scheduling/ownership-bypass logic
+                    # (sqlite_backends.py:2510), but field testers misread it as
+                    # "submitter is not admin". Remove from public projection.
+                    db_job.pop("is_admin", None)
+                    return db_job  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.error(f"Failed to get job {job_id} from SQLite: {e}")
+
+        return None
+
+    def _job_to_dict(self, job: "BackgroundJob") -> Dict[str, Any]:
+        """Convert an in-memory BackgroundJob to the standard response dictionary format."""
+        return {
+            "job_id": job.job_id,
+            "operation_type": job.operation_type,
+            "status": job.status.value,
+            "created_at": job.created_at.isoformat(),
+            "started_at": (job.started_at.isoformat() if job.started_at else None),
+            "completed_at": (
+                job.completed_at.isoformat() if job.completed_at else None
+            ),
+            "progress": job.progress,
+            "result": job.result,
+            "error": job.error,
+            "username": job.username,
+            "repo_alias": job.repo_alias,
+            "resolution_attempts": job.resolution_attempts,
+            "claude_actions": job.claude_actions,
+            "failure_reason": job.failure_reason,
+            "extended_error": job.extended_error,
+            "language_resolution_status": job.language_resolution_status,
+        }
+
+    def list_jobs(
+        self,
+        username: str,
+        status_filter: Optional[str] = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        List jobs for a user with filtering and pagination.
+
+        When a SQLite backend is configured, queries it as the primary source so
+        jobs from other cluster nodes are included.  In-memory jobs are merged in
+        (overriding DB entries for the same job_id) to provide fresher progress data.
+
+        Args:
+            username: Username to filter jobs for
+            status_filter: Optional status filter
+            limit: Maximum number of jobs to return
+            offset: Number of jobs to skip
+
+        Returns:
+            Dictionary with jobs list and total count
+        """
+        if self._sqlite_backend is not None:
+            try:
+                # Fetch all matching jobs from DB; paginate client-side after merging
+                db_jobs = self._sqlite_backend.list_jobs(
+                    username=username,
+                    status=status_filter,
+                    limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                )
+                # Build dict keyed by job_id from DB results.
+                # v10.4.6 (Obs 3.2): scrub internal is_admin field from each
+                # SQLite-sourced job dict before exposing in public response.
+                # _job_to_dict() (used for in-memory override below) already omits it.
+                merged: Dict[str, Any] = {}
+                for j in db_jobs:
+                    j.pop("is_admin", None)
+                    merged[j["job_id"]] = j
+                # Override with in-memory jobs (fresher progress) for matching criteria
+                with self._lock:
+                    for job in self.jobs.values():
+                        if job.username != username:
+                            continue
+                        if status_filter and job.status.value != status_filter:
+                            continue
+                        merged[job.job_id] = self._job_to_dict(job)
+                # Sort by created_at descending (all values are isoformat strings)
+                all_jobs = sorted(
+                    merged.values(),
+                    key=lambda j: j.get("created_at") or "",
+                    reverse=True,
+                )
+                total_count = len(all_jobs)
+                paginated = all_jobs[offset : offset + limit]
+                return {
+                    "jobs": paginated,
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            except Exception as e:
+                logging.error(f"Failed to list jobs from SQLite backend: {e}")
+
+        with self._lock:
+            # Filter jobs by user
+            user_jobs = [job for job in self.jobs.values() if job.username == username]
+
+            # Apply status filter if provided
+            if status_filter:
+                user_jobs = [
+                    job for job in user_jobs if job.status.value == status_filter
+                ]
+
+            # Sort by creation time (newest first)
+            user_jobs.sort(key=lambda x: x.created_at, reverse=True)
+
+            total_count = len(user_jobs)
+
+            # Apply pagination
+            paginated_jobs = user_jobs[offset : offset + limit]
+
+            return {
+                "jobs": [self._job_to_dict(job) for job in paginated_jobs],
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    # ------------------------------------------------------------------
+    # Story #996: Child process lifecycle management
+    # ------------------------------------------------------------------
+
+    # Grace period after SIGTERM before escalating to SIGKILL (AC6).
+    _SIGTERM_GRACE_SECONDS: float = 2.0
+    # Maximum time to wait for SIGKILL acknowledgement before moving on.
+    _SIGKILL_JOIN_SECONDS: float = 1.0
+
+    def register_child_process(
+        self, job_id: str, process: "multiprocessing.Process"
+    ) -> None:
+        """Register a child process for a job so it can be terminated on cancel.
+
+        If the job is already marked cancelled (race condition AC7), terminates
+        the newly registered process immediately.
+
+        Args:
+            job_id: The job that owns this process.
+            process: A multiprocessing.Process instance to track.
+        """
+        with self._child_processes_lock:
+            if job_id not in self._child_processes:
+                self._child_processes[job_id] = []
+            self._child_processes[job_id].append(process)
+
+        # AC7: race condition — cancel arrived before process was registered
+        with self._lock:
+            job = self.jobs.get(job_id)
+            already_cancelled = job is not None and job.cancelled
+        if already_cancelled:
+            self._terminate_child_processes(job_id)
+
+    def unregister_child_processes(self, job_id: str) -> None:
+        """Remove all tracked child processes for a job after it completes.
+
+        Args:
+            job_id: The job whose processes should be cleared.
+        """
+        with self._child_processes_lock:
+            self._child_processes.pop(job_id, None)
+
+    def _terminate_child_processes(self, job_id: str) -> None:
+        """Send SIGTERM then SIGKILL (after grace period) to all child processes.
+
+        Implements the AC6 two-phase termination: SIGTERM first, then
+        escalate to SIGKILL for processes that survive the grace period.
+
+        Args:
+            job_id: The job whose child processes should be terminated.
+        """
+        with self._child_processes_lock:
+            processes = list(self._child_processes.get(job_id, []))
+
+        # Phase 1: SIGTERM all alive processes
+        for proc in processes:
+            if proc.is_alive():
+                proc.terminate()
+
+        # Phase 2: wait grace period then SIGKILL survivors
+        for proc in processes:
+            proc.join(timeout=self._SIGTERM_GRACE_SECONDS)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=self._SIGKILL_JOIN_SECONDS)
+
+    def cancel_job(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Cancel a running or pending job.
+
+        When the job is not in memory but a SQLite backend is configured, the job
+        may belong to another cluster node.  In that case the cancellation is written
+        directly to the DB; the executing node will detect it on its next progress check.
+
+        Args:
+            job_id: Job ID to cancel
+            username: Username requesting cancellation (for authorization)
+            is_admin: When True, bypasses username ownership check so admin users
+                      can cancel any job including jobs owned by "system" (Bug #853)
+
+        Returns:
+            Cancellation result dictionary
+        """
+        with self._lock:
+            job = self.jobs.get(job_id)
+
+        if job is not None:
+            # Local job — use existing in-memory path
+            if not is_admin and job.username != username:
+                return {"success": False, "message": "Job not found or not authorized"}
+
+            was_running = False
+            with self._lock:
+                if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
+                    return {
+                        "success": False,
+                        "message": f"Cannot cancel job in {job.status.value} status",
+                    }
+
+                was_running = job.status == JobStatus.RUNNING
+
+                # Mark job as cancelled
+                job.cancelled = True
+
+                if job.status == JobStatus.PENDING:
+                    # If pending, immediately mark as cancelled
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now(timezone.utc)
+                # For running jobs, the job execution will detect cancellation
+                # and update status accordingly
+
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+            # Story #996: Terminate driver processes for running xray jobs
+            if was_running:
+                self._terminate_child_processes(job_id)
+            logging.info(f"Job {job_id} cancelled by user {username}")
+            return {"success": True, "message": "Job cancelled successfully"}
+
+        # Job not in memory — check DB backend for cross-node jobs
+        if self._sqlite_backend is not None:
+            try:
+                db_job = self._sqlite_backend.get_job(job_id)
+                if db_job is None or (
+                    not is_admin and db_job.get("username") != username
+                ):
+                    return {
+                        "success": False,
+                        "message": "Job not found or not authorized",
+                    }
+
+                db_status = db_job.get("status", "")
+                if db_status not in ("pending", "running"):
+                    return {
+                        "success": False,
+                        "message": f"Cannot cancel job in {db_status} status",
+                    }
+
+                self._sqlite_backend.update_job(
+                    job_id,
+                    status="cancelled",
+                    cancelled=True,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                logging.info(f"Job {job_id} cancelled in DB by user {username}")
+                return {"success": True, "message": "Job cancelled successfully"}
+            except Exception as e:
+                logging.error(f"Failed to cancel job {job_id} via SQLite backend: {e}")
+                return {"success": False, "message": "Failed to cancel job"}
+
+        return {"success": False, "message": "Job not found or not authorized"}
+
+    def _check_db_cancellation(self, job_id: str) -> None:
+        """Poll DB for external cancellation (cross-node cluster support).
+
+        Called from progress_callback to detect cancellations triggered
+        on a different cluster node.  Bug #584.
+        """
+        try:
+            if self._sqlite_backend is not None:
+                job_data = self._sqlite_backend.get_job(job_id)
+                if job_data and job_data.get("status") == "cancelled":
+                    with self._lock:
+                        if job_id in self.jobs:
+                            self.jobs[job_id].cancelled = True
+                            logging.debug(
+                                "Bug #584: Detected cross-node cancellation for job %s",
+                                job_id,
+                            )
+        except Exception:
+            pass  # Best-effort — don't break progress reporting
+
+    def _close_thread_connections_on_all_managers(self, job_id: str) -> None:
+        """Bug #878 Fix A.3 helper.
+
+        Iterate over every registered ``DatabaseConnectionManager`` instance
+        and call ``close_thread_connection()`` on each so the caller thread's
+        tracked SQLite connection is closed and untracked before the thread
+        dies.  Called from two places:
+
+        1. ``_execute_job`` outer finally — covers the ``progress_callback``
+           path where the user's ``func`` runs directly on the outer worker
+           thread that ``submit_job`` spawned.
+        2. ``_execute_with_cancellation_check`` inner worker's finally —
+           covers the non-``progress_callback`` path where ``func`` runs on
+           a nested thread whose TID never equals the outer thread's TID.
+
+        Defensive: any exception from an individual manager is logged at
+        WARNING level but does NOT propagate, so one broken manager cannot
+        prevent cleanup on its siblings.
+        """
+        # Take a snapshot list so a concurrent _instances mutation during
+        # iteration cannot raise RuntimeError: dictionary changed size.
+        managers_snapshot = list(DatabaseConnectionManager._instances.values())
+        for manager in managers_snapshot:
+            try:
+                manager.close_thread_connection()
+            except Exception as exc:
+                logging.warning(
+                    "close_thread_connection raised for job %s on manager %s: %s",
+                    job_id,
+                    getattr(manager, "db_path", "<unknown>"),
+                    exc,
+                )
+
+    def _execute_job(
+        self, job_id: str, func: Callable[[], Dict[str, Any]], args: tuple, kwargs: dict
+    ) -> None:
+        """
+        Execute a background job with cancellation support and concurrency limiting.
+
+        Story #26: Jobs wait for a semaphore slot before transitioning to RUNNING.
+        Jobs stay in PENDING state until a slot is available.
+
+        Args:
+            job_id: Job ID
+            func: Function to execute
+            args: Function arguments
+            kwargs: Function keyword arguments
+        """
+        # Bug #878 Fix A.3: Outer try/finally wraps the entire job body so
+        # that every exit path from this worker thread — normal return,
+        # exception, early cancellation — closes any SQLite connections
+        # this thread opened on registered DatabaseConnectionManager
+        # instances.  Closing at the source of the churn eliminates the
+        # race (RC-3) where short-lived job threads accumulated tracked
+        # connections faster than the demand-driven cleanup sweep could
+        # drain them.
+        try:
+            # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
+            # Job remains in PENDING state while waiting
+            logging.debug(
+                f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
+            )
+            self._job_semaphore.acquire()
+
+            try:
+                # Now we have a slot - check if job was cancelled while waiting
+                with self._lock:
+                    job = self.jobs[job_id]
+                    if job.cancelled:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = datetime.now(timezone.utc)
+                # Story #267 Component 3-4: Persist outside lock
+                if job.cancelled:
+                    self._persist_jobs(job_id=job_id)
+                    return
+
+                with self._lock:
+                    job.status = JobStatus.RUNNING
+                    job.started_at = datetime.now(timezone.utc)
+                    job.progress = 10
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+
+                # Story #311: Notify tracker that job is now running
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.update_status(job_id, status="running")
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.update_status(running) failed for {job_id}",
+                            exc_info=True,
+                        )
+
+                logging.info(f"Starting background job {job_id}")
+
+                # Create progress callback function
+                def progress_callback(
+                    progress: int,
+                    phase: Optional[str] = None,
+                    detail: Optional[str] = None,
+                ):
+                    with self._lock:
+                        if job_id in self.jobs and not self.jobs[job_id].cancelled:
+                            self.jobs[job_id].progress = progress
+                            # Story #480: Update phase info when provided
+                            if phase is not None:
+                                self.jobs[job_id].current_phase = phase
+                            if detail is not None:
+                                self.jobs[job_id].phase_detail = detail
+                    # Story #267 Component 3-4: Persist outside lock
+                    self._persist_jobs(job_id=job_id)
+                    # Bug #584: Check DB for cross-node cancellation
+                    self._check_db_cancellation(job_id)
+
+                # Check if function accepts progress callback
+                func_signature = inspect.signature(func)
+
+                # Check for cancellation before execution
+                cancelled = False
+                with self._lock:
+                    if self.jobs[job_id].cancelled:
+                        self.jobs[job_id].status = JobStatus.CANCELLED
+                        self.jobs[job_id].completed_at = datetime.now(timezone.utc)
+                        cancelled = True
+                if cancelled:
+                    # Story #267 Component 3-4: Persist outside lock
+                    self._persist_jobs(job_id=job_id)
+                    return
+
+                # Execute the actual operation with frequent cancellation checks
+                if "progress_callback" in func_signature.parameters:
+                    # Function manages its own progress via ProgressPhaseAllocator.
+                    # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
+                    # a visible 25->0 regression when the function's first phase
+                    # starts at 0 (e.g., phase_start("semantic") == 0).
+                    enhanced_kwargs = kwargs.copy()
+                    enhanced_kwargs["progress_callback"] = progress_callback
+                    result = func(*args, **enhanced_kwargs)
+                else:
+                    # For functions without progress callback, emit a coarse 25%
+                    # marker to indicate execution has started, then wrap execution
+                    # to check for cancellation periodically.
+                    progress_callback(25)
+                    result = self._execute_with_cancellation_check(
+                        job_id, func, args, kwargs
+                    )
+
+                # Job completed — determine final status from result
+                with self._lock:
+                    job = self.jobs[job_id]
+                    if not job.cancelled:
+                        # Bug #646: result["success"] is False (exact identity) → FAILED
+                        if isinstance(result, dict) and result.get("success") is False:
+                            job.status = JobStatus.FAILED
+                        # Bug #679: result["partial"] is True (exact identity) → COMPLETED_PARTIAL
+                        elif isinstance(result, dict) and result.get("partial") is True:
+                            job.status = JobStatus.COMPLETED_PARTIAL
+                        else:
+                            job.status = JobStatus.COMPLETED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.result = result
+                        job.progress = 100
+                    else:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = datetime.now(timezone.utc)
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+
+                # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
+                if self._job_tracker is not None:
+                    try:
+                        if job.status in (
+                            JobStatus.COMPLETED,
+                            JobStatus.COMPLETED_PARTIAL,
+                        ):
+                            # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
+                            self._job_tracker.complete_job(
+                                job_id,
+                                result=job.result
+                                if isinstance(job.result, dict)
+                                else None,
+                            )
+                        elif job.status == JobStatus.FAILED:
+                            error_msg = (
+                                job.result.get("error", "job failed")
+                                if isinstance(job.result, dict)
+                                else "job failed"
+                            )
+                            self._job_tracker.fail_job(job_id, error=error_msg)
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker completion callback failed for {job_id}",
+                            exc_info=True,
+                        )
+
+                # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
+                # Only when SQLite backend is available (data is preserved in DB)
+                # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
+                if self._sqlite_backend and job.status in (
+                    JobStatus.COMPLETED,
+                    JobStatus.COMPLETED_PARTIAL,
+                    JobStatus.CANCELLED,
+                    JobStatus.FAILED,
+                ):
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
+
+                if job.status == JobStatus.FAILED:
+                    logging.warning(
+                        f"Background job {job_id} completed with failure result"
+                    )
+                else:
+                    logging.info(f"Background job {job_id} completed successfully")
+
+            except InterruptedError as e:
+                # Job was cancelled
+                logging.info(f"Background job {job_id} was cancelled: {e}")
+                with self._lock:
+                    job = self.jobs[job_id]
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now(timezone.utc)
+                    job.error = str(e)
+                    job.progress = 0
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+                # Tracker notification skipped for InterruptedError (always
+                # cancellation) — fail_job would overwrite status to "failed".
+                # Story #267 Component 8: Remove from memory after persist (SQLite only)
+                if self._sqlite_backend:
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
+            except Exception as e:
+                error_msg = str(e)
+
+                with self._lock:
+                    job = self.jobs[job_id]
+                    if job.cancelled:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = job.completed_at or datetime.now(
+                            timezone.utc
+                        )
+                        job.error = "cancelled"
+                        logging.info(
+                            f"Background job {job_id} exception after cancel: {error_msg}"
+                        )
+                    else:
+                        job.status = JobStatus.FAILED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.error = error_msg
+                        job.progress = 0
+                        logging.error(f"Background job {job_id} failed: {error_msg}")
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+                # Story #311 AC3: Notify tracker of failure (skip for
+                # cancelled jobs — fail_job overwrites status to "failed").
+                if self._job_tracker is not None and not job.cancelled:
+                    try:
+                        self._job_tracker.fail_job(
+                            job_id,
+                            error=error_msg,
+                        )
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.fail_job failed for {job_id}",
+                            exc_info=True,
+                        )
+                # Story #267 Component 8: Remove from memory after persist (SQLite only)
+                if self._sqlite_backend:
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
+
+            finally:
+                # Story #26: Release semaphore slot to allow another job to run
+                self._job_semaphore.release()
+                # Clean up running job reference
+                with self._lock:
+                    self._running_jobs.pop(job_id, None)
+        finally:
+            # Bug #878 Fix A.3: Proactively close any SQLite connections
+            # this worker thread opened on registered DatabaseConnectionManager
+            # instances.  Runs after the inner finally so semaphore release and
+            # _running_jobs cleanup still happen first.  Defensive: a failure
+            # to close on one manager must not stop cleanup on its siblings.
+            #
+            # Note: this covers the "progress_callback" path where the user's
+            # func runs directly on THIS thread.  The non-progress_callback
+            # path dispatches to a nested worker thread inside
+            # _execute_with_cancellation_check; that path has its own Fix A.3
+            # cleanup block so each thread closes the connections IT opened.
+            self._close_thread_connections_on_all_managers(job_id=job_id)
+
+    def _execute_with_cancellation_check(
+        self, job_id: str, func: Callable, args: tuple, kwargs: dict
+    ) -> Any:
+        """
+        Execute a function with periodic cancellation checks.
+
+        For long-running functions that don't support progress callbacks,
+        this method runs them in a separate thread and checks for cancellation.
+        """
+        import threading
+        import queue
+        from typing import Any
+
+        result_queue: queue.Queue[Any] = queue.Queue()
+        exception_queue: queue.Queue[Exception] = queue.Queue()
+
+        def worker():
+            # Bug #878 Fix A.3: This nested worker thread is where the
+            # user's func actually runs on the non-progress_callback path,
+            # so any SQLite connections are opened under THIS thread's TID.
+            # The outer _execute_job finally runs on a DIFFERENT thread and
+            # would close the wrong entry — cleanup must happen HERE before
+            # the nested worker thread dies.  Defensive via helper.
+            try:
+                try:
+                    result = func(*args, **kwargs)
+                    result_queue.put(result)
+                except Exception as e:
+                    exception_queue.put(e)
+            finally:
+                self._close_thread_connections_on_all_managers(job_id=job_id)
+
+        # Start function in separate thread
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+
+        # Poll for completion or cancellation
+        while worker_thread.is_alive():
+            # Check for cancellation
+            with self._lock:
+                if self.jobs[job_id].cancelled:
+                    # Function is still running, but we mark as cancelled
+                    # The thread will continue but we ignore its result
+                    raise InterruptedError("Job cancelled during execution")
+
+            # Wait a bit before next check
+            worker_thread.join(timeout=0.1)
+
+        # Check if there was an exception
+        if not exception_queue.empty():
+            raise exception_queue.get()
+
+        # Return result if available
+        if not result_queue.empty():
+            return result_queue.get()
+
+        # Should not reach here normally
+        return {"status": "completed"}
+
+    def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
+        """
+        Clean up old completed/failed jobs from both memory and SQLite.
+
+        Story #267 Component 5: Wire to sqlite_backend.cleanup_old_jobs().
+
+        Args:
+            max_age_hours: Maximum age of jobs to keep in hours
+
+        Returns:
+            Number of jobs cleaned up
+        """
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        cleaned_count = 0
+
+        # Step 1: Clean in-memory (under lock)
+        with self._lock:
+            job_ids_to_remove = []
+
+            for job_id, job in self.jobs.items():
+                if (
+                    job.status
+                    in [
+                        JobStatus.COMPLETED,
+                        JobStatus.COMPLETED_PARTIAL,
+                        JobStatus.FAILED,
+                        JobStatus.CANCELLED,
+                    ]
+                    and job.completed_at
+                    and job.completed_at < cutoff_time
+                ):
+                    job_ids_to_remove.append(job_id)
+
+            for job_id in job_ids_to_remove:
+                del self.jobs[job_id]
+                cleaned_count += 1
+
+        # Step 2: Clean SQLite (outside lock) - Story #267 Component 5
+        if self._sqlite_backend:
+            try:
+                db_cleaned = self._sqlite_backend.cleanup_old_jobs(max_age_hours)
+                cleaned_count = max(cleaned_count, db_cleaned)
+            except Exception as e:
+                logging.error(f"Failed to cleanup old jobs from SQLite: {e}")
+
+        if cleaned_count > 0:
+            logging.info(f"Cleaned up {cleaned_count} old background jobs")
+
+        return cleaned_count
+
+    def get_active_job_count(self) -> int:
+        """
+        Get count of currently active/running jobs (DB-first for cluster correctness).
+
+        Returns:
+            Number of active jobs
+        """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return counts.get("running", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.warning(
+                    "Failed to get active job count from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+        with self._lock:
+            return sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.RUNNING
+            )
+
+    def get_pending_job_count(self) -> int:
+        """
+        Get count of pending jobs waiting to be executed (DB-first for cluster correctness).
+
+        Returns:
+            Number of pending jobs
+        """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return counts.get("pending", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.warning(
+                    "Failed to get pending job count from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+        with self._lock:
+            return sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.PENDING
+            )
+
+    def get_failed_job_count(self) -> int:
+        """
+        Get count of failed jobs.
+
+        Story #267 Component 8: Query SQLite for failed count since failed jobs
+        are removed from memory after persistence.
+
+        Returns:
+            Number of failed jobs
+        """
+        # Story #267 Component 8: Use SQLite for failed count
+        if self._sqlite_backend:
+            try:
+                status_counts = self._sqlite_backend.count_jobs_by_status()
+                return status_counts.get("failed", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.error(f"Failed to get failed job count from SQLite: {e}")
+                return 0
+
+        # Fallback: iterate in-memory jobs (for JSON storage or no backend)
+        with self._lock:
+            return sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.FAILED
+            )
+
+    def get_running_job_count(self) -> int:
+        """
+        Get count of currently running jobs (Story #26).
+
+        This is an alias for get_active_job_count for consistency with
+        the concurrency limiting feature naming.
+
+        Returns:
+            Number of running jobs
+        """
+        return self.get_active_job_count()
+
+    def get_queued_job_count(self) -> int:
+        """
+        Get count of jobs waiting in queue for a slot (Story #26).
+
+        This is an alias for get_pending_job_count for consistency with
+        the concurrency limiting feature naming.
+
+        Returns:
+            Number of pending/queued jobs
+        """
+        return self.get_pending_job_count()
+
+    def get_job_queue_metrics(self) -> Dict[str, int]:
+        """
+        Get combined job queue metrics (Story #26, DB-first for cluster correctness).
+
+        Returns:
+            Dictionary with running_count, queued_count, and max_concurrent
+        """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return {
+                    "running_count": counts.get("running", 0),
+                    "queued_count": counts.get("pending", 0),
+                    "max_concurrent": self.max_concurrent_jobs,
+                }
+            except Exception as e:
+                logging.warning(
+                    "Failed to get job queue metrics from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+
+        with self._lock:
+            running_count = sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.RUNNING
+            )
+            queued_count = sum(
+                1 for job in self.jobs.values() if job.status == JobStatus.PENDING
+            )
+
+        return {
+            "running_count": running_count,
+            "queued_count": queued_count,
+            "max_concurrent": self.max_concurrent_jobs,
+        }
+
+    def shutdown(self) -> None:
+        """
+        Graceful shutdown of all running jobs.
+
+        Cancels all running jobs and waits for threads to complete.
+        This method should be called during application shutdown.
+        """
+        with self._lock:
+            # Cancel all running jobs
+            running_job_ids = list(self._running_jobs.keys())
+            for job_id in running_job_ids:
+                job = self.jobs.get(job_id)
+                if job and job.status == JobStatus.RUNNING:
+                    job.cancelled = True
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now(timezone.utc)
+                    logging.info(f"Job {job_id} cancelled during shutdown")
+
+            # Snapshot jobs under lock for persistence
+            jobs_snapshot = {jid: self._snapshot_job(j) for jid, j in self.jobs.items()}
+
+            # Get list of threads to wait for
+            threads_to_wait = list(self._running_jobs.values())
+
+        # Persist final job states OUTSIDE lock to avoid blocking
+        if self._sqlite_backend:
+            for jid, snapshot in jobs_snapshot.items():
+                try:
+                    self._persist_job_to_sqlite(jid, snapshot)
+                except Exception as e:
+                    logging.error(f"Failed to persist job {jid} during shutdown: {e}")
+
+        # Wait for all threads to complete (outside of lock to avoid deadlock)
+        for thread in threads_to_wait:
+            if thread.is_alive():
+                try:
+                    thread.join(timeout=5.0)
+                    if thread.is_alive():
+                        logging.warning(
+                            f"Thread {thread.name} did not complete gracefully within 5 seconds"
+                        )
+                except Exception as e:
+                    logging.error(f"Error waiting for thread to complete: {e}")
+
+        logging.info("Background job manager shutdown complete")
+
+    def get_jobs_by_operation_and_params(
+        self, operation_types: list[str], params_filter: Optional[Dict[str, Any]] = None
+    ) -> list[Dict[str, Any]]:
+        """
+        Get jobs by operation type and optional parameter filtering.
+
+        When a SQLite backend is configured, queries it per operation type so jobs from
+        other cluster nodes are included.  In-memory jobs override DB entries for the same
+        job_id (fresher progress data).
+
+        Args:
+            operation_types: List of operation types to filter by
+            params_filter: Optional dictionary of parameters to match (currently unused)
+
+        Returns:
+            List of job dictionaries matching the criteria
+        """
+        if self._sqlite_backend is not None:
+            try:
+                merged: Dict[str, Any] = {}
+                for op_type in operation_types:
+                    db_jobs = self._sqlite_backend.list_jobs(
+                        operation_type=op_type,
+                        limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                    )
+                    for j in db_jobs:
+                        merged[j["job_id"]] = j
+                # Override with in-memory jobs (fresher progress)
+                with self._lock:
+                    for job in self.jobs.values():
+                        if job.operation_type in operation_types:
+                            merged[job.job_id] = self._job_to_dict(job)
+                return list(merged.values())
+            except Exception as e:
+                logging.error(
+                    f"Failed to get jobs by operation from SQLite backend: {e}"
+                )
+
+        with self._lock:
+            return [
+                self._job_to_dict(job)
+                for job in self.jobs.values()
+                if job.operation_type in operation_types
+            ]
+
+    def _snapshot_job(self, job: "BackgroundJob") -> Dict[str, Any]:
+        """Create a serializable snapshot of job state for persistence outside lock.
+
+        Story #267 Component 4: This snapshot is taken under the lock, then the
+        actual SQLite I/O happens outside the lock using this snapshot.
+        """
+        return {
+            "job_id": job.job_id,
+            "operation_type": job.operation_type,
+            "status": job.status.value if hasattr(job.status, "value") else job.status,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "result": job.result,
+            "error": job.error,
+            "progress": job.progress,
+            "username": job.username,
+            "is_admin": job.is_admin,
+            "cancelled": job.cancelled,
+            "repo_alias": job.repo_alias,
+            "resolution_attempts": job.resolution_attempts,
+            "claude_actions": job.claude_actions,
+            "failure_reason": job.failure_reason,
+            "extended_error": job.extended_error,
+            "language_resolution_status": job.language_resolution_status,
+            # Story #480: Real-time phase progress fields (Bug fix: persist to SQLite)
+            "current_phase": job.current_phase,
+            "phase_detail": job.phase_detail,
+        }
+
+    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
+        """Persist a single job snapshot to SQLite without holding the memory lock.
+
+        Story #267 Component 4: This method does SQLite I/O outside the lock.
+        If the write fails, the in-memory state is still correct.
+        """
+        if not self._sqlite_backend:
+            return
+        try:
+            existing = self._sqlite_backend.get_job(job_id)
+            if existing:
+                self._sqlite_backend.update_job(
+                    job_id=job_id,
+                    status=snapshot["status"],
+                    started_at=snapshot["started_at"],
+                    completed_at=snapshot["completed_at"],
+                    result=snapshot["result"],
+                    error=snapshot["error"],
+                    progress=snapshot["progress"],
+                    cancelled=snapshot["cancelled"],
+                    resolution_attempts=snapshot["resolution_attempts"],
+                    claude_actions=snapshot["claude_actions"],
+                    failure_reason=snapshot["failure_reason"],
+                    extended_error=snapshot["extended_error"],
+                    language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
+                )
+            else:
+                self._sqlite_backend.save_job(
+                    job_id=snapshot["job_id"],
+                    operation_type=snapshot["operation_type"],
+                    status=snapshot["status"],
+                    created_at=snapshot["created_at"],
+                    started_at=snapshot["started_at"],
+                    completed_at=snapshot["completed_at"],
+                    result=snapshot["result"],
+                    error=snapshot["error"],
+                    progress=snapshot["progress"],
+                    username=snapshot["username"],
+                    is_admin=snapshot["is_admin"],
+                    cancelled=snapshot["cancelled"],
+                    repo_alias=snapshot["repo_alias"],
+                    resolution_attempts=snapshot["resolution_attempts"],
+                    claude_actions=snapshot["claude_actions"],
+                    failure_reason=snapshot["failure_reason"],
+                    extended_error=snapshot["extended_error"],
+                    language_resolution_status=snapshot["language_resolution_status"],
+                    current_phase=snapshot.get("current_phase"),
+                    phase_detail=snapshot.get("phase_detail"),
+                )
+        except Exception as e:
+            logging.error(f"Failed to persist job {job_id} to SQLite: {e}")
+
+    def _persist_jobs(self, job_id: Optional[str] = None) -> None:
+        """
+        Persist jobs to storage (SQLite or JSON file).
+
+        Story #267 Components 1-2: When job_id is provided, only that job is persisted
+        (single-job path). When job_id is None, all jobs are persisted (shutdown/bulk).
+
+        Note: For SQLite single-job persist, this method can be called outside the lock
+        since it uses _persist_job_to_sqlite which does its own error handling.
+        For full persist and JSON, this should be called within a lock.
+        """
+        # Use SQLite backend if enabled
+        if self._sqlite_backend:
+            if job_id is not None:
+                # Story #267 Component 1: Single-job persist (2 ops instead of 20K)
+                self._persist_single_job_sqlite(job_id)
+            else:
+                # Full persist (shutdown only)
+                self._persist_jobs_sqlite()
+            return
+
+        # Fall back to JSON file storage
+        if not self.storage_path:
+            return
+
+        try:
+            storage_file = Path(self.storage_path)
+            storage_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Convert jobs to serializable format
+            serializable_jobs = {}
+            for jid, job in self.jobs.items():
+                job_dict = asdict(job)
+                # Convert datetime objects to ISO strings
+                for field in ["created_at", "started_at", "completed_at"]:
+                    if job_dict[field] is not None:
+                        job_dict[field] = job_dict[field].isoformat()
+                # Convert enum to string
+                job_dict["status"] = (
+                    job_dict["status"].value
+                    if hasattr(job_dict["status"], "value")
+                    else job_dict["status"]
+                )
+                serializable_jobs[jid] = job_dict
+
+            with open(storage_file, "w") as f:
+                json.dump(serializable_jobs, f, indent=2)
+
+        except Exception as e:
+            # Log the error but don't raise - persistence failures shouldn't break the system
+            # Jobs should still work in memory even if persistence fails
+            logging.error(f"Failed to persist jobs: {e}")
+
+    def _persist_single_job_sqlite(self, job_id: str) -> None:
+        """Persist a single job to SQLite.
+
+        Story #267 Component 1: Instead of iterating all jobs (20K ops),
+        persist only the one job that changed (2 ops: get + save/update).
+        """
+        if not self._sqlite_backend:
+            return
+
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return  # Job was removed between lock release and persist
+            snapshot = self._snapshot_job(job)
+
+        self._persist_job_to_sqlite(job_id, snapshot)
+
+    def _persist_jobs_sqlite(self) -> None:
+        """
+        Persist all in-memory jobs to SQLite.
+
+        Note: This method should be called within a lock.
+        """
+        if not self._sqlite_backend:
+            return
+
+        try:
+            for job_id, job in self.jobs.items():
+                # Check if job exists in database
+                existing = self._sqlite_backend.get_job(job_id)
+                if existing:
+                    # Update existing job
+                    self._sqlite_backend.update_job(
+                        job_id=job_id,
+                        status=job.status.value,
+                        started_at=(
+                            job.started_at.isoformat() if job.started_at else None
+                        ),
+                        completed_at=(
+                            job.completed_at.isoformat() if job.completed_at else None
+                        ),
+                        result=job.result,
+                        error=job.error,
+                        progress=job.progress,
+                        cancelled=job.cancelled,
+                        resolution_attempts=job.resolution_attempts,
+                        claude_actions=job.claude_actions,
+                        failure_reason=job.failure_reason,
+                        extended_error=job.extended_error,
+                        language_resolution_status=job.language_resolution_status,
+                    )
+                else:
+                    # Insert new job
+                    self._sqlite_backend.save_job(
+                        job_id=job_id,
+                        operation_type=job.operation_type,
+                        status=job.status.value,
+                        created_at=job.created_at.isoformat(),
+                        started_at=(
+                            job.started_at.isoformat() if job.started_at else None
+                        ),
+                        completed_at=(
+                            job.completed_at.isoformat() if job.completed_at else None
+                        ),
+                        result=job.result,
+                        error=job.error,
+                        progress=job.progress,
+                        username=job.username,
+                        is_admin=job.is_admin,
+                        cancelled=job.cancelled,
+                        repo_alias=job.repo_alias,
+                        resolution_attempts=job.resolution_attempts,
+                        claude_actions=job.claude_actions,
+                        failure_reason=job.failure_reason,
+                        extended_error=job.extended_error,
+                        language_resolution_status=job.language_resolution_status,
+                    )
+        except Exception as e:
+            logging.error(f"Failed to persist jobs to SQLite: {e}")
+
+    # Maximum number of jobs to load from SQLite into memory at startup (legacy)
+    MAX_JOBS_TO_LOAD = 10000
+
+    # Story #267 Component 8: Safety cap for active jobs loaded per status at startup.
+    # Normally < 20 active jobs, but cap at 500 to prevent unbounded memory usage.
+    MAX_ACTIVE_JOBS_PER_STATUS = 500
+
+    def _load_jobs(self) -> None:
+        """
+        Load jobs from storage (SQLite or JSON file).
+        """
+        # Use SQLite backend if enabled
+        if self._sqlite_backend:
+            self._load_jobs_sqlite()
+            return
+
+        # Fall back to JSON file storage
+        if not self.storage_path:
+            return
+
+        try:
+            storage_file = Path(self.storage_path)
+            if not storage_file.exists():
+                return
+
+            with open(storage_file, "r") as f:
+                stored_jobs = json.load(f)
+
+            for job_id, job_dict in stored_jobs.items():
+                # Convert ISO strings back to datetime objects
+                for field in ["created_at", "started_at", "completed_at"]:
+                    if job_dict[field] is not None:
+                        job_dict[field] = datetime.fromisoformat(job_dict[field])
+
+                # Convert string status back to enum
+                job_dict["status"] = JobStatus(job_dict["status"])
+
+                # Create job object
+                job = BackgroundJob(**job_dict)
+                self.jobs[job_id] = job
+
+            logging.info(f"Loaded {len(stored_jobs)} jobs from storage")
+
+        except Exception as e:
+            logging.error(f"Failed to load jobs from storage: {e}")
+
+    def _load_jobs_sqlite(self) -> None:
+        """
+        Load jobs from SQLite database into memory.
+
+        Story #723: Clean up orphaned jobs before loading.
+        On server restart, any 'running' or 'pending' jobs are orphaned
+        since the processes executing them no longer exist.
+
+        Story #267 Component 6: Clean up old completed/failed jobs before loading.
+        Story #267 Component 8: Load only active/pending jobs (not all 10K).
+        """
+        if not self._sqlite_backend:
+            return
+
+        try:
+            # Story #723: Clean up orphaned jobs on server startup
+            # This must happen BEFORE loading jobs into memory to ensure
+            # the in-memory state reflects the cleaned-up database state
+            orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
+            if orphan_count > 0:
+                logging.info(
+                    f"Cleaned up {orphan_count} orphaned jobs on server startup"
+                )
+
+            # Story #267 Component 6: Startup cleanup of old completed/failed jobs
+            # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours
+            max_age = self._data_retention_config.background_jobs_retention_hours
+            old_cleaned = self._sqlite_backend.cleanup_old_jobs(max_age)
+            if old_cleaned > 0:
+                logging.info(
+                    f"Startup cleanup: removed {old_cleaned} old jobs from SQLite "
+                    f"(older than {max_age} hours)"
+                )
+
+            # Story #267 Component 8: Load only active/pending jobs into memory.
+            # After orphan cleanup marks running/pending as failed, there should
+            # be very few active jobs. Historical data is served from SQLite directly.
+            loaded_count = 0
+            for status_value in ["running", "pending"]:
+                status_jobs = self._sqlite_backend.list_jobs(
+                    status=status_value,
+                    limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                )
+                for job_dict in status_jobs:
+                    self._deserialize_and_add_job(job_dict)
+                    loaded_count += 1
+
+            logging.info(f"Loaded {loaded_count} active jobs from SQLite into memory")
+
+        except Exception as e:
+            logging.error(f"Failed to load jobs from SQLite: {e}")
+
+    def _deserialize_and_add_job(self, job_dict: Dict[str, Any]) -> None:
+        """Deserialize a job dictionary from SQLite and add to in-memory dict.
+
+        Story #267 Component 8: Extracted helper to avoid duplicating deserialization
+        logic when loading jobs per-status in _load_jobs_sqlite.
+        """
+        # Convert ISO strings back to datetime objects
+        for field_name in ["created_at", "started_at", "completed_at"]:
+            if job_dict.get(field_name) is not None:
+                job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
+
+        # Convert string status back to enum
+        job_dict["status"] = JobStatus(job_dict["status"])
+
+        # Create job object
+        job = BackgroundJob(**job_dict)
+        self.jobs[job_dict["job_id"]] = job
+
+    def _calculate_cutoff(self, time_filter: str) -> datetime:
+        """
+        Calculate cutoff datetime based on time filter.
+
+        Args:
+            time_filter: Time filter string ("24h", "7d", "30d")
+
+        Returns:
+            Cutoff datetime (timezone-aware UTC)
+        """
+        now = datetime.now(timezone.utc)
+
+        if time_filter == "24h":
+            return now - timedelta(hours=24)
+        elif time_filter == "7d":
+            return now - timedelta(days=7)
+        elif time_filter == "30d":
+            return now - timedelta(days=30)
+        else:
+            # Default to 24h for invalid filters
+            return now - timedelta(hours=24)
+
+    def get_job_stats_with_filter(self, time_filter: str = "24h") -> Dict[str, int]:
+        """
+        Get job statistics filtered by time period.
+
+        Story #267 Component 8: Query SQLite directly for historical stats since
+        completed/failed jobs are no longer kept in memory.
+
+        Args:
+            time_filter: Time filter string ("24h", "7d", "30d")
+
+        Returns:
+            Dictionary with "completed" and "failed" counts
+        """
+        # Story #267 Component 8: Use SQLite for stats (completed/failed not in memory)
+        if self._sqlite_backend:
+            try:
+                return self._sqlite_backend.get_job_stats(time_filter)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.error(f"Failed to get job stats from SQLite: {e}")
+                return {"completed": 0, "failed": 0}
+
+        # Fallback: iterate in-memory jobs (for JSON storage or no backend)
+        cutoff_time = self._calculate_cutoff(time_filter)
+
+        with self._lock:
+            completed = 0
+            failed = 0
+
+            for job in self.jobs.values():
+                # Only count jobs with completion time after cutoff
+                if job.completed_at and job.completed_at >= cutoff_time:
+                    if job.status == JobStatus.COMPLETED:
+                        completed += 1
+                    elif job.status == JobStatus.FAILED:
+                        failed += 1
+
+            return {"completed": completed, "failed": failed}
+
+    def get_recent_jobs_with_filter(
+        self, time_filter: str = "30d", limit: int = 20
+    ) -> list[Dict[str, Any]]:
+        """
+        Get recent jobs filtered by time period.
+
+        Story #4 AC1: Includes RUNNING, PENDING, COMPLETED, and FAILED jobs.
+        Running/pending jobs appear at the top of the list before completed jobs.
+
+        Story #267 Component 8: Active jobs come from memory, historical from SQLite.
+
+        Args:
+            time_filter: Time filter string ("24h", "7d", "30d"), default "30d"
+            limit: Maximum number of jobs to return, default 20
+
+        Returns:
+            List of job dictionaries with running/pending first, then sorted by time
+        """
+        cutoff_time = self._calculate_cutoff(time_filter)
+        recent_jobs = []
+        seen_job_ids: set = set()
+
+        # Step 1: Get active jobs from memory (running/pending)
+        with self._lock:
+            for job in self.jobs.values():
+                include_job = False
+
+                if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
+                    if job.created_at >= cutoff_time:
+                        include_job = True
+                elif job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                    if job.completed_at and job.completed_at >= cutoff_time:
+                        include_job = True
+
+                if include_job:
+                    job_dict = {
+                        "job_id": job.job_id,
+                        "operation_type": job.operation_type,
+                        "status": job.status.value,
+                        "created_at": job.created_at.isoformat(),
+                        "started_at": (
+                            job.started_at.isoformat() if job.started_at else None
+                        ),
+                        "completed_at": (
+                            job.completed_at.isoformat() if job.completed_at else None
+                        ),
+                        "progress": job.progress,
+                        "result": job.result,
+                        "error": job.error,
+                        "username": job.username,
+                        "repo_alias": job.repo_alias,
+                    }
+                    recent_jobs.append(job_dict)
+                    seen_job_ids.add(job.job_id)
+
+        # Step 2: Story #267 Component 8 - Get historical jobs from SQLite
+        if self._sqlite_backend:
+            try:
+                db_jobs = self._sqlite_backend.list_jobs(limit=limit)
+                for db_job in db_jobs:
+                    if db_job["job_id"] not in seen_job_ids:
+                        # Apply time filter
+                        include_db_job = False
+                        status = db_job.get("status", "")
+                        if status in ("running", "pending"):
+                            created_str = db_job.get("created_at")
+                            if created_str:
+                                created_dt = datetime.fromisoformat(created_str)
+                                if created_dt >= cutoff_time:
+                                    include_db_job = True
+                        elif status in ("completed", "failed"):
+                            completed_str = db_job.get("completed_at")
+                            if completed_str:
+                                completed_dt = datetime.fromisoformat(completed_str)
+                                if completed_dt >= cutoff_time:
+                                    include_db_job = True
+
+                        if include_db_job:
+                            recent_jobs.append(db_job)
+                            seen_job_ids.add(db_job["job_id"])
+            except Exception as e:
+                logging.error(f"Failed to get recent jobs from SQLite: {e}")
+
+        # Story #4 AC1: Sort with running/pending jobs first, then by time
+        # Priority: RUNNING (0) > PENDING (1) > COMPLETED/FAILED (2)
+        # Within each priority, sort by relevant time (newest first)
+        def sort_key(x):
+            status = x["status"]
+            if status == "running":
+                priority = 0
+                # Use started_at for running jobs, fallback to created_at
+                time_str = x.get("started_at") or x.get("created_at")
+            elif status == "pending":
+                priority = 1
+                # Use created_at for pending jobs
+                time_str = x.get("created_at")
+            else:
+                priority = 2
+                # Use completed_at for completed/failed jobs
+                time_str = x.get("completed_at") or x.get("created_at")
+
+            # Parse time for sorting (newest first = reverse, so negate)
+            if time_str:
+                dt = datetime.fromisoformat(time_str)
+            else:
+                dt = datetime.min.replace(tzinfo=timezone.utc)
+
+            return (priority, -dt.timestamp())
+
+        recent_jobs.sort(key=sort_key)
+
+        # Return up to limit jobs
+        return recent_jobs[:limit]
+
+    # ------------------------------------------------------------------
+    # Story #271: Display-layer job retrieval with filtering and pagination
+    # ------------------------------------------------------------------
+
+    def _normalize_job_to_display_dict(self, job) -> Dict[str, Any]:
+        """Convert a BackgroundJob object or SQLite row dict to a display dict.
+
+        Produces a consistent dict shape regardless of source (memory vs DB),
+        matching exactly what the jobs.html template expects.
+
+        Args:
+            job: Either a BackgroundJob dataclass instance or a dict from
+                 BackgroundJobsSqliteBackend._row_to_dict()
+
+        Returns:
+            Dict with all required display keys.
+        """
+        if isinstance(job, BackgroundJob):
+            # --- In-memory BackgroundJob object ---
+            status_str = (
+                job.status.value if hasattr(job.status, "value") else str(job.status)
+            )
+            created_at = job.created_at.isoformat() if job.created_at else None
+            started_at = job.started_at.isoformat() if job.started_at else None
+            completed_at = job.completed_at.isoformat() if job.completed_at else None
+
+            # Determine repository_name: prefer repo_alias, fall back to result dict
+            repository_name = getattr(job, "repo_alias", None)
+            if not repository_name and job.result and isinstance(job.result, dict):
+                repository_name = job.result.get("alias") or job.result.get(
+                    "repository"
+                )
+
+            # Calculate duration_seconds for completed jobs
+            duration_seconds = None
+            if job.completed_at and job.started_at:
+                try:
+                    completed = job.completed_at
+                    started = job.started_at
+                    completed_aware = (
+                        hasattr(completed, "tzinfo") and completed.tzinfo is not None
+                    )
+                    started_aware = (
+                        hasattr(started, "tzinfo") and started.tzinfo is not None
+                    )
+                    if completed_aware and not started_aware:
+                        completed = completed.replace(tzinfo=None)
+                    elif started_aware and not completed_aware:
+                        started = started.replace(tzinfo=None)
+                    duration_seconds = int((completed - started).total_seconds())
+                except (TypeError, AttributeError):
+                    duration_seconds = None
+
+            return {
+                "job_id": job.job_id,
+                "job_type": job.operation_type,
+                "operation_type": job.operation_type,
+                "status": status_str,
+                "progress": job.progress,
+                "created_at": created_at,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "error_message": job.error,
+                "username": job.username,
+                "user_alias": getattr(job, "user_alias", None),
+                "repository_name": repository_name,
+                "repository_url": getattr(job, "repository_url", None),
+                "progress_info": getattr(job, "progress_info", None),
+                "duration_seconds": duration_seconds,
+            }
+        else:
+            # --- SQLite row dict (from _row_to_dict) ---
+            started_at_str = job.get("started_at")
+            completed_at_str = job.get("completed_at")
+
+            # Calculate duration_seconds from ISO strings
+            duration_seconds = None
+            if started_at_str and completed_at_str:
+                try:
+                    started_dt = datetime.fromisoformat(started_at_str)
+                    completed_dt = datetime.fromisoformat(completed_at_str)
+                    duration_seconds = int((completed_dt - started_dt).total_seconds())
+                except (ValueError, TypeError):
+                    duration_seconds = None
+
+            operation_type = job.get("operation_type") or ""
+            return {
+                "job_id": job.get("job_id"),
+                "job_type": operation_type,
+                "operation_type": operation_type,
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "created_at": job.get("created_at"),
+                "started_at": started_at_str,
+                "completed_at": completed_at_str,
+                "error_message": job.get("error"),
+                "username": job.get("username"),
+                "user_alias": job.get(
+                    "username"
+                ),  # DB jobs have no separate user_alias
+                "repository_name": job.get("repo_alias"),
+                "repository_url": None,  # Not stored in DB
+                "progress_info": None,  # Not stored in DB
+                "duration_seconds": duration_seconds,
+            }
+
+    def get_jobs_for_display(
+        self,
+        status_filter: str = None,  # type: ignore[assignment]
+        type_filter: str = None,  # type: ignore[assignment]
+        search_text: str = None,  # type: ignore[assignment]
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple:
+        """Return (jobs_list, total_count, total_pages) merging memory + SQLite.
+
+        Story #271 Component 2: Filtered, paginated jobs for the Web UI jobs page.
+
+        Algorithm:
+        1. Collect active jobs (running/pending) from self.jobs under self._lock.
+        2. Apply filters to active jobs in Python (small set).
+        3. Build seen_ids set from active jobs to avoid duplicates from DB.
+        4. Query SQLite via list_jobs_filtered() with filters + exclude_ids=seen_ids.
+        5. Merge active + DB jobs; compute total_count and total_pages.
+        6. Apply pagination (page, page_size).
+
+        Args:
+            status_filter: Exact status string to filter by (e.g. 'completed').
+            type_filter: Exact operation_type string to filter by.
+            search_text: Case-insensitive substring to search repo name / username.
+            page: 1-based page number.
+            page_size: Number of results per page.
+
+        Returns:
+            Tuple of (jobs: List[Dict], total_count: int, total_pages: int).
+        """
+        # Step 1: Collect active (running/pending) memory jobs
+        active_jobs: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+
+        with self._lock:
+            for job in self.jobs.values():
+                if job.status not in (JobStatus.RUNNING, JobStatus.PENDING):
+                    continue
+
+                # Apply filters to memory jobs in Python
+                status_str = (
+                    job.status.value
+                    if hasattr(job.status, "value")
+                    else str(job.status)
+                )
+                if status_filter and status_str != status_filter:
+                    continue
+                if type_filter and job.operation_type != type_filter:
+                    continue
+                if search_text:
+                    search_lower = search_text.lower()
+                    repo = (getattr(job, "repo_alias", None) or "").lower()
+                    user = (job.username or "").lower()
+                    op = (job.operation_type or "").lower()
+                    err = (job.error or "").lower()
+                    if not (
+                        search_lower in repo
+                        or search_lower in user
+                        or search_lower in op
+                        or search_lower in err
+                    ):
+                        continue
+
+                active_jobs.append(self._normalize_job_to_display_dict(job))
+                seen_ids.add(job.job_id)
+
+        # Step 2: Query SQLite for historical / non-active jobs with same filters
+        db_jobs_normalized: List[Dict[str, Any]] = []
+        db_total_from_sqlite = 0
+
+        if self._sqlite_backend:
+            try:
+                db_rows, db_count = self._sqlite_backend.list_jobs_filtered(
+                    status=status_filter,
+                    operation_type=type_filter,
+                    search_text=search_text,
+                    exclude_ids=seen_ids if seen_ids else None,
+                )
+                db_total_from_sqlite = db_count
+                for row in db_rows:
+                    db_jobs_normalized.append(self._normalize_job_to_display_dict(row))
+            except Exception as e:
+                logging.error(f"Failed to get jobs for display from SQLite: {e}")
+
+        # Step 3: Merge and compute total_count
+        all_jobs = active_jobs + db_jobs_normalized
+        total_count = len(active_jobs) + db_total_from_sqlite
+
+        # Step 4: Paginate
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        offset = (page - 1) * page_size
+        paginated = all_jobs[offset : offset + page_size]
+
+        return paginated, total_count, total_pages

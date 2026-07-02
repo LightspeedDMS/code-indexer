@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Verify your identity - CIDX{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <article>
+        <header>
+            <h1>Verify your identity</h1>
+        </header>
+
+        <p>Enter your authenticator code to continue.</p>
+
+        {% if error %}
+        <div class="error-message" role="alert">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="/auth/elevate-form" id="elevateForm">
+            <input type="hidden" name="next" value="{{ next }}">
+
+            <label for="totp_code">
+                Authenticator code
+                <input type="text" id="totp_code" name="totp_code"
+                       autocomplete="one-time-code"
+                       inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                       required autofocus placeholder="6-digit code">
+            </label>
+
+            <details>
+                <summary>Use a recovery code instead</summary>
+                <label for="recovery_code">
+                    Recovery code
+                    <input type="text" id="recovery_code" name="recovery_code"
+                           pattern="[A-Z0-9-]+" placeholder="XXXX-XXXX-XXXX-XXXX">
+                </label>
+            </details>
+
+            <button type="submit">Verify</button>
+        </form>
+    </article>
+</div>
+{% endblock %}

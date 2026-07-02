@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/LightspeedDMS/code-indexer/discussions
+    about: For general questions, design discussions, or "how do I..." threads, please use Discussions instead of opening an Issue.

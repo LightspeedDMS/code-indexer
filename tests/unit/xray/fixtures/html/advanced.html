@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Advanced HTML5</title>
+  <!-- Web Component templates -->
+  <template id="user-card-template">
+    <style>
+      :host { display: block; border: 1px solid #ccc; padding: 1rem; border-radius: 4px; }
+      ::slotted(h2) { margin: 0 0 0.5rem; }
+    </style>
+    <slot name="avatar"></slot>
+    <slot name="name"><span>Unknown User</span></slot>
+    <slot name="email"></slot>
+    <slot></slot>
+  </template>
+</head>
+<body>
+  <!-- Custom elements -->
+  <user-card data-user-id="42" role="article" aria-label="User profile">
+    <img slot="avatar" src="/avatars/42.jpg" alt="User avatar" width="64" height="64" loading="lazy" />
+    <h2 slot="name">Alice Smith</h2>
+    <a slot="email" href="mailto:alice@example.com">alice@example.com</a>
+    <p>Senior Engineer</p>
+  </user-card>
+
+  <!-- Dialog element -->
+  <dialog id="confirm-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-desc">
+    <h2 id="dialog-title">Confirm Action</h2>
+    <p id="dialog-desc">Are you sure you want to proceed?</p>
+    <div class="dialog-actions">
+      <button type="button" autofocus value="cancel" formmethod="dialog">Cancel</button>
+      <button type="button" value="confirm" class="btn--danger">Confirm</button>
+    </div>
+  </dialog>
+
+  <!-- Details and Summary -->
+  <details open>
+    <summary>Advanced Features</summary>
+    <ul>
+      <li>Web Components</li>
+      <li>Dialog Element</li>
+      <li>Picture Element</li>
+    </ul>
+  </details>
+
+  <!-- Picture element with art direction -->
+  <picture>
+    <source media="(min-width: 1200px)" srcset="/img/hero-1200.webp" type="image/webp" />
+    <source media="(min-width: 800px)" srcset="/img/hero-800.webp" type="image/webp" />
+    <source media="(min-width: 1200px)" srcset="/img/hero-1200.jpg" />
+    <img src="/img/hero-400.jpg" alt="Hero image" width="400" height="300" />
+  </picture>
+
+  <!-- Data list for autocomplete -->
+  <label for="language-input">Language:</label>
+  <input id="language-input" list="languages" name="language" autocomplete="off" />
+  <datalist id="languages">
+    <option value="Python"></option>
+    <option value="JavaScript"></option>
+    <option value="TypeScript"></option>
+    <option value="Java"></option>
+    <option value="Kotlin"></option>
+    <option value="Go"></option>
+  </datalist>
+
+  <!-- Output element -->
+  <form oninput="result.value=parseInt(a.value)+parseInt(b.value)">
+    <input type="number" id="a" value="0" /> +
+    <input type="number" id="b" value="0" /> =
+    <output name="result" for="a b">0</output>
+  </form>
+
+  <!-- Meter and Progress -->
+  <meter id="disk-usage" min="0" max="100" low="25" high="75" optimum="10" value="42">
+    42% disk usage
+  </meter>
+  <progress id="load-progress" max="100" value="70">70%</progress>
+
+  <!-- Figure with figcaption -->
+  <figure role="img" aria-labelledby="fig-caption">
+    <pre><code class="language-python">def hello(name: str) -> None:
+    print(f"Hello, {name}!")</code></pre>
+    <figcaption id="fig-caption">Python greeting function</figcaption>
+  </figure>
+
+  <script type="module">
+    class UserCard extends HTMLElement {
+      static get observedAttributes() { return ["data-user-id"]; }
+      connectedCallback() {
+        const tmpl = document.getElementById("user-card-template");
+        this.attachShadow({ mode: "open" }).appendChild(tmpl.content.cloneNode(true));
+      }
+    }
+    customElements.define("user-card", UserCard);
+  </script>
+</body>
+</html>

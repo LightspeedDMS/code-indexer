@@ -1,0 +1,2372 @@
+"""
+Unit tests for sqlite_backends.py - SQLite implementations for all managers.
+
+Tests written FIRST following TDD methodology.
+Story #702: Migrate Central JSON Files to SQLite
+"""
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+
+class TestGlobalReposSqliteBackend:
+    """Tests for GlobalReposSqliteBackend CRUD operations."""
+
+    def test_register_repo_inserts_new_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When register_repo() is called with repo details
+        Then a new record is inserted in global_repos table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="test-repo-global",
+            repo_name="test-repo",
+            repo_url="https://github.com/test/repo.git",
+            index_path="/path/to/index",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT alias_name, repo_name, repo_url, index_path FROM global_repos"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "test-repo-global"
+        assert row[1] == "test-repo"
+        assert row[2] == "https://github.com/test/repo.git"
+        assert row[3] == "/path/to/index"
+
+    def test_get_repo_returns_existing_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing repo
+        When get_repo() is called with the alias
+        Then it returns the repo details as a dictionary.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="my-repo-global",
+            repo_name="my-repo",
+            repo_url="https://github.com/my/repo.git",
+            index_path="/path/to/my/index",
+            enable_temporal=True,
+            temporal_options={"time_range": "all"},
+        )
+
+        result = backend.get_repo("my-repo-global")
+
+        assert result is not None
+        assert result["alias_name"] == "my-repo-global"
+        assert result["repo_name"] == "my-repo"
+        assert result["enable_temporal"] is True
+        assert result["temporal_options"] == {"time_range": "all"}
+
+    def test_get_repo_returns_none_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested repo
+        When get_repo() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        result = backend.get_repo("nonexistent-repo")
+
+        assert result is None
+
+    def test_list_repos_returns_all_records(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple repos
+        When list_repos() is called
+        Then it returns all repos as a dictionary keyed by alias.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="repo1-global",
+            repo_name="repo1",
+            repo_url=None,
+            index_path="/path/1",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+        backend.register_repo(
+            alias_name="repo2-global",
+            repo_name="repo2",
+            repo_url=None,
+            index_path="/path/2",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        result = backend.list_repos()
+
+        assert len(result) == 2
+        assert "repo1-global" in result
+        assert "repo2-global" in result
+        assert result["repo1-global"]["repo_name"] == "repo1"
+        assert result["repo2-global"]["repo_name"] == "repo2"
+
+    def test_delete_repo_removes_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing repo
+        When delete_repo() is called
+        Then the record is removed.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="to-delete-global",
+            repo_name="to-delete",
+            repo_url=None,
+            index_path="/path/delete",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Verify it exists
+        assert backend.get_repo("to-delete-global") is not None
+
+        # Delete it
+        backend.delete_repo("to-delete-global")
+
+        # Verify it's gone
+        assert backend.get_repo("to-delete-global") is None
+
+    def test_update_last_refresh_updates_timestamp(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing repo
+        When update_last_refresh() is called
+        Then the last_refresh timestamp is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+        import time
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="refresh-repo-global",
+            repo_name="refresh-repo",
+            repo_url=None,
+            index_path="/path/refresh",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Get initial timestamp
+        initial = backend.get_repo("refresh-repo-global")
+        assert initial is not None
+        initial_refresh = initial["last_refresh"]
+
+        # Wait a moment to ensure timestamp changes
+        time.sleep(0.01)
+
+        # Update the timestamp
+        backend.update_last_refresh("refresh-repo-global")
+
+        # Verify timestamp was updated
+        updated = backend.get_repo("refresh-repo-global")
+        assert updated is not None
+        assert updated["last_refresh"] != initial_refresh
+
+    def test_update_enable_temporal_updates_existing_repo(self, tmp_path: Path) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database with an existing repo with enable_temporal=False
+        When update_enable_temporal() is called with enable_temporal=True
+        Then the enable_temporal flag is updated and True is returned.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="python-mock-global",
+            repo_name="python-mock",
+            repo_url="https://github.com/test/python-mock.git",
+            index_path="/path/to/index",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Verify initial state
+        initial = backend.get_repo("python-mock-global")
+        assert initial is not None
+        assert initial["enable_temporal"] is False
+
+        # Update enable_temporal flag
+        result = backend.update_enable_temporal("python-mock-global", True)
+
+        # Verify update succeeded
+        assert result is True
+
+        # Verify flag was updated in database
+        updated = backend.get_repo("python-mock-global")
+        assert updated is not None
+        assert updated["enable_temporal"] is True
+
+        # Verify database stores True as 1
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT enable_temporal FROM global_repos WHERE alias_name = ?",
+            ("python-mock-global",),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == 1  # True stored as 1
+
+    def test_update_enable_temporal_returns_false_for_nonexistent_repo(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database without the specified repo
+        When update_enable_temporal() is called
+        Then False is returned (rowcount=0).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+
+        # Attempt to update nonexistent repo
+        result = backend.update_enable_temporal("nonexistent-global", True)
+
+        # Verify operation failed gracefully
+        assert result is False
+
+    def test_update_enable_temporal_converts_false_to_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Bug #131: GlobalReposSqliteBackend.update_enable_temporal() method.
+        Given a database with an existing repo with enable_temporal=True
+        When update_enable_temporal() is called with enable_temporal=False
+        Then the flag is updated to False and stored as 0 in database.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GlobalReposSqliteBackend(str(db_path))
+        backend.register_repo(
+            alias_name="temporal-repo-global",
+            repo_name="temporal-repo",
+            repo_url="https://github.com/test/temporal.git",
+            index_path="/path/to/index",
+            enable_temporal=True,
+            temporal_options={"time_range": "all"},
+        )
+
+        # Verify initial state
+        initial = backend.get_repo("temporal-repo-global")
+        assert initial is not None
+        assert initial["enable_temporal"] is True
+
+        # Update enable_temporal to False
+        result = backend.update_enable_temporal("temporal-repo-global", False)
+
+        # Verify update succeeded
+        assert result is True
+
+        # Verify flag was updated
+        updated = backend.get_repo("temporal-repo-global")
+        assert updated is not None
+        assert updated["enable_temporal"] is False
+
+        # Verify database stores False as 0
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT enable_temporal FROM global_repos WHERE alias_name = ?",
+            ("temporal-repo-global",),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == 0  # False stored as 0
+
+
+@pytest.mark.slow
+class TestUsersSqliteBackend:
+    """Tests for UsersSqliteBackend with normalized tables."""
+
+    def test_create_user_inserts_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When create_user() is called
+        Then a new user record is inserted.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="testuser",
+            password_hash="hash123",
+            role="admin",
+            email="test@example.com",
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT username, role, email FROM users")
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "testuser"
+        assert row[1] == "admin"
+        assert row[2] == "test@example.com"
+
+    def test_get_user_returns_user_with_api_keys(self, tmp_path: Path) -> None:
+        """
+        Given a user with api_keys
+        When get_user() is called
+        Then it returns user with api_keys array populated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="apiuser",
+            password_hash="hash",
+            role="user",
+        )
+        backend.add_api_key(
+            username="apiuser",
+            key_id="key1",
+            key_hash="keyhash1",
+            key_prefix="cidx_",
+            name="My Key",
+        )
+
+        result = backend.get_user("apiuser")
+
+        assert result is not None
+        assert result["username"] == "apiuser"
+        assert "api_keys" in result
+        assert len(result["api_keys"]) == 1
+        assert result["api_keys"][0]["key_id"] == "key1"
+
+    def test_list_users_returns_all_users(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple users
+        When list_users() is called
+        Then it returns all users.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(username="user1", password_hash="hash1", role="admin")
+        backend.create_user(username="user2", password_hash="hash2", role="normal_user")
+        backend.create_user(username="user3", password_hash="hash3", role="power_user")
+
+        result = backend.list_users()
+
+        assert len(result) == 3
+        usernames = [u["username"] for u in result]
+        assert "user1" in usernames
+        assert "user2" in usernames
+        assert "user3" in usernames
+
+    def test_update_user_modifies_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing user
+        When update_user() is called with new values
+        Then the user record is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="update_user",
+            password_hash="hash",
+            role="normal_user",
+            email="old@example.com",
+        )
+
+        # Update username and email
+        backend.update_user(
+            username="update_user",
+            new_username="updated_user",
+            email="new@example.com",
+        )
+
+        # Old username should not exist
+        assert backend.get_user("update_user") is None
+
+        # New username should exist with updated data
+        result = backend.get_user("updated_user")
+        assert result is not None
+        assert result["email"] == "new@example.com"
+
+    def test_update_user_modifies_email_only(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing user
+        When update_user() is called with only email
+        Then only the email is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="email_user",
+            password_hash="hash",
+            role="admin",
+            email="old@example.com",
+        )
+
+        # Update only email
+        backend.update_user(username="email_user", email="updated@example.com")
+
+        result = backend.get_user("email_user")
+        assert result is not None
+        assert result["email"] == "updated@example.com"
+        assert result["role"] == "admin"
+
+    def test_update_user_returns_false_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the user
+        When update_user() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+
+        result = backend.update_user(username="nonexistent", email="x@y.com")
+
+        assert result is False
+
+    def test_delete_user_cascades_to_api_keys(self, tmp_path: Path) -> None:
+        """
+        Given a user with api_keys and mcp_credentials
+        When delete_user() is called
+        Then all related records are cascade deleted.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="cascade_user",
+            password_hash="hash",
+            role="user",
+        )
+        backend.add_api_key(
+            username="cascade_user",
+            key_id="key1",
+            key_hash="keyhash",
+            key_prefix="cidx_",
+        )
+        backend.add_mcp_credential(
+            username="cascade_user",
+            credential_id="cred1",
+            client_id="client123",
+            client_secret_hash="secrethash",
+            client_id_prefix="mcp_",
+        )
+
+        # Verify records exist
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM user_api_keys WHERE username='cascade_user'"
+        )
+        assert cursor.fetchone()[0] == 1
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM user_mcp_credentials WHERE username='cascade_user'"
+        )
+        assert cursor.fetchone()[0] == 1
+        conn.close()
+
+        # Delete user
+        backend.delete_user("cascade_user")
+
+        # Verify cascades occurred
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM user_api_keys WHERE username='cascade_user'"
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM user_mcp_credentials WHERE username='cascade_user'"
+        )
+        assert cursor.fetchone()[0] == 0
+        conn.close()
+
+
+class TestUsersSqliteBackendOIDCMethods:
+    """Tests for UsersSqliteBackend OIDC-related methods (Story #702 SSO fix)."""
+
+    def test_get_user_by_email_returns_user_when_exists(self, tmp_path: Path) -> None:
+        """
+        Given a database with a user that has an email
+        When get_user_by_email() is called with that email
+        Then it returns the user data.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="emailuser",
+            password_hash="hash123",
+            role="normal_user",
+            email="test@example.com",
+        )
+
+        result = backend.get_user_by_email("test@example.com")
+
+        assert result is not None
+        assert result["username"] == "emailuser"
+        assert result["email"] == "test@example.com"
+        assert result["role"] == "normal_user"
+
+    def test_get_user_by_email_case_insensitive(self, tmp_path: Path) -> None:
+        """
+        Given a database with a user that has an email
+        When get_user_by_email() is called with different case
+        Then it returns the user data (case-insensitive).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="caseuser",
+            password_hash="hash",
+            role="admin",
+            email="Test@Example.COM",
+        )
+
+        # Search with lowercase
+        result = backend.get_user_by_email("test@example.com")
+
+        assert result is not None
+        assert result["username"] == "caseuser"
+
+    def test_get_user_by_email_returns_none_when_not_found(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database without a user with the specified email
+        When get_user_by_email() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="otheruser",
+            password_hash="hash",
+            role="user",
+            email="other@example.com",
+        )
+
+        result = backend.get_user_by_email("nonexistent@example.com")
+
+        assert result is None
+
+    def test_get_user_by_email_strips_whitespace(self, tmp_path: Path) -> None:
+        """
+        Given a database with a user that has an email
+        When get_user_by_email() is called with leading/trailing whitespace
+        Then it returns the user data (whitespace trimmed).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="trimuser",
+            password_hash="hash",
+            role="normal_user",
+            email="trim@example.com",
+        )
+
+        # Search with whitespace
+        result = backend.get_user_by_email("  trim@example.com  ")
+
+        assert result is not None
+        assert result["username"] == "trimuser"
+
+    def test_get_user_by_email_includes_api_keys_and_mcp_credentials(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a user with api_keys and mcp_credentials
+        When get_user_by_email() is called
+        Then it returns user with all related data.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="fulluser",
+            password_hash="hash",
+            role="admin",
+            email="full@example.com",
+        )
+        backend.add_api_key(
+            username="fulluser",
+            key_id="key1",
+            key_hash="keyhash",
+            key_prefix="cidx_",
+            name="My API Key",
+        )
+        backend.add_mcp_credential(
+            username="fulluser",
+            credential_id="cred1",
+            client_id="client123",
+            client_secret_hash="secrethash",
+            client_id_prefix="mcp_",
+            name="My MCP Credential",
+        )
+
+        result = backend.get_user_by_email("full@example.com")
+
+        assert result is not None
+        assert len(result["api_keys"]) == 1
+        assert result["api_keys"][0]["key_id"] == "key1"
+        assert len(result["mcp_credentials"]) == 1
+        assert result["mcp_credentials"][0]["credential_id"] == "cred1"
+
+    def test_set_oidc_identity_updates_user(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing user
+        When set_oidc_identity() is called
+        Then the user's oidc_identity is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="oidcuser",
+            password_hash="hash",
+            role="normal_user",
+            email="oidc@example.com",
+        )
+
+        identity = {
+            "subject": "oidc-12345",
+            "email": "oidc@example.com",
+            "linked_at": "2025-01-15T10:30:00Z",
+            "last_login": "2025-01-15T10:30:00Z",
+        }
+        result = backend.set_oidc_identity("oidcuser", identity)
+
+        assert result is True
+
+        # Verify identity was stored
+        user = backend.get_user("oidcuser")
+        assert user is not None
+        assert user["oidc_identity"] is not None
+        assert user["oidc_identity"]["subject"] == "oidc-12345"
+        assert user["oidc_identity"]["email"] == "oidc@example.com"
+
+    def test_set_oidc_identity_returns_false_for_nonexistent_user(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database without the specified user
+        When set_oidc_identity() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+
+        identity = {"subject": "oidc-12345"}
+        result = backend.set_oidc_identity("nonexistent", identity)
+
+        assert result is False
+
+    def test_set_oidc_identity_overwrites_existing_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a user with existing oidc_identity
+        When set_oidc_identity() is called with new identity
+        Then the identity is overwritten.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="overwriteuser",
+            password_hash="hash",
+            role="normal_user",
+        )
+
+        # Set initial identity
+        identity1 = {"subject": "old-subject", "email": "old@example.com"}
+        backend.set_oidc_identity("overwriteuser", identity1)
+
+        # Overwrite with new identity
+        identity2 = {"subject": "new-subject", "email": "new@example.com"}
+        backend.set_oidc_identity("overwriteuser", identity2)
+
+        # Verify new identity
+        user = backend.get_user("overwriteuser")
+        assert user is not None
+        assert user["oidc_identity"]["subject"] == "new-subject"
+        assert user["oidc_identity"]["email"] == "new@example.com"
+
+
+class TestUsersSqliteBackendMCPAndOIDCMethods:
+    """Tests for UsersSqliteBackend MCP credential and OIDC methods (Story #702 SQLite migration)."""
+
+    def test_delete_mcp_credential_removes_credential(self, tmp_path: Path) -> None:
+        """
+        Given a user with MCP credentials in SQLite
+        When delete_mcp_credential() is called
+        Then the specified credential is removed.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="mcpuser", password_hash="hash", role="normal_user"
+        )
+        backend.add_mcp_credential(
+            username="mcpuser",
+            credential_id="cred-to-delete",
+            client_id="mcp_abc123",
+            client_secret_hash="secrethash",
+            client_id_prefix="mcp_",
+            name="Test Credential",
+        )
+        backend.add_mcp_credential(
+            username="mcpuser",
+            credential_id="cred-to-keep",
+            client_id="mcp_def456",
+            client_secret_hash="secrethash2",
+            client_id_prefix="mcp_",
+            name="Keep Credential",
+        )
+
+        # Delete one credential
+        result = backend.delete_mcp_credential("mcpuser", "cred-to-delete")
+
+        assert result is True
+
+        # Verify only one credential remains
+        user = backend.get_user("mcpuser")
+        assert user is not None
+        assert len(user["mcp_credentials"]) == 1
+        assert user["mcp_credentials"][0]["credential_id"] == "cred-to-keep"
+
+    def test_delete_mcp_credential_returns_false_for_nonexistent(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a user without the specified credential
+        When delete_mcp_credential() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(username="nocred", password_hash="hash", role="normal_user")
+
+        result = backend.delete_mcp_credential("nocred", "nonexistent-cred")
+
+        assert result is False
+
+    def test_update_mcp_credential_last_used_updates_timestamp(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a user with MCP credentials in SQLite
+        When update_mcp_credential_last_used() is called
+        Then the last_used_at timestamp is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="lastused", password_hash="hash", role="normal_user"
+        )
+        backend.add_mcp_credential(
+            username="lastused",
+            credential_id="cred-update",
+            client_id="mcp_abc123",
+            client_secret_hash="secrethash",
+            client_id_prefix="mcp_",
+        )
+
+        # Initially last_used_at should be None
+        user = backend.get_user("lastused")
+        assert user is not None
+        initial_last_used = user["mcp_credentials"][0]["last_used_at"]
+        assert initial_last_used is None
+
+        # Update last_used_at
+        result = backend.update_mcp_credential_last_used("lastused", "cred-update")
+
+        assert result is True
+
+        # Verify timestamp was updated
+        user = backend.get_user("lastused")
+        assert user is not None
+        assert user["mcp_credentials"][0]["last_used_at"] is not None
+
+    def test_update_mcp_credential_last_used_returns_false_for_nonexistent(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a user without the specified credential
+        When update_mcp_credential_last_used() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(username="nouser", password_hash="hash", role="normal_user")
+
+        result = backend.update_mcp_credential_last_used("nouser", "nonexistent-cred")
+
+        assert result is False
+
+    def test_list_all_mcp_credentials_returns_all_credentials(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given multiple users with MCP credentials
+        When list_all_mcp_credentials() is called
+        Then it returns all credentials across all users.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(username="user1", password_hash="hash", role="normal_user")
+        backend.create_user(username="user2", password_hash="hash", role="admin")
+        backend.add_mcp_credential(
+            username="user1",
+            credential_id="cred1",
+            client_id="mcp_user1",
+            client_secret_hash="hash1",
+            client_id_prefix="mcp_",
+            name="User1 Cred",
+        )
+        backend.add_mcp_credential(
+            username="user2",
+            credential_id="cred2",
+            client_id="mcp_user2",
+            client_secret_hash="hash2",
+            client_id_prefix="mcp_",
+            name="User2 Cred",
+        )
+
+        credentials = backend.list_all_mcp_credentials()
+
+        assert len(credentials) == 2
+        usernames = [c["username"] for c in credentials]
+        assert "user1" in usernames
+        assert "user2" in usernames
+
+    def test_list_all_mcp_credentials_pagination(self, tmp_path: Path) -> None:
+        """
+        Given multiple MCP credentials
+        When list_all_mcp_credentials() is called with limit and offset
+        Then it returns paginated results.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(username="pager", password_hash="hash", role="normal_user")
+        for i in range(5):
+            backend.add_mcp_credential(
+                username="pager",
+                credential_id=f"cred{i}",
+                client_id=f"mcp_cred{i}",
+                client_secret_hash=f"hash{i}",
+                client_id_prefix="mcp_",
+            )
+
+        # Get first page
+        page1 = backend.list_all_mcp_credentials(limit=2, offset=0)
+        assert len(page1) == 2
+
+        # Get second page
+        page2 = backend.list_all_mcp_credentials(limit=2, offset=2)
+        assert len(page2) == 2
+
+        # Get last page
+        page3 = backend.list_all_mcp_credentials(limit=2, offset=4)
+        assert len(page3) == 1
+
+    def test_remove_oidc_identity_removes_identity(self, tmp_path: Path) -> None:
+        """
+        Given a user with OIDC identity in SQLite
+        When remove_oidc_identity() is called
+        Then the OIDC identity is removed (set to NULL).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+        backend.create_user(
+            username="oidcremove", password_hash="hash", role="normal_user"
+        )
+        backend.set_oidc_identity(
+            "oidcremove", {"subject": "oidc-123", "email": "oidc@example.com"}
+        )
+
+        # Verify identity exists
+        user = backend.get_user("oidcremove")
+        assert user is not None
+        assert user["oidc_identity"] is not None
+
+        # Remove identity
+        result = backend.remove_oidc_identity("oidcremove")
+
+        assert result is True
+
+        # Verify identity is removed
+        user = backend.get_user("oidcremove")
+        assert user is not None
+        assert user["oidc_identity"] is None
+
+    def test_remove_oidc_identity_returns_false_for_nonexistent_user(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database without the specified user
+        When remove_oidc_identity() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import UsersSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = UsersSqliteBackend(str(db_path))
+
+        result = backend.remove_oidc_identity("nonexistent")
+
+        assert result is False
+
+
+class TestSyncJobsSqliteBackend:
+    """Tests for SyncJobsSqliteBackend with JSON blob columns."""
+
+    def test_create_job_inserts_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When create_job() is called with job details
+        Then a new record is inserted in sync_jobs table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-001",
+            username="testuser",
+            user_alias="Test User",
+            job_type="sync",
+            status="pending",
+            repository_url="https://github.com/test/repo.git",
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT job_id, username, user_alias, job_type, status FROM sync_jobs"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "job-001"
+        assert row[1] == "testuser"
+        assert row[2] == "Test User"
+        assert row[3] == "sync"
+        assert row[4] == "pending"
+
+    def test_get_job_returns_existing_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing job
+        When get_job() is called with the job_id
+        Then it returns the job details as a dictionary.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-002",
+            username="user2",
+            user_alias="User Two",
+            job_type="refresh",
+            status="running",
+            repository_url="https://github.com/user2/repo.git",
+        )
+
+        result = backend.get_job("job-002")
+
+        assert result is not None
+        assert result["job_id"] == "job-002"
+        assert result["username"] == "user2"
+        assert result["status"] == "running"
+
+    def test_get_job_returns_none_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested job
+        When get_job() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        result = backend.get_job("nonexistent-job")
+
+        assert result is None
+
+    def test_update_job_modifies_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing job
+        When update_job() is called with new values
+        Then the record is updated.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-003",
+            username="user3",
+            user_alias="User Three",
+            job_type="sync",
+            status="pending",
+        )
+
+        # Update job
+        backend.update_job(
+            job_id="job-003",
+            status="completed",
+            progress=100,
+            error_message=None,
+        )
+
+        result = backend.get_job("job-003")
+        assert result is not None
+        assert result["status"] == "completed"
+        assert result["progress"] == 100
+
+    def test_list_jobs_returns_all_records(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple jobs
+        When list_jobs() is called
+        Then it returns all jobs.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-a",
+            username="user1",
+            user_alias="U1",
+            job_type="sync",
+            status="pending",
+        )
+        backend.create_job(
+            job_id="job-b",
+            username="user2",
+            user_alias="U2",
+            job_type="refresh",
+            status="running",
+        )
+
+        result = backend.list_jobs()
+
+        assert len(result) == 2
+        job_ids = [j["job_id"] for j in result]
+        assert "job-a" in job_ids
+        assert "job-b" in job_ids
+
+    def test_delete_job_removes_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing job
+        When delete_job() is called
+        Then the record is removed.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-del",
+            username="user",
+            user_alias="U",
+            job_type="sync",
+            status="pending",
+        )
+
+        # Verify it exists
+        assert backend.get_job("job-del") is not None
+
+        # Delete it
+        backend.delete_job("job-del")
+
+        # Verify it's gone
+        assert backend.get_job("job-del") is None
+
+    def test_update_job_with_json_blob_columns(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing job
+        When update_job() is called with complex nested data (phases, analytics)
+        Then the JSON blob columns are stored correctly.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SyncJobsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SyncJobsSqliteBackend(str(db_path))
+        backend.create_job(
+            job_id="job-json",
+            username="user",
+            user_alias="User",
+            job_type="sync",
+            status="running",
+        )
+
+        phases = {
+            "clone": {"status": "completed", "progress": 100},
+            "index": {"status": "running", "progress": 50},
+        }
+        phase_weights = {"clone": 0.3, "index": 0.7}
+        analytics_data = {"files_processed": 100, "duration_seconds": 120}
+
+        backend.update_job(
+            job_id="job-json",
+            phases=phases,
+            phase_weights=phase_weights,
+            current_phase="index",
+            analytics_data=analytics_data,
+        )
+
+        result = backend.get_job("job-json")
+        assert result is not None
+        assert result["phases"] == phases
+        assert result["phase_weights"] == phase_weights
+        assert result["current_phase"] == "index"
+        assert result["analytics_data"] == analytics_data
+
+
+@pytest.mark.slow
+class TestCITokensSqliteBackend:
+    """Tests for CITokensSqliteBackend CRUD operations."""
+
+    def test_save_token_inserts_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When save_token() is called
+        Then a new record is inserted in ci_tokens table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import CITokensSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = CITokensSqliteBackend(str(db_path))
+        backend.save_token(
+            platform="github",
+            encrypted_token="encrypted_value_123",
+            base_url=None,
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT platform, encrypted_token, base_url FROM ci_tokens"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "github"
+        assert row[1] == "encrypted_value_123"
+        assert row[2] is None
+
+    def test_get_token_returns_existing_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing token
+        When get_token() is called
+        Then it returns the token data.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import CITokensSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = CITokensSqliteBackend(str(db_path))
+        backend.save_token(
+            platform="gitlab",
+            encrypted_token="gitlab_encrypted_token",
+            base_url="https://gitlab.example.com",
+        )
+
+        result = backend.get_token("gitlab")
+
+        assert result is not None
+        assert result["platform"] == "gitlab"
+        assert result["encrypted_token"] == "gitlab_encrypted_token"
+        assert result["base_url"] == "https://gitlab.example.com"
+
+    def test_get_token_returns_none_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested token
+        When get_token() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import CITokensSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = CITokensSqliteBackend(str(db_path))
+        result = backend.get_token("nonexistent")
+
+        assert result is None
+
+    def test_delete_token_removes_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing token
+        When delete_token() is called
+        Then the record is removed.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import CITokensSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = CITokensSqliteBackend(str(db_path))
+        backend.save_token(platform="github", encrypted_token="token123")
+
+        # Verify it exists
+        assert backend.get_token("github") is not None
+
+        # Delete it
+        backend.delete_token("github")
+
+        # Verify it's gone
+        assert backend.get_token("github") is None
+
+    def test_list_tokens_returns_all_platforms(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple tokens
+        When list_tokens() is called
+        Then it returns all tokens keyed by platform.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import CITokensSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = CITokensSqliteBackend(str(db_path))
+        backend.save_token(platform="github", encrypted_token="gh_token")
+        backend.save_token(platform="gitlab", encrypted_token="gl_token")
+
+        result = backend.list_tokens()
+
+        assert len(result) == 2
+        assert "github" in result
+        assert "gitlab" in result
+
+
+class TestSessionsSqliteBackend:
+    """Tests for SessionsSqliteBackend (invalidated_sessions and password_change_timestamps)."""
+
+    def test_invalidate_session_inserts_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When invalidate_session() is called
+        Then a record is inserted in invalidated_sessions table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        backend.invalidate_session(
+            username="testuser",
+            token_id="token-abc-123",
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT username, token_id FROM invalidated_sessions")
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "testuser"
+        assert row[1] == "token-abc-123"
+
+    def test_is_session_invalidated_returns_true_for_invalidated(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database with an invalidated session
+        When is_session_invalidated() is called
+        Then it returns True.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        backend.invalidate_session(username="user1", token_id="tok-1")
+
+        result = backend.is_session_invalidated("user1", "tok-1")
+
+        assert result is True
+
+    def test_is_session_invalidated_returns_false_for_valid(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database without the session invalidated
+        When is_session_invalidated() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        result = backend.is_session_invalidated("user1", "valid-token")
+
+        assert result is False
+
+    def test_set_password_change_timestamp(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When set_password_change_timestamp() is called
+        Then a record is inserted/updated in password_change_timestamps table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        backend.set_password_change_timestamp("testuser", "2025-01-15T10:30:00Z")
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT username, changed_at FROM password_change_timestamps"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "testuser"
+        assert row[1] == "2025-01-15T10:30:00Z"
+
+    def test_get_password_change_timestamp_returns_value(self, tmp_path: Path) -> None:
+        """
+        Given a database with a password change timestamp
+        When get_password_change_timestamp() is called
+        Then it returns the timestamp.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        backend.set_password_change_timestamp("user2", "2025-01-20T14:00:00Z")
+
+        result = backend.get_password_change_timestamp("user2")
+
+        assert result == "2025-01-20T14:00:00Z"
+
+    def test_get_password_change_timestamp_returns_none_for_nonexistent(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database without password change timestamp for user
+        When get_password_change_timestamp() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        result = backend.get_password_change_timestamp("nonexistent")
+
+        assert result is None
+
+    def test_clear_invalidated_sessions_for_user(self, tmp_path: Path) -> None:
+        """
+        Given a database with invalidated sessions for a user
+        When clear_invalidated_sessions() is called
+        Then all sessions for that user are removed.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+        backend.invalidate_session("user1", "tok-1")
+        backend.invalidate_session("user1", "tok-2")
+        backend.invalidate_session("user2", "tok-3")
+
+        # Clear user1's sessions
+        backend.clear_invalidated_sessions("user1")
+
+        # user1's sessions should be gone
+        assert backend.is_session_invalidated("user1", "tok-1") is False
+        assert backend.is_session_invalidated("user1", "tok-2") is False
+        # user2's session should remain
+        assert backend.is_session_invalidated("user2", "tok-3") is True
+
+    def test_cleanup_old_data_removes_old_entries(self, tmp_path: Path) -> None:
+        """
+        Given a database with old session data
+        When cleanup_old_data() is called
+        Then old entries are removed (Story #702 SQLite migration).
+        """
+        from datetime import datetime, timedelta, timezone
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+
+        # Insert old timestamp (60 days ago)
+        old_time = datetime.now(timezone.utc) - timedelta(days=60)
+        backend.set_password_change_timestamp("old_user", old_time.isoformat())
+
+        # Insert recent timestamp (5 days ago)
+        recent_time = datetime.now(timezone.utc) - timedelta(days=5)
+        backend.set_password_change_timestamp("recent_user", recent_time.isoformat())
+
+        # Cleanup entries older than 30 days
+        count = backend.cleanup_old_data(days_to_keep=30)
+
+        # old_user should be cleaned up
+        assert count == 1
+        assert backend.get_password_change_timestamp("old_user") is None
+        # recent_user should remain
+        assert backend.get_password_change_timestamp("recent_user") is not None
+
+    def test_cleanup_old_data_returns_zero_when_nothing_to_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given a database with only recent session data
+        When cleanup_old_data() is called
+        Then it returns 0.
+        """
+        from datetime import datetime, timezone
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SessionsSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SessionsSqliteBackend(str(db_path))
+
+        # Insert recent timestamp
+        backend.set_password_change_timestamp(
+            "recent_user", datetime.now(timezone.utc).isoformat()
+        )
+
+        # Cleanup - nothing should be removed
+        count = backend.cleanup_old_data(days_to_keep=30)
+
+        assert count == 0
+        assert backend.get_password_change_timestamp("recent_user") is not None
+
+
+class TestSSHKeysSqliteBackend:
+    """Tests for SSHKeysSqliteBackend with junction table for hosts."""
+
+    def test_create_key_inserts_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When create_key() is called
+        Then a new record is inserted in ssh_keys table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="my-key",
+            fingerprint="SHA256:abc123",
+            key_type="ed25519",
+            private_path="/home/user/.ssh/my-key",
+            public_path="/home/user/.ssh/my-key.pub",
+            public_key="ssh-ed25519 AAAAC3...",
+            email="user@example.com",
+            description="My SSH key",
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT name, fingerprint, key_type, private_path FROM ssh_keys"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "my-key"
+        assert row[1] == "SHA256:abc123"
+        assert row[2] == "ed25519"
+        assert row[3] == "/home/user/.ssh/my-key"
+
+    def test_get_key_returns_existing_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing key
+        When get_key() is called
+        Then it returns the key details with hosts list.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="get-key",
+            fingerprint="SHA256:xyz789",
+            key_type="rsa",
+            private_path="/path/to/key",
+            public_path="/path/to/key.pub",
+        )
+
+        result = backend.get_key("get-key")
+
+        assert result is not None
+        assert result["name"] == "get-key"
+        assert result["fingerprint"] == "SHA256:xyz789"
+        assert result["hosts"] == []  # No hosts assigned yet
+
+    def test_get_key_returns_none_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested key
+        When get_key() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        result = backend.get_key("nonexistent-key")
+
+        assert result is None
+
+    def test_assign_host_to_key(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing key
+        When assign_host() is called
+        Then the host is added to the junction table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="host-key",
+            fingerprint="SHA256:host123",
+            key_type="ed25519",
+            private_path="/path/key",
+            public_path="/path/key.pub",
+        )
+
+        # Assign hosts
+        backend.assign_host("host-key", "github.com")
+        backend.assign_host("host-key", "gitlab.com")
+
+        result = backend.get_key("host-key")
+        assert result is not None
+        assert len(result["hosts"]) == 2
+        assert "github.com" in result["hosts"]
+        assert "gitlab.com" in result["hosts"]
+
+    def test_remove_host_from_key(self, tmp_path: Path) -> None:
+        """
+        Given a key with assigned hosts
+        When remove_host() is called
+        Then the host is removed from the junction table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="remove-host-key",
+            fingerprint="SHA256:rem123",
+            key_type="ed25519",
+            private_path="/path/key",
+            public_path="/path/key.pub",
+        )
+        backend.assign_host("remove-host-key", "github.com")
+        backend.assign_host("remove-host-key", "gitlab.com")
+
+        # Remove one host
+        backend.remove_host("remove-host-key", "github.com")
+
+        result = backend.get_key("remove-host-key")
+        assert result is not None
+        assert len(result["hosts"]) == 1
+        assert "gitlab.com" in result["hosts"]
+        assert "github.com" not in result["hosts"]
+
+    def test_delete_key_cascades_to_hosts(self, tmp_path: Path) -> None:
+        """
+        Given a key with assigned hosts
+        When delete_key() is called
+        Then the key and all host assignments are removed (cascade).
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="cascade-key",
+            fingerprint="SHA256:casc123",
+            key_type="ed25519",
+            private_path="/path/key",
+            public_path="/path/key.pub",
+        )
+        backend.assign_host("cascade-key", "github.com")
+        backend.assign_host("cascade-key", "gitlab.com")
+
+        # Delete the key
+        backend.delete_key("cascade-key")
+
+        # Verify key is gone
+        assert backend.get_key("cascade-key") is None
+
+        # Verify hosts are also gone (cascade)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM ssh_key_hosts WHERE key_name='cascade-key'"
+        )
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count == 0
+
+    def test_list_keys_returns_all_records(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple keys
+        When list_keys() is called
+        Then it returns all keys with their hosts.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import SSHKeysSqliteBackend
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = SSHKeysSqliteBackend(str(db_path))
+        backend.create_key(
+            name="key1",
+            fingerprint="fp1",
+            key_type="ed25519",
+            private_path="/p1",
+            public_path="/p1.pub",
+        )
+        backend.create_key(
+            name="key2",
+            fingerprint="fp2",
+            key_type="rsa",
+            private_path="/p2",
+            public_path="/p2.pub",
+        )
+        backend.assign_host("key1", "github.com")
+
+        result = backend.list_keys()
+
+        assert len(result) == 2
+        key_names = [k["name"] for k in result]
+        assert "key1" in key_names
+        assert "key2" in key_names
+
+        # Verify hosts are populated
+        key1_result = next(k for k in result if k["name"] == "key1")
+        assert "github.com" in key1_result["hosts"]
+
+
+class TestGoldenRepoMetadataSqliteBackend:
+    """Tests for GoldenRepoMetadataSqliteBackend CRUD operations (Story #711)."""
+
+    def test_add_repo_inserts_new_record(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When add_repo() is called with repo details
+        Then a new record is inserted in golden_repos_metadata table.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="test-golden-repo",
+            repo_url="https://github.com/test/repo.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/test-golden-repo",
+            created_at="2025-01-15T10:00:00Z",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        # Verify record was inserted
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT alias, repo_url, default_branch, clone_path, enable_temporal "
+            "FROM golden_repos_metadata"
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == "test-golden-repo"
+        assert row[1] == "https://github.com/test/repo.git"
+        assert row[2] == "main"
+        assert row[3] == "/data/golden-repos/test-golden-repo"
+        assert row[4] == 0  # False stored as 0
+
+    def test_add_repo_with_temporal_options_stores_json(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When add_repo() is called with temporal_options
+        Then the temporal_options are stored as JSON blob.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        temporal_options = {
+            "max_commits": 500,
+            "since_date": "2024-01-01",
+            "diff_context": 10,
+        }
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="temporal-repo",
+            repo_url="https://github.com/test/temporal.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/temporal-repo",
+            created_at="2025-01-15T10:00:00Z",
+            enable_temporal=True,
+            temporal_options=temporal_options,
+        )
+
+        # Verify record with JSON blob
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute(
+            "SELECT enable_temporal, temporal_options FROM golden_repos_metadata "
+            "WHERE alias = ?",
+            ("temporal-repo",),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == 1  # True stored as 1
+        stored_options = json.loads(row[1])
+        assert stored_options == temporal_options
+
+    def test_add_repo_with_null_temporal_options(self, tmp_path: Path) -> None:
+        """
+        Given an initialized database
+        When add_repo() is called with None temporal_options
+        Then the repo is stored correctly with null temporal_options.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="no-temporal",
+            repo_url="https://github.com/test/no-temporal.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/no-temporal",
+            created_at="2025-01-15T10:00:00Z",
+            enable_temporal=False,
+            temporal_options=None,
+        )
+
+        result = backend.get_repo("no-temporal")
+
+        assert result is not None
+        assert result["enable_temporal"] is False
+        assert result["temporal_options"] is None
+
+    def test_get_repo_returns_existing_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing golden repo
+        When get_repo() is called with the alias
+        Then it returns the repo details as a dictionary.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="get-golden-repo",
+            repo_url="https://github.com/test/get-repo.git",
+            default_branch="develop",
+            clone_path="/data/golden-repos/get-golden-repo",
+            created_at="2025-01-15T12:00:00Z",
+            enable_temporal=True,
+            temporal_options={"max_commits": 100},
+        )
+
+        result = backend.get_repo("get-golden-repo")
+
+        assert result is not None
+        assert result["alias"] == "get-golden-repo"
+        assert result["repo_url"] == "https://github.com/test/get-repo.git"
+        assert result["default_branch"] == "develop"
+        assert result["clone_path"] == "/data/golden-repos/get-golden-repo"
+        assert result["created_at"] == "2025-01-15T12:00:00Z"
+        assert result["enable_temporal"] is True
+        assert result["temporal_options"] == {"max_commits": 100}
+
+    def test_get_repo_returns_none_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested repo
+        When get_repo() is called
+        Then it returns None.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        result = backend.get_repo("nonexistent-golden-repo")
+
+        assert result is None
+
+    def test_list_repos_returns_all_records(self, tmp_path: Path) -> None:
+        """
+        Given a database with multiple golden repos
+        When list_repos() is called
+        Then it returns all repos as a list.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="repo1",
+            repo_url="https://github.com/test/repo1.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/repo1",
+            created_at="2025-01-15T10:00:00Z",
+        )
+        backend.add_repo(
+            alias="repo2",
+            repo_url="https://github.com/test/repo2.git",
+            default_branch="develop",
+            clone_path="/data/golden-repos/repo2",
+            created_at="2025-01-15T11:00:00Z",
+        )
+
+        result = backend.list_repos()
+
+        assert len(result) == 2
+        aliases = [r["alias"] for r in result]
+        assert "repo1" in aliases
+        assert "repo2" in aliases
+
+    def test_remove_repo_deletes_record(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing golden repo
+        When remove_repo() is called
+        Then the record is removed and True is returned.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="to-delete",
+            repo_url="https://github.com/test/delete.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/to-delete",
+            created_at="2025-01-15T10:00:00Z",
+        )
+
+        # Verify it exists
+        assert backend.get_repo("to-delete") is not None
+
+        # Delete it
+        deleted = backend.remove_repo("to-delete")
+
+        # Verify deletion
+        assert deleted is True
+        assert backend.get_repo("to-delete") is None
+
+    def test_remove_repo_returns_false_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested repo
+        When remove_repo() is called
+        Then False is returned.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        deleted = backend.remove_repo("nonexistent")
+
+        assert deleted is False
+
+    def test_repo_exists_returns_true_for_existing(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing golden repo
+        When repo_exists() is called
+        Then it returns True.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="exists-repo",
+            repo_url="https://github.com/test/exists.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/exists-repo",
+            created_at="2025-01-15T10:00:00Z",
+        )
+
+        assert backend.repo_exists("exists-repo") is True
+
+    def test_repo_exists_returns_false_for_nonexistent(self, tmp_path: Path) -> None:
+        """
+        Given a database without the requested repo
+        When repo_exists() is called
+        Then it returns False.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+
+        assert backend.repo_exists("nonexistent") is False
+
+    def test_add_repo_duplicate_raises_integrity_error(self, tmp_path: Path) -> None:
+        """
+        Given a database with an existing golden repo
+        When add_repo() is called with the same alias
+        Then sqlite3.IntegrityError is raised.
+        """
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        schema = DatabaseSchema(str(db_path))
+        schema.initialize_database()
+
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.add_repo(
+            alias="duplicate-test",
+            repo_url="https://github.com/test/first.git",
+            default_branch="main",
+            clone_path="/data/golden-repos/duplicate-test",
+            created_at="2025-01-15T10:00:00Z",
+        )
+
+        # Attempt to add duplicate
+        with pytest.raises(sqlite3.IntegrityError):
+            backend.add_repo(
+                alias="duplicate-test",
+                repo_url="https://github.com/test/second.git",
+                default_branch="develop",
+                clone_path="/data/golden-repos/duplicate-test-2",
+                created_at="2025-01-15T11:00:00Z",
+            )
+
+    def test_ensure_table_exists_migrates_missing_columns(self, tmp_path: Path) -> None:
+        """
+        Given an existing database with a golden_repos_metadata table
+            that is missing category_id, category_auto_assigned, and wiki_enabled
+        When ensure_table_exists() is called
+        Then all three columns are added via ALTER TABLE migration.
+        """
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        db_path = tmp_path / "legacy.db"
+
+        # Create a legacy table that is missing the new columns
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE golden_repos_metadata (
+                alias TEXT PRIMARY KEY NOT NULL,
+                repo_url TEXT NOT NULL,
+                default_branch TEXT NOT NULL,
+                clone_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                enable_temporal INTEGER NOT NULL DEFAULT 0,
+                temporal_options TEXT
+            )
+        """
+        )
+        conn.commit()
+        conn.close()
+
+        # Verify the legacy table does NOT have the new columns
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+        cols_before = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert "category_id" not in cols_before
+        assert "category_auto_assigned" not in cols_before
+        assert "wiki_enabled" not in cols_before
+
+        # Run migration
+        backend = GoldenRepoMetadataSqliteBackend(str(db_path))
+        backend.ensure_table_exists()
+
+        # Verify all three columns now exist
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
+        cols_after = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert "category_id" in cols_after
+        assert "category_auto_assigned" in cols_after
+        assert "wiki_enabled" in cols_after

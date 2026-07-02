@@ -1,0 +1,138 @@
+"""OIDC authentication routes for FastAPI."""
+
+import os
+from typing import TYPE_CHECKING, Optional
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from ...web.auth import get_session_manager
+from ...web.routes import _get_user_mfa_status
+
+if TYPE_CHECKING:
+    from .oidc_manager import OIDCManager
+    from ..state_manager import StateManager
+
+router = APIRouter(prefix="/auth/sso", tags=["sso"])
+
+
+# Global OIDC manager instance (injected by app.py)
+oidc_manager: Optional["OIDCManager"] = None
+
+
+# Global state manager instance (injected by app.py)
+state_manager: Optional["StateManager"] = None
+
+
+@router.get("/callback")
+async def sso_callback(code: str, state: str, request: Request):
+    """Handle OIDC callback."""
+    if oidc_manager is None or state_manager is None:
+        raise HTTPException(status_code=500, detail="OIDC not configured")
+
+    # Validate state token (CSRF protection)
+    # Try both state managers (oidc_routes and oauth_routes)
+    state_data = state_manager.validate_state(state)
+    if not state_data:
+        # Try oauth state manager if available
+        from code_indexer.server.auth import dependencies
+
+        if hasattr(dependencies, "oidc_state_manager"):
+            state_data = dependencies.oidc_state_manager.validate_state(state)
+
+        if not state_data:
+            raise HTTPException(status_code=400, detail="Invalid state")
+
+    # Build callback URL using CIDX_ISSUER_URL if set (for reverse proxy scenarios)
+    issuer_url = os.getenv("CIDX_ISSUER_URL")
+    if issuer_url:
+        callback_url = f"{issuer_url.rstrip('/')}/auth/sso/callback"
+    else:
+        callback_url = str(request.url_for("sso_callback"))
+
+    # Use appropriate code_verifier based on flow type
+    code_verifier = state_data.get("oidc_code_verifier") or state_data.get(
+        "code_verifier"
+    )
+
+    tokens = await oidc_manager.provider.exchange_code_for_token(  # type: ignore[union-attr]
+        code, code_verifier, callback_url
+    )
+
+    # Parse ID token to get user info (includes groups for Entra/Keycloak)
+    if "id_token" not in tokens:
+        raise HTTPException(status_code=500, detail="ID token not returned by provider")
+
+    user_info = oidc_manager.provider.get_user_info(  # type: ignore[union-attr]
+        tokens["access_token"], tokens["id_token"]
+    )
+
+    # Match or create user (email-based)
+    user = await oidc_manager.match_or_create_user(user_info)
+
+    # Check if user was found/created (JIT provisioning disabled or email not verified)
+    if user is None:
+        raise HTTPException(
+            status_code=403, detail="User not authorized. Please contact administrator."
+        )
+
+    # Check if this is OAuth authorization flow
+    if state_data.get("flow") == "oauth_authorize":
+        # This is OAuth flow - issue OAuth authorization code
+        # Use the backend-aware oauth_manager from app.state (set in app_wiring.py)
+        oauth_manager = request.app.state.oauth_manager
+
+        # Generate OAuth authorization code
+        oauth_code = oauth_manager.generate_authorization_code(
+            client_id=state_data["client_id"],
+            user_id=user.username,
+            code_challenge=state_data["code_challenge"],
+            redirect_uri=state_data["redirect_uri"],
+            state=state_data["oauth_state"],
+        )
+
+        # Redirect back to OAuth client (Claude Code) with authorization code
+        # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
+        redirect_url = f"{state_data['redirect_uri']}?code={oauth_code}"
+        if state_data["oauth_state"] is not None:
+            redirect_url = f"{redirect_url}&state={state_data['oauth_state']}"
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    else:
+        # This is unified login or admin UI flow - create session
+        session_manager = get_session_manager()
+
+        # Smart redirect logic (Phase 4: Login Consolidation)
+        redirect_to = state_data.get("redirect_to")
+
+        if redirect_to:
+            # Explicit redirect_to from unified login or admin flow
+            redirect_url = redirect_to
+        elif user.role.value == "admin":
+            # Admin user, no explicit redirect - go to admin dashboard
+            redirect_url = "/admin/"
+        else:
+            # Non-admin user - go to user interface
+            redirect_url = "/user/api-keys"
+
+        # MFA enforcement for SSO users (same pattern as password login)
+        if _get_user_mfa_status(user.username):
+            from ..mfa_challenge import mfa_challenge_manager
+            from ...web.mfa_routes import render_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url=redirect_url,
+            )
+            return render_mfa_challenge_page(challenge_token)
+
+        redirect_response = RedirectResponse(url=redirect_url, status_code=302)
+
+        session_manager.create_session(
+            redirect_response,
+            username=user.username,
+            role=user.role.value,
+        )
+
+        return redirect_response

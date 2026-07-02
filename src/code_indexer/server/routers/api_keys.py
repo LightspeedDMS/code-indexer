@@ -1,0 +1,793 @@
+"""
+API Keys REST API Router.
+
+Provides endpoints for API key management (Anthropic and VoyageAI).
+
+Story #20: API Key Management for Claude CLI and VoyageAI
+"""
+
+import logging
+import os
+import re
+import json
+import uuid
+from pathlib import Path
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from starlette.requests import Request
+from ..auth import dependencies
+from ..auth.dependencies import get_current_admin_user_hybrid
+from ..auth.user_manager import User
+from ..services.api_key_management import (
+    ApiKeyValidator,
+    ApiKeySyncService,
+    ApiKeyConnectivityTester,
+)
+from ..services.config_service import ConfigService
+from code_indexer.server.logging_utils import format_error_log
+
+logger = logging.getLogger(__name__)
+
+
+def get_job_tracker():
+    """
+    Get the global JobTracker instance from app module.
+
+    Returns None if the tracker is not yet initialized.
+    Story #314: allows patching in tests and accessing the global tracker.
+    """
+    try:
+        from ..app import job_tracker  # type: ignore[attr-defined]
+
+        return job_tracker
+    except Exception:
+        return None
+
+
+def get_claude_cli_manager():
+    """
+    Get the global ClaudeCliManager instance.
+
+    Wraps the service-level function for module-level patching in tests.
+    """
+    from ..services.claude_cli_manager import get_claude_cli_manager as _get
+
+    return _get()
+
+
+def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
+    """
+    Trigger immediate catch-up processing when API key is saved.
+
+    Updates the global ClaudeCliManager with the new API key and triggers
+    catch-up processing in a background thread to process any repos that
+    were registered before the API key was configured.
+
+    Args:
+        api_key: The new API key (must be non-empty to trigger catch-up)
+
+    Returns:
+        True if catch-up was triggered, False if skipped (no manager or invalid key)
+
+    Story #23 AC3: Immediate Catch-Up Trigger on API Key Save
+    """
+    import threading
+    from ..middleware.correlation import get_correlation_id
+
+    # Validate key
+    if not api_key:
+        logger.debug("Skipping catch-up trigger: no API key provided")
+        return False
+
+    # Get global manager
+    manager = get_claude_cli_manager()
+    if manager is None:
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-012",
+                "Cannot trigger catch-up: ClaudeCliManager not initialized",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return False
+
+    # Update the manager's API key
+    manager.update_api_key(api_key)
+
+    # Trigger catch-up in background thread
+    def run_catchup():
+        from ..middleware.correlation import get_correlation_id as _get_cid
+
+        # Story #314: Register immediate_catchup job for dashboard visibility
+        tracker = get_job_tracker()
+        tracked_job_id = None
+        if tracker is not None:
+            try:
+                tracked_job_id = f"immediate-catchup-{uuid.uuid4().hex[:8]}"
+                tracker.register_job(
+                    tracked_job_id,
+                    "immediate_catchup",
+                    username="system",
+                    repo_alias="server",
+                )
+                tracker.update_status(tracked_job_id, status="running")
+            except Exception as e:
+                logger.debug(f"Failed to register immediate_catchup job: {e}")
+                tracked_job_id = None
+
+        try:
+            logger.info(
+                "Starting immediate catch-up processing after API key save",
+                extra={"correlation_id": _get_cid()},
+            )
+            result = manager.process_all_fallbacks()
+            if result.processed:
+                logger.info(
+                    f"Catch-up completed: processed {len(result.processed)} repos",
+                    extra={"correlation_id": _get_cid()},
+                )
+            elif result.error:
+                logger.warning(
+                    format_error_log(
+                        "STORE-GENERAL-013",
+                        f"Catch-up partially completed: {result.error}",
+                        extra={"correlation_id": _get_cid()},
+                    )
+                )
+            else:
+                logger.info(
+                    "Catch-up completed: no repos needed processing",
+                    extra={"correlation_id": _get_cid()},
+                )
+
+            if tracked_job_id and tracker is not None:
+                try:
+                    tracker.complete_job(tracked_job_id)
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to complete immediate_catchup job {tracked_job_id}: {e}"
+                    )
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "STORE-GENERAL-014",
+                    f"Catch-up processing failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": _get_cid()},
+                )
+            )
+            if tracked_job_id and tracker is not None:
+                try:
+                    tracker.fail_job(tracked_job_id, error=str(e))
+                except Exception as e2:
+                    logger.debug(
+                        f"Failed to mark immediate_catchup job {tracked_job_id} as failed: {e2}"
+                    )
+
+    catchup_thread = threading.Thread(
+        target=run_catchup,
+        name="ImmediateCatchupProcessor",
+        daemon=True,
+    )
+    catchup_thread.start()
+
+    logger.info(
+        "API key updated, immediate catch-up triggered in background",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return True
+
+
+# Request/Response Models
+class SaveApiKeyRequest(BaseModel):
+    """Request to save an API key."""
+
+    api_key: str = Field(..., description="The API key to save")
+
+
+class SaveApiKeyResponse(BaseModel):
+    """Response after saving an API key."""
+
+    success: bool
+    provider: str
+    already_synced: bool = False
+    error: Optional[str] = None
+
+
+class TestApiKeyRequest(BaseModel):
+    """Request to test an API key connectivity."""
+
+    api_key: str = Field(..., description="The API key to test")
+
+
+class TestApiKeyResponse(BaseModel):
+    """Response from API key connectivity test."""
+
+    success: bool
+    provider: str
+    error: Optional[str] = None
+    response_time_ms: Optional[int] = None
+
+
+class ApiKeysStatusResponse(BaseModel):
+    """Response with API key configuration status."""
+
+    anthropic_configured: bool
+    voyageai_configured: bool
+    cohere_configured: bool
+
+
+# Singleton service instances
+_api_key_sync_service: Optional[ApiKeySyncService] = None
+
+
+def get_api_key_sync_service() -> ApiKeySyncService:
+    """Get or create the API key sync service instance."""
+    global _api_key_sync_service
+    if _api_key_sync_service is None:
+        _api_key_sync_service = ApiKeySyncService()
+    return _api_key_sync_service
+
+
+def _make_tester(http_request: Request) -> ApiKeyConnectivityTester:
+    """Create a per-request ApiKeyConnectivityTester wired to the app factory.
+
+    Reads http_client_factory from app.state, which is always set by
+    wire_fault_injection() at startup (Story #746) — plain factory when the
+    harness is disabled, fault-aware factory when enabled.  Fresh instance per
+    request avoids shared mutable state.
+    """
+    from code_indexer.server.fault_injection.http_client_factory import (
+        HttpClientFactory,
+    )
+
+    factory: HttpClientFactory = http_request.app.state.http_client_factory
+    return ApiKeyConnectivityTester(http_client_factory=factory)
+
+
+def get_config_service() -> ConfigService:
+    """Get the config service instance."""
+    from ..services.config_service import get_config_service as _get_config_service
+
+    return _get_config_service()
+
+
+# Helper functions for key clearing
+def _clear_from_claude_config(key_to_clear: str) -> Optional[str]:
+    """Clear apiKey from ~/.claude.json if it matches. Returns location name if cleared."""
+    try:
+        claude_config_path = Path.home() / ".claude.json"
+        if claude_config_path.exists():
+            with open(claude_config_path, "r") as f:
+                claude_config = json.load(f)
+            if claude_config.get("apiKey") == key_to_clear:
+                del claude_config["apiKey"]
+                with open(claude_config_path, "w") as f:
+                    json.dump(claude_config, f, indent=2)
+                return "~/.claude.json"
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-015",
+                f"Could not check/clear apiKey from ~/.claude.json: {e}",
+            )
+        )
+    return None
+
+
+def _clear_from_rc_files(key_to_clear: str, env_var_name: str) -> List[str]:
+    """Clear matching export from ~/.bashrc and ~/.profile. Returns list of cleared locations."""
+    cleared = []
+    for rc_file in [".bashrc", ".profile"]:
+        try:
+            rc_path = Path.home() / rc_file
+            if rc_path.exists():
+                content = rc_path.read_text()
+                # Match export VAR="key" or export VAR='key' or export VAR=key
+                pattern = rf'^export\s+{env_var_name}=["\']?{re.escape(key_to_clear)}["\']?\s*$'
+                new_content, count = re.subn(pattern, "", content, flags=re.MULTILINE)
+                if count > 0:
+                    new_content = re.sub(r"\n{3,}", "\n\n", new_content)
+                    rc_path.write_text(new_content)
+                    cleared.append(f"~/{rc_file}")
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "STORE-GENERAL-016", f"Could not check/clear from ~/{rc_file}: {e}"
+                )
+            )
+    return cleared
+
+
+# Router
+router = APIRouter(prefix="/api/api-keys", tags=["API Keys"])
+
+
+@router.post(
+    "/anthropic",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def save_anthropic_key(
+    request: SaveApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> SaveApiKeyResponse:
+    """
+    Save and sync Anthropic API key.
+
+    Validates format, then syncs to:
+    - ~/.claude.json
+    - os.environ["ANTHROPIC_API_KEY"]
+    """
+    # 409 guard: block manual key save when subscription mode is active
+    _cfg = get_config_service().get_config()
+    assert _cfg.claude_integration_config is not None
+    if _cfg.claude_integration_config.claude_auth_mode == "subscription":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot save Anthropic API key while subscription mode is active. "
+                "Switch claude_auth_mode to 'api_key' first via /api/llm-creds/save-config."
+            ),
+        )
+
+    # Validate format
+    validation = ApiKeyValidator.validate_anthropic_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Sync key
+    sync_service = get_api_key_sync_service()
+    result = sync_service.sync_anthropic_key(request.api_key)
+
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error)
+
+    # Persist to server config
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    config.claude_integration_config.anthropic_api_key = request.api_key
+    config_service.save_config(config)
+
+    # Trigger immediate catch-up processing (Story #23, AC3)
+    # This replaces the old flag-based deferred reconciliation (Story #20)
+    try:
+        trigger_catchup_on_api_key_save(request.api_key)
+    except Exception as e:
+        logger.debug(f"Could not trigger immediate catch-up: {e}")
+
+    return SaveApiKeyResponse(
+        success=True,
+        provider="anthropic",
+        already_synced=result.already_synced,
+    )
+
+
+@router.post(
+    "/voyageai",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def save_voyageai_key(
+    request: SaveApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> SaveApiKeyResponse:
+    """
+    Save and sync VoyageAI API key.
+
+    Validates format, then syncs to:
+    - os.environ["VOYAGE_API_KEY"]
+    """
+    # Validate format
+    validation = ApiKeyValidator.validate_voyageai_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Sync key
+    sync_service = get_api_key_sync_service()
+    result = sync_service.sync_voyageai_key(request.api_key)
+
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error)
+
+    # Persist to server config
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    config.claude_integration_config.voyageai_api_key = request.api_key
+    config_service.save_config(config)
+
+    return SaveApiKeyResponse(
+        success=True,
+        provider="voyageai",
+        already_synced=result.already_synced,
+    )
+
+
+@router.post("/anthropic/test", response_model=TestApiKeyResponse)
+async def test_anthropic_key(
+    request: TestApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test Anthropic API key connectivity.
+
+    Makes a test call via Claude CLI to verify the key works.
+    """
+    # Validate format first
+    validation = ApiKeyValidator.validate_anthropic_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_anthropic_connectivity(request.api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.post("/voyageai/test", response_model=TestApiKeyResponse)
+async def test_voyageai_key(
+    request: TestApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test VoyageAI API key connectivity.
+
+    Makes a test embedding API call to verify the key works.
+    """
+    # Validate format first
+    validation = ApiKeyValidator.validate_voyageai_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_voyageai_connectivity(request.api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.post("/anthropic/test-configured", response_model=TestApiKeyResponse)
+async def test_configured_anthropic_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test the currently configured Anthropic API key connectivity.
+
+    Tests the key stored in server config without requiring a new key input.
+    """
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+
+    api_key = config.claude_integration_config.anthropic_api_key
+    if not api_key:
+        return TestApiKeyResponse(
+            success=False,
+            provider="anthropic",
+            error="No Anthropic API key configured",
+        )
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_anthropic_connectivity(api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.post("/voyageai/test-configured", response_model=TestApiKeyResponse)
+async def test_configured_voyageai_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test the currently configured VoyageAI API key connectivity.
+
+    Tests the key stored in server config without requiring a new key input.
+    """
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+
+    api_key = config.claude_integration_config.voyageai_api_key
+    if not api_key:
+        return TestApiKeyResponse(
+            success=False,
+            provider="voyageai",
+            error="No VoyageAI API key configured",
+        )
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_voyageai_connectivity(api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.get("/status", response_model=ApiKeysStatusResponse)
+def get_api_keys_status(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> ApiKeysStatusResponse:
+    """
+    Get API key configuration status.
+
+    Returns whether each provider has a key configured.
+    """
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+
+    return ApiKeysStatusResponse(
+        anthropic_configured=bool(config.claude_integration_config.anthropic_api_key),
+        voyageai_configured=bool(config.claude_integration_config.voyageai_api_key),
+        cohere_configured=bool(config.claude_integration_config.cohere_api_key),
+    )
+
+
+class ClearApiKeyResponse(BaseModel):
+    """Response after clearing an API key."""
+
+    success: bool
+    provider: str
+    message: str
+
+
+@router.post(
+    "/cohere",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def save_cohere_key(
+    request: SaveApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> SaveApiKeyResponse:
+    """
+    Save and sync Cohere API key.
+
+    Validates format, then syncs to:
+    - os.environ["CO_API_KEY"]
+    """
+    # Validate format
+    validation = ApiKeyValidator.validate_cohere_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Sync key
+    sync_service = get_api_key_sync_service()
+    result = sync_service.sync_cohere_key(request.api_key)
+
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error)
+
+    # Persist to server config
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    config.claude_integration_config.cohere_api_key = request.api_key
+    config_service.save_config(config)
+
+    return SaveApiKeyResponse(
+        success=True,
+        provider="cohere",
+        already_synced=result.already_synced,
+    )
+
+
+@router.post("/cohere/test", response_model=TestApiKeyResponse)
+async def test_cohere_key(
+    request: TestApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test Cohere API key connectivity.
+
+    Makes a test embedding API call to verify the key works.
+    """
+    # Validate format first
+    validation = ApiKeyValidator.validate_cohere_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_cohere_connectivity(request.api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.post("/cohere/test-configured", response_model=TestApiKeyResponse)
+async def test_configured_cohere_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test the currently configured Cohere API key connectivity.
+
+    Tests the key stored in server config without requiring a new key input.
+    """
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+
+    api_key = config.claude_integration_config.cohere_api_key
+    if not api_key:
+        return TestApiKeyResponse(
+            success=False,
+            provider="cohere",
+            error="No Cohere API key configured",
+        )
+
+    # Test connectivity
+    tester = _make_tester(http_request)
+    result = await tester.test_cohere_connectivity(api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.delete(
+    "/cohere",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_cohere_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> ClearApiKeyResponse:
+    """Clear the Cohere API key from config and matching synced locations."""
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    key_to_clear = config.claude_integration_config.cohere_api_key
+
+    if not key_to_clear:
+        return ClearApiKeyResponse(
+            success=True, provider="cohere", message="No key was configured"
+        )
+
+    cleared = ["server config"]
+
+    # Clear from config
+    config.claude_integration_config.cohere_api_key = ""
+    config_service.save_config(config)
+
+    # Clear from environment only if it matches
+    if os.environ.get("CO_API_KEY") == key_to_clear:
+        del os.environ["CO_API_KEY"]
+        cleared.append("environment")
+
+    # Clear from ~/.bashrc and ~/.profile only if matching
+    cleared.extend(_clear_from_rc_files(key_to_clear, "CO_API_KEY"))
+
+    logger.info(f"Cleared Cohere API key from: {', '.join(cleared)}")
+    return ClearApiKeyResponse(
+        success=True, provider="cohere", message=f"Cleared from: {', '.join(cleared)}"
+    )
+
+
+@router.delete(
+    "/anthropic",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_anthropic_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> ClearApiKeyResponse:
+    """Clear the Anthropic API key from config and matching synced locations."""
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    key_to_clear = config.claude_integration_config.anthropic_api_key
+
+    if not key_to_clear:
+        return ClearApiKeyResponse(
+            success=True, provider="anthropic", message="No key was configured"
+        )
+
+    cleared = ["server config"]
+
+    # Clear from config
+    config.claude_integration_config.anthropic_api_key = ""
+    config_service.save_config(config)
+
+    # Clear from environment only if it matches
+    if os.environ.get("ANTHROPIC_API_KEY") == key_to_clear:
+        del os.environ["ANTHROPIC_API_KEY"]
+        cleared.append("environment")
+
+    # Clear from ~/.claude.json only if it matches
+    if loc := _clear_from_claude_config(key_to_clear):
+        cleared.append(loc)
+
+    # Clear from ~/.bashrc and ~/.profile only if matching
+    cleared.extend(_clear_from_rc_files(key_to_clear, "ANTHROPIC_API_KEY"))
+
+    logger.info(f"Cleared Anthropic API key from: {', '.join(cleared)}")
+    return ClearApiKeyResponse(
+        success=True,
+        provider="anthropic",
+        message=f"Cleared from: {', '.join(cleared)}",
+    )
+
+
+@router.delete(
+    "/voyageai",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_voyageai_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> ClearApiKeyResponse:
+    """Clear the VoyageAI API key from config and matching synced locations."""
+    config_service = get_config_service()
+    config = config_service.get_config()
+    assert config.claude_integration_config is not None
+    key_to_clear = config.claude_integration_config.voyageai_api_key
+
+    if not key_to_clear:
+        return ClearApiKeyResponse(
+            success=True, provider="voyageai", message="No key was configured"
+        )
+
+    cleared = ["server config"]
+
+    # Clear from config
+    config.claude_integration_config.voyageai_api_key = ""
+    config_service.save_config(config)
+
+    # Clear from environment only if it matches
+    if os.environ.get("VOYAGE_API_KEY") == key_to_clear:
+        del os.environ["VOYAGE_API_KEY"]
+        cleared.append("environment")
+
+    # Clear from ~/.bashrc and ~/.profile only if matching
+    cleared.extend(_clear_from_rc_files(key_to_clear, "VOYAGE_API_KEY"))
+
+    logger.info(f"Cleared VoyageAI API key from: {', '.join(cleared)}")
+    return ClearApiKeyResponse(
+        success=True, provider="voyageai", message=f"Cleared from: {', '.join(cleared)}"
+    )

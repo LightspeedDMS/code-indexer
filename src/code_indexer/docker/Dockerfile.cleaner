@@ -1,0 +1,23 @@
+FROM alpine:latest
+
+# Install necessary tools for file operations
+RUN apk add --no-cache \
+    curl \
+    bash \
+    findutils \
+    coreutils
+
+# Build argument for cache invalidation when cleanup script changes
+ARG CLEANUP_SCRIPT_HASH=default
+# Force cache invalidation when cleanup script hash changes
+RUN echo "Cleanup script hash: ${CLEANUP_SCRIPT_HASH}"
+
+# Create a simple cleanup script
+COPY cleanup.sh /cleanup.sh
+RUN chmod +x /cleanup.sh
+
+# Expose port for HTTP endpoint
+EXPOSE 8091
+
+# Start the cleanup service
+CMD ["/cleanup.sh"]

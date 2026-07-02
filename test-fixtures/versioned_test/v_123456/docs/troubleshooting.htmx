@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Troubleshooting Guide</title>
+    <script src="https://unpkg.com/htmx.org@1.9.0"></script>
+</head>
+<body>
+    <h1>Troubleshooting Guide</h1>
+    
+    <p>Common errors and how to resolve them.</p>
+    
+    <h2>HTTP Error Codes</h2>
+    
+    <p>Reference table for all possible HTTP error responses:</p>
+    
+    <img src="../images/error-codes.gif" alt="HTTP Error Codes Reference">
+    
+    <h2>Common Issues</h2>
+    
+    <div hx-get="/api/status" hx-trigger="load">
+        <h3>401 Unauthorized</h3>
+        <p>This error occurs when:</p>
+        <ul>
+            <li>No Authorization header provided</li>
+            <li>JWT token is expired</li>
+            <li>Token signature is invalid</li>
+        </ul>
+        <p><strong>Solution:</strong> Re-authenticate and obtain a new token.</p>
+        
+        <h3>403 Forbidden</h3>
+        <p>User is authenticated but lacks permission for the resource.</p>
+        <p><strong>Solution:</strong> Contact administrator for proper role assignment.</p>
+        
+        <h3>429 Too Many Requests</h3>
+        <p>Rate limit has been exceeded.</p>
+        <p><strong>Solution:</strong> Wait for the rate limit window to reset (typically 60 seconds).</p>
+        
+        <h3>500 Internal Server Error</h3>
+        <p>Unexpected server condition. Check server logs for details.</p>
+        <p><strong>Solution:</strong> Report to development team with request ID from response headers.</p>
+    </div>
+</body>
+</html>

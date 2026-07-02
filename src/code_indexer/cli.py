@@ -1,0 +1,18933 @@
+"""Command line interface for Code Indexer."""
+
+import asyncio
+import getpass
+import json
+import logging
+import os
+import sys
+import signal
+import subprocess
+import time
+import threading
+from pathlib import Path
+from typing import Optional, Union, Callable, Dict, Any, List, Literal, cast
+
+import click
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.table import Table
+
+# Rich progress imports removed - using MultiThreadedProgressManager instead
+
+from .config import ConfigManager, Config
+from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
+from .disabled_commands import get_command_mode_icons
+from .utils.enhanced_messaging import (
+    get_conflicting_flags_message,
+    get_service_unavailable_message,
+)
+from .utils.exception_logger import ExceptionLogger
+from .mode_detection.command_mode_detector import CommandModeDetector, find_project_root
+from .disabled_commands import require_mode
+from . import __version__
+from .cli_scip import scip_group
+from .cli_git import git_group
+from .cli_files import files_group
+from .cli_cicd import cicd_group
+from .cli_help import help_group
+from .cli_keys import keys_group
+from .cli_index import index_remote_group
+from .cli_xray import xray_group
+
+# Module-level imports for test mocking (noqa: F401 = intentionally unused for test patching)
+from .api_clients.admin_client import AdminAPIClient  # noqa: F401
+from .api_clients.repos_client import ReposAPIClient  # noqa: F401
+from .backends.backend_factory import BackendFactory  # noqa: F401
+from .services.embedding_factory import EmbeddingProviderFactory  # noqa: F401
+from .remote.credential_manager import ProjectCredentialManager  # noqa: F401
+
+# Daemon delegation imports (lazy loaded when daemon enabled)
+from . import cli_daemon_delegation  # noqa: F401
+from . import cli_daemon_lifecycle  # noqa: F401
+
+
+def setup_logging() -> None:
+    """Configure root logger to use RichHandler for Rich Live compatibility.
+
+    Installs RichHandler instead of the default stdlib StreamHandler so that
+    WARNING/ERROR output is coordinated with the Rich Live progress widget:
+    RichHandler pauses the Live region during emission, preventing the cursor
+    collision that caused truncated log lines (issue #942).
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(message)s",  # RichHandler renders level/name itself
+        handlers=[RichHandler(rich_tracebacks=False, show_time=False, show_path=False)],
+    )
+
+
+def run_async(coro):
+    """
+    Run an async coroutine, handling both new event loops and existing ones.
+
+    This utility is crucial for CLI commands that need to work both:
+    1. In normal CLI usage (no event loop running)
+    2. In test environments (event loop already running)
+
+    Bug #749: Tolerates being called with an already-resolved sync value
+    (dict, list, etc.). The CLI wraps both async and sync API-client method
+    calls in run_async(); sync methods (httpx.Client-based, thread-pool-safe)
+    return plain results rather than coroutines. When the input isn't a
+    coroutine, return it verbatim instead of crashing with
+    "a coroutine was expected".
+
+    Args:
+        coro: A coroutine OR an already-computed sync result
+
+    Returns:
+        The result of the coroutine, or the sync value unchanged
+    """
+    # Bug #749: pass-through for sync results (non-coroutine inputs)
+    if not asyncio.iscoroutine(coro):
+        return coro
+
+    try:
+        # Try to get the current event loop
+        asyncio.get_running_loop()
+        # If we get here, there's already a running loop
+        # Create a new thread to run the coroutine
+
+        result = None
+        exception = None
+
+        def run_in_new_loop():
+            nonlocal result, exception
+            try:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    result = new_loop.run_until_complete(coro)
+                finally:
+                    new_loop.close()
+            except Exception as e:
+                exception = e
+
+        thread = threading.Thread(target=run_in_new_loop)
+        thread.start()
+        thread.join()
+
+        if exception:
+            raise exception
+        return result
+
+    except RuntimeError:
+        # No event loop running, we can use asyncio.run()
+        return asyncio.run(coro)
+
+
+def _get_credential_client_and_config(json_output: bool = False):
+    """Get CredentialAPIClient with standard setup and error handling.
+
+    Args:
+        json_output: If True, errors are printed as JSON
+
+    Returns:
+        Tuple of (client, project_root) if successful
+
+    Raises:
+        SystemExit: If configuration or credentials are missing
+    """
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.credential_client import CredentialAPIClient
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = CredentialAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+        return client, project_root
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+# MultiThreadedProgressManager imported locally where needed
+
+# CoW-related imports removed as part of CoW cleanup Epic
+
+logger = logging.getLogger(__name__)
+
+# Indexing safety buffer: time (seconds) reserved before token/rate-limit cutoff.
+_INDEX_SAFETY_BUFFER_SECONDS = 60
+
+# Multiplier applied to the user-requested limit when over-fetching candidates for
+# a rerank stage.  Gives the reranker enough documents to meaningfully re-order before
+# we truncate back to the original limit.
+_RERANK_OVERFETCH_MULTIPLIER = 4
+
+
+def _parse_file_extensions(raw: Optional[str]) -> List[str]:
+    """Parse --file-extensions CLI flag into a normalized list (Story #906).
+
+    Comma-separated input. Each token is whitespace-stripped, then any leading
+    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
+    after BOTH normalization steps are skipped (handles inputs like '.' or
+    '.,py' that would otherwise produce empty entries). Returns [] when input
+    is None, empty, or whitespace-only.
+
+    Examples:
+      _parse_file_extensions(None)           == []
+      _parse_file_extensions("")             == []
+      _parse_file_extensions("py")           == ["py"]
+      _parse_file_extensions("py,js")        == ["py", "js"]
+      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
+      _parse_file_extensions(".")            == []
+      _parse_file_extensions(".,py")         == ["py"]
+    """
+    if not raw:
+        return []
+    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
+    return [ext for ext in normalized if ext]
+
+
+def _log_skipped_provider_warning(provider_name: str) -> None:
+    """Log a warning that a provider was skipped due to missing API key."""
+    logger.warning(
+        "Skipping provider '%s': no API key found in environment",
+        provider_name,
+    )
+
+
+def _make_offset_callback(
+    base_callback: "Callable[..., None]",
+    provider_idx: int,
+    num_providers: int,
+) -> "Callable[..., None]":
+    """Wrap a progress callback to emit monotonically increasing progress across N providers.
+
+    Each provider emits current in range 0→total independently.  When multiple
+    providers run sequentially the raw progress resets to 0 for each provider,
+    causing server-side monotonic clamps to freeze the display.
+
+    This wrapper maps provider i's progress into the global range
+    [i*total, (i+1)*total] out of (num_providers*total), so the combined
+    sequence is strictly non-decreasing regardless of how many providers run.
+
+    Single-provider case (num_providers=1, provider_idx=0) is identity:
+        offset_current = 0*total + current = current
+        offset_total   = 1*total           = total
+
+    Args:
+        base_callback: The underlying progress callback to forward calls to.
+        provider_idx: Zero-based index of this provider in the sequence.
+        num_providers: Total number of providers that will run.
+
+    Returns:
+        A wrapper callable with the same signature as base_callback.
+    """
+
+    def _cb(
+        current: int, total: "Optional[int]", path: "Any" = None, **kwargs: "Any"
+    ) -> None:
+        if total and total > 0:
+            offset_current = provider_idx * total + current
+            offset_total = num_providers * total
+            base_callback(offset_current, offset_total, path, **kwargs)
+        else:
+            base_callback(current, total, path, **kwargs)
+
+    return _cb
+
+
+def _generate_language_help_text() -> str:
+    """Generate dynamic help text for language option based on LanguageMapper."""
+    try:
+        from .services.language_mapper import LanguageMapper
+
+        language_mapper = LanguageMapper()
+        supported_languages = sorted(language_mapper.get_supported_languages())
+
+        # Group languages for better readability
+        programming = [
+            lang
+            for lang in supported_languages
+            if lang
+            in [
+                "python",
+                "javascript",
+                "typescript",
+                "java",
+                "csharp",
+                "cpp",
+                "c",
+                "go",
+                "rust",
+                "php",
+                "ruby",
+                "swift",
+                "kotlin",
+                "scala",
+                "dart",
+            ]
+        ]
+        web = [lang for lang in supported_languages if lang in ["html", "css", "vue"]]
+        markup = [
+            lang
+            for lang in supported_languages
+            if lang in ["markdown", "xml", "latex", "rst"]
+        ]
+        data = [
+            lang
+            for lang in supported_languages
+            if lang in ["json", "yaml", "toml", "ini", "sql", "csv"]
+        ]
+        shell = [
+            lang
+            for lang in supported_languages
+            if lang in ["shell", "bash", "powershell", "batch"]
+        ]
+        other = [
+            lang
+            for lang in supported_languages
+            if lang not in programming + web + markup + data + shell
+        ]
+
+        help_parts = []
+        help_parts.append("Filter by programming language or file extension.")
+        help_parts.append("Supported friendly names:")
+
+        if programming:
+            help_parts.append(f"Programming: {', '.join(programming)}")
+        if web:
+            help_parts.append(f"Web: {', '.join(web)}")
+        if markup:
+            help_parts.append(f"Markup: {', '.join(markup)}")
+        if data:
+            help_parts.append(f"Data: {', '.join(data)}")
+        if shell:
+            help_parts.append(f"Shell: {', '.join(shell)}")
+        if other:
+            help_parts.append(f"Other: {', '.join(other)}")
+
+        help_parts.append(
+            "You can also use file extensions directly (py, js, ts, etc.)"
+        )
+
+        return " ".join(help_parts)
+    except Exception:
+        # Fallback to static text if dynamic generation fails
+        return "Filter by programming language. Supports both friendly names (python, javascript, etc.) and file extensions (py, js, etc.)"
+
+
+def _create_default_override_file(project_dir: Path, force: bool = False) -> bool:
+    """Create default .code-indexer-override.yaml file.
+
+    Args:
+        project_dir: Project root directory
+        force: Overwrite existing file if True
+
+    Returns:
+        True if file was created, False if skipped
+    """
+    override_path = project_dir / ".code-indexer-override.yaml"
+
+    # Don't overwrite existing file unless force is True
+    if override_path.exists() and not force:
+        return False
+
+    default_content = """# Code-indexer override file
+#
+# This file allows you to override file inclusion/exclusion rules
+# at the project level, with highest precedence over gitignore and config.
+#
+# Rules are applied in this order:
+# 1. force_exclude_patterns (absolute exclusion, overrides everything)
+# 2. force_include_patterns (overrides base exclusion)
+# 3. Extension filtering (add_extensions, remove_extensions)
+# 4. Directory filtering (add_exclude_dirs, add_include_dirs)
+# 5. Base config and gitignore rules (lowest precedence)
+#
+# Patterns use gitignore syntax:
+#   *.log        - matches all .log files
+#   temp/        - matches temp directory
+#   **/*.cache   - matches .cache files in any subdirectory
+#   !important/  - negation (force include)
+
+# Additional file extensions to index (beyond config defaults)
+add_extensions: []
+
+# File extensions to exclude (overrides config whitelist)
+remove_extensions: []
+
+# Additional directories to exclude from indexing
+add_exclude_dirs: []
+
+# Additional directories to force include
+add_include_dirs: []
+
+# Force include files matching these patterns (overrides gitignore/config)
+force_include_patterns: []
+
+# Force exclude files matching these patterns (absolute exclusion)
+force_exclude_patterns: []
+"""
+
+    override_path.write_text(default_content)
+    return True
+
+
+def _format_claude_response(response: str) -> str:
+    """Format Claude response for better terminal display."""
+    if not response:
+        return response
+
+    # Check if response contains Claude structured objects (list format)
+    if response.startswith("[") and "TextBlock" in response:
+        # Parse the structured response from Claude
+        formatted_text = _parse_claude_sdk_response(response)
+        if formatted_text:
+            response = formatted_text
+
+    # Ensure proper line breaks are preserved
+    formatted = response.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Handle multiple consecutive newlines (preserve paragraph breaks)
+    lines = formatted.split("\n")
+    formatted_lines = []
+
+    for line in lines:
+        # Strip only trailing whitespace, preserve indentation
+        formatted_lines.append(line.rstrip())
+
+    # Join with newlines and ensure we don't have excessive empty lines at start/end
+    result = "\n".join(formatted_lines).strip()
+
+    # Ensure the response ends with a newline for better formatting
+    if result and not result.endswith("\n"):
+        result += "\n"
+
+    return result
+
+
+def _parse_claude_sdk_response(response: str) -> str:
+    """Parse Claude structured response to extract text content."""
+    try:
+        import re
+
+        # Extract TextBlock content
+        text_blocks = []
+
+        # Find all TextBlock(text='...') patterns
+        text_pattern = r"TextBlock\(text='(.*?)'\)"
+        matches = re.findall(text_pattern, response, re.DOTALL)
+
+        for match in matches:
+            # Unescape the text content
+            text = match.replace("\\'", "'").replace("\\n", "\n").replace("\\\\", "\\")
+            text_blocks.append(text)
+
+        # Join all text blocks
+        if text_blocks:
+            return "\n\n".join(text_blocks)
+
+        # Fallback: try to extract any text content between quotes
+        fallback_pattern = r"'([^']*(?:\\'[^']*)*)'"
+        fallback_matches = re.findall(fallback_pattern, response)
+
+        # Find the longest match (likely the main content)
+        if fallback_matches:
+            longest_match = max(fallback_matches, key=len)
+            if len(longest_match) > 100:  # Only use if it seems substantial
+                return str(
+                    longest_match.replace("\\'", "'")
+                    .replace("\\n", "\n")
+                    .replace("\\\\", "\\")
+                )
+
+        return response  # Return original if parsing fails
+
+    except Exception as e:
+        console = Console()
+        console.print(f"Warning: Failed to parse Claude response: {e}", style="yellow")
+        return response  # Return original if parsing fails
+
+
+def _is_markdown_content(text: str) -> bool:
+    """Detect if text content is likely markdown."""
+    if not text or len(text.strip()) < 10:
+        return False
+
+    # Check for common markdown patterns
+    markdown_indicators = [
+        "# ",  # Headers
+        "## ",  # Headers
+        "### ",  # Headers
+        "**",  # Bold
+        "*",  # Italic/Bold
+        "`",  # Code
+        "```",  # Code blocks
+        "- ",  # Lists
+        "* ",  # Lists
+        "1. ",  # Numbered lists
+        "[",  # Links
+        "> ",  # Blockquotes
+    ]
+
+    # Count markdown indicators
+    indicator_count = sum(1 for indicator in markdown_indicators if indicator in text)
+
+    # If we have multiple markdown patterns or it looks structured, treat as markdown
+    return indicator_count >= 2 or "```" in text or text.count("#") >= 2
+
+
+class GracefulInterruptHandler:
+    """Handler for graceful interruption of long-running operations with timeout protection."""
+
+    def __init__(
+        self,
+        console: Console,
+        operation_name: str = "Operation",
+        cancellation_timeout: float = 30.0,
+    ):
+        self.console = console
+        self.operation_name = operation_name
+        self.interrupted = False
+        self.force_quit = False
+        self.cancellation_timeout = cancellation_timeout
+        self.interrupt_time: Optional[float] = None
+        self.original_sigint_handler: Optional[Union[Callable, int]] = None
+        self.progress_bar = None
+
+    def __enter__(self):
+        self.original_sigint_handler = signal.signal(
+            signal.SIGINT, self._signal_handler
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, self.original_sigint_handler)
+
+        # If we were interrupted, show final message
+        if self.interrupted:
+            if self.progress_bar:
+                self.progress_bar.stop()
+            self.console.print()  # New line
+            self.console.print(
+                f"🛑 {self.operation_name} interrupted by user", style="yellow"
+            )
+            self.console.print(
+                "📊 Progress has been saved and can be resumed later", style="cyan"
+            )
+            return True  # Suppress the KeyboardInterrupt exception
+
+    def _signal_handler(self, signum, frame):
+        """Handle SIGINT (Ctrl-C) gracefully with immediate feedback and timeout protection."""
+
+        current_time = time.time()
+
+        # First interrupt - graceful cancellation
+        if not self.interrupted:
+            self.interrupted = True
+            self.interrupt_time = current_time
+
+            # Provide immediate visual feedback
+            if self.progress_bar:
+                self.progress_bar.stop()
+
+            # Clear line and show immediate cancellation notice
+            self.console.print()  # New line
+            self.console.print(
+                f"🛑 CANCELLATION REQUESTED - Interrupting {self.operation_name.lower()}...",
+                style="bold yellow",
+            )
+            self.console.print(
+                "⏳ Safely finishing current operations and saving progress...",
+                style="cyan",
+            )
+            self.console.print(
+                f"💡 Press Ctrl-C again within {self.cancellation_timeout}s to force quit (may lose progress)",
+                style="dim yellow",
+            )
+
+        # Second interrupt - check timeout
+        elif (
+            self.interrupt_time
+            and (current_time - self.interrupt_time) < self.cancellation_timeout
+        ):
+            self.force_quit = True
+            self.console.print()  # New line
+            self.console.print(
+                "🚨 FORCE QUIT REQUESTED - Terminating immediately...", style="bold red"
+            )
+            self.console.print("⚠️  Progress may be lost!", style="red")
+            # Force exit immediately
+            import sys
+
+            sys.exit(1)
+
+        # Timeout exceeded - force quit automatically
+        elif (
+            self.interrupt_time
+            and (current_time - self.interrupt_time) >= self.cancellation_timeout
+        ):
+            self.force_quit = True
+            self.console.print()  # New line
+            self.console.print(
+                f"⏰ CANCELLATION TIMEOUT ({self.cancellation_timeout}s) - Force quitting...",
+                style="bold red",
+            )
+            self.console.print("⚠️  Progress may be lost due to timeout!", style="red")
+            # Force exit due to timeout
+            import sys
+
+            sys.exit(2)
+
+    def set_progress_bar(self, progress_bar):
+        """Set the progress bar to stop when interrupted."""
+        self.progress_bar = progress_bar
+
+    def is_cancellation_overdue(self) -> bool:
+        """Check if cancellation has timed out and should be forced."""
+        if not self.interrupted or not self.interrupt_time:
+            return False
+
+        return (time.time() - self.interrupt_time) >= self.cancellation_timeout
+
+    def get_time_since_cancellation(self) -> float:
+        """Get seconds since cancellation was requested."""
+        if not self.interrupt_time:
+            return 0.0
+
+        return time.time() - self.interrupt_time
+
+
+# Global console for rich output
+console = Console()
+
+
+def _get_reranker_sinbin_path() -> Path:
+    """Return the XDG-compliant sinbin persistence path for CLI reranker state.
+
+    Respects XDG_CONFIG_HOME if set; falls back to ~/.config/cidx/reranker_state.json.
+    Single source of truth used by both the temporal rerank path (Story #905) and
+    the Bundle 4 hoisted init block.
+    """
+    _xdg = os.environ.get("XDG_CONFIG_HOME")
+    _base = Path(_xdg) if _xdg else Path.home() / ".config"
+    return _base / "cidx" / "reranker_state.json"
+
+
+def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None:
+    """Display query execution timing telemetry.
+
+    Args:
+        console: Rich console for output
+        timing_info: Dictionary with timing data in milliseconds and metadata
+    """
+    if not timing_info:
+        return
+
+    console.print("\n⏱️  Query Timing:")
+    console.print("-" * 60)
+
+    # Check if this is a multi-index query (code + multimodal)
+    has_multi_index = (
+        timing_info.get("has_multimodal", False)
+        and "parallel_multi_index_ms" in timing_info
+    )
+
+    # Calculate total time from high-level steps only (not breakdown components)
+    # For parallel multi-index execution, use parallel_multi_index_ms
+    if has_multi_index:
+        # Multi-index parallel execution path
+        high_level_steps = {
+            "parallel_multi_index_ms": "Parallel multi-index query",
+            "git_filter_ms": "Git-aware filtering",
+        }
+    elif "parallel_load_ms" in timing_info:
+        # Parallel execution path (FilesystemVectorStore)
+        high_level_steps = {
+            "parallel_load_ms": "Parallel load (embedding + index)",
+            "hnsw_search_ms": "Vector search",
+            "git_filter_ms": "Git-aware filtering",
+        }
+    else:
+        # Sequential execution path (FilesystemClient or legacy)
+        high_level_steps = {
+            "embedding_ms": "Embedding generation",
+            "vector_search_ms": "Vector search (total)",
+            "git_filter_ms": "Git-aware filtering",
+        }
+
+    total_ms = sum(timing_info.get(key, 0) for key in high_level_steps.keys())
+
+    # Prepare breakdown keys and labels (shown under parallel_load_ms, vector_search_ms, or parallel_multi_index_ms)
+    multi_index_breakdown_keys = [
+        "code_index_ms",  # voyage-code-3 index (parallel)
+        "multimodal_index_ms",  # voyage-multimodal-3 index (parallel)
+        "merge_deduplicate_ms",  # Merge and deduplication
+    ]
+
+    multi_index_breakdown_labels = {
+        "code_index_ms": "    ├─ voyage-code-3 index",
+        "multimodal_index_ms": "    ├─ multimodal index",
+        "merge_deduplicate_ms": "    └─ Merge & deduplicate",
+    }
+
+    parallel_breakdown_keys = [
+        "embedding_ms",  # Concurrent with index loading
+        "index_load_ms",  # Concurrent with embedding
+        "id_index_load_ms",  # Part of index loading
+        "parallel_overhead_ms",  # Threading coordination overhead
+    ]
+
+    parallel_breakdown_labels = {
+        "embedding_ms": "    ├─ Embedding generation (concurrent)",
+        "index_load_ms": "    ├─ HNSW index load (concurrent)",
+        "id_index_load_ms": "    ├─ ID index load (concurrent)",
+        "parallel_overhead_ms": "    └─ Threading overhead",
+    }
+
+    search_breakdown_keys = [
+        "matrix_load_ms",
+        "index_load_ms",
+        "hnsw_search_ms",
+        "id_index_load_ms",
+        "staleness_detection_ms",
+    ]
+
+    search_breakdown_labels = {
+        "matrix_load_ms": "    ├─ Matrix load",
+        "index_load_ms": "    ├─ HNSW index load",
+        "hnsw_search_ms": "    ├─ HNSW search",
+        "id_index_load_ms": "    ├─ ID index load",
+        "staleness_detection_ms": "    └─ Content & staleness detection",
+    }
+
+    has_parallel_breakdown = "parallel_load_ms" in timing_info
+    has_search_breakdown = any(key in timing_info for key in search_breakdown_keys)
+
+    # Display each high-level step, with breakdown inserted appropriately
+    for key, label in high_level_steps.items():
+        if key in timing_info:
+            ms = timing_info[key]
+            percentage = (ms / total_ms * 100) if total_ms > 0 else 0
+
+            # Format time
+            if ms < 1:
+                time_str = f"{ms:.2f}ms"
+            elif ms < 1000:
+                time_str = f"{ms:.0f}ms"
+            else:
+                time_str = f"{ms / 1000:.2f}s"
+
+            console.print(f"  • {label:<30} {time_str:>10} ({percentage:>5.1f}%)")
+
+            # Insert multi-index breakdown immediately after parallel_multi_index_ms
+            if key == "parallel_multi_index_ms" and has_multi_index:
+                console.print("")
+                for breakdown_key in multi_index_breakdown_keys:
+                    if breakdown_key in timing_info and timing_info[breakdown_key] >= 0:
+                        breakdown_ms = timing_info[breakdown_key]
+
+                        # Format time
+                        if breakdown_ms < 1:
+                            breakdown_time_str = f"{breakdown_ms:.2f}ms"
+                        elif breakdown_ms < 1000:
+                            breakdown_time_str = f"{breakdown_ms:.0f}ms"
+                        else:
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
+
+                        breakdown_label = multi_index_breakdown_labels.get(
+                            breakdown_key, breakdown_key
+                        )
+
+                        # Add (parallel) marker for index timings to show they ran concurrently
+                        # Also add TIMEOUT indicator if the index timed out
+                        if breakdown_key in ["code_index_ms", "multimodal_index_ms"]:
+                            # Check for timeout flag
+                            timeout_flag = (
+                                "code_timed_out"
+                                if breakdown_key == "code_index_ms"
+                                else "multimodal_timed_out"
+                            )
+                            timed_out = timing_info.get(timeout_flag, False)
+                            timeout_indicator = " TIMEOUT" if timed_out else ""
+                            breakdown_label_with_marker = (
+                                breakdown_label + " (parallel)"
+                            )
+                            console.print(
+                                f"  {breakdown_label_with_marker:<30} {breakdown_time_str:>10}{timeout_indicator}"
+                            )
+                        else:
+                            console.print(
+                                f"  {breakdown_label:<30} {breakdown_time_str:>10}"
+                            )
+                console.print("")
+
+            # Insert parallel breakdown immediately after parallel_load_ms
+            elif key == "parallel_load_ms" and has_parallel_breakdown:
+                console.print("")
+                for breakdown_key in parallel_breakdown_keys:
+                    if breakdown_key in timing_info and timing_info[breakdown_key] > 0:
+                        breakdown_ms = timing_info[breakdown_key]
+                        # Note: Don't calculate percentage from total_ms - these are concurrent!
+                        # Exception: For overhead, show percentage of parallel load time
+
+                        # Format time
+                        if breakdown_ms < 1:
+                            breakdown_time_str = f"{breakdown_ms:.2f}ms"
+                        elif breakdown_ms < 1000:
+                            breakdown_time_str = f"{breakdown_ms:.0f}ms"
+                        else:
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
+
+                        breakdown_label = parallel_breakdown_labels.get(
+                            breakdown_key, breakdown_key
+                        )
+
+                        # For overhead, show percentage of parallel load time
+                        if (
+                            breakdown_key == "parallel_overhead_ms"
+                            and "parallel_load_ms" in timing_info
+                        ):
+                            parallel_load_ms = timing_info["parallel_load_ms"]
+                            overhead_pct = (
+                                (breakdown_ms / parallel_load_ms * 100)
+                                if parallel_load_ms > 0
+                                else 0
+                            )
+                            console.print(
+                                f"  {breakdown_label:<30} {breakdown_time_str:>10} ({overhead_pct:>4.1f}% overhead)"
+                            )
+                        else:
+                            console.print(
+                                f"  {breakdown_label:<30} {breakdown_time_str:>10}"
+                            )
+                console.print("")
+
+            # Insert search breakdown immediately after vector_search_ms (for non-parallel path)
+            elif key == "vector_search_ms" and has_search_breakdown:
+                console.print("")
+                for breakdown_key in search_breakdown_keys:
+                    if breakdown_key in timing_info and timing_info[breakdown_key] > 0:
+                        breakdown_ms = timing_info[breakdown_key]
+                        breakdown_percentage = (
+                            (breakdown_ms / total_ms * 100) if total_ms > 0 else 0
+                        )
+
+                        # Format time
+                        if breakdown_ms < 1:
+                            breakdown_time_str = f"{breakdown_ms:.2f}ms"
+                        elif breakdown_ms < 1000:
+                            breakdown_time_str = f"{breakdown_ms:.0f}ms"
+                        else:
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
+
+                        breakdown_label = search_breakdown_labels.get(
+                            breakdown_key, breakdown_key
+                        )
+                        console.print(
+                            f"  {breakdown_label:<30} {breakdown_time_str:>10} ({breakdown_percentage:>5.1f}%)"
+                        )
+                console.print("")
+
+    # Display search path indicator
+    if "search_path" in timing_info:
+        search_path = timing_info["search_path"]
+        path_emoji = {
+            "hnsw_index": "⚡",  # Lightning bolt for fast HNSW
+            "none": "❌",
+        }
+        emoji = path_emoji.get(search_path, "❓")
+        console.print(f"\n  Search path: {emoji} {search_path}")
+
+    console.print("-" * 60)
+
+    # Total
+    if total_ms < 1000:
+        total_str = f"{total_ms:.0f}ms"
+    else:
+        total_str = f"{total_ms / 1000:.2f}s"
+    console.print(f"  {'Total query time':<30} {total_str:>10} (100.0%)")
+    console.print()
+
+
+def _display_fts_results(
+    results: List[Dict[str, Any]],
+    quiet: bool = False,
+    console: Optional[Console] = None,
+) -> None:
+    """Display full-text search results with Rich formatting.
+
+    Args:
+        results: List of FTS search results from TantivyIndexManager
+        quiet: If True, show minimal output (file:line:col only)
+        console: Rich console for output (creates new if None)
+    """
+    if console is None:
+        console = Console()
+
+    if not quiet:
+        console.print("[bold cyan]Full-Text Search Results[/bold cyan]\n")
+
+    if not results:
+        if not quiet:
+            console.print("[yellow]No matches found[/yellow]")
+        return
+
+    for i, result in enumerate(results, 1):
+        # Extract result fields
+        path = result.get("path", "unknown")
+        line = result.get("line", 0)
+        column = result.get("column", 0)
+
+        # Quiet mode: print match number with file:line:column
+        if quiet:
+            console.print(f"{i}. {path}:{line}:{column}")
+            continue
+
+        # Full mode: rich formatting with readable position
+        console.print(
+            f"[cyan]{i}.[/cyan] [green]{path}[/green] [yellow](Line {line}, Col {column})[/yellow]"
+        )
+
+        # Show language if available
+        language = result.get("language")
+        if language:
+            console.print(f"   Language: [blue]{language}[/blue]")
+
+        # Show matched text
+        match_text = result.get("match_text", "")
+        if match_text:
+            console.print(f"   Match: [red]{match_text}[/red]")
+
+        # Show snippet with syntax highlighting if available
+        # snippet_lines=0 returns empty string, so we skip display
+        snippet = result.get("snippet", "")
+        if snippet and snippet.strip():  # Only show if snippet is non-empty
+            console.print("   Context:")
+            try:
+                from rich.syntax import Syntax
+
+                syntax = Syntax(
+                    snippet,
+                    language or "text",
+                    theme="monokai",
+                    line_numbers=True,
+                    start_line=result.get("snippet_start_line", 1),
+                )
+                console.print(syntax)
+            except Exception:
+                # Fallback: just print the snippet without highlighting
+                console.print(f"   {snippet}")
+
+        console.print()
+
+
+def _display_semantic_results(
+    results: List[Dict[str, Any]],
+    console: Console,
+    quiet: bool = False,
+    timing_info: Optional[Dict[str, Any]] = None,
+    current_display_branch: Optional[str] = None,
+) -> None:
+    """Display semantic search results (shared by standalone and daemon modes).
+
+    This function contains the complete display logic for semantic search results
+    and is used by both:
+    - cli.py query command (standalone mode)
+    - cli_daemon_fast.py (daemon mode)
+
+    Args:
+        results: List of search results with 'score' and 'payload' keys
+        console: Rich console for output
+        quiet: If True, minimal output (score + path + content only)
+        timing_info: Optional timing information for performance display
+        current_display_branch: Optional current git branch name for display
+    """
+    if not results:
+        if not quiet:
+            console.print("❌ No results found", style="yellow")
+            # Display timing summary even when no results
+            if timing_info:
+                _display_query_timing(console, timing_info)
+        return
+
+    if not quiet:
+        console.print(f"\n✅ Found {len(results)} results:")
+        console.print("=" * 80)
+        # Display timing summary
+        if timing_info:
+            _display_query_timing(console, timing_info)
+
+    # Auto-detect current branch if not provided
+    if current_display_branch is None and not quiet:
+        import subprocess
+
+        try:
+            git_result = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=Path.cwd(),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            current_display_branch = (
+                git_result.stdout.strip() if git_result.returncode == 0 else "unknown"
+            )
+        except Exception:
+            current_display_branch = "unknown"
+
+    for i, result in enumerate(results, 1):
+        payload = result["payload"]
+        score = result["score"]
+
+        # File info
+        file_path = payload.get("path", "unknown")
+        language = payload.get("language", "unknown")
+        content = payload.get("content", "")
+
+        # Staleness info (if available)
+        staleness_info = result.get("staleness", {})
+        staleness_indicator = staleness_info.get("staleness_indicator", "")
+
+        # Line number info
+        line_start = payload.get("line_start")
+        line_end = payload.get("line_end")
+
+        # Create file path with line numbers
+        if line_start is not None and line_end is not None:
+            if line_start == line_end:
+                file_path_with_lines = f"{file_path}:{line_start}"
+            else:
+                file_path_with_lines = f"{file_path}:{line_start}-{line_end}"
+        else:
+            file_path_with_lines = file_path
+
+        if quiet:
+            # Quiet mode - minimal output: match number, score, staleness, path with line numbers
+            if staleness_indicator:
+                console.print(
+                    f"{i}. {score:.3f} {staleness_indicator} {file_path_with_lines}"
+                )
+            else:
+                console.print(f"{i}. {score:.3f} {file_path_with_lines}")
+            if content:
+                # Show full content with line numbers in quiet mode (no truncation)
+                content_lines = content.split("\n")
+
+                # Add line number prefixes if we have line start info
+                if line_start is not None:
+                    numbered_lines = []
+                    for j, line in enumerate(content_lines):
+                        line_num = line_start + j
+                        numbered_lines.append(f"{line_num:3}: {line}")
+                    content_with_line_numbers = "\n".join(numbered_lines)
+                    console.print(content_with_line_numbers, markup=False)
+                else:
+                    console.print(content, markup=False)
+            console.print()  # Empty line between results
+        else:
+            # Normal verbose mode
+            file_size = payload.get("file_size", 0)
+            indexed_at = payload.get("indexed_at", "unknown")
+
+            # Git-aware metadata
+            git_available = payload.get("git_available", False)
+            project_id = payload.get("project_id", "unknown")
+
+            # Create header with match number, git info and line numbers
+            header = f"{i}. 📄 File: {file_path_with_lines}"
+            if language != "unknown":
+                header += f" | 🏷️  Language: {language}"
+            header += f" | 📊 Score: {score:.3f}"
+
+            # Add staleness indicator to header if available
+            if staleness_indicator:
+                header += f" | {staleness_indicator}"
+
+            console.print(f"\n[bold cyan]{header}[/bold cyan]")
+
+            # Enhanced metadata display
+            metadata_info = f"📏 Size: {file_size} bytes | 🕒 Indexed: {indexed_at}"
+
+            # Add staleness details in verbose mode
+            if staleness_info.get("staleness_delta_seconds") is not None:
+                delta_seconds = staleness_info["staleness_delta_seconds"]
+                if delta_seconds > 0:
+                    delta_hours = delta_seconds / 3600
+                    if delta_hours < 1:
+                        delta_minutes = int(delta_seconds / 60)
+                        staleness_detail = f"Local file newer by {delta_minutes}m"
+                    elif delta_hours < 24:
+                        delta_hours_int = int(delta_hours)
+                        staleness_detail = f"Local file newer by {delta_hours_int}h"
+                    else:
+                        delta_days = int(delta_hours / 24)
+                        staleness_detail = f"Local file newer by {delta_days}d"
+                    metadata_info += f" | ⏰ Staleness: {staleness_detail}"
+
+            if git_available:
+                # Use current branch for display (content points are branch-agnostic)
+                git_branch = current_display_branch
+                git_commit = payload.get("git_commit_hash", "unknown")
+                if git_commit != "unknown" and len(git_commit) > 8:
+                    git_commit = git_commit[:8] + "..."
+                metadata_info += f" | 🌿 Branch: {git_branch}"
+                if git_commit != "unknown":
+                    metadata_info += f" | 📦 Commit: {git_commit}"
+
+            metadata_info += f" | 🏗️  Project: {project_id}"
+            console.print(metadata_info)
+
+            # Note: Fixed-size chunking no longer provides semantic metadata
+
+            # Content display with line numbers (full chunk, no truncation)
+            if content:
+                # Create content header with line range
+                if line_start is not None and line_end is not None:
+                    if line_start == line_end:
+                        content_header = f"📖 Content (Line {line_start}):"
+                    else:
+                        content_header = f"📖 Content (Lines {line_start}-{line_end}):"
+                else:
+                    content_header = "📖 Content:"
+
+                console.print(f"\n{content_header}")
+                console.print("─" * 50)
+
+                # Add line number prefixes to full content (no truncation)
+                content_lines = content.split("\n")
+
+                # Add line number prefixes if we have line start info
+                if line_start is not None:
+                    numbered_lines = []
+                    for j, line in enumerate(content_lines):
+                        line_num = line_start + j
+                        numbered_lines.append(f"{line_num:3}: {line}")
+                    content_with_line_numbers = "\n".join(numbered_lines)
+                else:
+                    content_with_line_numbers = content
+
+                # Syntax highlighting if possible (note: syntax highlighting with line numbers is complex)
+                if language and language != "unknown":
+                    try:
+                        # For now, use plain text with line numbers for better readability
+                        # Rich's Syntax with line_numbers=True uses its own numbering system
+                        console.print(content_with_line_numbers, markup=False)
+                    except Exception:
+                        console.print(content_with_line_numbers, markup=False)
+                else:
+                    console.print(content_with_line_numbers, markup=False)
+
+            console.print("─" * 50)
+
+
+def _execute_semantic_search(
+    query: str,
+    limit: int,
+    languages: tuple,
+    exclude_languages: tuple,
+    path_filter: tuple,
+    exclude_paths: tuple,
+    min_score: Optional[float],
+    accuracy: str,
+    quiet: bool,
+    project_root: Path,
+    config_manager,
+    console: Console,
+    file_extensions: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Execute semantic search - extracted for parallel execution in hybrid mode.
+
+    This function contains the complete semantic search logic extracted from the main
+    query command to enable true parallel execution with FTS search.
+
+    Args:
+        query: Search query text
+        limit: Maximum number of results
+        languages: Tuple of language filters
+        exclude_languages: Tuple of languages to exclude
+        path_filter: Tuple of path filter patterns
+        exclude_paths: Tuple of path patterns to exclude
+        min_score: Minimum similarity score threshold
+        accuracy: Search accuracy mode
+        quiet: If True, minimal output
+        project_root: Project root directory
+        config_manager: Configuration manager instance
+        console: Rich console for output
+
+    Returns:
+        List of semantic search results
+    """
+    import time
+    from typing import Any, Dict
+
+    try:
+        config = config_manager.load()
+
+        # Initialize services - lazy imports for query path
+        from .services.generic_query_service import GenericQueryService
+        from .services.language_validator import LanguageValidator
+        from .services.language_mapper import LanguageMapper
+        from .services.multi_index_query_service import MultiIndexQueryService
+
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        backend = BackendFactory.create(
+            config=config, project_root=Path(config.codebase_dir)
+        )
+        vector_store_client = backend.get_vector_store_client()
+
+        # Initialize MultiIndexQueryService for unified query interface
+        # This handles both single-index (code only) and multi-index (code + multimodal) queries
+        multi_index_service = MultiIndexQueryService(
+            project_root=project_root,
+            vector_store=vector_store_client,
+            embedding_provider=embedding_provider,
+        )
+
+        # Health checks
+        if not embedding_provider.health_check():
+            if not quiet:
+                console.print(
+                    f"[yellow]⚠️  {embedding_provider.get_provider_name().title()} service not available[/yellow]"
+                )
+            return []
+
+        if not vector_store_client.health_check():
+            if not quiet:
+                console.print("[yellow]⚠️  Vector store service not available[/yellow]")
+            return []
+
+        # Ensure provider-aware collection is set for search
+        collection_name = vector_store_client.resolve_collection_name(
+            config, embedding_provider
+        )
+        # Ensure payload indexes exist (read-only check for query operations)
+        vector_store_client.ensure_payload_indexes(collection_name, context="query")
+
+        # Initialize timing dictionary for telemetry
+        timing_info: Dict[str, Any] = {}
+
+        # Build filter conditions
+        filter_conditions: Dict[str, Any] = {}
+        if languages:
+            # Validate language parameters
+            language_validator = LanguageValidator()
+            language_mapper = LanguageMapper()
+            language_filters = []
+
+            for lang in languages:
+                # Validate each language
+                validation_result = language_validator.validate_language(lang)
+
+                if not validation_result.is_valid:
+                    if not quiet:
+                        console.print(f"[yellow]⚠️  Invalid language: {lang}[/yellow]")
+                    continue
+
+                # Build language filter
+                language_filter = language_mapper.build_language_filter(lang)
+                language_filters.append(language_filter)
+
+            if language_filters:
+                # Multiple languages: wrap in "should" clause (OR logic)
+                # Single language: use directly (no wrapper needed)
+                if len(language_filters) > 1:
+                    filter_conditions["must"] = [{"should": language_filters}]
+                else:
+                    filter_conditions["must"] = language_filters
+        if path_filter:
+            path_filters = [
+                {"key": "path", "match": {"text": pf}} for pf in path_filter
+            ]
+            if len(path_filters) > 1:
+                # Multiple path filters: wrap in "should" clause (OR logic)
+                filter_conditions.setdefault("must", []).append(
+                    {"should": path_filters}
+                )
+            else:
+                # Single path filter: append directly
+                filter_conditions.setdefault("must", []).extend(path_filters)
+
+        # Build exclusion filters (must_not conditions)
+        if exclude_languages:
+            language_validator = LanguageValidator()
+            language_mapper = LanguageMapper()
+            must_not_conditions = []
+
+            for exclude_lang in exclude_languages:
+                # Validate each exclusion language
+                validation_result = language_validator.validate_language(exclude_lang)
+
+                if not validation_result.is_valid:
+                    if not quiet:
+                        console.print(
+                            f"[yellow]⚠️  Invalid exclusion language: {exclude_lang}[/yellow]"
+                        )
+                    continue
+
+                # Get all extensions for this language
+                extensions = language_mapper.get_extensions(exclude_lang)
+
+                # Add must_not condition for each extension
+                for ext in extensions:
+                    must_not_conditions.append(
+                        {"key": "language", "match": {"value": ext}}
+                    )
+
+            if must_not_conditions:
+                filter_conditions["must_not"] = must_not_conditions
+
+        # Build path exclusion filters (must_not conditions for paths)
+        if exclude_paths:
+            from .services.path_filter_builder import PathFilterBuilder
+
+            path_filter_builder = PathFilterBuilder()
+
+            # Build path exclusion filters
+            path_exclusion_filters = path_filter_builder.build_exclusion_filter(
+                list(exclude_paths)
+            )
+
+            # Add to existing must_not conditions
+            if path_exclusion_filters.get("must_not"):
+                if "must_not" in filter_conditions:
+                    filter_conditions["must_not"].extend(
+                        path_exclusion_filters["must_not"]
+                    )
+                else:
+                    filter_conditions["must_not"] = path_exclusion_filters["must_not"]
+
+        # Check if project uses git-aware indexing
+        from .services.git_topology_service import GitTopologyService
+
+        git_topology_service = GitTopologyService(config.codebase_dir)
+        is_git_aware = git_topology_service.is_git_available()
+
+        # Initialize query service for git-aware filtering
+        query_service = GenericQueryService(config.codebase_dir, config)
+
+        # Determine if we should use branch-aware querying
+        if is_git_aware:
+            # Use git-aware filtering for git projects
+            use_branch_aware_query = True
+        else:
+            # Use generic query service for non-git projects
+            use_branch_aware_query = False
+
+        # Use appropriate search method based on project type
+        if use_branch_aware_query:
+            # Build filter conditions (NO git_branch filter - let post-filtering handle it)
+            filter_conditions_list = []
+
+            # Only filter by git_available to exclude non-git content
+            filter_conditions_list.append(
+                {"key": "git_available", "match": {"value": True}}
+            )
+
+            # Add user-specified filters
+            if languages:
+                language_mapper = LanguageMapper()
+                # Handle multiple languages by building OR conditions
+                if len(languages) > 1:
+                    # Multiple languages: use OR logic (should clause)
+                    language_filters = [
+                        language_mapper.build_language_filter(lang)
+                        for lang in languages
+                    ]
+                    filter_conditions_list.append({"should": language_filters})  # type: ignore[dict-item]
+                else:
+                    # Single language: add directly
+                    language_filter = language_mapper.build_language_filter(
+                        languages[0]
+                    )
+                    filter_conditions_list.append(language_filter)
+
+            if path_filter:
+                # Multiple path filters should use OR logic
+                if len(path_filter) > 1:
+                    # Multiple path filters: use OR logic (should clause)
+                    path_filters = [
+                        {"key": "path", "match": {"text": pf}} for pf in path_filter
+                    ]
+                    filter_conditions_list.append({"should": path_filters})  # type: ignore[dict-item]
+                else:
+                    # Single path filter: add directly
+                    filter_conditions_list.append(
+                        {"key": "path", "match": {"text": path_filter[0]}}
+                    )
+
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
+            # Build filter conditions preserving both must and must_not conditions
+            query_filter_conditions = (
+                {"must": filter_conditions_list} if filter_conditions_list else {}
+            )
+            # Preserve must_not conditions (exclusion filters)
+            if filter_conditions.get("must_not"):
+                query_filter_conditions["must_not"] = filter_conditions["must_not"]
+
+            # Query using MultiIndexQueryService (handles both code and multimodal indexes)
+            raw_results, multi_index_timing = multi_index_service.query(
+                query_text=query,
+                limit=limit * 2,
+                collection_name=collection_name,
+                filter_conditions=query_filter_conditions,
+            )
+
+            # Merge multi-index timing into timing_info
+            timing_info.update(multi_index_timing)
+
+            # Apply git-aware post-filtering
+            git_filter_start = time.time()
+            # Type hint: raw_results is always List[Dict[str, Any]] here
+            git_results = query_service.filter_results_by_current_branch(
+                raw_results  # type: ignore[arg-type]
+            )
+            timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
+
+            # Apply minimum score filtering
+            if min_score:
+                filtered_results = []
+                for result in git_results:
+                    if result.get("score", 0) >= min_score:
+                        filtered_results.append(result)
+                git_results = filtered_results
+        else:
+            # Use MultiIndexQueryService for non-git projects
+            # Note: min_score filtering will be applied after query returns
+            raw_results, multi_index_timing = multi_index_service.query(
+                query_text=query,
+                limit=limit * 2,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions if filter_conditions else None,
+            )
+
+            # Apply minimum score filtering if specified
+            if min_score:
+                raw_results = [r for r in raw_results if r.get("score", 0) >= min_score]
+
+            # Merge multi-index timing into timing_info
+            timing_info.update(multi_index_timing)
+
+            # Apply git-aware filtering
+            git_filter_start = time.time()
+            # Type hint: raw_results is always List[Dict[str, Any]] here
+            git_results = query_service.filter_results_by_current_branch(
+                raw_results  # type: ignore[arg-type]
+            )
+            timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
+
+        # Limit to requested number after filtering
+        results = git_results[:limit]
+
+        # Apply staleness detection to local query results
+        if results:
+            try:
+                staleness_start = time.time()
+                from .api_clients.remote_query_client import QueryResultItem
+                from .remote.staleness_detector import StalenessDetector
+
+                query_result_items = []
+                for result in results:
+                    payload = result["payload"]
+
+                    # Extract file metadata for staleness comparison
+                    file_last_modified = payload.get("file_last_modified")
+                    indexed_at = payload.get("indexed_at")
+
+                    # Convert indexed_at ISO timestamp to Unix timestamp float
+                    indexed_timestamp = None
+                    if indexed_at:
+                        try:
+                            from datetime import datetime
+
+                            dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
+                            indexed_timestamp = dt.timestamp()
+                        except (ValueError, AttributeError):
+                            indexed_timestamp = None
+
+                    query_item = QueryResultItem(
+                        similarity_score=result["score"],
+                        file_path=payload.get("path", "unknown"),
+                        line_number=payload.get("line_start", 1),
+                        code_snippet=payload.get("content", ""),
+                        repository_alias=project_root.name,
+                        file_last_modified=file_last_modified,
+                        indexed_timestamp=indexed_timestamp,
+                    )
+                    query_result_items.append(query_item)
+
+                # Apply staleness detection in local mode
+                staleness_detector = StalenessDetector()
+                enhanced_results = staleness_detector.apply_staleness_detection(
+                    query_result_items, project_root, mode="local"
+                )
+                timing_info["staleness_detection_ms"] = (
+                    time.time() - staleness_start
+                ) * 1000
+
+                # Annotate results with staleness detection metadata.
+                # No reranker in this function — use preserve_order=False so
+                # fresh results sort before stale ones (staleness-first ordering).
+                results = _annotate_staleness(
+                    results, enhanced_results, preserve_order=False
+                )
+
+            except Exception as _staleness_exc:
+                # Staleness detection is best-effort; continue with original results.
+                # Log at debug so failures are visible without spamming users.
+                logging.getLogger(__name__).debug(
+                    "Staleness detection skipped: %s", _staleness_exc, exc_info=True
+                )
+
+        return results
+
+    except Exception as e:
+        if not quiet:
+            console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
+        logger = logging.getLogger(__name__)
+        logger.error(f"Semantic search error: {e}", exc_info=True)
+        return []
+
+
+def _display_hybrid_results(
+    fts_results: List[Dict[str, Any]],
+    semantic_results: List[Dict[str, Any]],
+    quiet: bool = False,
+    console: Optional[Console] = None,
+) -> None:
+    """Display hybrid search results (FTS + Semantic) with clear separation.
+
+    Args:
+        fts_results: List of FTS search results from TantivyIndexManager
+        semantic_results: List of semantic search results
+        quiet: If True, show minimal output
+        console: Rich console for output (creates new if None)
+    """
+    if console is None:
+        console = Console()
+
+    # FTS Results First
+    if not quiet:
+        console.print("[bold cyan]━━━ FULL-TEXT SEARCH RESULTS ━━━[/bold cyan]\n")
+
+    if fts_results:
+        _display_fts_results(fts_results, quiet=quiet, console=console)
+    else:
+        if not quiet:
+            console.print("[yellow]No text matches found[/yellow]\n")
+
+    # Clear Separator
+    if not quiet:
+        console.print("[bold]" + "─" * 60 + "[/bold]\n")
+
+    # Semantic Results Second
+    if not quiet:
+        console.print("[bold magenta]━━━ SEMANTIC SEARCH RESULTS ━━━[/bold magenta]\n")
+
+    if semantic_results:
+        # Display semantic results (reuse logic from existing semantic display)
+        for i, result in enumerate(semantic_results, 1):
+            payload = result.get("payload", {})
+            score = result.get("score", 0.0)
+
+            # File info
+            file_path = payload.get("path", "unknown")
+            language = payload.get("language", "unknown")
+            content = payload.get("content", "")
+
+            # Line number info
+            line_start = payload.get("line_start")
+            line_end = payload.get("line_end")
+
+            # Create file path with line numbers
+            if line_start is not None and line_end is not None:
+                if line_start == line_end:
+                    file_path_with_lines = f"{file_path}:{line_start}"
+                else:
+                    file_path_with_lines = f"{file_path}:{line_start}-{line_end}"
+            else:
+                file_path_with_lines = file_path
+
+            if quiet:
+                # Quiet mode - minimal output with match number
+                console.print(f"{i}. {score:.3f} {file_path_with_lines}")
+                if content:
+                    # Show content with line numbers
+                    content_lines = content.split("\n")
+                    if line_start is not None:
+                        numbered_lines = []
+                        for j, line in enumerate(content_lines):
+                            line_num = line_start + j
+                            numbered_lines.append(f"{line_num:3}: {line}")
+                        content_with_line_numbers = "\n".join(numbered_lines)
+                        console.print(content_with_line_numbers, markup=False)
+                    else:
+                        console.print(content, markup=False)
+            else:
+                # Full display mode
+                console.print(f"\n[magenta]{i}.[/magenta] Score: {score:.3f}")
+                console.print(f"File: [green]{file_path_with_lines}[/green]")
+                if language != "unknown":
+                    console.print(f"Language: [blue]{language}[/blue]")
+
+                if content:
+                    console.print("Content:")
+                    console.print("-" * 40)
+                    console.print(content, markup=False)
+                    console.print("-" * 40)
+    else:
+        if not quiet:
+            console.print("[yellow]No semantic matches found[/yellow]\n")
+
+
+def _check_authentication_state(ctx) -> bool:
+    """Check if user is authenticated and session is valid.
+
+    Args:
+        ctx: Click context
+
+    Returns:
+        bool: True if authenticated, False otherwise
+    """
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .api_clients.auth_client import create_auth_client
+        from .remote.credential_manager import CredentialNotFoundError
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ Authentication required: Please login first", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            return False
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+        except Exception:
+            console.print("❌ Authentication required: Please login first", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            return False
+
+        # Try to load stored credentials
+        try:
+            # Attempt to create authenticated client
+            auth_client = create_auth_client(server_url, project_root)
+            if not auth_client.credentials:
+                console.print(
+                    "❌ Authentication required: Please login first", style="red"
+                )
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                return False
+
+            # Basic validation - we assume if credentials exist, they're valid
+            # The actual API call will validate the session
+            return True
+
+        except CredentialNotFoundError:
+            console.print("❌ Authentication required: Please login first", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            return False
+        except Exception as e:
+            # Handle expired sessions or invalid credentials
+            if "expired" in str(e).lower() or "invalid" in str(e).lower():
+                console.print("❌ Session expired: Please login again", style="red")
+                console.print(
+                    "💡 Use 'cidx auth login' to re-authenticate", style="dim"
+                )
+                return False
+            else:
+                console.print(
+                    "❌ Authentication required: Please login first", style="red"
+                )
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                return False
+
+    except Exception as e:
+        console.print("❌ Authentication check failed", style="red")
+        if ctx.obj.get("verbose"):
+            console.print(f"Error: {e}", style="dim red")
+        return False
+
+
+def _validate_password_strength(password: str) -> tuple:
+    """Validate password strength using project password policy.
+
+    Args:
+        password: Password to validate
+
+    Returns:
+        tuple: (is_valid, message) - validation result and message
+    """
+    from .password_policy import validate_password_strength
+
+    return validate_password_strength(password)
+
+
+def create_auth_client(server_url: str, project_root: Path):
+    """Create authentication client with proper configuration.
+
+    Args:
+        server_url: Server URL for authentication
+        project_root: Project root directory
+
+    Returns:
+        AuthAPIClient: Configured authentication client
+    """
+    from .api_clients.auth_client import create_auth_client as _create_auth_client
+    from .remote.config import load_remote_configuration
+
+    # Try to get username from remote configuration for credential loading
+    username = None
+    try:
+        remote_config = load_remote_configuration(project_root)
+        username = remote_config.get("username")
+    except Exception:
+        # If we can't load remote config, proceed without username
+        pass
+
+    return _create_auth_client(server_url, project_root, username)
+
+
+class ModeAwareGroup(click.Group):
+    """Custom Click Group that adds mode compatibility icons to command help."""
+
+    def format_commands(self, ctx, formatter):
+        """Format commands with mode compatibility icons."""
+        commands = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None:
+                continue
+
+            # Get mode icons for this command
+            icons = get_command_mode_icons(subcommand)
+
+            # Get help text with much longer limit to avoid early truncation
+            help_text = cmd.get_short_help_str(limit=120)
+
+            commands.append((subcommand, icons, help_text))
+
+        if commands:
+            formatter.write_heading("Commands")
+
+            # Custom formatting with fixed-width columns accounting for emoji width
+            for cmd_name, icons, help_text in sorted(commands):
+                # Emojis take 2 visual columns each, so adjust padding
+                # Calculate visual width: each emoji = 2 chars, regular chars = 1 char
+                emoji_count = icons.count("🌐") + icons.count("💻") + icons.count("🔗")
+                visual_width = len(icons) + emoji_count
+
+                # Target total width for command part is 26 chars (increased for 3 icons)
+                padding_needed = max(0, 26 - visual_width - len(cmd_name))
+
+                formatted_line = (
+                    f"  {icons} {cmd_name}{' ' * padding_needed} {help_text}"
+                )
+                formatter.write(formatted_line + "\n")
+
+            formatter.write("\n")
+            formatter.write("Legend: 🌐 Remote | 💻 Local | 🔗 Proxy\n")
+
+
+@click.group(invoke_without_command=True, cls=ModeAwareGroup)
+@click.option("--config", "-c", type=click.Path(exists=False), help="Config file path")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option(
+    "--path",
+    "-p",
+    type=click.Path(exists=True),
+    help="Start directory for config discovery (walks up to find .code-indexer/)",
+)
+@click.option(
+    "--use-cidx-prompt",
+    is_flag=True,
+    help="Generate and display a comprehensive prompt for AI systems to use cidx semantic search",
+)
+@click.option(
+    "--format",
+    type=click.Choice(["text", "markdown", "compact", "comprehensive"]),
+    default="text",
+    help="Output format for the cidx prompt (default: text)",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    help="Save cidx prompt to file instead of displaying",
+)
+@click.option(
+    "--compact",
+    is_flag=True,
+    help="Generate compact version of cidx prompt (overrides --format)",
+)
+@click.version_option(version=__version__, prog_name="code-indexer")
+@click.pass_context
+def cli(
+    ctx,
+    config: Optional[str],
+    verbose: bool,
+    path: Optional[str],
+    use_cidx_prompt: bool,
+    format: str,
+    output: Optional[str],
+    compact: bool,
+):
+    """AI-powered semantic code search with local models.
+
+    \b
+    TIP: Use 'cidx' as a short alias for 'code-indexer' (e.g., 'cidx start')
+
+    \b
+    GETTING STARTED:
+      1. code-indexer start     # Start services (creates default config if needed)
+      2. code-indexer index     # Smart incremental indexing
+      3. code-indexer query "search term"  # Search your code
+
+      OR for custom configuration (init is optional):
+      1. code-indexer init      # OPTIONAL: Initialize with custom settings
+      2. code-indexer start     # Start services (VoyageAI)
+      3. code-indexer index     # Smart incremental indexing
+      4. code-indexer query "search term"  # Search your code
+
+    \b
+    CONFIGURATION:
+      Config file: .code-indexer/config.json
+
+      Key settings:
+      • exclude_dirs: Folders to skip (e.g., ["node_modules", "dist"])
+      • file_extensions: File types to index (e.g., ["py", "js", "ts"])
+      • max_file_size: Maximum file size in bytes (default: 1MB)
+      • chunking: Model-aware chunk sizes (voyage-code-3: 4096, voyage-multimodal-3: 4096)
+
+      Exclusions also respect .gitignore patterns automatically.
+
+    \b
+    DATA MANAGEMENT:
+      • Git-aware: Tracks branches, commits, and file changes
+      • Project isolation: Each project gets its own collection
+      • Storage: Vector data stored in .code-indexer/index/ (per-project)
+      • Cleanup: Use 'clean-data' (fast) or 'uninstall' (complete removal)
+
+    \b
+    EXAMPLES:
+      code-indexer init --max-file-size 2000000  # 2MB limit
+      code-indexer index --clear                 # Fresh index
+      code-indexer query "function authentication"
+      code-indexer clean-data --all-projects  # Clear all project data
+
+      # Generate AI integration prompt:
+      code-indexer --use-cidx-prompt                    # Display prompt
+      code-indexer --use-cidx-prompt --format markdown  # Markdown format
+      code-indexer --use-cidx-prompt --compact          # Compact version
+      code-indexer --use-cidx-prompt --output ai-prompt.txt  # Save to file
+
+      # Using --path to work with different project locations:
+      code-indexer --path /home/user/myproject index
+      code-indexer --path ../other-project query "search term"
+      code-indexer -p ./nested/folder status
+
+    For detailed help on any command, use: code-indexer COMMAND --help
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+
+    # Initialize ExceptionLogger VERY EARLY for error tracking
+    exception_logger = ExceptionLogger.initialize(project_root=Path.cwd(), mode="cli")
+    exception_logger.install_thread_exception_hook()
+
+    # Configure logging with RichHandler for Rich Live compatibility (issue #942).
+    # setup_logging() installs RichHandler so WARNING/ERROR output coordinates
+    # with the Live progress widget and appears complete above the progress bar.
+    setup_logging()
+
+    # Configure logging to suppress noisy third-party messages
+    if not verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("root").setLevel(logging.WARNING)
+        # Note: the per-logger mute for provider_health_monitor is no longer needed
+        # because the systemic RichHandler fix above coordinates all loggers with Rich.
+
+    # Handle --use-cidx-prompt flag (early return)
+    if use_cidx_prompt:
+        try:
+            # Lazy import for prompt generation
+            from .services.cidx_prompt_generator import create_cidx_ai_prompt
+
+            # Determine format (compact overrides format option)
+            prompt_format = "compact" if compact else format
+
+            # Generate the prompt
+            prompt = create_cidx_ai_prompt(format=prompt_format)
+
+            # Output to file or console
+            if output:
+                output_path = Path(output)
+                output_path.write_text(prompt, encoding="utf-8")
+                console.print(
+                    f"✅ Cidx AI prompt saved to: {output_path}", style="green"
+                )
+            else:
+                console.print(prompt)
+
+            return
+        except Exception as e:
+            console.print(f"❌ Failed to generate cidx prompt: {e}", style="red")
+            if verbose:
+                import traceback
+
+                console.print(traceback.format_exc())
+            sys.exit(1)
+
+    # If no command is provided and --use-cidx-prompt was not used, show help
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        return
+
+    # Use path for config discovery, leveraging existing backtracking logic
+    if path:
+        start_dir = Path(path).resolve()
+        ctx.obj["config_manager"] = ConfigManager.create_with_backtrack(start_dir)
+        project_root = find_project_root(start_dir)
+    elif config:
+        ctx.obj["config_manager"] = ConfigManager(Path(config))
+        project_root = Path(
+            config
+        ).parent.parent  # Assume config is in .code-indexer/config.json
+    else:
+        # Always use backtracking by default to find config in parent directories
+        ctx.obj["config_manager"] = ConfigManager.create_with_backtrack()
+        project_root = find_project_root(Path.cwd())
+
+    # Detect operational mode for command routing
+    mode_detector = CommandModeDetector(project_root)
+    detected_mode = mode_detector.detect_mode()
+
+    # Store mode information in Click context for command routing
+    ctx.obj["mode"] = detected_mode
+    ctx.obj["project_root"] = project_root
+    ctx.obj["mode_detector"] = mode_detector
+
+    if verbose:
+        console.print(f"🔍 Detected mode: {detected_mode}", style="dim")
+        console.print(f"📁 Project root: {project_root}", style="dim")
+
+
+# Register SCIP commands
+cli.add_command(scip_group)
+
+# Register Git commands (Story #737)
+cli.add_command(git_group)
+
+# Register File commands (Story #738)
+cli.add_command(files_group)
+
+
+# Story #746: Register CI/CD commands (implemented in cli_cicd.py)
+cli.add_command(cicd_group)
+
+# Story #749: Register Help commands (implemented in cli_help.py)
+cli.add_command(help_group)
+
+# Story #656: Register SSH key management commands (implemented in cli_keys.py)
+cli.add_command(keys_group)
+
+# Story #656: Register Remote index management commands (implemented in cli_index.py)
+cli.add_command(index_remote_group)
+
+# Story #975: Register X-Ray CLI commands (implemented in cli_xray.py)
+cli.add_command(xray_group)
+
+
+@cli.group("groups")
+@require_mode("remote")
+def groups_group():
+    """User group and access control management (remote mode only).
+
+    Provides management of user groups, permissions, and access control
+    for repositories on the CIDX server.
+
+    Subcommands will be implemented in subsequent stories.
+    """
+    pass
+
+
+@cli.group("credentials")
+@require_mode("remote")
+def credentials_group():
+    """MCP credential storage and retrieval (remote mode only).
+
+    Provides secure storage and retrieval of MCP credentials
+    for AI tool integration on the CIDX server.
+
+    Subcommands will be implemented in subsequent stories.
+    """
+    pass
+
+
+@cli.command()
+@click.argument(
+    "codebase_dir",
+    required=False,
+    type=click.Path(exists=True),
+)
+@click.option("--force", "-f", is_flag=True, help="Overwrite existing configuration")
+@click.option(
+    "--max-file-size",
+    type=int,
+    help="Maximum file size to index (bytes, default: 1048576)",
+)
+@click.option(
+    "--embedding-provider",
+    type=click.Choice(["voyage-ai"]),
+    default="voyage-ai",
+    help="Embedding provider to use (VoyageAI only in v8.0+)",
+)
+@click.option(
+    "--voyage-model",
+    type=str,
+    default="voyage-code-3",
+    help="VoyageAI model name (default: voyage-code-3)",
+)
+@click.option(
+    "--interactive",
+    "-i",
+    is_flag=True,
+    help="Interactive configuration prompt",
+)
+@click.option(
+    "--create-override-file",
+    is_flag=True,
+    help="Create .code-indexer-override.yaml file for project-level file filtering rules",
+)
+@click.option(
+    "--remote",
+    type=str,
+    help="Initialize remote mode with server URL (e.g., https://cidx.example.com)",
+)
+@click.option(
+    "--username",
+    type=str,
+    help="Username for remote server authentication",
+)
+@click.option(
+    "--password",
+    type=str,
+    help="Password for remote server authentication",
+)
+@click.option(
+    "--proxy-mode",
+    is_flag=True,
+    help="Initialize as proxy directory for managing multiple indexed repositories",
+)
+@click.option(
+    "--vector-store",
+    type=click.Choice(["filesystem"], case_sensitive=False),
+    default="filesystem",
+    help="Vector storage backend: 'filesystem' (container-free, only supported option)",
+)
+@click.option(
+    "--daemon",
+    is_flag=True,
+    help="Enable daemon mode for performance optimization",
+)
+@click.option(
+    "--daemon-ttl",
+    type=int,
+    default=10,
+    help="Cache TTL in minutes for daemon mode (default: 10)",
+)
+@click.pass_context
+def init(
+    ctx,
+    codebase_dir: Optional[str],
+    force: bool,
+    max_file_size: Optional[int],
+    embedding_provider: str,
+    voyage_model: str,
+    interactive: bool,
+    create_override_file: bool,
+    remote: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+    proxy_mode: bool,
+    vector_store: str,
+    daemon: bool,
+    daemon_ttl: int,
+):
+    """Initialize code indexing in current directory (OPTIONAL).
+
+    \b
+    Creates .code-indexer/config.json with project configuration.
+
+    \b
+    NOTE: This command is optional. If you skip init and run 'start' directly,
+    a default configuration will be created automatically with VoyageAI provider
+    and standard settings. Only use init if you want to customize settings.
+
+    \b
+    INITIALIZATION MODES:
+      🏠 Local Mode (default): Creates local configuration with VoyageAI embeddings
+      ☁️  Remote Mode: Connects to existing CIDX server (--remote option)
+
+    \b
+    CONFIGURATION OPTIONS:
+      • Exclude directories: Edit exclude_dirs in config.json
+      • File types: Modify file_extensions array
+      • Size limits: Use --max-file-size or edit config.json
+      • Chunking: Model-aware sizing (voyage-code-3: 4096, voyage-multimodal-3: 4096)
+
+    \b
+    DEFAULT EXCLUSIONS:
+      node_modules, venv, __pycache__, .git, dist, build, target,
+      .idea, .vscode, .gradle, bin, obj, coverage, .next, .nuxt
+
+    \b
+    EMBEDDING PROVIDERS:
+      • voyage-ai: VoyageAI API (default, requires VOYAGE_API_KEY environment variable)
+
+    \b
+    EXAMPLES:
+      code-indexer init                                    # Basic initialization with VoyageAI
+      code-indexer init --interactive                     # Interactive configuration
+      code-indexer init --voyage-model voyage-large-2     # Specify VoyageAI model
+      code-indexer init --max-file-size 2000000          # 2MB file limit
+      code-indexer init --force                          # Overwrite existing config
+
+    \b
+    VOYAGEAI SETUP:
+      To use VoyageAI, set your API key first:
+      export VOYAGE_API_KEY=your_api_key_here
+
+      Then persist it (add to ~/.bashrc, ~/.zshrc, or ~/.profile):
+      echo 'export VOYAGE_API_KEY=your_api_key_here' >> ~/.bashrc
+
+    After initialization, edit .code-indexer/config.json to customize:
+    • embedding_provider: "voyage-ai" (VoyageAI only in v8.0+)
+    • exclude_dirs: ["node_modules", "dist", "my_temp_folder"]
+    • file_extensions: ["py", "js", "ts", "java", "cpp"]
+    """
+    # Handle remote mode initialization
+    if remote:
+        if not username or not password:
+            console.print(
+                "❌ Remote initialization requires --username and --password",
+                style="red",
+            )
+            console.print()
+            console.print(
+                "Usage: cidx init --remote <server-url> --username <user> --password <pass>"
+            )
+            console.print()
+            console.print("Example:")
+            console.print(
+                "  cidx init --remote https://cidx.example.com --username john --password secret123"
+            )
+            sys.exit(1)
+
+        # Import remote initialization functionality
+        try:
+            from .remote.initialization import initialize_remote_mode
+            from .remote.exceptions import RemoteInitializationError
+
+            # Determine target directory
+            target_dir = Path(codebase_dir) if codebase_dir else Path.cwd()
+
+            # Run remote initialization
+            try:
+                initialize_remote_mode(
+                    project_root=target_dir,
+                    server_url=remote,
+                    username=username,
+                    password=password,
+                    console=console,
+                )
+                sys.exit(0)
+
+            except RemoteInitializationError as e:
+                console.print(
+                    f"❌ Remote initialization failed: {e.message}", style="red"
+                )
+                if e.details:
+                    console.print(f"   Details: {e.details}", style="red")
+                console.print()
+                console.print(
+                    "Please check your server URL, credentials, and network connectivity."
+                )
+                sys.exit(1)
+
+        except ImportError as e:
+            console.print("❌ Remote functionality not available", style="red")
+            console.print(f"Import error: {e}")
+            sys.exit(1)
+
+    # Handle proxy mode initialization
+    if proxy_mode:
+        from .proxy.proxy_initializer import (
+            ProxyInitializer,
+            ProxyInitializationError,
+            NestedProxyError,
+        )
+
+        # Determine target directory
+        target_dir = Path(codebase_dir) if codebase_dir else Path.cwd()
+
+        try:
+            # Create ProxyInitializer instance
+            initializer = ProxyInitializer(target_dir=target_dir)
+
+            # Run initialization
+            initializer.initialize(force=force)
+
+            # Get discovered repositories for user feedback
+            config_file = target_dir / ".code-indexer" / "config.json"
+            with open(config_file) as f:
+                config_data = json.load(f)
+
+            discovered_repos = config_data.get("discovered_repos", [])
+
+            # Display success message
+            console.print("✅ Proxy mode initialized successfully", style="green")
+            console.print(
+                f"📂 Configuration saved to: {target_dir / '.code-indexer' / 'config.json'}",
+                style="dim",
+            )
+            console.print()
+
+            # Show discovered repositories
+            console.print(
+                f"📚 Discovered {len(discovered_repos)} repositories", style="cyan"
+            )
+            if discovered_repos:
+                for repo in discovered_repos:
+                    console.print(f"   • {repo}", style="dim")
+            else:
+                console.print()
+                console.print(
+                    "📭 No repositories found in this directory", style="yellow"
+                )
+                console.print(
+                    "   Add indexed repositories as subdirectories and re-run with --force",
+                    style="dim",
+                )
+
+            sys.exit(0)
+
+        except NestedProxyError as e:
+            console.print("❌ Cannot create nested proxy configuration", style="red")
+            console.print(f"   {str(e)}", style="red")
+            sys.exit(1)
+
+        except ProxyInitializationError as e:
+            console.print("❌ Proxy initialization failed", style="red")
+            console.print(f"   {str(e)}", style="red")
+            console.print()
+            console.print(
+                "💡 Use --force to overwrite existing configuration", style="dim"
+            )
+            sys.exit(1)
+
+        except Exception as e:
+            console.print(
+                "❌ Unexpected error during proxy initialization", style="red"
+            )
+            console.print(f"   {str(e)}", style="red")
+            sys.exit(1)
+
+    # For init command, always create config in current directory (or specified codebase_dir)
+    # Don't use the CLI context's config_manager which may have found a parent config
+    target_dir = Path(codebase_dir) if codebase_dir else Path.cwd()
+    project_config_path = target_dir / ".code-indexer" / "config.json"
+    config_manager = ConfigManager(project_config_path)
+
+    # Port registry check removed (Story #506: container management deprecated)
+    # Filesystem backend doesn't need port coordination
+    if vector_store != "filesystem":
+        console.print("⚠️  Filesystem container backend is deprecated", style="yellow")
+        console.print(
+            "💡 Please use filesystem backend: cidx init --vector-store filesystem",
+            style="blue",
+        )
+
+    # Check if config already exists
+    if config_manager.config_path.exists():
+        # Load existing config to check for backend changes
+        existing_config = config_manager.load()
+        existing_backend = (
+            existing_config.vector_store.provider
+            if existing_config.vector_store
+            else "filesystem"  # Default if not set
+        )
+
+        # Check if switching backends with --force
+        if force and existing_backend != vector_store:
+            console.print(
+                "⚠️  Backend switch detected: {} → {}".format(
+                    existing_backend, vector_store
+                ),
+                style="yellow bold",
+            )
+            console.print()
+            console.print(
+                "🔄 Switching vector storage backends requires:", style="yellow"
+            )
+            console.print("   • Removing existing vector index data", style="blue")
+            console.print("   • Re-indexing your entire codebase", style="blue")
+            console.print("   • Your source code files are preserved", style="green")
+            console.print()
+            console.print(
+                "💡 Recommended workflow for backend switching:", style="cyan"
+            )
+            console.print("   1. cidx stop", style="dim")
+            console.print("   2. cidx uninstall --confirm", style="dim")
+            console.print(f"   3. cidx init --vector-store {vector_store}", style="dim")
+            console.print("   4. cidx start", style="dim")
+            console.print("   5. cidx index", style="dim")
+            console.print()
+
+            from rich.prompt import Confirm
+
+            if not Confirm.ask(
+                "Proceed with backend switch (will overwrite config)?", default=False
+            ):
+                console.print("❌ Backend switch cancelled", style="yellow")
+                sys.exit(0)
+
+        # Special case: if only --create-override-file is requested, allow it
+        if not force and create_override_file:
+            # Load existing config and create override file
+            config = existing_config
+            project_root = config.codebase_dir
+            if _create_default_override_file(project_root, force=False):
+                console.print(
+                    "📝 Created .code-indexer-override.yaml for project-level file filtering"
+                )
+                console.print("✅ Override file created successfully")
+            else:
+                console.print("📝 Override file already exists, not overwriting")
+                console.print("Use --force to overwrite existing override file")
+            return
+        elif not force:
+            console.print(
+                f"❌ Configuration already exists at {config_manager.config_path}"
+            )
+            console.print("Use --force to overwrite")
+            sys.exit(1)
+
+    try:
+        # Interactive configuration if requested
+        if interactive:
+            console.print("🔧 Interactive configuration setup")
+            console.print("=" * 50)
+
+            # Provider selection
+            from .services.embedding_factory import EmbeddingProviderFactory
+
+            provider_info = EmbeddingProviderFactory.get_provider_info()
+
+            console.print("\n📡 Available embedding providers:")
+            for provider, info in provider_info.items():
+                console.print(f"  • {provider}: {info['description']}")
+                if info.get("requires_api_key"):
+                    console.print(
+                        f"    Requires API key: {info.get('api_key_env', 'N/A')}"
+                    )
+
+            # Only VoyageAI is supported in v8.0+
+            embedding_provider = "voyage-ai"
+            if not os.getenv("VOYAGE_API_KEY"):
+                console.print(
+                    "⚠️  Warning: VOYAGE_API_KEY environment variable not set!",
+                    style="yellow",
+                )
+                console.print("You'll need to set it before using VoyageAI:")
+                console.print("export VOYAGE_API_KEY=your_api_key_here")
+
+                # Prompt for VoyageAI model
+                voyage_model = click.prompt("VoyageAI model", default="voyage-code-3")
+
+        # Create default config with target_dir for proper initialization
+        # target_dir respects --codebase-dir parameter
+        config = Config(codebase_dir=target_dir)
+        config_manager._config = config
+
+        # Update config with provided options
+        updates: Dict[str, Any] = {}
+
+        # Set embedding provider
+        updates["embedding_provider"] = embedding_provider
+
+        # Set vector store backend
+        from .config import VectorStoreConfig
+
+        # Cast to Literal["filesystem"] - vector_store is validated by click.Choice to only allow "filesystem"
+        updates["vector_store"] = VectorStoreConfig(
+            provider=cast(Literal["filesystem"], vector_store)
+        ).model_dump()
+
+        # Provider-specific configuration
+        if embedding_provider == "voyage-ai":
+            voyage_ai_config = config.voyage_ai.model_dump()
+            voyage_ai_config["model"] = voyage_model
+            voyage_ai_config["tokens_per_minute"] = (
+                1000000  # Set default to avoid rate limiting
+            )
+            updates["voyage_ai"] = voyage_ai_config
+            # Note: Vector size is determined dynamically by embedding provider
+            # voyage-code-3: 1024 dimensions, voyage-large-2: 1536 dimensions
+
+        # Indexing configuration updates
+        if max_file_size is not None:
+            indexing_config = config.indexing.model_dump()
+            indexing_config["max_file_size"] = max_file_size
+            updates["indexing"] = indexing_config
+
+        # filesystem_segment_size parameter removed in v8.0 (Filesystem backend removed)
+        # FilesystemVectorStore doesn't require segment size configuration
+
+        # Conditionally allocate ports based on vector store backend
+        # Filesystem backend doesn't need containers, so no port allocation
+        # Apply updates if any (project_ports/project_containers removed in v8.0)
+        if updates:
+            config = config_manager.update_config(**updates)
+
+        # Save with documentation
+        config_manager.save_with_documentation(config)
+
+        # Initialize vector storage backend
+
+        backend = BackendFactory.create(config=config, project_root=config.codebase_dir)
+        try:
+            backend.initialize()
+            console.print(
+                f"✅ Initialized {config.vector_store.provider} vector storage backend"  # type: ignore
+            )
+        except Exception as e:
+            console.print(
+                f"⚠️  Warning: Failed to initialize backend: {e}", style="yellow"
+            )
+
+        # Create filesystem storage directory proactively during init to prevent race condition
+        # Only needed for filesystem backend
+        if config.vector_store and config.vector_store.provider == "filesystem":  # type: ignore
+            project_filesystem_dir = (
+                config.codebase_dir / ".code-indexer" / "filesystem"
+            )
+            project_filesystem_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create override file (by default or if explicitly requested)
+        project_root = config.codebase_dir
+        if (
+            create_override_file
+            or not (project_root / ".code-indexer-override.yaml").exists()
+        ):
+            if _create_default_override_file(project_root, force=force):
+                console.print(
+                    "📝 Created .code-indexer-override.yaml for project-level file filtering"
+                )
+
+        # Create language mappings file (proactive creation during init)
+        from .utils.yaml_utils import create_language_mappings_yaml
+
+        language_mappings_created = create_language_mappings_yaml(
+            config_manager.config_path.parent, force=force
+        )
+
+        if language_mappings_created:
+            console.print(
+                "📚 Created language-mappings.yaml for query language filtering"
+            )
+
+        console.print(f"✅ Initialized configuration at {config_manager.config_path}")
+        console.print(
+            f"📖 Documentation created at {config_manager.config_path.parent / 'README.md'}"
+        )
+        console.print(f"📁 Codebase directory: {config.codebase_dir}")
+        console.print(f"📏 Max file size: {config.indexing.max_file_size:,} bytes")
+        console.print(
+            "📦 Chunking: Model-aware sizing (voyage-code-3: 4096, voyage-multimodal-3: 4096)"
+        )
+
+        # Show configured embedding provider and models
+        provider_name = config.embedding_provider
+        if provider_name == "voyage-ai":
+            from .config import VOYAGE_MULTIMODAL_MODEL
+
+            console.print(f"Using: {config.voyage_ai.model}, {VOYAGE_MULTIMODAL_MODEL}")
+            if not os.getenv("VOYAGE_API_KEY"):
+                console.print(
+                    "⚠️  Remember to set VOYAGE_API_KEY environment variable!",
+                    style="yellow",
+                )
+
+        console.print("🔧 Run 'code-indexer start' to start services")
+
+        # Enable daemon mode if requested
+        if daemon:
+            try:
+                config_manager.enable_daemon(ttl_minutes=daemon_ttl)
+                console.print(
+                    f"✅ Daemon mode enabled (Cache TTL: {daemon_ttl} minutes)",
+                    style="green",
+                )
+                console.print("ℹ️  Daemon will auto-start on first query", style="dim")
+            except ValueError as e:
+                console.print(f"❌ Invalid daemon TTL: {e}", style="red")
+                sys.exit(1)
+
+    except Exception as e:
+        console.print(f"❌ Failed to initialize: {e}", style="red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option(
+    "--show",
+    is_flag=True,
+    help="Display current configuration",
+)
+@click.option(
+    "--daemon/--no-daemon",
+    default=None,
+    help="Enable or disable daemon mode",
+)
+@click.option(
+    "--daemon-ttl",
+    type=int,
+    help="Update cache TTL in minutes for daemon mode",
+)
+@click.option(
+    "--set-diff-context",
+    type=int,
+    help="Set default diff context lines for temporal indexing (0-50, default: 5)",
+)
+@click.pass_context
+def config(
+    ctx,
+    show: bool,
+    daemon: Optional[bool],
+    daemon_ttl: Optional[int],
+    set_diff_context: Optional[int],
+):
+    """Manage repository configuration.
+
+    \b
+    Configure daemon mode and other repository settings.
+
+    \b
+    EXAMPLES:
+      cidx config --show                    # Display current config
+      cidx config --daemon                  # Enable daemon mode
+      cidx config --no-daemon               # Disable daemon mode
+      cidx config --daemon-ttl 20           # Set TTL to 20 minutes
+      cidx config --daemon --daemon-ttl 30  # Enable daemon with 30min TTL
+
+    \b
+    DAEMON MODE:
+      Daemon mode optimizes performance by keeping indexed data in memory
+      and providing faster query responses. The daemon auto-starts on
+      first query and auto-shuts down after idle timeout.
+    """
+    # Get config_manager from context (set by main CLI function with backtracking)
+    config_manager = ctx.obj.get("config_manager")
+
+    # If no config_manager in context, fall back to backtracking from cwd
+    if not config_manager:
+        config_manager = ConfigManager.create_with_backtrack(Path.cwd())
+
+    # Check if config exists
+    if not config_manager.config_path.exists():
+        console.print("❌ No CIDX configuration found", style="red")
+        console.print()
+        console.print("Initialize a repository first:")
+        console.print("  cidx init", style="cyan")
+        console.print()
+        console.print("Or navigate to an initialized repository directory")
+        sys.exit(1)
+
+    # Handle --show
+    if show:
+        try:
+            config = config_manager.load()
+            daemon_config = config_manager.get_daemon_config()
+
+            console.print()
+            console.print("[bold cyan]Repository Configuration[/bold cyan]")
+            console.print("─" * 50)
+            console.print()
+
+            # Daemon mode status
+            daemon_status = "Enabled" if daemon_config["enabled"] else "Disabled"
+            status_style = "green" if daemon_config["enabled"] else "yellow"
+            console.print(
+                f"  Daemon Mode:    [{status_style}]{daemon_status}[/{status_style}]"
+            )
+
+            if daemon_config["enabled"]:
+                console.print(
+                    f"  Cache TTL:      {daemon_config['ttl_minutes']} minutes"
+                )
+                auto_start = daemon_config.get("auto_start", True)
+                console.print(f"  Auto-start:     {'Yes' if auto_start else 'No'}")
+                auto_shutdown = daemon_config["auto_shutdown_on_idle"]
+                console.print(f"  Auto-shutdown:  {'Yes' if auto_shutdown else 'No'}")
+
+                # Show socket path
+                socket_path = config_manager.get_socket_path()
+                console.print(f"  Socket Path:    {socket_path}")
+
+            console.print()
+
+            # Temporal indexing configuration
+            console.print("[bold cyan]Temporal Indexing[/bold cyan]")
+            console.print("─" * 50)
+            console.print()
+
+            if hasattr(config, "temporal") and config.temporal:
+                diff_context = config.temporal.diff_context_lines
+                console.print(f"  Diff Context:   {diff_context} lines", end="")
+                if diff_context == 5:
+                    console.print(" (default)", style="dim")
+                else:
+                    console.print(" (custom)", style="yellow")
+            else:
+                console.print("  Diff Context:   5 lines (default)", style="dim")
+
+            console.print()
+            return 0
+
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+    # Handle configuration updates
+    update_performed = False
+
+    if daemon is not None:
+        try:
+            if daemon:
+                config_manager.enable_daemon()
+                console.print("✅ Daemon mode enabled", style="green")
+                console.print("ℹ️  Daemon will auto-start on first query", style="dim")
+            else:
+                config_manager.disable_daemon()
+                console.print("✅ Daemon mode disabled", style="green")
+                console.print("ℹ️  Queries will run in standalone mode", style="dim")
+            update_performed = True
+        except Exception as e:
+            console.print(f"❌ Failed to update daemon mode: {e}", style="red")
+            sys.exit(1)
+
+    if daemon_ttl is not None:
+        try:
+            config_manager.update_daemon_ttl(daemon_ttl)
+            console.print(
+                f"✅ Cache TTL updated to {daemon_ttl} minutes", style="green"
+            )
+            update_performed = True
+        except ValueError as e:
+            console.print(f"❌ Invalid daemon TTL: {e}", style="red")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to update daemon TTL: {e}", style="red")
+            sys.exit(1)
+
+    if set_diff_context is not None:
+        try:
+            # Validate range
+            if set_diff_context < 0 or set_diff_context > 50:
+                console.print(
+                    f"❌ Invalid diff-context {set_diff_context}. Valid range: 0-50",
+                    style="red",
+                )
+                sys.exit(1)
+
+            # Load config, update temporal settings, and save
+            from .config import TemporalConfig
+
+            config = config_manager.load()
+            if not hasattr(config, "temporal") or config.temporal is None:
+                config.temporal = TemporalConfig(diff_context_lines=set_diff_context)
+            else:
+                config.temporal.diff_context_lines = set_diff_context
+            config_manager.save(config)
+
+            console.print(
+                f"✅ Diff context set to {set_diff_context} lines", style="green"
+            )
+            update_performed = True
+        except Exception as e:
+            console.print(f"❌ Failed to update diff-context: {e}", style="red")
+            sys.exit(1)
+
+    # If no operations performed, show help message
+    if not update_performed and not show:
+        console.print("ℹ️  No configuration changes requested", style="yellow")
+        console.print()
+        console.print("Use --show to display current configuration")
+        console.print("Use --daemon or --no-daemon to toggle daemon mode")
+        console.print("Use --daemon-ttl <minutes> to update cache TTL")
+        console.print()
+        console.print("Run 'cidx config --help' for more information")
+        return 0
+
+    return 0
+
+
+# NOTE: Legacy Filesystem container 'start' command removed (Story #505)
+# Daemon start command is now at line ~15776: @cli.command("start")
+# The old start() function with Filesystem container setup has been removed
+# as it was dead code (overridden by daemon start_command)
+
+
+def validate_index_flags(ctx, param, value):
+    """Validate flag combinations for the index command before execution."""
+    if not value:
+        return value
+
+    # Access all params - they're stored in ctx.params as options are processed
+    params = ctx.params
+
+    # Check for --detect-deletions + --reconcile conflict
+    if param.name == "detect_deletions" and value:
+        if params.get("reconcile"):
+            console.print(
+                "❌ Cannot use --detect-deletions with --reconcile", style="red"
+            )
+            console.print(
+                "💡 --reconcile mode includes deletion detection automatically",
+                style="yellow",
+            )
+            ctx.exit(1)
+
+    if param.name == "reconcile" and value:
+        if params.get("detect_deletions"):
+            console.print(
+                "❌ Cannot use --detect-deletions with --reconcile", style="red"
+            )
+            console.print(
+                "💡 --reconcile mode includes deletion detection automatically",
+                style="yellow",
+            )
+            ctx.exit(1)
+
+    return value
+
+
+@cli.command("set-global-refresh")
+@click.argument("interval", type=int)
+def set_global_refresh_interval(interval: int):
+    """Set global repository refresh interval (minimum 60 seconds).
+
+    \b
+    EXAMPLE:
+        cidx set-global-refresh 300
+    """
+    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+    import os
+
+    golden_repos_dir = os.environ.get(
+        "GOLDEN_REPOS_DIR", os.path.expanduser("~/.code-indexer/golden-repos")
+    )
+
+    ops = GlobalRepoOperations(golden_repos_dir)
+    try:
+        ops.set_config(interval)
+        console.print(
+            f"[green]Updated global refresh interval to {interval} seconds[/green]"
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(4)
+
+
+@cli.command("show-global")
+def show_global_config():
+    """Show current global repository configuration.
+
+    \b
+    EXAMPLE:
+        cidx show-global
+    """
+    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+    import os
+
+    golden_repos_dir = os.environ.get(
+        "GOLDEN_REPOS_DIR", os.path.expanduser("~/.code-indexer/golden-repos")
+    )
+
+    ops = GlobalRepoOperations(golden_repos_dir)
+    config = ops.get_config()
+
+    console.print("\n[bold]Global Repository Configuration[/bold]")
+    console.print(f"Refresh Interval: {config['refresh_interval']} seconds")
+    console.print()
+
+
+def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
+    """Return per-provider metadata path with backward-compat migration.
+
+    Returns config_dir / f"metadata-{provider_name}.json".
+
+    Migration for voyage-ai: if metadata-voyage-ai.json does not exist but
+    metadata.json does, a symlink is created so existing incremental state is
+    preserved. If the filesystem does not support symlinks (PermissionError,
+    NotImplementedError, AttributeError), the file is copied instead and a
+    warning is logged. New providers always receive a fresh metadata file,
+    which forces a full index on first use.
+    """
+    provider_metadata = config_dir / f"metadata-{provider_name}.json"
+    if provider_metadata.exists():
+        return provider_metadata
+
+    legacy_metadata = config_dir / "metadata.json"
+    if provider_name == "voyage-ai" and legacy_metadata.exists():
+        import shutil
+
+        shutil.copy2(str(legacy_metadata), str(provider_metadata))
+        return provider_metadata
+
+    return provider_metadata
+
+
+@cli.command()
+@click.option(
+    "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
+)
+@click.option(
+    "--reconcile",
+    "-r",
+    is_flag=True,
+    callback=validate_index_flags,
+    help="Reconcile disk files with database and index missing files + timestamp-based changes",
+)
+@click.option(
+    "--batch-size", "-b", default=50, help="Batch size for processing (default: 50)"
+)
+@click.option(
+    "--files-count-to-process",
+    type=int,
+    default=None,
+    hidden=True,
+    help="Internal: Stop after processing N files (for testing)",
+)
+@click.option(
+    "--detect-deletions",
+    is_flag=True,
+    callback=validate_index_flags,
+    help="Detect and handle files deleted from filesystem but still in database (for standard indexing only; --reconcile includes this automatically)",
+)
+@click.option(
+    "--rebuild-indexes",
+    is_flag=True,
+    help="Rebuild payload indexes for optimal performance",
+)
+@click.option(
+    "--rebuild-index",
+    is_flag=True,
+    help="Rebuild HNSW index from existing vector files (filesystem backend only)",
+)
+@click.option(
+    "--fts",
+    is_flag=True,
+    help="Build full-text search index alongside semantic index (requires tantivy)",
+)
+@click.option(
+    "--rebuild-fts-index",
+    is_flag=True,
+    help="Rebuild ONLY the FTS index from already-indexed files (does not touch semantic vectors)",
+)
+@click.option(
+    "--index-commits",
+    is_flag=True,
+    help="Index git commit history for temporal search (current branch only by default)",
+)
+@click.option(
+    "--all-branches",
+    is_flag=True,
+    help="Index all branches (requires --index-commits, may increase storage significantly)",
+)
+@click.option(
+    "--max-commits",
+    type=int,
+    help="Maximum number of commits to index per branch (default: all)",
+)
+@click.option(
+    "--since-date",
+    type=str,
+    help="Index commits since date (YYYY-MM-DD format)",
+)
+@click.option(
+    "--diff-context",
+    type=int,
+    default=None,
+    help="Number of context lines for git diffs (0-50, default: 5). "
+    "Higher values improve search quality but increase storage.",
+)
+@click.option(
+    "--progress-json",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
+    "Used by the server's background worker to stream progress updates.",
+)
+@click.pass_context
+@require_mode("local")
+def index(
+    ctx,
+    clear: bool,
+    reconcile: bool,
+    batch_size: int,
+    files_count_to_process: Optional[int],
+    detect_deletions: bool,
+    rebuild_indexes: bool,
+    rebuild_index: bool,
+    fts: bool,
+    rebuild_fts_index: bool,
+    index_commits: bool,
+    all_branches: bool,
+    max_commits: Optional[int],
+    since_date: Optional[str],
+    diff_context: Optional[int],
+    progress_json: bool = False,
+):
+    """Index the codebase for semantic search.
+
+    \b
+    Processes all files in your codebase and creates vector embeddings
+    for semantic search. Uses git-aware processing to track changes.
+
+    \b
+    WHAT GETS INDEXED:
+      • Files matching configured file_extensions
+      • Excludes directories in exclude_dirs configuration
+      • Respects .gitignore patterns automatically
+      • Files under max_file_size limit
+
+    \b
+    GIT INTEGRATION:
+      • Tracks current branch and commit
+      • Associates code with git metadata
+      • Enables branch-aware search
+      • Detects file changes and modifications
+
+    \b
+    PROGRESS TRACKING:
+      • Real-time progress bar with file names
+      • Processing speed and time estimates
+      • Error reporting for failed files
+      • Throttling status indicators (VoyageAI only):
+        ⚡ Full speed - no throttling detected
+        🔴 Server throttling - API rate limits detected, backing off automatically
+
+    \b
+    SMART INDEXING:
+      • Automatically detects previous indexing state
+      • Performs incremental updates for modified files only
+      • Includes 1-minute safety buffer for reliability
+      • Handles provider/model changes intelligently
+
+    \b
+    RECONCILIATION:
+      • Automatically saves progress during indexing
+      • Can resume interrupted operations from where they left off
+      • Use --reconcile to compare disk files with database and index missing/modified files
+      • For non-git projects: compares file modification timestamps
+      • For git projects: primarily detects missing files and uses indexing timestamps as fallback
+      • Shows remaining files count in status command
+      • --reconcile mode ALWAYS includes deletion detection automatically
+
+    \b
+    DELETION DETECTION:
+      • Standard indexing ignores deleted files (leaves stale database entries)
+      • Use --detect-deletions with standard indexing to clean up deleted files
+      • Git projects: soft delete (hides files in current branch, preserves history)
+      • Non-git projects: hard delete (removes files completely from database)
+      • NOT needed with --reconcile (deletion detection always included)
+      • NOT useful with --clear (collection is emptied and rebuilt anyway)
+
+    \b
+    PERFORMANCE TUNING:
+      • Vector calculations can be parallelized for faster indexing
+      • VoyageAI default: 8 threads (API supports parallel requests)
+      • Configure thread count in config.json: voyage_ai.parallel_requests
+
+    \b
+    EXAMPLES:
+      code-indexer index                 # Smart incremental indexing
+      code-indexer index --clear         # Force full reindex (clears existing data)
+      code-indexer index --rebuild-index    # Rebuild HNSW index from vectors
+      code-indexer index --reconcile     # Reconcile disk vs database and index missing/modified files
+      code-indexer index --detect-deletions  # Standard indexing + cleanup deleted files
+      code-indexer index -b 100          # Larger batch size for speed
+      code-indexer index -p 4           # Use 4 parallel threads for vector calculations
+      code-indexer index -p 1           # Force single-threaded for debugging
+
+    \b
+    STORAGE:
+      Vector data stored in: .code-indexer/index/ (per-project)
+      Filesystem backend stores vectors as optimized JSON files.
+    """
+    config_manager = ctx.obj["config_manager"]
+
+    # H2: When --progress-json is active, redirect the module-level console to
+    # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.
+    global console
+    if progress_json:
+        console = Console(stderr=True)
+
+    # Validate --diff-context flag (must happen before daemon delegation)
+    if diff_context is not None and not index_commits:
+        console.print(
+            "❌ Cannot use --diff-context without --index-commits",
+            style="red",
+        )
+        sys.exit(1)
+
+    if diff_context is not None:
+        # Validate diff context value
+        if diff_context < 0 or diff_context > 50:
+            console.print(
+                f"❌ Invalid diff-context {diff_context}. Valid range: 0-50",
+                style="red",
+            )
+            console.print(
+                "💡 Recommended values: 0 (minimal), 5 (default), 10 (maximum quality)",
+                style="yellow",
+            )
+            sys.exit(1)
+
+        if diff_context > 20:
+            console.print(
+                f"⚠️  Large diff context ({diff_context} lines) will significantly increase storage",
+                style="yellow",
+            )
+            console.print(
+                "💡 Recommended range: 3-10 lines for best balance", style="dim"
+            )
+
+    # Check if daemon mode is enabled and delegate accordingly
+    config = config_manager.load()
+    daemon_enabled = config.daemon and config.daemon.enabled
+
+    # Handle --rebuild-fts-index BEFORE general daemon delegation
+    if rebuild_fts_index and daemon_enabled:
+        from .cli_daemon_delegation import rebuild_fts_via_daemon
+
+        exit_code = rebuild_fts_via_daemon(config_manager, console)
+        sys.exit(exit_code)
+
+    if daemon_enabled:
+        # Check for unsupported flags in daemon mode
+        # Note: rebuild_fts_index is now supported via RPC endpoint
+        if rebuild_indexes or rebuild_index:
+            console.print(
+                "❌ Rebuild flags (--rebuild-indexes, --rebuild-index) "
+                "are not yet supported in daemon mode",
+                style="red",
+            )
+            console.print(
+                "💡 Use local mode for rebuild operations: cidx config --no-daemon",
+                style="yellow",
+            )
+            sys.exit(1)
+
+        # Delegate to daemon with all parameters
+        from .cli_daemon_delegation import _index_via_daemon
+
+        exit_code = _index_via_daemon(
+            force_reindex=clear,
+            daemon_config=config.daemon.model_dump(),  # config.daemon is guaranteed to exist here
+            enable_fts=fts,
+            batch_size=batch_size,
+            reconcile=reconcile,
+            files_count_to_process=files_count_to_process,
+            detect_deletions=detect_deletions,
+            index_commits=index_commits,
+            all_branches=all_branches,
+            max_commits=max_commits,
+            since_date=since_date,
+            diff_context=diff_context,
+        )
+        sys.exit(exit_code)
+    else:
+        # Display mode indicator
+        console.print("🔧 Running in local mode", style="blue")
+
+        # Validate flag combinations
+        if detect_deletions and reconcile:
+            console.print(
+                "❌ Cannot use --detect-deletions with --reconcile",
+                style="red",
+            )
+            console.print(
+                "💡 --reconcile mode includes deletion detection automatically",
+                style="yellow",
+            )
+            sys.exit(1)
+
+        if detect_deletions and clear:
+            console.print(
+                "⚠️  Warning: --detect-deletions is redundant with --clear",
+                style="yellow",
+            )
+            console.print(
+                "💡 --clear empties the collection completely, making deletion detection unnecessary",
+                style="yellow",
+            )
+
+        # Validate temporal indexing flags
+        if all_branches and not index_commits:
+            console.print(
+                "❌ Cannot use --all-branches without --index-commits",
+                style="red",
+            )
+            console.print(
+                "💡 Use: cidx index --index-commits --all-branches",
+                style="yellow",
+            )
+            sys.exit(1)
+
+        if max_commits and not index_commits:
+            console.print(
+                "❌ Cannot use --max-commits without --index-commits",
+                style="red",
+            )
+            sys.exit(1)
+
+        if since_date and not index_commits:
+            console.print(
+                "❌ Cannot use --since-date without --index-commits",
+                style="red",
+            )
+            sys.exit(1)
+
+        # Validate --diff-context flag
+        if diff_context is not None and not index_commits:
+            console.print(
+                "❌ Cannot use --diff-context without --index-commits",
+                style="red",
+            )
+            sys.exit(1)
+
+        if diff_context is not None:
+            # Validate diff context value
+            if diff_context < 0 or diff_context > 50:
+                console.print(
+                    f"❌ Invalid diff-context {diff_context}. Valid range: 0-50",
+                    style="red",
+                )
+                console.print(
+                    "💡 Recommended values: 0 (minimal), 5 (default), 10 (maximum quality)",
+                    style="yellow",
+                )
+                sys.exit(1)
+
+            if diff_context > 20:
+                console.print(
+                    f"⚠️  Large diff context ({diff_context} lines) will significantly increase storage",
+                    style="yellow",
+                )
+                console.print(
+                    "💡 Recommended range: 3-10 lines for best balance", style="dim"
+                )
+
+        # Handle --index-commits flag (standalone mode only - daemon delegates above)
+        if index_commits:
+            try:
+                # Lazy import temporal indexing components
+                from .services.temporal.temporal_indexer import TemporalIndexer
+                from .storage.filesystem_vector_store import FilesystemVectorStore
+
+                config = config_manager.load()
+
+                # Apply diff_context override if provided
+                if diff_context is not None:
+                    from .config import TemporalConfig
+
+                    if not hasattr(config, "temporal") or config.temporal is None:
+                        config.temporal = TemporalConfig(
+                            diff_context_lines=diff_context
+                        )
+                    else:
+                        config.temporal.diff_context_lines = diff_context
+                    # Update config manager so TemporalIndexer sees the override
+                    config_manager._config = config
+
+                # Initialize vector store
+                index_dir = config.codebase_dir / ".code-indexer" / "index"
+                vector_store = FilesystemVectorStore(
+                    base_path=index_dir, project_root=config.codebase_dir
+                )
+
+                # Check if --clear flag is set for temporal collection
+                if clear:
+                    console.print("🧹 Clearing temporal index...", style="cyan")
+                    from .services.temporal.temporal_collection_naming import (
+                        clear_all_temporal_collections,
+                    )
+
+                    cleared_count = clear_all_temporal_collections(
+                        index_dir, vector_store
+                    )
+                    if cleared_count == 0:
+                        console.print(
+                            "No existing temporal collections found. Starting fresh index."
+                        )
+                    console.print("✅ Temporal index cleared", style="green")
+
+                # Bug #642 Step 1: run migration BEFORE resolving the collection name.
+                # Without this, TemporalIndexer is constructed with the new provider-aware
+                # path before the legacy directory has been renamed, so temporal_meta.json
+                # is not found and last_commit = None -> full git log with no limit.
+                migrate_legacy_temporal_collection(index_dir, config)
+
+                # Initialize temporal indexer with provider-aware collection name
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    resolve_temporal_collection_from_config,
+                )
+
+                _temporal_coll_name = resolve_temporal_collection_from_config(config)
+                temporal_indexer = TemporalIndexer(
+                    config_manager, vector_store, collection_name=_temporal_coll_name
+                )
+
+                # Cost estimation warning for all-branches (no confirmation prompt)
+                if all_branches:
+                    # Get branch count for cost warning
+                    try:
+                        import subprocess
+
+                        result = subprocess.run(
+                            ["git", "branch", "-a"],
+                            cwd=config.codebase_dir,
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        branch_count = len(
+                            [
+                                line
+                                for line in result.stdout.split("\n")
+                                if line.strip() and not line.strip().startswith("*")
+                            ]
+                        )
+
+                        if branch_count > 50:
+                            console.print(
+                                f"⚠️  [yellow]Indexing all branches will process {branch_count} branches[/yellow]",
+                                markup=True,
+                            )
+                            console.print(
+                                "   This may significantly increase storage and API costs.",
+                                style="yellow",
+                            )
+                            console.print()
+                            # NOTE: Removed confirmation prompt to enable batch/automated usage
+                            # Proceeding directly with indexing as requested by user
+                    except subprocess.CalledProcessError:
+                        pass  # Ignore git command failures
+
+                # Initialize progress managers for rich slot-based display
+                from .progress import MultiThreadedProgressManager
+                from .progress.progress_display import RichLiveProgressManager
+
+                # Get parallel processing thread count for display slots
+                parallel_threads = (
+                    getattr(config.voyage_ai, "parallel_requests", 8)
+                    if hasattr(config, "voyage_ai")
+                    else 8
+                )
+
+                # Create Rich Live progress manager for bottom-anchored display
+                rich_live_manager = RichLiveProgressManager(console=console)
+                progress_manager = MultiThreadedProgressManager(
+                    console=console,
+                    live_manager=rich_live_manager,
+                    max_slots=parallel_threads,  # FIX Issue 1: Match TemporalIndexer's CleanSlotTracker slot count
+                )
+
+                display_initialized = False
+
+                def show_setup_message(message: str):
+                    """Display setup/informational messages as scrolling cyan text."""
+                    rich_live_manager.handle_setup_message(message)
+
+                def update_commit_progress(
+                    current: int,
+                    total: int,
+                    info: str,
+                    concurrent_files=None,
+                    slot_tracker=None,
+                ):
+                    """Update commit processing progress with slot-based display."""
+                    nonlocal display_initialized
+
+                    # Initialize Rich Live display on first call
+                    if not display_initialized:
+                        rich_live_manager.start_bottom_display()
+                        display_initialized = True
+
+                    # Parse progress info for metrics if available
+                    try:
+                        # FIX Issue 2: Extract rate from info (handles both "files/s" and "commits/s")
+                        # Info format: "current/total commits (%) | X.X commits/s | Y.Y KB/s | ..."
+                        parts = info.split(" | ")
+                        if len(parts) >= 2:
+                            rate_str = parts[1].strip()
+                            # Extract numeric value from "X.X commits/s" or "X.X files/s"
+                            rate_parts = rate_str.split()
+                            if len(rate_parts) >= 1:
+                                files_per_second = float(rate_parts[0])
+                            else:
+                                files_per_second = 0.0
+                        else:
+                            files_per_second = 0.0
+
+                        # Parse KB/s from parts[2] if available
+                        if len(parts) >= 3:
+                            kb_str = parts[2].strip()
+                            kb_parts = kb_str.split()
+                            if len(kb_parts) >= 1:
+                                kb_per_second = float(kb_parts[0])
+                            else:
+                                kb_per_second = 0.0
+                        else:
+                            kb_per_second = 0.0
+                    except (ValueError, IndexError):
+                        files_per_second = 0.0
+                        kb_per_second = 0.0
+
+                    # Update MultiThreadedProgressManager with rich display
+                    progress_manager.update_complete_state(
+                        current=current,
+                        total=total,
+                        files_per_second=files_per_second,
+                        kb_per_second=kb_per_second,  # Parsed from info string
+                        active_threads=parallel_threads,
+                        concurrent_files=concurrent_files or [],
+                        slot_tracker=slot_tracker,
+                        info=info,
+                        item_type="commits",
+                    )
+
+                    # Get integrated display content (Rich Table) and update Rich Live bottom-anchored display
+                    rich_table = progress_manager.get_integrated_display()
+                    rich_live_manager.async_handle_progress_update(rich_table)
+
+                if progress_json:
+                    # AC6: --progress-json active — emit JSON lines, suppress Rich display
+                    from .services.progress_phase_allocator import emit_progress_json
+
+                    def progress_callback(  # type: ignore[misc]
+                        current: int,
+                        total: int,
+                        path=None,
+                        info: str = "",
+                        concurrent_files=None,
+                        slot_tracker=None,
+                        item_type: str = "commits",
+                    ):
+                        """JSON-emitting progress callback for --progress-json mode."""
+                        if total and total > 0:
+                            emit_progress_json(current=current, total=total, info=info)
+
+                    # M4: Attach no-op implementations so indexing code that calls these
+                    # attributes does not raise AttributeError in --progress-json mode.
+                    progress_callback.show_setup_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.update_file_progress = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.show_error_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+                    progress_callback.check_for_interruption = lambda: None  # type: ignore[attr-defined]
+                    progress_callback.reset_progress_timers = lambda: None  # type: ignore[attr-defined]
+
+                else:
+
+                    def progress_callback(  # type: ignore[misc]
+                        current: int,
+                        total: int,
+                        path: Path,
+                        info: str = "",
+                        concurrent_files=None,
+                        slot_tracker=None,
+                        item_type: str = "commits",
+                    ):
+                        """Multi-threaded progress callback - uses Rich Live progress display."""
+                        # Handle setup messages (total=0)
+                        if info and total == 0:
+                            show_setup_message(info)
+                            return
+
+                        # Handle commit progress (total>0)
+                        if total and total > 0:
+                            update_commit_progress(
+                                current, total, info, concurrent_files, slot_tracker
+                            )
+                            return
+
+                # Run temporal indexing
+                console.print(
+                    "🕒 Starting temporal git history indexing...", style="cyan"
+                )
+                if all_branches:
+                    console.print("   Mode: All branches", style="cyan")
+                else:
+                    console.print("   Mode: Current branch only", style="cyan")
+
+                # Compute total provider count before any provider runs so
+                # _make_offset_callback can normalise progress across all of them.
+                from .services.embedding_factory import (
+                    EmbeddingProviderFactory as _EPF_pre,
+                )
+
+                _num_temporal_providers = len(_EPF_pre.get_configured_providers(config))
+                if _num_temporal_providers < 1:
+                    _num_temporal_providers = 1
+
+                indexing_result = temporal_indexer.index_commits(
+                    all_branches=all_branches,
+                    max_commits=max_commits,
+                    since_date=since_date,
+                    progress_callback=_make_offset_callback(
+                        progress_callback, 0, _num_temporal_providers
+                    ),
+                    reconcile=reconcile,
+                )
+
+                # Stop Rich Live display before showing results
+                if display_initialized:
+                    rich_live_manager.stop_display()
+
+                # Display results
+                console.print()
+                console.print("✅ Temporal indexing completed!", style="green bold")
+                console.print(
+                    f"   Total commits processed: {indexing_result.total_commits}",
+                    style="green",
+                )
+                console.print(
+                    f"   Files changed: {indexing_result.files_processed}",
+                    style="green",
+                )
+                console.print(
+                    f"   Vectors created (approx): ~{indexing_result.approximate_vectors_created}",
+                    style="green",
+                )
+                console.print(
+                    f"   Skip ratio: {indexing_result.skip_ratio:.1%}",
+                    style="green",
+                )
+                console.print(
+                    f"   Branches indexed: {', '.join(indexing_result.branches_indexed)}",
+                    style="green",
+                )
+                console.print()
+
+                temporal_indexer.close()
+
+                # Multi-provider temporal loop (Story #640): index remaining providers.
+                from .services.embedding_factory import EmbeddingProviderFactory as _EPF
+                from .services.temporal.temporal_collection_naming import (
+                    resolve_temporal_collection_from_config as _resolve_temporal_coll,
+                )
+
+                _primary_provider = config.embedding_provider
+                _all_temporal_providers = _EPF.get_configured_providers(config)
+                _extra_temporal_providers = [
+                    p for p in _all_temporal_providers if p != _primary_provider
+                ]
+                for _extra_idx, _extra_provider in enumerate(_extra_temporal_providers):
+                    console.print(
+                        f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
+                        style="cyan",
+                    )
+                    _orig_provider = config.embedding_provider
+                    _extra_temporal_indexer = None
+                    try:
+                        # Health check before indexing (audit fix A1)
+                        _extra_embedding = _EPF.create(
+                            config, provider_name=_extra_provider
+                        )
+                        if not _extra_embedding.health_check():
+                            console.print(
+                                f"⚠️  {_extra_provider} health check failed — skipping temporal",
+                                style="yellow",
+                            )
+                            continue
+
+                        config.embedding_provider = _extra_provider  # type: ignore[assignment]
+                        config_manager._config = config
+                        _extra_coll_name = _resolve_temporal_coll(config)
+                        _extra_temporal_indexer = TemporalIndexer(
+                            config_manager,
+                            vector_store,
+                            collection_name=_extra_coll_name,
+                        )
+                        _extra_indexing_result = _extra_temporal_indexer.index_commits(
+                            all_branches=all_branches,
+                            max_commits=max_commits,
+                            since_date=since_date,
+                            progress_callback=_make_offset_callback(
+                                progress_callback,
+                                _extra_idx + 1,
+                                _num_temporal_providers,
+                            ),
+                            reconcile=reconcile,
+                        )
+                        console.print(
+                            f"✅ {_extra_provider}: "
+                            f"{_extra_indexing_result.total_commits} commits",
+                            style="green",
+                        )
+                    finally:
+                        if _extra_temporal_indexer is not None:
+                            _extra_temporal_indexer.close()
+                        config.embedding_provider = _orig_provider  # type: ignore[assignment]
+                        config_manager._config = config
+
+                sys.exit(0)
+
+            except Exception as e:
+                # Enhanced error logging for diagnosing Errno 7 and other failures
+                import traceback
+
+                error_details = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "errno": getattr(e, "errno", None),
+                    "working_directory": str(Path.cwd()),
+                }
+
+                # Log to file for debugging
+                error_log = (
+                    Path.cwd()
+                    / ".code-indexer"
+                    / f"temporal_error_{int(time.time())}.log"
+                )
+                error_log.parent.mkdir(parents=True, exist_ok=True)
+                with open(error_log, "w") as f:
+                    import json
+
+                    json.dump(error_details, f, indent=2)
+
+                console.print(f"❌ Temporal indexing failed: {e}", style="red")
+                console.print(f"💾 Error details saved to: {error_log}", style="yellow")
+
+                if (
+                    ctx.obj.get("verbose") or True
+                ):  # Always show stack trace for debugging
+                    console.print(traceback.format_exc())
+                sys.exit(1)
+
+    # Handle --rebuild-fts-index flag (early exit path)
+    if rebuild_fts_index:
+        try:
+            config = config_manager.load()
+
+            # Check if indexing progress file exists
+            progress_file = config_manager.config_path.parent / "indexing_progress.json"
+            if not progress_file.exists():
+                console.print("❌ No indexing progress found", style="red")
+                console.print(
+                    "💡 Run 'cidx index' first to create the semantic index",
+                    style="yellow",
+                )
+                sys.exit(1)
+
+            # Lazy import FTS components
+            from .services.tantivy_index_manager import TantivyIndexManager
+            from .indexing.file_finder import FileFinder
+
+            console.print("🔍 Discovering files...")
+
+            # Use FileFinder to discover files from disk (respects gitignore, base + override config)
+            # This is 60-180x faster than scanning vector JSONs for large codebases
+            file_finder = FileFinder(config)
+            discovered_files = list(file_finder.find_files())
+
+            if not discovered_files:
+                console.print("❌ No files found to index", style="red")
+                console.print(
+                    "💡 Check your file_extensions and exclude_dirs configuration",
+                    style="yellow",
+                )
+                sys.exit(1)
+
+            console.print("🔧 Rebuilding FTS index...")
+            console.print(f"📄 Found {len(discovered_files)} files")
+
+            # Initialize Tantivy manager
+            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
+            tantivy_manager = TantivyIndexManager(fts_index_dir)
+
+            # Clear and recreate FTS index
+            import shutil
+
+            if fts_index_dir.exists():
+                console.print("🧹 Clearing existing FTS index...")
+                shutil.rmtree(fts_index_dir)
+
+            tantivy_manager.initialize_index(create_new=True)
+            console.print("✅ FTS index initialized")
+
+            # Re-index all completed files to FTS
+            from rich.progress import (
+                Progress,
+                BarColumn,
+                TextColumn,
+                TimeRemainingColumn,
+            )
+
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    "Rebuilding FTS index...", total=len(discovered_files)
+                )
+
+                indexed_count = 0
+                failed_count = 0
+
+                for file_path in discovered_files:
+                    try:
+                        # Read file content (file_path is already a Path object from FileFinder)
+                        if not file_path.exists():
+                            failed_count += 1
+                            progress.advance(task)
+                            continue
+
+                        with open(
+                            file_path, "r", encoding="utf-8", errors="ignore"
+                        ) as f:
+                            content = f.read()
+
+                        # Detect language from file extension
+                        extension = file_path.suffix.lstrip(".")
+                        language = extension if extension else "unknown"
+
+                        # Create FTS document
+                        doc = {
+                            "path": str(file_path),
+                            "content": content,
+                            "content_raw": content,
+                            "identifiers": [],  # Empty for now
+                            "line_start": 1,
+                            "line_end": len(content.splitlines()),
+                            "language": language,
+                        }
+
+                        # Add to FTS index
+                        tantivy_manager.add_document(doc)
+                        indexed_count += 1
+
+                    except Exception as e:
+                        failed_count += 1
+                        console.print(
+                            f"⚠️  Failed to index {file_path}: {e}", style="yellow"
+                        )
+
+                    progress.advance(task)
+
+                # Commit all documents
+                tantivy_manager.commit()
+
+            # Show completion summary
+            console.print("\n✅ FTS index rebuilt successfully")
+            console.print(f"📄 Files indexed: {indexed_count}")
+            if failed_count > 0:
+                console.print(f"⚠️  Failed files: {failed_count}", style="yellow")
+
+            sys.exit(0)
+
+        except Exception as e:
+            console.print(f"❌ FTS rebuild failed: {e}", style="red")
+            import traceback
+
+            if ctx.obj.get("verbose"):
+                console.print(traceback.format_exc(), style="dim")
+            sys.exit(1)
+
+    try:
+        config = config_manager.load()
+
+        # Multi-provider loop (Story #620): read embedding_providers, check API keys.
+        # config.json is never mutated on disk — only in-memory override is used.
+        _all_providers = config.get_embedding_providers()
+        _providers_with_keys = []
+        for _p in _all_providers:
+            if EmbeddingProviderFactory.resolve_api_key(_p) is None:
+                _log_skipped_provider_warning(_p)
+            else:
+                _providers_with_keys.append(_p)
+        if _providers_with_keys:
+            config.embedding_provider = _providers_with_keys[0]  # type: ignore[assignment]
+        _additional_providers = _providers_with_keys[1:]
+
+        # Initialize services - lazy imports for index path
+        from .services.smart_indexer import SmartIndexer
+
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        backend = BackendFactory.create(
+            config=config, project_root=Path(config.codebase_dir)
+        )
+        vector_store_client = backend.get_vector_store_client()
+
+        # Health checks
+        if not embedding_provider.health_check():
+            provider_name = embedding_provider.get_provider_name().title()
+            error_message = get_service_unavailable_message(provider_name, "cidx start")
+            console.print(error_message, style="red")
+            sys.exit(1)
+
+        if not backend.health_check():
+            provider = (
+                config.vector_store.provider if config.vector_store else "Filesystem"
+            )
+            error_message = get_service_unavailable_message(
+                provider.title(), "cidx start"
+            )
+            console.print(error_message, style="red")
+            sys.exit(1)
+
+        # Initialize smart indexer with per-provider metadata (Bug #625, Fix 4/M1).
+        # Each provider gets its own metadata-{provider}.json so incremental state
+        # is not shared across providers.
+        _primary_provider = config.embedding_provider
+        metadata_path = _get_provider_metadata_path(
+            config_manager.config_path.parent, _primary_provider
+        )
+        smart_indexer = SmartIndexer(
+            config, embedding_provider, vector_store_client, metadata_path
+        )
+
+        # Get git status and display
+        git_status = smart_indexer.get_git_status()
+        if git_status["git_available"]:
+            console.print("📂 Git repository detected")
+            console.print(f"🌿 Current branch: {git_status['current_branch']}")
+            console.print(f"📦 Project ID: {git_status['project_id']}")
+        else:
+            console.print(f"📁 Non-git project: {git_status['project_id']}")
+
+        # Use config.json setting directly
+        thread_count = config.voyage_ai.parallel_requests
+        console.print(
+            f"🧵 Vector calculation threads: {thread_count} (from config.json)"
+        )
+
+        # Show indexing strategy
+        if clear:
+            console.print("🧹 Force full reindex requested")
+        elif reconcile:
+            console.print("🔄 Reconciling disk files with database index...")
+        else:
+            indexing_status = smart_indexer.get_indexing_status()
+            if indexing_status["can_resume"]:
+                console.print("🔄 Resuming incremental indexing...")
+                console.print(
+                    f"📊 Previous progress: {indexing_status['files_processed']} files, {indexing_status['chunks_indexed']} chunks"
+                )
+            else:
+                console.print("🆕 No previous index found, performing full index")
+
+        # Create progress tracking with graceful interrupt handling
+        interrupt_handler = None
+
+        # Initialize progress managers for rich display
+        from .progress import MultiThreadedProgressManager
+        from .progress.progress_display import RichLiveProgressManager
+
+        # Create Rich Live progress manager for bottom-anchored display
+        rich_live_manager = RichLiveProgressManager(console=console)
+        progress_manager = MultiThreadedProgressManager(
+            console=console,
+            live_manager=rich_live_manager,
+            max_slots=thread_count + 2,
+        )
+
+        # Connect slot tracker to progress manager for real-time slot display
+        if hasattr(smart_indexer, "slot_tracker") and smart_indexer.slot_tracker:
+            progress_manager.set_slot_tracker(smart_indexer.slot_tracker)
+
+        display_initialized = False
+
+        def show_setup_message(message: str):
+            """Display setup/informational messages as scrolling cyan text."""
+            rich_live_manager.handle_setup_message(message)
+
+        def show_error_message(file_path, error_msg: str):
+            """Display error messages appropriately based on context."""
+            if ctx.obj["verbose"]:
+                rich_live_manager.handle_error_message(file_path, error_msg)
+
+        def update_file_progress_with_concurrent_files(
+            current: int, total: int, info: str, concurrent_files=None
+        ):
+            """Update file processing with concurrent file tracking."""
+            nonlocal display_initialized
+
+            # Initialize Rich Live display on first call
+            if not display_initialized:
+                rich_live_manager.start_bottom_display()
+                display_initialized = True
+
+            # ALWAYS use MultiThreadedProgressManager - NO FALLBACKS
+            # Parse progress info for metrics if available
+            try:
+                parts = info.split(" | ")
+                if len(parts) >= 4:
+                    files_per_second = float(parts[1].replace(" files/s", ""))
+                    kb_per_second = float(parts[2].replace(" KB/s", ""))
+                    threads_text = parts[3]
+                    active_threads = (
+                        int(threads_text.split()[0])
+                        if threads_text.split()
+                        else thread_count
+                    )
+                else:
+                    files_per_second = 0.0
+                    kb_per_second = 0.0
+                    active_threads = thread_count
+            except (ValueError, IndexError):
+                files_per_second = 0.0
+                kb_per_second = 0.0
+                active_threads = thread_count
+
+            # Get slot tracker from smart_indexer
+            slot_tracker = None
+            if hasattr(smart_indexer, "slot_tracker"):
+                slot_tracker = smart_indexer.slot_tracker
+
+            # Update MultiThreadedProgressManager with rich display
+            # Use empty list for concurrent_files if not provided - display will handle it gracefully
+            progress_manager.update_complete_state(
+                current=current,
+                total=total,
+                files_per_second=files_per_second,
+                kb_per_second=kb_per_second,
+                active_threads=active_threads,
+                concurrent_files=concurrent_files or [],
+                slot_tracker=slot_tracker,
+                info=info,  # Pass info for phase detection
+            )
+
+            # Get integrated display content (Rich Table) and update Rich Live bottom-anchored display
+            rich_table = progress_manager.get_integrated_display()
+            rich_live_manager.async_handle_progress_update(
+                rich_table
+            )  # Bug #470 fix - async queue
+
+        def check_for_interruption():
+            """Check if operation was interrupted and return signal."""
+            if interrupt_handler and interrupt_handler.interrupted:
+                return "INTERRUPT"
+            return None
+
+        if progress_json:
+            # AC6: --progress-json active — emit JSON lines, suppress Rich display
+            from .services.progress_phase_allocator import (
+                emit_progress_json as _emit_json,
+            )
+
+            def progress_callback(  # type: ignore[misc]
+                current,
+                total,
+                file_path=None,
+                error=None,
+                info=None,
+                concurrent_files=None,
+                slot_tracker=None,
+            ):
+                """JSON-emitting progress callback for --progress-json mode."""
+                if total and total > 0 and info:
+                    _emit_json(current=current, total=total, info=info or "")
+
+            # M4: Attach no-op implementations so indexing code that calls these
+            # attributes does not raise AttributeError in --progress-json mode.
+            progress_callback.show_setup_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.update_file_progress = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.show_error_message = lambda *a, **kw: None  # type: ignore[attr-defined]
+            progress_callback.check_for_interruption = lambda: None  # type: ignore[attr-defined]
+            progress_callback.reset_progress_timers = lambda: None  # type: ignore[attr-defined]
+
+        else:
+
+            def progress_callback(  # type: ignore[misc]
+                current,
+                total,
+                file_path,
+                error=None,
+                info=None,
+                concurrent_files=None,
+                slot_tracker=None,
+            ):
+                """Multi-threaded progress callback - uses Rich Live progress display."""
+                # Check for interruption first
+                interrupt_result = check_for_interruption()
+                if interrupt_result:
+                    return interrupt_result
+
+                # Handle setup messages (total=0)
+                if info and total == 0:
+                    show_setup_message(info)
+                    return
+
+                # Handle file progress (total>0) with cancellation status
+                if total and total > 0 and info:
+                    # Add cancellation indicator to progress info if interrupted
+                    if interrupt_handler and interrupt_handler.interrupted:
+                        cancellation_info = f"🛑 CANCELLING - {info}"
+                        update_file_progress_with_concurrent_files(
+                            current, total, cancellation_info, concurrent_files
+                        )
+                    else:
+                        update_file_progress_with_concurrent_files(
+                            current, total, info, concurrent_files
+                        )
+                    return
+
+                # Show errors
+                if error:
+                    show_error_message(file_path, error)
+                    return
+
+                # Fallback: if somehow no display exists, just print info (should rarely happen)
+                if info:
+                    show_setup_message(info)
+
+            # Clean API for components to use directly (no magic parameters!)
+            # Note: mypy doesn't like adding attributes to functions, but this works at runtime
+            progress_callback.show_setup_message = show_setup_message  # type: ignore[attr-defined]
+            progress_callback.update_file_progress = lambda current, total, info: (  # type: ignore[attr-defined]
+                check_for_interruption()
+                or update_file_progress_with_concurrent_files(current, total, info)
+            )
+            progress_callback.show_error_message = show_error_message  # type: ignore[attr-defined]
+            progress_callback.check_for_interruption = check_for_interruption  # type: ignore[attr-defined]
+            progress_callback.reset_progress_timers = (  # type: ignore[attr-defined]
+                lambda: progress_manager.reset_progress_timers()
+            )
+
+        # Check for conflicting flags
+        if clear and reconcile:
+            error_message = get_conflicting_flags_message("--clear", "--reconcile")
+            console.print(error_message, style="red")
+            sys.exit(1)
+
+        # Use graceful interrupt handling for the indexing operation
+        operation_name = "Indexing"
+        if reconcile:
+            operation_name = "Reconciliation"
+        elif clear:
+            operation_name = "Full reindexing"
+
+        # Initialize stats with default values to handle early cancellation
+        stats = None
+
+        try:
+            with GracefulInterruptHandler(console, operation_name) as handler:
+                interrupt_handler = handler
+
+                # Get collection name for operations
+                collection_name = vector_store_client.resolve_collection_name(
+                    config, embedding_provider
+                )
+
+                # Handle rebuild index flag
+                if rebuild_index:
+                    # Check if filesystem backend is being used
+                    from .storage.filesystem_vector_store import (
+                        FilesystemVectorStore,
+                    )
+
+                    if not isinstance(vector_store_client, FilesystemVectorStore):
+                        console.print(
+                            "❌ --rebuild-index only works with filesystem vector storage",
+                            style="red",
+                        )
+                        console.print(
+                            "💡 Current backend does not support index rebuilding",
+                            style="yellow",
+                        )
+                        sys.exit(1)
+
+                    # Get collection path
+                    collection_path = vector_store_client.base_path / collection_name
+                    if not collection_path.exists():
+                        console.print(
+                            f"❌ Collection '{collection_name}' not found",
+                            style="red",
+                        )
+                        sys.exit(1)
+
+                    # Load metadata to determine current index type
+                    import json
+
+                    metadata_file = collection_path / "collection_meta.json"
+                    if not metadata_file.exists():
+                        console.print(
+                            "❌ Collection metadata not found - collection may be corrupted",
+                            style="red",
+                        )
+                        sys.exit(1)
+
+                    with open(metadata_file) as f:
+                        metadata = json.load(f)
+
+                    # Rebuild HNSW index
+                    console.print(
+                        "🔄 Rebuilding HNSW index from existing vector files..."
+                    )
+                    from .storage.hnsw_index_manager import (
+                        HNSWIndexManager,
+                    )
+
+                    try:
+                        hnsw_manager = HNSWIndexManager(
+                            vector_dim=metadata.get("vector_size", 1536)
+                        )
+                        vectors_rebuilt = hnsw_manager.rebuild_from_vectors(
+                            collection_path
+                        )
+                        console.print(
+                            f"\n✅ HNSW index rebuilt successfully - {vectors_rebuilt} vectors processed"
+                        )
+                    except Exception as e:
+                        console.print(
+                            f"\n❌ Failed to rebuild HNSW index: {e}", style="red"
+                        )
+                        sys.exit(1)
+                    return
+
+                # Handle rebuild indexes flag
+                if rebuild_indexes:
+                    if vector_store_client.rebuild_payload_indexes(collection_name):
+                        console.print("Index rebuild completed successfully")
+                    else:
+                        console.print("Index rebuild failed - check logs for details")
+                        sys.exit(1)
+                    return
+
+                # For non-clear operations, ensure payload indexes exist before indexing
+                # For --clear operations, skip this since collection will be recreated fresh
+                if not clear:
+                    vector_store_client.ensure_payload_indexes(
+                        collection_name, context="index"
+                    )
+
+                stats = smart_indexer.smart_index(
+                    force_full=clear,
+                    reconcile_with_database=reconcile,
+                    batch_size=batch_size,
+                    progress_callback=progress_callback,
+                    safety_buffer_seconds=_INDEX_SAFETY_BUFFER_SECONDS,
+                    files_count_to_process=files_count_to_process,
+                    vector_thread_count=config.voyage_ai.parallel_requests,
+                    detect_deletions=detect_deletions,
+                    enable_fts=fts,
+                )
+
+                # Show final completion state (if not interrupted)
+                if display_initialized and not handler.interrupted:
+                    # Stop progress manager and Rich Live display before showing completion message
+                    progress_manager.stop_progress()
+                    rich_live_manager.stop_display()
+                    console.print("\n✅ Completed")
+
+        except Exception as e:
+            # Clean up progress manager and Rich Live display before error message
+            if display_initialized:
+                progress_manager.stop_progress()
+                rich_live_manager.stop_display()
+            console.print(f"❌ Indexing failed: {e}", style="red")
+            sys.exit(1)
+
+        # Clean up progress manager and Rich Live display before completion summary
+        if display_initialized:
+            progress_manager.stop_progress()
+            rich_live_manager.stop_display()
+
+        # Show completion summary with throughput (if stats available)
+        if stats is None:
+            # Early cancellation before stats were initialized
+            console.print("🛑 Operation cancelled before completion", style="yellow")
+            return
+
+        if getattr(stats, "cancelled", False):
+            console.print("🛑 Indexing cancelled!", style="yellow")
+            console.print("📄 Files processed before cancellation: ", end="")
+            console.print(f"{stats.files_processed}", style="yellow")
+            console.print("📦 Chunks indexed before cancellation: ", end="")
+            console.print(f"{stats.chunks_created}", style="yellow")
+            console.print(
+                "💾 Progress saved - you can resume indexing later", style="blue"
+            )
+        else:
+            console.print("✅ Indexing complete!", style="green")
+            console.print(f"📄 Files processed: {stats.files_processed}")
+            console.print(f"📦 Chunks indexed: {stats.chunks_created}")
+
+        console.print(f"⏱️  Duration: {stats.duration:.2f}s")
+
+        # Calculate final throughput
+        if stats.duration > 0:
+            files_per_min = (stats.files_processed / stats.duration) * 60
+            chunks_per_min = (stats.chunks_created / stats.duration) * 60
+            console.print(
+                f"🚀 Throughput: {files_per_min:.1f} files/min, {chunks_per_min:.1f} chunks/min"
+            )
+
+        if stats.failed_files > 0:
+            console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
+
+        # Show final indexing status
+        final_status = smart_indexer.get_indexing_status()
+        if final_status["status"] == "completed":
+            console.print(
+                "💾 Progress saved for future incremental updates", style="dim"
+            )
+
+        # Additional providers loop (Story #620): index remaining providers in sequence.
+        # Each provider gets a fresh embedding service and SmartIndexer; FTS is skipped
+        # because it is provider-agnostic and already built in the primary pass.
+        for _extra_provider in _additional_providers:
+            console.print(f"\n🔄 Indexing additional provider: {_extra_provider}")
+            config.embedding_provider = _extra_provider  # type: ignore[assignment]
+            _extra_embedding = EmbeddingProviderFactory.create(config, console)
+            if not _extra_embedding.health_check():
+                console.print(
+                    f"⚠️  {_extra_provider} health check failed — skipping",
+                    style="yellow",
+                )
+                continue
+            _extra_backend = BackendFactory.create(
+                config=config, project_root=Path(config.codebase_dir)
+            )
+            _extra_client = _extra_backend.get_vector_store_client()
+            _extra_metadata = _get_provider_metadata_path(
+                config_manager.config_path.parent, _extra_provider
+            )
+            _extra_indexer = SmartIndexer(
+                config, _extra_embedding, _extra_client, _extra_metadata
+            )
+            _extra_stats = _extra_indexer.smart_index(
+                force_full=clear,
+                reconcile_with_database=reconcile,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                safety_buffer_seconds=_INDEX_SAFETY_BUFFER_SECONDS,
+                files_count_to_process=files_count_to_process,
+                vector_thread_count=(
+                    config.cohere.parallel_requests
+                    if _extra_provider == "cohere"
+                    else config.voyage_ai.parallel_requests
+                ),
+                detect_deletions=detect_deletions,
+                enable_fts=False,
+            )
+            if _extra_stats is not None:
+                console.print(
+                    f"✅ {_extra_provider}: {_extra_stats.files_processed} files, "
+                    f"{_extra_stats.chunks_created} chunks",
+                    style="green",
+                )
+
+    except Exception as e:
+        console.print(f"❌ Indexing failed: {e}", style="red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option(
+    "--debounce", default=2.0, help="Seconds to wait before processing changes"
+)
+@click.option("--batch-size", default=50, help="Batch size for processing")
+@click.option("--initial-sync", is_flag=True, help="Perform full sync before watching")
+@click.option(
+    "--fts",
+    is_flag=True,
+    help="Enable FTS index updates alongside semantic index (requires tantivy)",
+)
+@click.pass_context
+@require_mode("local", "proxy")
+def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
+    """Git-aware watch for file changes with branch support."""
+    # Story #472: Re-enabled daemon delegation with non-blocking RPC
+    # Watch now runs in background thread in daemon, allowing CLI to return immediately
+
+    # Handle proxy mode (Story 2.2)
+    mode = ctx.obj.get("mode")
+    if mode == "proxy":
+        from .proxy import execute_proxy_command
+
+        project_root = ctx.obj["project_root"]
+
+        # Build args list for watch command
+        args = ["--debounce", str(debounce), "--batch-size", str(batch_size)]
+        if initial_sync:
+            args.append("--initial-sync")
+        if fts:
+            args.append("--fts")
+
+        exit_code = execute_proxy_command(project_root, "watch", args)
+        sys.exit(exit_code)
+
+    config_manager = ctx.obj["config_manager"]
+    project_root = ctx.obj.get("project_root", Path.cwd())
+
+    # Try daemon delegation first (Story #472)
+    if mode == "local":
+        from .cli_daemon_delegation import start_watch_via_daemon
+
+        # Attempt to delegate to daemon (non-blocking mode)
+        if start_watch_via_daemon(
+            project_root,
+            debounce_seconds=debounce,
+            batch_size=batch_size,
+            initial_sync=initial_sync,
+            fts=fts,
+        ):
+            # Successfully delegated to daemon - exit immediately
+            sys.exit(0)
+
+    # Fall back to standalone mode if daemon delegation failed
+
+    # Deprecation warning for --fts flag (auto-detection replaces it)
+    if fts:
+        console.print(
+            "⚠️ --fts flag is deprecated. Auto-detection is now used.",
+            style="yellow",
+        )
+
+    # Auto-detect existing indexes
+    from .cli_watch_helpers import detect_existing_indexes
+
+    available_indexes = detect_existing_indexes(project_root)
+    detected_count = sum(available_indexes.values())
+
+    if detected_count == 0:
+        console.print("⚠️ No indexes found. Run 'cidx index' first.", style="yellow")
+        sys.exit(1)
+
+    console.print(f"🔍 Detected {detected_count} index(es) to watch:", style="blue")
+
+    try:
+        from watchdog.observers import Observer
+
+        # Import git-aware components
+        from .services.git_topology_service import GitTopologyService
+        from .services.watch_metadata import WatchMetadata
+        from .services.git_aware_watch_handler import GitAwareWatchHandler
+
+        config = config_manager.load()
+
+        # Lazy imports for watch services
+        from .services.smart_indexer import SmartIndexer
+
+        # Display detected indexes
+        if available_indexes["semantic"]:
+            console.print("  ✅ Semantic index (HEAD collection)", style="green")
+        if available_indexes["fts"]:
+            console.print("  ✅ FTS index (full-text search)", style="green")
+        if available_indexes["temporal"]:
+            console.print("  ✅ Temporal index (git history commits)", style="green")
+
+        # Initialize services only if semantic index exists (primary index)
+        semantic_handler = None
+        fts_watch_handler = None
+        temporal_watch_handler = None
+        git_topology_service = None
+        git_state = None
+        watch_metadata = None
+        watch_metadata_path = None
+
+        if available_indexes["semantic"]:
+            # Initialize services (same as index command)
+            embedding_provider = EmbeddingProviderFactory.create(config, console)
+
+            # Initialize vector store (FilesystemVectorStore - Story #505)
+            from .storage.filesystem_vector_store import FilesystemVectorStore
+
+            index_dir = config.codebase_dir / ".code-indexer" / "index"
+            vector_store_client = FilesystemVectorStore(
+                base_path=index_dir, project_root=config.codebase_dir
+            )
+
+            # Health checks
+            if not embedding_provider.health_check():
+                console.print(
+                    f"❌ {embedding_provider.get_provider_name().title()} service not available",
+                    style="red",
+                )
+                sys.exit(1)
+
+            # Initialize SmartIndexer with per-provider metadata (Bug #625, Fix 4/M1).
+            metadata_path = _get_provider_metadata_path(
+                config_manager.config_path.parent, config.embedding_provider
+            )
+            smart_indexer = SmartIndexer(
+                config, embedding_provider, vector_store_client, metadata_path
+            )
+
+            # Initialize git topology service
+            git_topology_service = GitTopologyService(config.codebase_dir)
+
+            # Initialize watch metadata
+            watch_metadata_path = (
+                config_manager.config_path.parent / "watch_metadata.json"
+            )
+            watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
+
+        # Initialize semantic watch handler
+        if available_indexes["semantic"]:
+            # Ensure all required variables are initialized
+            assert git_topology_service is not None, (
+                "git_topology_service not initialized"
+            )
+            assert watch_metadata is not None, "watch_metadata not initialized"
+
+            # Get git state for metadata
+            git_state = (
+                git_topology_service.get_current_state()
+                if git_topology_service.is_git_available()
+                else {
+                    "git_available": False,
+                    "current_branch": None,
+                    "current_commit": None,
+                }
+            )
+
+            # Start watch session
+            collection_name = vector_store_client.resolve_collection_name(
+                config, embedding_provider
+            )
+            # Ensure payload indexes exist for watch indexing operations
+            vector_store_client.ensure_payload_indexes(collection_name, context="index")
+
+            watch_metadata.start_watch_session(
+                provider_name=embedding_provider.get_provider_name(),
+                model_name=embedding_provider.get_current_model(),
+                git_status=git_state,
+                collection_name=collection_name,
+            )
+
+            # Perform initial sync if requested or if first run
+            if initial_sync or watch_metadata.last_sync_timestamp == 0:
+                console.print("🔄 Performing initial git-aware sync...")
+                try:
+                    # Auto-enable FTS if index exists
+                    enable_fts_sync = fts or available_indexes["fts"]
+                    stats = smart_indexer.smart_index(
+                        batch_size=batch_size, quiet=True, enable_fts=enable_fts_sync
+                    )
+                    console.print(
+                        f"✅ Initial sync complete: {stats.files_processed} files processed"
+                    )
+                    watch_metadata.update_after_sync_cycle(
+                        files_processed=stats.files_processed
+                    )
+                except Exception as e:
+                    console.print(f"⚠️  Initial sync failed: {e}", style="yellow")
+                    console.print("Continuing with file watching...", style="yellow")
+
+            # Initialize git-aware watch handler
+            semantic_handler = GitAwareWatchHandler(
+                config=config,
+                smart_indexer=smart_indexer,
+                git_topology_service=git_topology_service,
+                watch_metadata=watch_metadata,
+                debounce_seconds=debounce,
+            )
+
+        # Initialize FTS watch handler if auto-detected or requested
+        if available_indexes["fts"] or fts:
+            # Lazy import FTS components
+            from .services.fts_watch_handler import FTSWatchHandler
+            from .services.tantivy_index_manager import TantivyIndexManager
+
+            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
+            tantivy_manager = TantivyIndexManager(fts_index_dir)
+
+            # Initialize or open existing index
+            if fts_index_dir.exists():
+                tantivy_manager.initialize_index(create_new=False)
+            else:
+                tantivy_manager.initialize_index(create_new=True)
+
+            fts_watch_handler = FTSWatchHandler(
+                tantivy_index_manager=tantivy_manager,
+                config=config,
+            )
+
+        # Initialize temporal watch handler if auto-detected
+        if available_indexes["temporal"]:
+            # Lazy import temporal components
+            from .cli_temporal_watch_handler import TemporalWatchHandler
+            from .services.temporal.temporal_indexer import TemporalIndexer
+            from .services.temporal.temporal_progressive_metadata import (
+                TemporalProgressiveMetadata,
+            )
+            from .storage.filesystem_vector_store import FilesystemVectorStore
+
+            # Initialize vector store with base_path (not collection path)
+            # This allows temporal_indexer to create the correct temporal_dir
+            index_dir = project_root / ".code-indexer" / "index"
+            vector_store = FilesystemVectorStore(
+                base_path=index_dir, project_root=project_root
+            )
+
+            # Create temporal indexer with provider-aware collection name
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                resolve_temporal_collection_from_config as _resolve_tcoll,
+            )
+
+            _tcoll_name = _resolve_tcoll(config)
+            temporal_indexer = TemporalIndexer(
+                config_manager, vector_store, collection_name=_tcoll_name
+            )
+
+            # Create progressive metadata using temporal_indexer's consolidated dir
+            progressive_metadata = TemporalProgressiveMetadata(
+                temporal_indexer.temporal_dir
+            )
+
+            # Create TemporalWatchHandler
+            temporal_watch_handler = TemporalWatchHandler(
+                project_root,
+                temporal_indexer=temporal_indexer,
+                progressive_metadata=progressive_metadata,
+            )
+
+            # Show temporal handler status
+            if temporal_watch_handler.use_polling:
+                console.print(
+                    "  ⚠️  Temporal: Using polling fallback (refs file not found)"
+                )
+            else:
+                console.print(
+                    f"  ✅ Temporal: Monitoring {temporal_watch_handler.git_refs_file.name}"
+                )
+
+        console.print(f"\n👀 Starting watch on {config.codebase_dir}")
+        console.print(f"⏱️  Debounce: {debounce}s")
+        if (
+            available_indexes["semantic"]
+            and git_topology_service is not None
+            and git_topology_service.is_git_available()
+            and git_state is not None
+        ):
+            console.print(
+                f"🌿 Git branch: {git_state.get('current_branch', 'unknown')}"
+            )
+        console.print("Press Ctrl+C to stop")
+
+        # Start git-aware file watching (semantic handler)
+        if semantic_handler:
+            semantic_handler.start_watching()
+
+        # Setup watchdog observer
+        observer = Observer()
+
+        # Register semantic handler
+        if semantic_handler:
+            observer.schedule(
+                semantic_handler, str(config.codebase_dir), recursive=True
+            )
+
+        # Register FTS handler if enabled
+        if fts_watch_handler:
+            observer.schedule(
+                fts_watch_handler, str(config.codebase_dir), recursive=True
+            )
+
+        # Register temporal handler if enabled
+        if temporal_watch_handler:
+            observer.schedule(temporal_watch_handler, str(project_root), recursive=True)
+
+        observer.start()
+        console.print(f"🔍 Watchdog observer started monitoring: {config.codebase_dir}")
+
+        try:
+            with GracefulInterruptHandler(
+                console, "Git-aware file watching"
+            ) as handler:
+                console.print(
+                    "👀 Watching for file changes and git operations... (Press Ctrl-C to stop)",
+                    style="dim",
+                )
+                while not handler.interrupted:
+                    import time
+
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            console.print("\n👋 Stopping watch mode...")
+        finally:
+            # Stop semantic handler if present
+            if semantic_handler:
+                semantic_handler.stop_watching()
+
+            observer.stop()
+            observer.join()
+
+            # Save final metadata if semantic handler was active
+            if available_indexes["semantic"] and watch_metadata and watch_metadata_path:
+                watch_metadata.save_to_disk(watch_metadata_path)
+
+                if semantic_handler:
+                    # Show final statistics
+                    watch_stats = semantic_handler.get_statistics()
+                    console.print("\n📊 Watch session complete:")
+                    console.print(
+                        f"   • Files processed: {watch_stats['handler_files_processed']}"
+                    )
+                    console.print(
+                        f"   • Indexing cycles: {watch_stats['handler_indexing_cycles']}"
+                    )
+                    if watch_stats["total_branch_changes"] > 0:
+                        console.print(
+                            f"   • Branch changes handled: {watch_stats['total_branch_changes']}"
+                        )
+
+    except Exception as e:
+        console.print(f"❌ Git-aware watch failed: {e}", style="red")
+        import traceback
+
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+# Story 2.1 Display Helper Functions
+
+
+def _display_file_chunk_match(result, index, temporal_service):
+    """Display a file chunk temporal match with diff."""
+    file_path = result.metadata.get("path") or result.metadata.get(
+        "file_path", "unknown"
+    )
+    line_start = result.metadata.get("line_start", 0)
+    line_end = result.metadata.get("line_end", 0)
+    commit_hash = result.metadata.get("commit_hash", "")
+
+    # Get diff_type from metadata to display marker
+    diff_type = result.metadata.get("diff_type", "unknown")
+
+    # Get commit details from result.temporal_context (Story 2: no SQLite)
+    # The temporal_context is populated from payload data by temporal_search_service
+    temporal_ctx = getattr(result, "temporal_context", {})
+    commit_date = temporal_ctx.get("commit_date", "Unknown")
+    author_name = temporal_ctx.get("author_name", "Unknown")
+    commit_message = temporal_ctx.get("commit_message", "[No message available]")
+
+    # For backward compatibility, check metadata too
+    if author_name == "Unknown" and "author_name" in result.metadata:
+        author_name = result.metadata.get("author_name", "Unknown")
+    if commit_date == "Unknown" and "commit_date" in result.metadata:
+        commit_date = result.metadata.get("commit_date", "Unknown")
+    if (
+        commit_message == "[No message available]"
+        and "commit_message" in result.metadata
+    ):
+        commit_message = result.metadata.get("commit_message", "[No message available]")
+
+    # Get author email from metadata
+    author_email = result.metadata.get("author_email", "unknown@example.com")
+
+    # Smart line number display: suppress :0-0 for temporal diffs
+    if line_start == 0 and line_end == 0:
+        # Temporal diffs have no specific line range - suppress :0-0
+        file_location = file_path
+    else:
+        # Regular results or temporal with specific lines - show range
+        file_location = f"{file_path}:{line_start}-{line_end}"
+
+    # Display header with diff-type marker (Story 2 requirement)
+    diff_markers = {
+        "added": "[ADDED]",
+        "deleted": "[DELETED]",
+        "modified": "[MODIFIED]",
+        "renamed": "[RENAMED]",
+        "binary": "[BINARY]",
+    }
+    marker = diff_markers.get(diff_type, "")
+
+    # Provider attribution (Story #640)
+    _providers = getattr(result, "contributing_providers", None)
+    _prov_tag = (
+        f" [{'+'.join(_providers)}]" if _providers and len(_providers) > 0 else ""
+    )
+
+    if marker:
+        console.print(
+            f"\n[bold cyan]{index}. {file_location}{_prov_tag}[/bold cyan] {marker}"
+        )
+    else:
+        console.print(f"\n[bold cyan]{index}. {file_location}{_prov_tag}[/bold cyan]")
+    console.print(f"   Score: {result.score:.3f}")
+    console.print(f"   Commit: {commit_hash[:7]} ({commit_date})")
+    console.print(f"   Author: {author_name} <{author_email}>")
+
+    # Display full commit message (NOT truncated)
+    # Bug #4 fix: Use markup=False to prevent Rich from interpreting special chars
+    message_lines = commit_message.split("\n")
+    console.print(f"   Message: {message_lines[0]}", markup=False)
+    for msg_line in message_lines[1:]:
+        console.print(f"            {msg_line}", markup=False)
+
+    console.print()
+
+    # Display rename indicator if present
+    if "display_note" in result.metadata:
+        console.print(f"   {result.metadata['display_note']}", style="yellow")
+        console.print()
+
+    # Display content (Story 2: No diff generation, just show content)
+    # All results in temporal index are changes by definition
+    console.print()
+    content = result.content
+    lines = content.split("\n")
+
+    # Modified diffs are self-documenting with @@ markers and +/- prefixes
+    # Suppress line numbers for them to avoid confusion
+    show_line_numbers = diff_type != "modified"
+
+    # Bug #4 fix: Use markup=False to prevent Rich from interpreting special chars in diff content
+    if show_line_numbers:
+        for i, line in enumerate(lines):
+            line_num = line_start + i
+            console.print(f"{line_num:4d}  {line}", markup=False)
+    else:
+        # Modified diff - no line numbers (diff markers are self-documenting)
+        for line in lines:
+            console.print(f"  {line}", markup=False)
+
+
+def _display_commit_message_match(result, index, temporal_service):
+    """Display a commit message temporal match."""
+    commit_hash = result.metadata.get("commit_hash", "")
+
+    # Get commit details from result.temporal_context (Story 2: no SQLite)
+    temporal_ctx = getattr(result, "temporal_context", {})
+    commit_date = temporal_ctx.get(
+        "commit_date", result.metadata.get("commit_date", "Unknown")
+    )
+    author_name = temporal_ctx.get(
+        "author_name", result.metadata.get("author_name", "Unknown")
+    )
+    author_email = result.metadata.get("author_email", "unknown@example.com")
+
+    # Provider attribution (Story #640)
+    _providers = getattr(result, "contributing_providers", None)
+    _prov_tag = (
+        f" [{'+'.join(_providers)}]" if _providers and len(_providers) > 0 else ""
+    )
+
+    # Display header
+    console.print(
+        f"\n[bold cyan]{index}. [COMMIT MESSAGE MATCH]{_prov_tag}[/bold cyan]"
+    )
+    console.print(f"   Score: {result.score:.3f}")
+    console.print(f"   Commit: {commit_hash[:7]} ({commit_date})")
+    console.print(f"   Author: {author_name} <{author_email}>")
+    console.print()
+
+    # Display matching section of commit message
+    # Bug #4 fix: Use markup=False to prevent Rich from interpreting special chars
+    console.print("   Message (matching section):")
+    for line in result.content.split("\n"):
+        console.print(f"   {line}", markup=False)
+    console.print()
+
+    # Story 2: No file changes available from diff-based indexing
+    # The temporal index only tracks what changed, not full file lists
+    console.print("   [dim]File changes tracked in diff-based index[/dim]")
+
+
+def display_temporal_results(results, temporal_service):
+    """Display temporal search results with proper ordering."""
+    # Separate results by type
+    commit_msg_matches = []
+    file_chunk_matches = []
+
+    for result in results.results:
+        match_type = result.metadata.get("type", "file_chunk")
+        if match_type == "commit_message":
+            commit_msg_matches.append(result)
+        else:
+            file_chunk_matches.append(result)
+
+    # Display commit messages first, then file chunks
+    index = 1
+
+    for result in commit_msg_matches:
+        _display_commit_message_match(result, index, temporal_service)
+        index += 1
+
+    for result in file_chunk_matches:
+        _display_file_chunk_match(result, index, temporal_service)
+        index += 1
+
+
+def _annotate_staleness(
+    results: List[Dict[str, Any]],
+    enhanced_results: Any,
+    preserve_order: bool = False,
+) -> List[Dict[str, Any]]:
+    """Annotate raw results with staleness metadata.
+
+    When ``preserve_order=True``, iterates ``results`` in input order (e.g.
+    reranked order) and looks up staleness data by file path.  This preserves
+    the caller's ordering instead of the staleness-sort order that
+    ``apply_staleness_detection`` applies internally (bug #965 fix).
+
+    When ``preserve_order=False`` (default), iterates ``enhanced_results``
+    which is already sorted by (is_stale, -score) so fresh results appear
+    first.  Use this for non-reranked queries.
+
+    Args:
+        results: Raw result dicts in display order (reranked or original).
+        enhanced_results: EnhancedQueryResultItem objects from StalenessDetector.
+        preserve_order: When True, keep ``results`` iteration order (reranked).
+            When False, use ``enhanced_results`` iteration order (fresh-first).
+
+    Returns:
+        New list of result dicts with a ``staleness`` key on each entry that
+        had a matching enhanced result.  Entries with no match are included
+        unchanged (no ``staleness`` key).
+    """
+    if preserve_order:
+        # Reranked path: iterate results in caller order, look up staleness by
+        # (path, line_number) composite key so sibling chunks from the same file
+        # are not silently overwritten by a path-only dict key.
+        enhanced_by_chunk = {(e.file_path, e.line_number): e for e in enhanced_results}
+        annotated = []
+        for original in results:
+            path = original["payload"].get("path", "")
+            line_start = original["payload"].get("line_start", 1)
+            enhanced = enhanced_by_chunk.get((path, line_start))
+            result_copy = original.copy()
+            if enhanced:
+                result_copy["staleness"] = {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                }
+            annotated.append(result_copy)
+        return annotated
+    else:
+        # Non-reranked path: annotate each result with staleness metadata, then
+        # sort fresh-first (is_stale ascending) with score-descending tie-break.
+        # Explicit sort ensures correct ordering regardless of enhanced_results
+        # input order.  Use (path, line_start) composite key so sibling chunks
+        # from the same file are each reachable.
+        results_by_chunk = {
+            (r["payload"].get("path", ""), r["payload"].get("line_start", 1)): r
+            for r in results
+        }
+        annotated = []
+        for enhanced in enhanced_results:
+            matched: Optional[Dict[str, Any]] = results_by_chunk.get(
+                (enhanced.file_path, enhanced.line_number)
+            )
+            if matched is None:
+                continue
+            result_copy = matched.copy()
+            result_copy["staleness"] = {
+                "is_stale": enhanced.is_stale,
+                "staleness_indicator": enhanced.staleness_indicator,
+                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+            }
+            annotated.append(result_copy)
+        annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
+        return annotated
+
+
+@cli.command()
+@click.argument("query")
+@click.option(
+    "--limit",
+    "-l",
+    default=10,
+    help="Number of results to return (default: 10, use 0 for unlimited grep-like output)",
+)
+@click.option(
+    "--language",
+    "languages",
+    multiple=True,
+    help=_generate_language_help_text()
+    + " Can be specified multiple times to include multiple languages. Example: --language python --language go",
+)
+@click.option(
+    "--exclude-language",
+    "exclude_languages",
+    multiple=True,
+    help="Exclude files of specified language(s). Can be specified multiple times to exclude multiple languages. Example: --exclude-language javascript --exclude-language typescript",
+)
+@click.option(
+    "--path-filter",
+    "path_filter",
+    multiple=True,
+    help="Filter by file path pattern (e.g., */tests/*). Can be specified multiple times for OR logic.",
+)
+@click.option(
+    "--exclude-path",
+    "exclude_paths",
+    multiple=True,
+    help="Exclude files matching path pattern(s). Supports glob patterns (*, **, ?, [seq]). Can be specified multiple times. Example: --exclude-path '*/tests/*' --exclude-path '*.min.js'",
+)
+@click.option("--min-score", type=float, help="Minimum similarity score (0.0-1.0)")
+@click.option(
+    "--accuracy",
+    type=click.Choice(["fast", "balanced", "high"]),
+    default="balanced",
+    help="Search accuracy profile: fast (lower accuracy, faster), balanced (default), high (higher accuracy, slower)",
+)
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    help="Quiet mode - only show results, no headers or metadata",
+)
+@click.option(
+    "--fts",
+    is_flag=True,
+    help="Use full-text search instead of semantic search (requires Tantivy index)",
+)
+@click.option(
+    "--semantic",
+    is_flag=True,
+    help="Use semantic search (default). Combine with --fts for hybrid search.",
+)
+@click.option(
+    "--case-sensitive",
+    is_flag=True,
+    help="Enable case-sensitive matching for FTS queries",
+)
+@click.option(
+    "--case-insensitive",
+    is_flag=True,
+    help="Force case-insensitive matching for FTS queries (default behavior)",
+)
+@click.option(
+    "--fuzzy",
+    is_flag=True,
+    help="Enable fuzzy matching with edit distance of 1 (typo tolerance)",
+)
+@click.option(
+    "--edit-distance",
+    type=int,
+    default=0,
+    help="Fuzzy match tolerance (0-3): 0=exact, 1=1 typo, 2=2 typos, 3=3 typos",
+)
+@click.option(
+    "--snippet-lines",
+    type=int,
+    default=5,
+    help="Context lines to show around matches (0=list only, 1-50=show context)",
+)
+@click.option(
+    "--regex",
+    is_flag=True,
+    help="Interpret query as regex pattern (FTS only, incompatible with --semantic or --fuzzy)",
+)
+@click.option(
+    "--time-range",
+    type=str,
+    help="Filter results by time range in format YYYY-MM-DD..YYYY-MM-DD (requires temporal index)",
+)
+@click.option(
+    "--time-range-all",
+    is_flag=True,
+    help="Query entire temporal history (shortcut for full date range)",
+)
+@click.option(
+    "--diff-type",
+    "diff_types",
+    multiple=True,
+    help="Filter by diff type: added, modified, deleted, renamed, binary (requires temporal index). Can be specified multiple times. Example: --diff-type added --diff-type modified",
+)
+@click.option(
+    "--author",
+    type=str,
+    help="Filter by commit author name or email (requires temporal index). Example: --author 'John Doe'",
+)
+@click.option(
+    "--chunk-type",
+    type=click.Choice(["commit_message", "commit_diff"], case_sensitive=False),
+    help="Filter by chunk type: commit_message (commit descriptions) or commit_diff (code changes). Requires --time-range or --time-range-all.",
+)
+@click.option(
+    "--repo",
+    type=str,
+    help="Query a global repository by alias (e.g., 'my-repo-global'). Allows querying registered global repos from any directory.",
+)
+@click.option(
+    "--repos",
+    type=str,
+    help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
+)
+@click.option(
+    "--file-extensions",
+    "file_extensions",
+    default=None,
+    type=str,
+    help=(
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        "Leading dot optional (.py and py both work). "
+        "Whitespace around commas is tolerated. "
+        "Composes with --language as intersection (both filters must match). "
+        "Empty string is treated as no filter."
+    ),
+)
+# --show-unchanged removed: Story 2 - all temporal results are changes now
+@click.option(
+    "--rerank-query",
+    "rerank_query",
+    default=None,
+    type=str,
+    help=(
+        "Apply reranker stage after retrieval using this query text. "
+        "If omitted and auto_populate_rerank_query is true in global config, "
+        "the search query is used automatically. "
+        "Pass an empty string ('') to explicitly disable reranking. "
+        "Requires VOYAGE_API_KEY or CO_API_KEY."
+    ),
+)
+@click.option(
+    "--rerank-instruction",
+    "rerank_instruction",
+    default=None,
+    type=str,
+    help=(
+        "Optional instruction prepended to the reranker query to guide ranking. "
+        "Passed to the reranker vendor as-is. "
+        "Only meaningful when --rerank-query is also provided."
+    ),
+)
+@click.pass_context
+@require_mode("local", "remote", "proxy")
+def query(
+    ctx,
+    query: str,
+    limit: int,
+    languages: tuple,
+    exclude_languages: tuple,
+    path_filter: tuple,
+    exclude_paths: tuple,
+    min_score: Optional[float],
+    accuracy: str,
+    quiet: bool,
+    fts: bool,
+    semantic: bool,
+    case_sensitive: bool,
+    case_insensitive: bool,
+    fuzzy: bool,
+    edit_distance: int,
+    snippet_lines: int,
+    regex: bool,
+    time_range: Optional[str],
+    time_range_all: bool,
+    diff_types: tuple,
+    author: Optional[str],
+    chunk_type: Optional[str],
+    repo: Optional[str],
+    repos: Optional[str],
+    rerank_query: Optional[str],
+    rerank_instruction: Optional[str],
+    file_extensions: Optional[str] = None,
+):
+    """Search the indexed codebase using semantic similarity.
+
+    \b
+    Performs AI-powered semantic search across your indexed code.
+    Uses vector embeddings to find conceptually similar code.
+
+    \b
+    SEARCH CAPABILITIES:
+      • Semantic search: Finds conceptually similar code
+      • Natural language: Describe what you're looking for
+      • Code patterns: Search for specific implementations
+      • Git-aware: Searches within current project/branch context
+
+    \b
+    REMOTE MODE REPOSITORY LINKING:
+      • Remote mode requires git repository context
+      • Uses repository linking to match local repository with remote server
+      • Queries run against your specific repository and branch
+
+    \b
+    FILTERING OPTIONS:
+      • Language: --language python (searches only Python files)
+      • Exclude: --exclude-language javascript (exclude JavaScript files)
+      • Path: --path-filter */tests/* (searches only test directories)
+      • Exclude Path: --exclude-path '*/tests/*' (exclude test directories)
+      • Score: --min-score 0.8 (only high-confidence matches)
+      • Limit: --limit 20 (more results)
+      • Accuracy: --accuracy high (higher accuracy, slower search)
+
+    \b
+    FILTER COMBINATIONS (Story 3.1):
+      • Combine inclusions and exclusions for precise targeting
+      • Multiple filters are supported and work together
+      • Exclusions always override inclusions
+      • Automatic conflict detection warns about contradictions
+
+    \b
+    QUERY EXAMPLES:
+      "authentication function"           # Find auth-related code
+      "database connection setup"        # Find DB setup code
+      "error handling try catch"         # Find error handling patterns
+      "REST API endpoint POST"           # Find POST API endpoints
+      "unit test mock"                   # Find mocking in tests
+
+    \b
+    BASIC EXAMPLES:
+      code-indexer query "user login"
+      code-indexer query "database" --language python
+      code-indexer query "test" --path-filter */tests/* --limit 5
+      code-indexer query "async" --min-score 0.8
+      code-indexer query "auth" --exclude-language javascript
+      code-indexer query "config" --exclude-language js --exclude-language ts
+      code-indexer query "api" --exclude-path '*/tests/*' --exclude-path '*.min.js'
+      code-indexer query "function" --quiet  # Just score, path, and content
+
+    \b
+    ADVANCED FILTER COMBINATIONS:
+      # Python files, excluding tests
+      code-indexer query "database" --language python --exclude-path '*/tests/*'
+
+      # Source files only, excluding JavaScript and TypeScript
+      code-indexer query "api" --path-filter '*/src/*' --exclude-language js --exclude-language ts
+
+      # Complex targeting with multiple filters
+      code-indexer query "handler" --language python --language go --exclude-path '*/vendor/*' --exclude-path '*/node_modules/*'
+
+    Results show file paths, matched content, and similarity scores.
+    Filter conflicts are automatically detected and warnings are displayed.
+    """
+    # AC5: Validate --chunk-type requires temporal flags (Story #476)
+    if chunk_type and not (time_range or time_range_all):
+        console = Console()
+        console.print(
+            "[red]❌ Error: --chunk-type requires --time-range or --time-range-all[/red]"
+        )
+        console.print()
+        console.print("Usage examples:")
+        console.print(
+            "  [cyan]cidx query 'bug fix' --time-range-all --chunk-type commit_message[/cyan]"
+        )
+        console.print(
+            "  [cyan]cidx query 'refactor' --time-range 2024-01-01..2024-12-31 --chunk-type commit_diff[/cyan]"
+        )
+        sys.exit(1)
+
+    # Get mode information from context
+    mode = ctx.obj.get("mode", "uninitialized")
+    project_root = ctx.obj.get("project_root")
+
+    # Import Path - needed by all query modes
+    from pathlib import Path
+
+    # Initialize console for output (needed by multiple code paths)
+    console = Console()
+
+    # Handle --repos flag for multi-repository queries (Story #676)
+    if repos:
+        # AC1: Validate --repos and --repo are mutually exclusive
+        if repo:
+            console.print(
+                "[red]Error: --repos and --repo are mutually exclusive.[/red]",
+                style="red",
+            )
+            console.print(
+                "  Use --repo for single repository queries",
+                style="dim",
+            )
+            console.print(
+                "  Use --repos for multi-repository queries (comma-separated)",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # AC1: Validate repos parameter is not empty
+        repos_str = repos.strip()
+        if not repos_str:
+            console.print(
+                "[red]Error: --repos cannot be empty.[/red]",
+                style="red",
+            )
+            console.print(
+                "  Provide comma-separated repository aliases: --repos repo1,repo2",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # AC2: Validate we're in remote mode (multi-repo requires server)
+        if mode != "remote":
+            console.print(
+                "[red]Error: Multi-repository queries require remote mode.[/red]",
+                style="red",
+            )
+            console.print(
+                "  Multi-repository search is only available when connected to a CIDX server.",
+                style="dim",
+            )
+            console.print(
+                "  To configure remote mode: [cyan]cidx init --remote[/cyan]",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # AC1: Split comma-separated repository list
+        repos_list = [r.strip() for r in repos_str.split(",") if r.strip()]
+
+        if not repos_list:
+            console.print(
+                "[red]Error: No valid repositories provided.[/red]",
+                style="red",
+            )
+            console.print(
+                "  Provide comma-separated repository aliases: --repos repo1,repo2",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # AC3: Execute multi-repository query via /api/query/multi
+        try:
+            from .cli_multi_repo import (
+                execute_multi_repo_query,
+                display_multi_repo_results,
+            )
+
+            multi_repo_results = execute_multi_repo_query(
+                query_text=query,
+                repos=repos_list,
+                limit=limit,
+                project_root=project_root,
+                languages=languages,
+                exclude_languages=exclude_languages,
+                path_filter=path_filter,
+                exclude_paths=exclude_paths,
+                min_score=min_score,
+                accuracy=accuracy,
+            )
+
+            # AC4: Format and display multi-repo results
+            display_multi_repo_results(multi_repo_results, quiet=quiet, console=console)
+            sys.exit(0)
+
+        except Exception as e:
+            console.print(f"[red]Multi-repository query failed: {e}[/red]")
+            import traceback
+
+            if not quiet:
+                console.print(traceback.format_exc())
+            sys.exit(1)
+
+    # AC2: Handle --repo flag for global alias resolution (Story #521)
+    if repo:
+        # Resolve global alias to actual index path
+        import os
+        from .global_repos.alias_manager import AliasManager
+
+        # Get golden repos directory from environment or use default
+        golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+        if not golden_repos_dir:
+            # Use default location in user home
+            golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
+
+        aliases_dir = Path(golden_repos_dir) / "aliases"
+        alias_manager = AliasManager(str(aliases_dir))
+
+        # Resolve the alias to get the index path
+        resolved_path = alias_manager.read_alias(repo)
+
+        if not resolved_path:
+            console.print(f"[red]Error: Global repo alias '{repo}' not found[/red]")
+            console.print(
+                "[yellow]Available global repos can be listed with: cidx global list[/yellow]"
+            )
+            console.print(
+                "[yellow]To activate a golden repo globally: cidx global activate <repo-name>[/yellow]"
+            )
+            sys.exit(1)
+
+        # The resolved_path might be repo_root OR the full index path
+        # Normalize to repo_root by stripping .code-indexer/index if present
+        resolved = Path(resolved_path)
+        if resolved.name == "index" and resolved.parent.name == ".code-indexer":
+            # Resolved path is full index path, strip to get repo root
+            repo_root = resolved.parent.parent
+        else:
+            # Resolved path is already repo root
+            repo_root = resolved
+
+        # Override project_root and mode
+        project_root = repo_root
+        mode = "local"  # Force local mode when querying global repos
+
+        # For global repos, we don't load config from file
+        # Instead, we create a minimal in-memory config
+        from .config import Config, VectorStoreConfig
+
+        # Create minimal config for querying global repo
+        global_repo_config = Config(
+            codebase_dir=repo_root,
+            vector_store=VectorStoreConfig(provider="filesystem"),
+        )
+
+        # Create a minimal config manager with the in-memory config
+        class MinimalConfigManager:
+            def __init__(self, config):
+                self._config = config
+
+            def load(self):
+                """Load and return the config (already in memory for global repos)."""
+                return self._config
+
+            def get_config(self):
+                """Get the config (already in memory for global repos)."""
+                return self._config
+
+            def get_daemon_config(self):
+                """No daemon support for global repos."""
+                return None  # No daemon for global repos
+
+        config_manager = MinimalConfigManager(global_repo_config)
+
+        # Store in context for downstream code
+        ctx.obj["config_manager"] = config_manager
+        ctx.obj["project_root"] = project_root
+        ctx.obj["mode"] = mode
+
+        if not quiet:
+            console.print(f"[blue]Querying global repo: {repo}[/blue]")
+
+    # Check daemon delegation for local mode (Story 2.3 + Story 1: Temporal Support)
+    # CRITICAL: Skip daemon delegation if standalone flag is set (prevents recursive loop)
+    standalone_mode = ctx.obj.get("standalone", False)
+
+    # Handle --time-range-all flag BEFORE daemon delegation check
+    if time_range_all:
+        # Set time_range to "all" internally
+        time_range = "all"
+
+    if mode == "local" and not standalone_mode:
+        try:
+            config_manager = ctx.obj.get("config_manager")
+            if config_manager:
+                daemon_config = config_manager.get_daemon_config()
+                if daemon_config and daemon_config.get("enabled"):
+                    # Display mode indicator (unless --quiet flag is set)
+                    if not quiet:
+                        console.print("🔧 Running in daemon mode", style="blue")
+
+                    # Delegate based on query type
+                    if time_range:
+                        # Story 1: Delegate temporal query to daemon
+                        exit_code = cli_daemon_delegation._query_temporal_via_daemon(
+                            query_text=query,
+                            time_range=time_range,
+                            daemon_config=daemon_config,
+                            project_root=project_root,
+                            limit=limit,
+                            languages=languages,
+                            exclude_languages=exclude_languages,
+                            path_filter=path_filter,
+                            exclude_path=exclude_paths,
+                            min_score=min_score,
+                            accuracy=accuracy,
+                            chunk_type=chunk_type,
+                            quiet=quiet,
+                        )
+                        sys.exit(exit_code)
+                    else:
+                        # Existing: Delegate HEAD query to daemon
+                        exit_code = cli_daemon_delegation._query_via_daemon(
+                            query_text=query,
+                            daemon_config=daemon_config,
+                            fts=fts,
+                            semantic=semantic,
+                            limit=limit,
+                            languages=languages,
+                            exclude_languages=exclude_languages,
+                            path_filter=path_filter,
+                            exclude_paths=exclude_paths,
+                            min_score=min_score,
+                            accuracy=accuracy,
+                            quiet=quiet,
+                            case_sensitive=case_sensitive,
+                            edit_distance=edit_distance,
+                            snippet_lines=snippet_lines,
+                            regex=regex,
+                        )
+                        sys.exit(exit_code)
+        except Exception:
+            # Daemon delegation failed, continue with standalone mode
+            pass
+
+    # Handle temporal search with time-range filtering (Story 2.1)
+    if time_range:
+        # Temporal search only supported in local mode
+        if mode != "local":
+            console.print(
+                "[yellow]⚠️  Temporal search is only supported in local mode[/yellow]"
+            )
+            sys.exit(1)
+
+        # Lazy import temporal search service
+        from .services.temporal.temporal_search_service import (
+            TemporalSearchService,
+        )
+
+        # Initialize config manager and temporal service
+        config_manager = ctx.obj.get("config_manager")
+        if not config_manager:
+            console.print("[red]❌ Configuration manager not available[/red]")
+            sys.exit(1)
+
+        # Initialize vector store client for temporal service
+        config = config_manager.get_config()
+        index_dir = config.codebase_dir / ".code-indexer" / "index"
+
+        # Import FilesystemVectorStore lazily
+        from .storage.filesystem_vector_store import FilesystemVectorStore
+
+        vector_store_client = FilesystemVectorStore(
+            base_path=index_dir, project_root=config.codebase_dir
+        )
+
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection,
+            resolve_temporal_collection_from_config as _resolve_tcn,
+        )
+
+        _temporal_coll = _resolve_tcn(config)
+        temporal_service = TemporalSearchService(
+            config_manager=config_manager,
+            project_root=Path(project_root),
+            vector_store_client=vector_store_client,
+            collection_name=_temporal_coll,
+        )
+
+        # Check if ANY temporal index exists (legacy or provider-aware)
+        _has_temporal = temporal_service.has_temporal_index() or any(
+            d.is_dir() and is_temporal_collection(d.name)
+            for d in index_dir.iterdir()
+            if d.is_dir()
+        )
+        if not _has_temporal:
+            console.print("[yellow]⚠️  Temporal index not available[/yellow]")
+            console.print()
+            console.print(
+                "Temporal index not available for this repository. No results returned."
+            )
+            console.print()
+            console.print(
+                "Build the temporal index with "
+                "[cyan]cidx index --index-commits[/cyan] "
+                "to enable time-range queries."
+            )
+            return
+        else:
+            # Handle time_range="all" from --time-range-all flag
+            if time_range == "all":
+                # Query entire temporal history - get min and max dates from commits.db
+                # For now, use a very wide range (will be improved in future)
+                start_date = "1970-01-01"
+                end_date = "2100-12-31"
+                if not quiet:
+                    console.print("🕒 Searching entire temporal history...")
+            else:
+                # Validate date range format
+                try:
+                    start_date, end_date = temporal_service._validate_date_range(
+                        time_range
+                    )
+                except ValueError as e:
+                    console.print(f"[red]❌ Invalid time range: {e}[/red]")
+                    console.print()
+                    console.print("Use format: YYYY-MM-DD..YYYY-MM-DD")
+                    console.print(
+                        "Example: [cyan]cidx query 'auth' --time-range 2023-01-01..2024-01-01[/cyan]"
+                    )
+                    sys.exit(1)
+
+            # Initialize vector store for temporal queries
+            # Use the same pattern as regular query command
+            config = config_manager.load()
+            backend = BackendFactory.create(
+                config=config, project_root=Path(config.codebase_dir)
+            )
+            vector_store_client = backend.get_vector_store_client()
+
+            # Health check for vector store
+            if not vector_store_client.health_check():
+                if not quiet:
+                    console.print(
+                        "[yellow]⚠️  Vector store service not available[/yellow]"
+                    )
+                sys.exit(1)
+
+            # Execute temporal query via fusion dispatch (Story #636 wiring)
+            # Routes through parallel multi-provider execution with RRF fusion
+            from .services.temporal.temporal_fusion_dispatch import (
+                execute_temporal_query_with_fusion as _execute_temporal_fusion,
+            )
+
+            index_dir = config.codebase_dir / ".code-indexer" / "index"
+
+            if not quiet:
+                if time_range != "all":
+                    console.print(
+                        f"🕒 Searching code from {start_date} to {end_date}..."
+                    )
+                # Story 2: All temporal results are changes now
+                console.print("   Showing changed chunks only (diff-based indexing)")
+
+            # file_path_filter: use first path_filter entry when only one provided
+            _path_filter_str = list(path_filter)[0] if len(path_filter) == 1 else None
+
+            temporal_results = _execute_temporal_fusion(
+                config=config_manager.get_config(),
+                index_path=index_dir,
+                vector_store=vector_store_client,
+                query_text=query,
+                limit=limit,
+                time_range=(start_date, end_date),
+                file_path_filter=_path_filter_str,
+                diff_types=list(diff_types) if diff_types else None,
+                author=author,
+                chunk_type=chunk_type,
+            )
+
+            # Story #905: Apply unified rerank funnel to temporal results.
+            # All imports are inside this guard so they load only when results exist.
+            if temporal_results.results:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+                from code_indexer.config_global import load_global_config
+                from code_indexer.services.cli_rerank_config_shim import (
+                    CliRerankConfigService,
+                )
+                from code_indexer.services.provider_health_monitor import (
+                    ProviderHealthMonitor,
+                )
+
+                _global_config = load_global_config()
+
+                # Resolve effective rerank query: explicit flag > auto-populate > None.
+                # Empty string is treated as "not provided" so auto-populate can fire.
+                _temporal_effective_rerank_query: Optional[str]
+                if rerank_query:
+                    _temporal_effective_rerank_query = rerank_query
+                elif _global_config.rerank.auto_populate_rerank_query:
+                    _temporal_effective_rerank_query = query
+                else:
+                    _temporal_effective_rerank_query = None
+
+                if _temporal_effective_rerank_query:
+                    _temporal_monitor = ProviderHealthMonitor.get_instance(
+                        persistence_path=_get_reranker_sinbin_path()
+                    )
+                    _temporal_shim = CliRerankConfigService(_global_config)
+
+                    # Convert TemporalSearchResult objects to FTS-shaped dicts so the
+                    # funnel's content extractor can read result text.  The original
+                    # object is stored under "_temporal_obj" for round-trip
+                    # reconstruction after reranking so no data is lost.
+                    _funnel_inputs = [
+                        {
+                            "snippet": r.content,
+                            "file_path": r.file_path,
+                            "score": r.score,
+                            "_temporal_obj": r,
+                        }
+                        for r in temporal_results.results
+                    ]
+
+                    _reranked_dicts = _apply_cli_rerank_and_filter(
+                        results=_funnel_inputs,
+                        rerank_query=_temporal_effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=_temporal_shim,
+                        user_limit=limit,
+                        health_monitor=_temporal_monitor,
+                    )
+
+                    # Reconstruct TemporalSearchResult list in reranked order.
+                    temporal_results.results = [
+                        d["_temporal_obj"] for d in _reranked_dicts
+                    ]
+
+            # Keep a reference for display helpers that expect a temporal_service param
+            temporal_service = TemporalSearchService(
+                config_manager=config_manager,
+                project_root=Path(project_root),
+                vector_store_client=vector_store_client,
+            )
+
+            # Display results
+            if not quiet:
+                console.print()
+                if temporal_results.performance:
+                    perf = temporal_results.performance
+                    console.print(
+                        f"⚡ Search completed in {perf['total_ms']:.1f}ms "
+                        f"(semantic: {perf['semantic_search_ms']:.1f}ms, "
+                        f"temporal filter: {perf['temporal_filter_ms']:.1f}ms)"
+                    )
+                console.print(
+                    f"📊 Found {len(temporal_results.results)} results (total matches: {temporal_results.total_found})"
+                )
+                if temporal_results.warning:
+                    console.print(f"⚠️  {temporal_results.warning}", style="yellow")
+                console.print()
+
+            # Display results using new Story 2.1 implementation
+            if not quiet:
+                display_temporal_results(temporal_results, temporal_service)
+            else:
+                # Quiet mode: show match numbers and commit hash (not placeholder)
+                # Bug #4 fix: Use markup=False to prevent Rich from interpreting special chars
+                for index, temporal_result in enumerate(
+                    temporal_results.results, start=1
+                ):
+                    # Use type field to determine display (Bug #3 fix)
+                    # Commit messages have type="commit_message", diffs have type="commit_diff"
+                    match_type = temporal_result.metadata.get("type", "commit_diff")
+                    if match_type == "commit_message":
+                        # Extract ALL commit metadata
+                        commit_hash = temporal_result.metadata.get(
+                            "commit_hash", "unknown"
+                        )
+                        temporal_ctx = getattr(temporal_result, "temporal_context", {})
+                        commit_date = temporal_ctx.get(
+                            "commit_date",
+                            temporal_result.metadata.get("commit_date", "Unknown"),
+                        )
+                        author_name = temporal_ctx.get(
+                            "author_name",
+                            temporal_result.metadata.get("author_name", "Unknown"),
+                        )
+                        author_email = temporal_result.metadata.get(
+                            "author_email", "unknown@example.com"
+                        )
+
+                        # Provider attribution (Story #640)
+                        _providers = getattr(
+                            temporal_result, "contributing_providers", None
+                        )
+                        _prov_tag = (
+                            f"[{'+'.join(_providers)}] "
+                            if _providers and len(_providers) > 0
+                            else ""
+                        )
+
+                        # Header line with ALL metadata
+                        console.print(
+                            f"{index}. {temporal_result.score:.3f} {_prov_tag}[Commit {commit_hash[:7]}] ({commit_date}) {author_name} <{author_email}>",
+                            markup=False,
+                        )
+
+                        # Display ENTIRE commit message content (all lines, indented)
+                        for line in temporal_result.content.split("\n"):
+                            console.print(f"   {line}", markup=False)
+
+                        # Blank line between results
+                        console.print()
+                    else:
+                        # Provider attribution (Story #640)
+                        _providers = getattr(
+                            temporal_result, "contributing_providers", None
+                        )
+                        _prov_tag = (
+                            f"[{'+'.join(_providers)}] "
+                            if _providers and len(_providers) > 0
+                            else ""
+                        )
+
+                        # For commit_diff, use the file_path attribute (populated from "path" field)
+                        console.print(
+                            f"{index}. {temporal_result.score:.3f} {_prov_tag}{temporal_result.file_path}",
+                            markup=False,
+                        )
+
+            sys.exit(0)
+
+    # Determine search mode based on flags (Story 4)
+    if fts and semantic:
+        search_mode = "hybrid"
+    elif fts:
+        search_mode = "fts"
+    else:
+        search_mode = "semantic"  # Default behavior
+
+    # Bundle 4 (Stories #694 + #904): hoisted init for rerank + embedder chain.
+    # Defined BEFORE search_mode dispatch so all sub-paths (FTS, hybrid, regex,
+    # semantic, temporal) reference the same global_config / cli_rerank_config /
+    # health_monitor / effective_rerank_query / primary_embedder / secondary_embedder.
+    from code_indexer.config_global import load_global_config
+    from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
+    from code_indexer.services.embedder_chain import (
+        EmbedderUnavailableError,
+        _run_embedder_chain,
+    )
+    from code_indexer.services.embedder_provider_resolver import (
+        _resolve_embedder_providers,
+    )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+    global_config = load_global_config()
+
+    # Persistence path for sin-bin state: delegate to shared helper.
+    health_monitor = ProviderHealthMonitor.get_instance(
+        persistence_path=_get_reranker_sinbin_path()
+    )
+    cli_rerank_config = CliRerankConfigService(global_config)
+
+    # Resolve effective rerank_query (precedence: explicit flag > auto_populate > None).
+    # Empty string disables reranking explicitly (mirrors server guard).
+    effective_rerank_query: Optional[str]
+    if rerank_query is not None:
+        effective_rerank_query = rerank_query if rerank_query != "" else None
+    elif global_config.rerank.auto_populate_rerank_query:
+        effective_rerank_query = query
+    else:
+        effective_rerank_query = None
+
+    # Resolve embedder providers (primary, secondary) from environment.
+    # No-provider guard fires at the embedding call sites where the chain is invoked.
+    primary_embedder, secondary_embedder = _resolve_embedder_providers()
+
+    # Validate --regex flag compatibility
+    if regex:
+        # Regex requires FTS mode
+        if not fts:
+            console.print(
+                "[red]❌ --regex requires --fts flag (regex is only available for full-text search)[/red]"
+            )
+            console.print()
+            console.print("Use:")
+            console.print(
+                "  [cyan]cidx query 'pattern' --fts --regex[/cyan]     # Regex search"
+            )
+            console.print()
+            console.print(
+                "For semantic search, remove --regex and use natural language:"
+            )
+            console.print("  [cyan]cidx query 'function definition'[/cyan]")
+            sys.exit(1)
+
+        # Regex incompatible with semantic (hybrid mode)
+        if semantic:
+            console.print("[red]❌ Cannot combine --regex with --semantic[/red]")
+            console.print()
+            console.print("Regex matching only works with FTS (--fts).")
+            console.print("Remove --semantic or --regex flag.")
+            console.print()
+            console.print("Use one of:")
+            console.print(
+                "  [cyan]cidx query 'pattern' --fts --regex[/cyan]      # Regex search only"
+            )
+            console.print(
+                "  [cyan]cidx query 'text' --fts --semantic[/cyan]      # Hybrid search"
+            )
+            sys.exit(1)
+
+        # Regex incompatible with fuzzy matching
+        if fuzzy or edit_distance > 0:
+            console.print(
+                "[red]❌ Cannot combine --regex with --fuzzy or --edit-distance[/red]"
+            )
+            console.print()
+            console.print("Regex provides its own pattern matching capabilities.")
+            console.print("Remove --fuzzy/--edit-distance or --regex flag.")
+            console.print()
+            console.print("Use one of:")
+            console.print(
+                "  [cyan]cidx query 'pattern' --fts --regex[/cyan]      # Regex matching"
+            )
+            console.print(
+                "  [cyan]cidx query 'term' --fts --fuzzy[/cyan]         # Fuzzy matching"
+            )
+            sys.exit(1)
+
+    # Handle FTS/Hybrid query (Stories 3 & 4)
+    if search_mode in ["fts", "hybrid"]:
+        # FTS only supported in local mode currently
+        if mode != "local":
+            console.print(
+                "[yellow]⚠️  Full-text search is only supported in local mode[/yellow]"
+            )
+            sys.exit(1)
+
+        # Lazy import - only load when --fts used
+        from .services.tantivy_index_manager import TantivyIndexManager
+
+        # Check if FTS index exists
+        config_dir = Path(project_root) / ".code-indexer"
+        fts_index_dir = config_dir / "tantivy_index"
+
+        # Graceful degradation for hybrid mode (Story 4 AC#4)
+        if not fts_index_dir.exists():
+            if search_mode == "hybrid":
+                console.print(
+                    "[yellow]⚠️  FTS index not available, falling back to semantic-only search[/yellow]"
+                )
+                console.print(
+                    "[dim]   To enable hybrid search, build the FTS index first: cidx index --fts[/dim]"
+                )
+                search_mode = "semantic"
+            else:
+                console.print("[red]❌ FTS index not found[/red]")
+                console.print()
+                console.print("To use full-text search, first build the FTS index:")
+                console.print()
+                console.print("  [cyan]cidx index --fts[/cyan]")
+                console.print()
+                console.print("This will create both semantic and FTS indexes.")
+                console.print("For more info: [cyan]cidx index --help[/cyan]")
+                sys.exit(1)
+
+        # Only validate FTS-specific flags if we're actually using FTS
+        if search_mode in ["fts", "hybrid"]:
+            # Validate conflicting flags
+            if case_sensitive and case_insensitive:
+                console.print(
+                    "[red]❌ Cannot use both --case-sensitive and --case-insensitive[/red]"
+                )
+                console.print()
+                console.print("Use one of:")
+                console.print(
+                    "  [cyan]cidx query 'term' --fts[/cyan]                      # Case-insensitive (default)"
+                )
+                console.print(
+                    "  [cyan]cidx query 'term' --fts --case-sensitive[/cyan]     # Case-sensitive"
+                )
+                sys.exit(1)
+
+            # Validate edit_distance range
+            if not (0 <= edit_distance <= 3):
+                console.print(
+                    f"[red]❌ --edit-distance must be between 0 and 3 (got {edit_distance})[/red]"
+                )
+                console.print()
+                console.print("Valid values:")
+                console.print("  0 = Exact match (default)")
+                console.print("  1 = Allow 1 character difference")
+                console.print("  2 = Allow 2 character differences")
+                console.print("  3 = Allow 3 character differences")
+                sys.exit(1)
+
+            # Validate snippet_lines range
+            if not (0 <= snippet_lines <= 50):
+                console.print(
+                    f"[red]❌ --snippet-lines must be between 0 and 50 (got {snippet_lines})[/red]"
+                )
+                console.print()
+                console.print("Valid values:")
+                console.print("  0  = List files only (no content snippets)")
+                console.print("  5  = Show 5 lines of context (default)")
+                console.print("  10 = Show 10 lines of context")
+                sys.exit(1)
+
+            # Handle --fuzzy flag as shorthand for --edit-distance 1
+            if fuzzy and edit_distance == 0:
+                edit_distance = 1
+
+        # Execute hybrid search (Story 4 AC#1 & AC#5 - TRUE PARALLEL EXECUTION)
+        if search_mode == "hybrid":
+            from concurrent.futures import ThreadPoolExecutor
+
+            # Convert languages tuple to single language (FTS uses first language if multiple)
+            language_filter = languages[0] if languages else None
+
+            # Define FTS search function for parallel execution
+            # Over-fetch when reranking so reranker has enough candidates.
+            _hybrid_fetch_limit = (
+                (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                if effective_rerank_query
+                else limit
+            )
+
+            def execute_fts():
+                try:
+                    tantivy_manager = TantivyIndexManager(fts_index_dir)
+                    tantivy_manager.initialize_index(create_new=False)
+                    return tantivy_manager.search(
+                        query_text=query,
+                        case_sensitive=case_sensitive,
+                        edit_distance=edit_distance,
+                        snippet_lines=snippet_lines,
+                        limit=_hybrid_fetch_limit,
+                        language_filter=language_filter,
+                        path_filters=list(path_filter) if path_filter else None,
+                        exclude_paths=list(exclude_paths) if exclude_paths else None,
+                        use_regex=regex,  # Pass regex flag
+                    )
+                except Exception as e:
+                    console.print(f"[yellow]⚠️  FTS search failed: {e}[/yellow]")
+                    return []
+
+            # Execute BOTH searches in parallel (AC#5 - CRITICAL: Not sequential!)
+            # Both FTS and semantic run simultaneously, not one after the other
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit BOTH searches simultaneously
+                fts_future = executor.submit(execute_fts)
+                semantic_future = executor.submit(
+                    _execute_semantic_search,
+                    query=query,
+                    limit=_hybrid_fetch_limit,
+                    languages=languages,
+                    exclude_languages=exclude_languages,
+                    path_filter=path_filter,
+                    exclude_paths=exclude_paths,
+                    min_score=min_score,
+                    accuracy=accuracy,
+                    quiet=quiet,
+                    project_root=project_root,
+                    config_manager=ctx.obj["config_manager"],
+                    console=console,
+                    file_extensions=file_extensions,
+                )
+
+                # Wait for BOTH to complete (parallel execution)
+                try:
+                    fts_results = fts_future.result()
+                except Exception as e:
+                    console.print(f"[yellow]⚠️  FTS search failed: {e}[/yellow]")
+                    fts_results = []
+
+                try:
+                    semantic_results = semantic_future.result()
+                except Exception as e:
+                    console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
+                    semantic_results = []
+
+            # Story #694: apply reranker stage to each sub-list independently.
+            if effective_rerank_query:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+                fts_results = _apply_cli_rerank_and_filter(
+                    results=fts_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
+                semantic_results = _apply_cli_rerank_and_filter(
+                    results=semantic_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
+
+            # Display hybrid results with clear separation (AC#2)
+            _display_hybrid_results(
+                fts_results=fts_results,
+                semantic_results=semantic_results,
+                quiet=quiet,
+                console=console,
+            )
+            sys.exit(0)  # Exit after hybrid display (no fall-through to semantic logic)
+
+        # Execute FTS-only search (Story 3)
+        elif search_mode == "fts":
+            # Convert friendly language names to file extensions using LanguageMapper
+            language_extensions = None
+            if languages:
+                from .services.language_mapper import LanguageMapper
+
+                mapper = LanguageMapper()
+                # Expand all languages to their extensions
+                all_extensions = set()
+                for lang in languages:
+                    all_extensions.update(mapper.get_extensions(lang))
+                language_extensions = list(all_extensions) if all_extensions else None
+
+            try:
+                tantivy_manager = TantivyIndexManager(fts_index_dir)
+                tantivy_manager.initialize_index(create_new=False)
+                # Over-fetch when reranking so reranker has enough candidates.
+                _fts_fetch_limit = (
+                    (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                    if effective_rerank_query
+                    else limit
+                )
+                fts_results = tantivy_manager.search(
+                    query_text=query,
+                    case_sensitive=case_sensitive,
+                    edit_distance=edit_distance,
+                    snippet_lines=snippet_lines,
+                    limit=_fts_fetch_limit,
+                    languages=language_extensions,
+                    path_filters=list(path_filter) if path_filter else None,
+                    exclude_paths=list(exclude_paths) if exclude_paths else None,
+                    exclude_languages=(
+                        list(exclude_languages) if exclude_languages else None
+                    ),
+                    use_regex=regex,  # Pass regex flag
+                )
+
+                # Story #694: apply reranker stage if effective_rerank_query is set.
+                if effective_rerank_query:
+                    from code_indexer.cli_search_funnel import (
+                        _apply_cli_rerank_and_filter,
+                    )
+
+                    fts_results = _apply_cli_rerank_and_filter(
+                        results=fts_results,
+                        rerank_query=effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=cli_rerank_config,
+                        user_limit=limit,
+                        health_monitor=health_monitor,
+                    )
+
+                # Display results
+                _display_fts_results(fts_results, quiet=quiet, console=console)
+                sys.exit(0)
+
+            except Exception as e:
+                console.print(f"[red]❌ FTS query failed: {e}[/red]")
+                import traceback
+
+                console.print(traceback.format_exc())
+                sys.exit(1)
+    # Handle proxy mode (Story 2.2)
+    if mode == "proxy":
+        from .proxy import execute_proxy_command
+
+        # Build args list from command parameters
+        args = [query, "--limit", str(limit)]
+        for lang in languages:
+            args.extend(["--language", lang])
+        if path_filter:
+            for pf in path_filter:
+                args.extend(["--path-filter", pf])
+        for exclude_path in exclude_paths:
+            args.extend(["--exclude-path", exclude_path])
+        if min_score is not None:
+            args.extend(["--min-score", str(min_score)])
+        if accuracy != "balanced":
+            args.extend(["--accuracy", accuracy])
+        if quiet:
+            args.append("--quiet")
+
+        exit_code = execute_proxy_command(project_root, "query", args)
+        sys.exit(exit_code)
+
+    # Handle uninitialized mode
+    if mode == "uninitialized":
+        console.print("❌ Repository not initialized for CIDX", style="red")
+        console.print()
+        console.print("To get started, choose one of these initialization options:")
+        console.print()
+        console.print("🏠 Local Mode (recommended for getting started):")
+        console.print("   cidx init          # Initialize with VoyageAI embeddings")
+        console.print("   cidx start         # Start local services")
+        console.print("   cidx index         # Index your codebase")
+        console.print()
+        console.print("☁️  Remote Mode (connect to existing CIDX server):")
+        console.print(
+            "   cidx init --remote <server-url> --username <user> --password <pass>"
+        )
+        console.print()
+        console.print("For more help: cidx init --help")
+        sys.exit(1)
+
+    # Handle remote mode
+    if mode == "remote":
+        console.print(
+            "🔗 Remote mode detected - executing query on remote server...",
+            style="blue",
+        )
+
+        try:
+            # Execute remote query with transparent repository linking
+            from typing import cast
+
+            from .remote.query_execution import execute_remote_query
+            from .server.models.api_models import QueryResultItem
+
+            # NOTE: Remote query API currently supports single language only
+            # Use first language from tuple, ignore additional languages for remote mode
+            # NOTE: Remote query API currently supports single path only
+            # Use first path from tuple, ignore additional paths for remote mode
+            results_raw = execute_remote_query(
+                query_text=query,
+                limit=limit,
+                project_root=project_root,
+                language=languages[0] if languages else None,
+                path=path_filter[0] if path_filter else None,
+                min_score=min_score,
+                include_source=True,
+                accuracy=accuracy,
+            )
+
+            # Cast to help MyPy understand the actual return type
+            remote_results: List[QueryResultItem] = cast(
+                List[QueryResultItem], results_raw
+            )
+
+            if not remote_results:
+                console.print("No results found.", style="yellow")
+                sys.exit(0)
+
+            # Convert API client results to local format for display
+            converted_results: List[Dict[str, Any]] = []
+            for result_item in remote_results:
+                converted_result = {
+                    "score": getattr(
+                        result_item,
+                        "score",
+                        getattr(result_item, "similarity_score", 0.0),
+                    ),
+                    "payload": {
+                        "path": result_item.file_path,
+                        "language": getattr(result_item, "language", None),
+                        "content": getattr(
+                            result_item,
+                            "content",
+                            getattr(result_item, "code_snippet", ""),
+                        ),
+                        "line_start": getattr(
+                            result_item, "line_start", result_item.line_number
+                        ),
+                        "line_end": getattr(
+                            result_item, "line_end", result_item.line_number + 1
+                        ),
+                    },
+                }
+
+                # Add staleness info if available (EnhancedQueryResultItem)
+                if hasattr(result_item, "staleness_indicator"):
+                    converted_result["staleness"] = {
+                        "is_stale": getattr(result_item, "is_stale", False),
+                        "staleness_indicator": result_item.staleness_indicator,
+                        "staleness_delta_seconds": getattr(
+                            result_item, "staleness_delta_seconds", 0
+                        ),
+                    }
+
+                converted_results.append(converted_result)
+
+            # Use existing display logic for local queries
+            if not quiet:
+                console.print(f"\n✅ Found {len(converted_results)} results:")
+                console.print("=" * 80)
+
+            # Display each result using existing logic
+            for i, result in enumerate(converted_results, 1):
+                # Type hint: result is Dict[str, Any] here (converted from QueryResultItem)
+                payload = result["payload"]
+                score = result["score"]
+
+                # File info
+                file_path = payload.get("path", "unknown")
+                language = payload.get("language", "unknown")
+                content = payload.get("content", "")
+
+                # Line number info
+                line_start = payload.get("line_start")
+                line_end = payload.get("line_end")
+
+                # Create file path with line numbers
+                if line_start is not None and line_end is not None:
+                    if line_start == line_end:
+                        file_path_with_lines = f"{file_path}:{line_start}"
+                    else:
+                        file_path_with_lines = f"{file_path}:{line_start}-{line_end}"
+                else:
+                    file_path_with_lines = file_path
+
+                # Get staleness info if available
+                staleness_info = result.get("staleness", {})
+                staleness_indicator = staleness_info.get("staleness_indicator", "")
+
+                if quiet:
+                    # Quiet mode - minimal output: score, staleness indicator, path with line numbers
+                    if staleness_indicator:
+                        console.print(
+                            f"{score:.3f} {staleness_indicator} {file_path_with_lines}"
+                        )
+                    else:
+                        console.print(f"{score:.3f} {file_path_with_lines}")
+                    if content:
+                        # Show content with line numbers
+                        content_lines = content.split("\n")
+                        if line_start is not None:
+                            numbered_lines = []
+                            for j, line in enumerate(content_lines):
+                                line_num = line_start + j
+                                numbered_lines.append(f"{line_num:3}: {line}")
+                            content_with_line_numbers = "\n".join(numbered_lines)
+                            console.print(content_with_line_numbers, markup=False)
+                        else:
+                            console.print(content, markup=False)
+                else:
+                    # Full display mode
+                    header = f"[{i}] Score: {score:.3f}"
+                    if staleness_indicator:
+                        header += f" | {staleness_indicator}"
+                    console.print(f"\n{header}")
+
+                    console.print(f"File: {file_path_with_lines}")
+                    if language != "unknown":
+                        console.print(f"Language: {language}")
+
+                    # Add staleness details in verbose mode
+                    if staleness_info.get("staleness_delta_seconds") is not None:
+                        delta_seconds = staleness_info["staleness_delta_seconds"]
+                        if delta_seconds > 0:
+                            delta_hours = delta_seconds / 3600
+                            if delta_hours < 1:
+                                delta_minutes = int(delta_seconds / 60)
+                                staleness_detail = (
+                                    f"Local file newer by {delta_minutes}m"
+                                )
+                            elif delta_hours < 24:
+                                delta_hours_int = int(delta_hours)
+                                staleness_detail = (
+                                    f"Local file newer by {delta_hours_int}h"
+                                )
+                            else:
+                                delta_days = int(delta_hours / 24)
+                                staleness_detail = f"Local file newer by {delta_days}d"
+                            console.print(f"Staleness: {staleness_detail}")
+
+                    if content:
+                        if not quiet:
+                            console.print(f"Relevance: {score:.3f}/1.0")
+                        console.print("Content:")
+                        console.print("-" * 40)
+                        console.print(content, markup=False)
+                        console.print("-" * 40)
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            # Check for repository linking related errors and provide helpful guidance
+            error_message = str(e).lower()
+
+            if (
+                "git repository" in error_message
+                or "repository linking" in error_message
+            ):
+                console.print(
+                    "❌ Remote query requires git repository context", style="red"
+                )
+                console.print()
+                console.print(
+                    "🔗 Remote mode uses repository linking to match your local repository"
+                )
+                console.print("   with indexed repositories on the remote CIDX server.")
+                console.print()
+                console.print("📋 To resolve this, choose one of these options:")
+                console.print()
+                console.print("1️⃣  Initialize git repository in current directory:")
+                console.print("   git init")
+                console.print("   git remote add origin <your-repository-url>")
+                console.print()
+                console.print(
+                    "2️⃣  Clone existing repository that's indexed on remote server:"
+                )
+                console.print("   git clone <repository-url>")
+                console.print("   cd <repository-name>")
+                console.print('   cidx query "your search"')
+                console.print()
+                console.print(
+                    "💡 Repository linking ensures you get results relevant to your"
+                )
+                console.print("   current codebase context and branch.")
+            else:
+                console.print(f"❌ Remote query failed: {e}", style="red")
+
+            sys.exit(1)
+
+        # Return early to avoid falling through to local mode execution
+        return
+
+    # Continue with local mode execution
+    if not quiet:
+        console.print(f"🔍 Executing local query in: {project_root}", style="dim")
+
+    config_manager = ctx.obj["config_manager"]
+
+    try:
+        config = config_manager.load()
+
+        # Initialize services - lazy imports for query path
+        from .services.generic_query_service import GenericQueryService
+        from .services.language_validator import LanguageValidator
+        from .services.language_mapper import LanguageMapper
+
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        backend = BackendFactory.create(
+            config=config, project_root=Path(config.codebase_dir)
+        )
+        vector_store_client = backend.get_vector_store_client()
+
+        # Initialize MultiIndexQueryService for unified query interface
+        # This handles both single-index (code only) and multi-index (code + multimodal) queries
+        from .services.multi_index_query_service import MultiIndexQueryService
+
+        multi_index_service = MultiIndexQueryService(
+            project_root=project_root,
+            vector_store=vector_store_client,
+            embedding_provider=embedding_provider,
+        )
+
+        # Health checks
+        if not embedding_provider.health_check():
+            console.print(
+                f"❌ {embedding_provider.get_provider_name().title()} service not available",
+                style="red",
+            )
+            sys.exit(1)
+
+        if not vector_store_client.health_check():
+            console.print("❌ Vector store service not available", style="red")
+            sys.exit(1)
+
+        # Ensure provider-aware collection is set for search
+        collection_name = vector_store_client.resolve_collection_name(
+            config, embedding_provider
+        )
+        # Ensure payload indexes exist (read-only check for query operations)
+        vector_store_client.ensure_payload_indexes(collection_name, context="query")
+
+        # Initialize timing dictionary for telemetry
+        timing_info: Dict[str, Any] = {}
+
+        # NOTE: Embedding generation now happens in parallel with index loading
+        # inside vector_store_client.search() - do NOT pre-compute embedding here
+
+        # Build filter conditions for non-git path only
+        filter_conditions: Dict[str, Any] = {}
+        if languages:
+            # Validate language parameters
+            language_validator = LanguageValidator()
+            language_mapper = LanguageMapper()
+            language_filters = []
+
+            for lang in languages:
+                # Validate each language
+                validation_result = language_validator.validate_language(lang)
+
+                if not validation_result.is_valid:
+                    click.echo(f"Error: {validation_result.error_message}", err=True)
+                    if validation_result.suggestions:
+                        click.echo(
+                            f"Suggestions: {', '.join(validation_result.suggestions)}",
+                            err=True,
+                        )
+                    raise click.ClickException(f"Invalid language: {lang}")
+
+                # For non-git path, handle language mapping
+                language_filter = language_mapper.build_language_filter(lang)
+                language_filters.append(language_filter)
+
+            if language_filters:
+                # Multiple languages: wrap in "should" clause (OR logic)
+                # Single language: use directly (no wrapper needed)
+                if len(language_filters) > 1:
+                    filter_conditions["must"] = [{"should": language_filters}]
+                else:
+                    filter_conditions["must"] = language_filters
+        if path_filter:
+            path_filters = [
+                {"key": "path", "match": {"text": pf}} for pf in path_filter
+            ]
+            if len(path_filters) > 1:
+                # Multiple path filters: wrap in "should" clause (OR logic)
+                filter_conditions.setdefault("must", []).append(
+                    {"should": path_filters}
+                )
+            else:
+                # Single path filter: append directly
+                filter_conditions.setdefault("must", []).extend(path_filters)
+
+        # Build exclusion filters (must_not conditions)
+        if exclude_languages:
+            language_validator = LanguageValidator()
+            language_mapper = LanguageMapper()
+            must_not_conditions = []
+
+            for exclude_lang in exclude_languages:
+                # Validate each exclusion language
+                validation_result = language_validator.validate_language(exclude_lang)
+
+                if not validation_result.is_valid:
+                    click.echo(f"Error: {validation_result.error_message}", err=True)
+                    if validation_result.suggestions:
+                        click.echo(
+                            f"Suggestions: {', '.join(validation_result.suggestions)}",
+                            err=True,
+                        )
+                    raise click.ClickException(
+                        f"Invalid exclusion language: {exclude_lang}"
+                    )
+
+                # Get all extensions for this language
+                extensions = language_mapper.get_extensions(exclude_lang)
+
+                # Add must_not condition for each extension
+                for ext in extensions:
+                    must_not_conditions.append(
+                        {"key": "language", "match": {"value": ext}}
+                    )
+
+            if must_not_conditions:
+                filter_conditions["must_not"] = must_not_conditions
+
+        # Build path exclusion filters (must_not conditions for paths)
+        if exclude_paths:
+            from .services.path_filter_builder import PathFilterBuilder
+
+            path_filter_builder = PathFilterBuilder()
+
+            # Build path exclusion filters
+            path_exclusion_filters = path_filter_builder.build_exclusion_filter(
+                list(exclude_paths)
+            )
+
+            # Add to existing must_not conditions
+            if path_exclusion_filters.get("must_not"):
+                if "must_not" in filter_conditions:
+                    filter_conditions["must_not"].extend(
+                        path_exclusion_filters["must_not"]
+                    )
+                else:
+                    filter_conditions["must_not"] = path_exclusion_filters["must_not"]
+
+        # Detect and warn about filter conflicts (Story 3.1)
+        from .services.filter_conflict_detector import FilterConflictDetector
+
+        conflict_detector = FilterConflictDetector()
+
+        # Prepare filter arguments for conflict detection
+        include_languages = list(languages) if languages else []
+        include_paths = list(path_filter) if path_filter else []
+
+        conflicts = conflict_detector.detect_conflicts(
+            include_languages=include_languages,
+            exclude_languages=list(exclude_languages) if exclude_languages else [],
+            include_paths=include_paths,
+            exclude_paths=list(exclude_paths) if exclude_paths else [],
+        )
+
+        # Display warnings/errors for conflicts
+        if conflicts:
+            error_conflicts = [c for c in conflicts if c.severity == "error"]
+            warning_conflicts = [c for c in conflicts if c.severity == "warning"]
+
+            if error_conflicts:
+                console.print("\n[bold red]🚫 Filter Conflicts (Errors):[/bold red]")
+                for conflict in error_conflicts:
+                    console.print(f"  [red]• {conflict.message}[/red]")
+                console.print()
+
+            if warning_conflicts:
+                console.print("\n[bold yellow]⚠️  Filter Warnings:[/bold yellow]")
+                for conflict in warning_conflicts:
+                    console.print(f"  [yellow]• {conflict.message}[/yellow]")
+                console.print()
+
+        # Log filter structure for debugging (Story 3.1 AC #12)
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if filter_conditions:
+            import json
+
+            logger.debug(f"Query filters: {json.dumps(filter_conditions, indent=2)}")
+
+        # Check if project uses git-aware indexing
+        from .services.git_topology_service import GitTopologyService
+
+        # BranchAwareIndexer removed - using HighThroughputProcessor git-aware methods
+
+        git_topology_service = GitTopologyService(config.codebase_dir)
+        is_git_aware = git_topology_service.is_git_available()
+
+        # Initialize query service for git-aware filtering
+        query_service = GenericQueryService(config.codebase_dir, config)
+
+        # Determine if we should use branch-aware querying
+        if is_git_aware:
+            # Use git-aware filtering for git projects
+            current_branch = git_topology_service.get_current_branch() or "master"
+            use_branch_aware_query = True
+        else:
+            # Use generic query service for non-git projects
+            use_branch_aware_query = False
+
+        # Apply embedding provider's model filtering when searching
+        provider_info = embedding_provider.get_model_info()
+        if not quiet:
+            # Check if multimodal index exists to show appropriate models
+            code_model = provider_info.get("name", "unknown")
+            if multi_index_service.has_multimodal_index():
+                from .config import VOYAGE_MULTIMODAL_MODEL
+
+                console.print(f"Using: {code_model}, {VOYAGE_MULTIMODAL_MODEL}")
+            else:
+                console.print(f"Using: {code_model}")
+
+            # Get current branch context for git-aware filtering
+            if is_git_aware:
+                console.print(f"📂 Git repository: {config.codebase_dir.name}")
+                console.print(f"🌿 Current branch: {current_branch}")
+            else:
+                branch_context = query_service.get_current_branch_context()
+                console.print(f"📁 Non-git project: {branch_context['project_id']}")
+
+            # Search
+            console.print(f"🔍 Searching for: '{query}'")
+            if languages:
+                console.print(f"🏷️  Language filter: {', '.join(languages)}")
+            if path_filter:
+                console.print(f"📁 Path filter: {', '.join(path_filter)}")
+            console.print(f"📊 Limit: {limit}")
+            if min_score:
+                console.print(f"⭐ Min score: {min_score}")
+        else:
+            # Get current branch context for git-aware filtering (for non-git projects)
+            if not is_git_aware:
+                branch_context = query_service.get_current_branch_context()
+
+        # Get current branch for display
+        current_display_branch = "unknown"
+        try:
+            # Try to get branch from git directly since we're in a git repository
+            import subprocess
+
+            git_result = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=config.codebase_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if git_result.returncode == 0:
+                current_display_branch = git_result.stdout.strip()
+            else:
+                # Fallback to metadata if available
+                try:
+                    from .services.progressive_metadata import (
+                        ProgressiveMetadata,
+                    )
+
+                    metadata = ProgressiveMetadata(config.codebase_dir)
+                    current_display_branch = metadata.get_current_branch_with_retry(
+                        fallback="unknown"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Get current embedding model for filtering
+        current_model = embedding_provider.get_current_model()
+
+        # Use appropriate search method based on project type
+        if use_branch_aware_query:
+            # Use branch-aware search for git projects
+            if not quiet:
+                console.print("🔍 Applying git-aware filtering...")
+
+            # Build filter conditions (NO git_branch filter - let post-filtering handle it)
+            filter_conditions_list = []
+
+            # Only filter by git_available to exclude non-git content
+            filter_conditions_list.append(
+                {"key": "git_available", "match": {"value": True}}
+            )
+
+            # Add user-specified filters
+            if languages:
+                language_mapper = LanguageMapper()
+                # Handle multiple languages by building OR conditions
+                if len(languages) > 1:
+                    # Multiple languages: use OR logic (should clause)
+                    language_filters = [
+                        language_mapper.build_language_filter(lang)
+                        for lang in languages
+                    ]
+                    filter_conditions_list.append({"should": language_filters})  # type: ignore[dict-item]
+                else:
+                    # Single language: add directly
+                    language_filter = language_mapper.build_language_filter(
+                        languages[0]
+                    )
+                    filter_conditions_list.append(language_filter)
+
+            if path_filter:
+                # Multiple path filters should use OR logic
+                if len(path_filter) > 1:
+                    # Multiple path filters: use OR logic (should clause)
+                    path_filters = [
+                        {"key": "path", "match": {"text": pf}} for pf in path_filter
+                    ]
+                    filter_conditions_list.append({"should": path_filters})  # type: ignore[dict-item]
+                else:
+                    # Single path filter: add directly
+                    filter_conditions_list.append(
+                        {"key": "path", "match": {"text": path_filter[0]}}
+                    )
+
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
+            # Build filter conditions preserving both must and must_not conditions
+            query_filter_conditions = (
+                {"must": filter_conditions_list} if filter_conditions_list else {}
+            )
+            # CRITICAL: Preserve must_not conditions (exclusion filters) from earlier filter_conditions
+            # This ensures --exclude-language and --exclude-path work in git-aware repositories
+            if filter_conditions.get("must_not"):
+                query_filter_conditions["must_not"] = filter_conditions["must_not"]
+
+            # Query vector store (get more results to allow for git filtering)
+            # FilesystemVectorStore: parallel execution (query + embedding_provider)
+            # FilesystemVectorStore: requires pre-computed query_vector
+            from .storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
+
+            if isinstance(vector_store_client, FilesystemVectorStore):
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
+                )
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results, multi_index_timing = multi_index_service.query(
+                    query_text=query,
+                    limit=_semantic_fetch_limit,
+                    collection_name=collection_name,
+                    filter_conditions=query_filter_conditions,
+                )
+                # Use multi-index timing from service
+                search_timing: Dict[str, Any] = multi_index_timing
+            else:
+                # FilesystemVectorStore: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                (
+                    _embed_vec,
+                    _embed_provider,
+                    _embed_failure,
+                    _embed_ms,
+                    _embed_outcomes,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
+                )
+                if _embed_vec is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure}",
+                        providers_attempted=_embed_outcomes,
+                    )
+                query_embedding = _embed_vec
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit2 = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
+                )
+                raw_results_list = vector_store_client.search(
+                    query_vector=query_embedding,
+                    filter_conditions=query_filter_conditions,
+                    limit=_semantic_fetch_limit2,
+                    collection_name=collection_name,
+                )
+                raw_results = raw_results_list  # Type compatibility
+                search_timing = {}  # Filesystem doesn't return timing yet
+            # Merge detailed search timing into main timing info
+            timing_info.update(search_timing)
+
+            # Calculate vector_search_ms as sum of breakdown components for accurate reporting
+            breakdown_keys = [
+                "matrix_load_ms",
+                "index_load_ms",
+                "hnsw_search_ms",
+                "id_index_load_ms",
+                "staleness_detection_ms",
+            ]
+            timing_info["vector_search_ms"] = sum(
+                search_timing.get(k, 0) for k in breakdown_keys
+            )
+
+            # Apply git-aware post-filtering (checks file existence in current branch)
+            git_filter_start = time.time()
+            # Type hint: raw_results is always List[Dict[str, Any]] here
+            git_results = query_service.filter_results_by_current_branch(raw_results)  # type: ignore[arg-type]
+            timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
+
+            # Apply minimum score filtering (language and path already handled by Filesystem filters)
+            if min_score:
+                filtered_results: List[Dict[str, Any]] = []
+                for result in git_results:
+                    # Filter by minimum score
+                    if result.get("score", 0) >= min_score:
+                        filtered_results.append(result)
+                git_results = filtered_results
+        else:
+            # Use model-specific search for non-git projects
+            # FilesystemVectorStore: Use regular search (no model filter needed - single provider)
+            # FilesystemVectorStore: Use search_with_model_filter for multi-provider support
+            from .storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
+
+            if isinstance(vector_store_client, FilesystemVectorStore):
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results, multi_index_timing = multi_index_service.query(
+                    query_text=query,
+                    limit=limit * 2,
+                    collection_name=collection_name,
+                    filter_conditions=filter_conditions if filter_conditions else None,
+                )
+                # Use multi-index timing from service
+                search_timing = multi_index_timing
+                timing_info.update(search_timing)
+            else:
+                # Filesystem backend: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                search_start = time.time()
+                (
+                    _embed_vec2,
+                    _embed_provider2,
+                    _embed_failure2,
+                    _embed_ms2,
+                    _embed_outcomes2,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
+                )
+                if _embed_vec2 is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure2}",
+                        providers_attempted=_embed_outcomes2,
+                    )
+                query_embedding = _embed_vec2
+                raw_results_list = vector_store_client.search_with_model_filter(
+                    query_vector=query_embedding,
+                    embedding_model=current_model,
+                    limit=limit * 2,
+                    score_threshold=min_score,
+                    additional_filters=filter_conditions,
+                    accuracy=accuracy,
+                )
+                raw_results = raw_results_list  # Type compatibility
+                timing_info["vector_search_ms"] = (time.time() - search_start) * 1000
+
+            # Apply git-aware filtering
+            if not quiet:
+                console.print("🔍 Applying git-aware filtering...")
+            git_filter_start = time.time()
+            # Type hint: raw_results is always List[Dict[str, Any]] here
+            git_results = query_service.filter_results_by_current_branch(raw_results)  # type: ignore[arg-type]
+            timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
+
+        # Limit to requested number after filtering (over-fetched earlier for rerank)
+        results = git_results[:limit]
+
+        # Story #694: apply reranker stage if effective_rerank_query is set.
+        if effective_rerank_query:
+            from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+            results = _apply_cli_rerank_and_filter(
+                results=results,
+                rerank_query=effective_rerank_query,
+                rerank_instruction=rerank_instruction,
+                config=cli_rerank_config,
+                user_limit=limit,
+                health_monitor=health_monitor,
+            )
+
+        # Apply staleness detection to local query results
+        if results:
+            try:
+                staleness_start = time.time()
+                # Convert local results to QueryResultItem format for staleness detection
+                from .api_clients.remote_query_client import QueryResultItem
+                from .remote.staleness_detector import StalenessDetector
+
+                query_result_items = []
+                for result in results:
+                    payload = result["payload"]
+
+                    # Extract file metadata for staleness comparison
+                    file_last_modified = payload.get("file_last_modified")
+                    indexed_at = payload.get("indexed_at")
+
+                    # Convert indexed_at ISO timestamp to Unix timestamp float
+                    indexed_timestamp = None
+                    if indexed_at:
+                        try:
+                            from datetime import datetime
+
+                            dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
+                            indexed_timestamp = dt.timestamp()
+                        except (ValueError, AttributeError):
+                            indexed_timestamp = None
+
+                    query_item = QueryResultItem(
+                        similarity_score=result["score"],
+                        file_path=payload.get("path", "unknown"),
+                        line_number=payload.get("line_start", 1),
+                        code_snippet=payload.get("content", ""),
+                        repository_alias=project_root.name,
+                        file_last_modified=file_last_modified,
+                        indexed_timestamp=indexed_timestamp,
+                    )
+                    query_result_items.append(query_item)
+
+                # Apply staleness detection in local mode
+                staleness_detector = StalenessDetector()
+                enhanced_results = staleness_detector.apply_staleness_detection(
+                    query_result_items, project_root, mode="local"
+                )
+                timing_info["staleness_detection_ms"] = (
+                    time.time() - staleness_start
+                ) * 1000
+
+                # Annotate results with staleness detection metadata.
+                # When a reranker was applied (effective_rerank_query is set),
+                # pass preserve_order=True so _annotate_staleness iterates
+                # `results` (reranked order) and does not clobber it with the
+                # staleness-sort that apply_staleness_detection uses internally
+                # (bug #965).  Without a reranker, fresh results sort first.
+                results = _annotate_staleness(
+                    results,
+                    enhanced_results,
+                    preserve_order=bool(effective_rerank_query),
+                )
+
+            except Exception as e:
+                # Graceful fallback - continue with original results if staleness detection fails
+                if not quiet:
+                    console.print(
+                        f"⚠️  Staleness detection unavailable: {e}", style="dim yellow"
+                    )
+
+        # Display results using shared display function (DRY principle)
+        _display_semantic_results(
+            results=results,
+            console=console,
+            quiet=quiet,
+            timing_info=timing_info,
+            current_display_branch=current_display_branch,
+        )
+
+    except EmbedderUnavailableError as e:
+        # Story #904: clean user-facing message when all embedding providers are down.
+        console.print(
+            f"❌ Embedding unavailable: {e}",
+            style="red",
+            markup=False,
+        )
+        sys.exit(1)
+
+    except Exception as e:
+        console.print(f"❌ Search failed: {e}", style="red", markup=False)
+        sys.exit(1)
+
+
+@cli.command(name="teach-ai")
+@click.option(
+    "--claude",
+    "platform_claude",
+    is_flag=True,
+    help="Generate instructions for Claude Code platform",
+)
+@click.option(
+    "--codex",
+    "platform_codex",
+    is_flag=True,
+    help="Generate instructions for OpenAI Codex platform",
+)
+@click.option(
+    "--gemini",
+    "platform_gemini",
+    is_flag=True,
+    help="Generate instructions for Google Gemini platform",
+)
+@click.option(
+    "--opencode",
+    "platform_opencode",
+    is_flag=True,
+    help="Generate instructions for OpenCode platform",
+)
+@click.option(
+    "--q", "platform_q", is_flag=True, help="Generate instructions for Q platform"
+)
+@click.option(
+    "--junie",
+    "platform_junie",
+    is_flag=True,
+    help="Generate instructions for Junie platform",
+)
+@click.option(
+    "--project",
+    "scope_project",
+    is_flag=True,
+    help="Install instructions in project root (./CLAUDE.md)",
+)
+@click.option(
+    "--global",
+    "scope_global",
+    is_flag=True,
+    help="Install instructions globally (~/.claude/CLAUDE.md)",
+)
+@click.option(
+    "--show-only",
+    is_flag=True,
+    help="Preview instruction content without writing files",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Show full skills file contents in preview mode (requires --show-only)",
+)
+@click.option(
+    "--skills-only",
+    is_flag=True,
+    help="Install only skills to ~/.claude/skills/cidx/ without awareness injection",
+)
+def teach_ai(
+    platform_claude: bool,
+    platform_codex: bool,
+    platform_gemini: bool,
+    platform_opencode: bool,
+    platform_q: bool,
+    platform_junie: bool,
+    scope_project: bool,
+    scope_global: bool,
+    show_only: bool,
+    verbose: bool,
+    skills_only: bool,
+):
+    """Generate AI platform instructions for semantic code search.
+
+    Creates instruction files (like CLAUDE.md) that teach AI assistants how to use
+    cidx for semantic code search. Instructions are loaded from template files in
+    prompts/ai_instructions/, allowing non-developers to update content without
+    code changes.
+
+    \b
+    USAGE EXAMPLES:
+      # Install Claude instructions in project
+      cidx teach-ai --claude --project
+
+      # Install Claude instructions globally
+      cidx teach-ai --claude --global
+
+      # Preview instruction content
+      cidx teach-ai --claude --show-only
+
+    \b
+    PLATFORMS:
+      --claude      Claude Code platform
+      --codex       OpenAI Codex platform
+      --gemini      Google Gemini platform
+      --opencode    OpenCode platform
+      --q           Q platform
+      --junie       Junie platform
+
+    \b
+    SCOPE:
+      --project     Install in project root (./CLAUDE.md)
+      --global      Install globally (~/.claude/CLAUDE.md)
+      --show-only   Preview without writing files
+    """
+    from code_indexer.teach_ai_templates import install_skills, load_awareness_template
+
+    console = Console()
+
+    # Handle --skills-only mode (no platform/scope required)
+    if skills_only:
+        # Install skills to ~/.claude/skills/cidx/
+        skills_dir = Path.home() / ".claude" / "skills" / "cidx"
+        try:
+            installed_files = install_skills(str(skills_dir))
+            console.print(
+                "✅ Skills installed to ~/.claude/skills/cidx/", style="green"
+            )
+            console.print(f"   Installed {len(installed_files)} files:", style="dim")
+            for file in sorted(installed_files):
+                console.print(f"     • {file}", style="dim")
+        except Exception as e:
+            console.print(f"❌ Failed to install skills: {e}", style="red")
+            sys.exit(1)
+        return
+
+    # Validate platform flag (exactly one required for non-skills-only mode)
+    platforms = [
+        platform_claude,
+        platform_codex,
+        platform_gemini,
+        platform_opencode,
+        platform_q,
+        platform_junie,
+    ]
+    platform_count = sum(platforms)
+
+    if platform_count == 0:
+        console.print(
+            "❌ Platform required: --claude, --codex, --gemini, --opencode, --q, or --junie",
+            style="red",
+        )
+        sys.exit(1)
+
+    if platform_count > 1:
+        console.print("❌ Only one platform flag allowed at a time", style="red")
+        sys.exit(1)
+
+    # Validate scope flag (required unless --show-only)
+    if not show_only:
+        scopes = [scope_project, scope_global]
+        scope_count = sum(scopes)
+
+        if scope_count == 0:
+            console.print("❌ Scope required: --project or --global", style="red")
+            sys.exit(1)
+
+        if scope_count > 1:
+            console.print("❌ Only one scope flag allowed at a time", style="red")
+            sys.exit(1)
+
+    # Determine platform name for template lookup
+    if platform_claude:
+        platform_name = "claude"
+    elif platform_codex:
+        platform_name = "codex"
+    elif platform_gemini:
+        platform_name = "gemini"
+    elif platform_opencode:
+        platform_name = "opencode"
+    elif platform_q:
+        platform_name = "q"
+    elif platform_junie:
+        platform_name = "junie"
+    else:
+        console.print("❌ Internal error: No platform selected", style="red")
+        sys.exit(1)
+
+    # Load awareness template content
+    try:
+        awareness_content = load_awareness_template(platform_name)
+    except Exception as e:
+        console.print(f"❌ Failed to load awareness template: {e}", style="red")
+        sys.exit(1)
+
+    # Handle --show-only mode
+    if show_only:
+        console.print(f"📄 {platform_name.title()} Awareness Content:\n")
+        console.print(awareness_content, markup=False)
+        console.print("\n" + "=" * 80 + "\n")
+        console.print("📦 Skills Files:\n")
+
+        # List skills files
+        cli_dir = Path(__file__).parent
+        project_root = cli_dir.parent.parent
+        skills_source = project_root / "prompts" / "ai_instructions" / "skills" / "cidx"
+
+        for skill_file in sorted(skills_source.rglob("*")):
+            if skill_file.is_file():
+                relative_path = skill_file.relative_to(skills_source)
+                console.print(f"  • {relative_path}", style="dim")
+
+                # Show full content if --verbose
+                if verbose:
+                    console.print(f"\n    Content of {relative_path}:")
+                    console.print("    " + "-" * 76)
+                    content = skill_file.read_text()
+                    for line in content.split("\n"):
+                        console.print(f"    {line}")
+                    console.print("    " + "-" * 76 + "\n")
+
+        return
+
+    # Platform-specific validation: Gemini and Junie only support project-level
+    if platform_name == "gemini" and scope_global:
+        console.print(
+            "❌ Gemini platform only supports project-level instructions (--project)",
+            style="red",
+        )
+        console.print(
+            "   Gemini does not have a global configuration directory per research."
+        )
+        sys.exit(1)
+
+    if platform_name == "junie" and scope_global:
+        console.print(
+            "❌ Junie platform only supports project-level instructions (--project)",
+            style="red",
+        )
+        console.print(
+            "   Junie does not have a global configuration directory per research."
+        )
+        sys.exit(1)
+
+    # Determine target file path based on platform conventions
+    if scope_project:
+        if platform_name == "claude":
+            # Claude: CLAUDE.md in project root
+            target_path = Path.cwd() / "CLAUDE.md"
+            scope_desc = "project root"
+        elif platform_name == "codex":
+            # Codex: CODEX.md in project root (project-specific instructions)
+            target_path = Path.cwd() / "CODEX.md"
+            scope_desc = "project root"
+        elif platform_name == "gemini":
+            # Gemini: styleguide.md in .gemini subdirectory
+            gemini_dir = Path.cwd() / ".gemini"
+            gemini_dir.mkdir(parents=True, exist_ok=True)
+            target_path = gemini_dir / "styleguide.md"
+            scope_desc = ".gemini/"
+        elif platform_name == "opencode":
+            # OpenCode: AGENTS.md in project root (AGENTS.md open standard)
+            target_path = Path.cwd() / "AGENTS.md"
+            scope_desc = "project root"
+        elif platform_name == "q":
+            # Amazon Q: cidx.md in .amazonq/rules/ subdirectory
+            q_dir = Path.cwd() / ".amazonq" / "rules"
+            q_dir.mkdir(parents=True, exist_ok=True)
+            target_path = q_dir / "cidx.md"
+            scope_desc = ".amazonq/rules/"
+        elif platform_name == "junie":
+            # JetBrains Junie: guidelines.md in .junie subdirectory
+            junie_dir = Path.cwd() / ".junie"
+            junie_dir.mkdir(parents=True, exist_ok=True)
+            target_path = junie_dir / "guidelines.md"
+            scope_desc = ".junie/"
+        else:
+            # Default for other platforms
+            target_path = Path.cwd() / f"{platform_name.upper()}.md"
+            scope_desc = "project root"
+    else:  # scope_global
+        home_dir = Path.home()
+        if platform_name == "claude":
+            # Claude: ~/.claude/CLAUDE.md
+            platform_dir = home_dir / ".claude"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            target_path = platform_dir / "CLAUDE.md"
+            scope_desc = "~/.claude/"
+        elif platform_name == "codex":
+            # Codex: ~/.codex/instructions.md (global behavioral instructions)
+            platform_dir = home_dir / ".codex"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            target_path = platform_dir / "instructions.md"
+            scope_desc = "~/.codex/"
+        elif platform_name == "opencode":
+            # OpenCode: ~/.config/opencode/AGENTS.md (AGENTS.md open standard)
+            platform_dir = home_dir / ".config" / "opencode"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            target_path = platform_dir / "AGENTS.md"
+            scope_desc = "~/.config/opencode/"
+        elif platform_name == "q":
+            # Amazon Q: ~/.aws/amazonq/Q.md
+            platform_dir = home_dir / ".aws" / "amazonq"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            target_path = platform_dir / "Q.md"
+            scope_desc = "~/.aws/amazonq/"
+        else:
+            # Default for other platforms
+            platform_dir = home_dir / f".{platform_name}"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            target_path = platform_dir / f"{platform_name.upper()}.md"
+            scope_desc = f"~/.{platform_name}/"
+
+    # Two-tier update: Install skills + Update awareness
+    # Step 1: Install skills to ~/.claude/skills/cidx/
+    skills_dir = Path.home() / ".claude" / "skills" / "cidx"
+    try:
+        installed_files = install_skills(str(skills_dir))
+        console.print(
+            f"   📦 Skills installed ({len(installed_files)} files)", style="dim"
+        )
+    except Exception as e:
+        console.print(f"❌ Failed to install skills: {e}", style="red")
+        sys.exit(1)
+
+    # Step 2: Update awareness file
+    # Smart update: preserve existing content and update only CIDX section
+    if target_path.exists():
+        # File exists - use fast regex replacement (no Claude CLI needed)
+        console.print("📝 Updating existing file...", style="dim")
+
+        try:
+            existing_content = target_path.read_text()
+
+            # Pattern to find existing SEMANTIC SEARCH section
+            # Matches: "## 1. SEMANTIC SEARCH", "## SEMANTIC SEARCH", etc.
+            import re
+
+            section_pattern = re.compile(
+                r"(^##\s*(?:\d+\.\s*)?SEMANTIC SEARCH.*?)(?=^##\s|\Z)",
+                re.MULTILINE | re.DOTALL | re.IGNORECASE,
+            )
+
+            match = section_pattern.search(existing_content)
+
+            if match:
+                # Replace existing section with new awareness content
+                merged_content = (
+                    existing_content[: match.start()]
+                    + awareness_content.strip()
+                    + "\n\n"
+                    + existing_content[match.end() :].lstrip()
+                )
+                action = "updated"
+            else:
+                # No existing section - append at end
+                merged_content = (
+                    existing_content.rstrip() + "\n\n---\n\n" + awareness_content
+                )
+                action = "added"
+
+            # Write merged content
+            target_path.write_text(merged_content)
+
+            console.print(
+                f"✅ {platform_name.title()} instructions {action} in {scope_desc}",
+                style="green",
+            )
+            console.print(f"   File: {target_path}", style="dim")
+            console.print(
+                f"   ℹ️  Existing content preserved, CIDX section {action}",
+                style="blue dim",
+            )
+
+        except Exception as e:
+            console.print(f"❌ Failed to update instruction file: {e}", style="red")
+            sys.exit(1)
+    else:
+        # New file - create with awareness content
+        try:
+            target_path.write_text(awareness_content)
+            console.print(
+                f"✅ {platform_name.title()} instructions installed to {scope_desc}",
+                style="green",
+            )
+            console.print(f"   Awareness file: {target_path}", style="dim")
+            console.print("   Skills directory: ~/.claude/skills/cidx/", style="dim")
+        except Exception as e:
+            console.print(f"❌ Failed to write instruction file: {e}", style="red")
+            sys.exit(1)
+
+
+@cli.command()
+@click.pass_context
+@require_mode("local", "remote", "proxy", "uninitialized")
+def status(ctx):
+    """Show status of services and index (adapted for current mode).
+    \b
+    Displays comprehensive information about your code-indexer installation:
+    \b
+    LOCAL MODE:
+      • VoyageAI: AI embedding service status
+      • Daemon: Background service status
+      • Index: Filesystem vector store health
+      • Project configuration details
+      • Git repository information (if applicable)
+      • Vector collection statistics
+    \b
+    REMOTE MODE:
+      • Remote server connection status
+      • Repository linking information
+      • Connection health monitoring
+      • Repository staleness analysis
+      • Authentication status
+    \b
+    UNINITIALIZED MODE:
+      • Configuration status
+      • Getting started guidance
+      • Initialization options
+    \b
+    The status display automatically adapts based on your current configuration."""
+    mode = ctx.obj["mode"]
+    project_root = ctx.obj["project_root"]
+
+    # Status command always uses full CLI for Rich table display
+    # (Daemon delegation would lose the beautiful formatted table)
+    # CRITICAL: Skip daemon delegation if standalone flag is set (prevents recursive loop)
+
+    # Handle proxy mode (Story 2.2)
+    if mode == "proxy":
+        from .proxy import execute_proxy_command
+
+        # Build args list for status command
+        args = []  # type: ignore[var-annotated]
+
+        exit_code = execute_proxy_command(project_root, "status", args)
+        sys.exit(exit_code)
+
+    if mode == "local":
+        from .mode_specific_handlers import display_local_status
+
+        display_local_status(project_root)
+    elif mode == "remote":
+        from .mode_specific_handlers import display_remote_status
+
+        asyncio.run(display_remote_status(project_root))
+    else:  # uninitialized
+        from .mode_specific_handlers import display_uninitialized_status
+
+        display_uninitialized_status(project_root)
+
+
+def _status_impl(ctx):
+    """Show status of services and index.
+
+    \b
+    Displays comprehensive information about your code-indexer installation:
+
+    \b
+    SERVICE STATUS:
+      • VoyageAI: AI embedding service status
+      • Index: Filesystem vector store health
+
+    \b
+    INDEX INFORMATION:
+      • Project configuration details
+      • Git repository information (if applicable)
+      • Vector collection statistics
+      • Storage usage and optimization status
+      • Number of indexed files and chunks
+
+    \b
+    CONFIGURATION SUMMARY:
+      • File extensions being indexed
+      • Excluded directories
+      • File size and chunk limits
+      • Model and collection settings
+
+    \b
+    EXAMPLE OUTPUT:
+      ✅ Services: VoyageAI (ready)
+      📂 Project: my-app (Git: feature-branch)
+      📊 Index: 1,234 files, 5,678 chunks
+      💾 Storage: 45.2MB, optimized
+
+    Use this command to verify your installation and troubleshoot issues.
+    """
+    config_manager = ctx.obj["config_manager"]
+
+    try:
+        config = config_manager.load()
+
+        # Create status table
+        table = Table(title="🔍 Code Indexer Status")
+        table.add_column("Component", style="cyan")
+        table.add_column("Status", style="magenta")
+        table.add_column("Details", style="green")
+
+        # Add daemon mode indicator (requested by user)
+        try:
+            daemon_config = config.daemon if hasattr(config, "daemon") else None
+            socket_path = config_manager.get_socket_path()
+            daemon_running = socket_path.exists()
+
+            if daemon_config and daemon_config.enabled:
+                if daemon_running:
+                    table.add_row(
+                        "Daemon Mode",
+                        "✅ Active",
+                        f"Socket: {socket_path.name} | TTL: {daemon_config.ttl_minutes}min | Queries use daemon",
+                    )
+                else:
+                    table.add_row(
+                        "Daemon Mode",
+                        "⚠️ Configured",
+                        "Enabled but stopped (auto-starts on first query)",
+                    )
+            else:
+                table.add_row(
+                    "Daemon Mode",
+                    "❌ Disabled",
+                    "Standalone mode (enable: cidx config --daemon)",
+                )
+        except Exception:
+            # If daemon config check fails, just skip the row
+            pass
+
+        # Check backend provider first to determine if containers are needed
+        backend_provider = getattr(config, "vector_store", None)
+        backend_provider = (
+            backend_provider.provider if backend_provider else "filesystem"
+        )  # Default to filesystem for backward compatibility
+
+        # Container status check removed (Story #506: container management deprecated)
+        # Filesystem backend doesn't need container services
+        if backend_provider != "filesystem":
+            table.add_row(
+                "Container Backend",
+                "⚠️ Deprecated",
+                "Use filesystem backend instead",
+            )
+
+        # Check embedding provider - ALWAYS attempt health check via HTTP
+        try:
+            embedding_provider = EmbeddingProviderFactory.create(config, console)
+            provider_name = embedding_provider.get_provider_name().title()
+
+            # Always try health check via HTTP (works across containers)
+            provider_ok = embedding_provider.health_check()
+            provider_status = "✅ Ready" if provider_ok else "❌ Not Available"
+
+            if provider_ok:
+                from .config import VOYAGE_MULTIMODAL_MODEL
+
+                current_model = embedding_provider.get_current_model()
+                provider_details = f"Models: {current_model}, {VOYAGE_MULTIMODAL_MODEL}"
+            else:
+                provider_details = "Service unreachable"
+
+            table.add_row(
+                f"{provider_name} Provider", provider_status, provider_details
+            )
+        except Exception as e:
+            table.add_row("Embedding Provider", "❌ Error", str(e))
+
+        # Check Vector Storage Backend (Filesystem or Filesystem)
+        # backend_provider already determined above
+        filesystem_ok = False  # Initialize to False
+        vector_store_client = None  # Initialize to None
+
+        # Initialize variables for recovery guidance (both backends need these defined)
+        missing_components: List[str] = []
+        fs_index_files_display: Optional[str] = None
+
+        if backend_provider == "filesystem":
+            # Filesystem backend - no containers required
+            from .storage.filesystem_vector_store import FilesystemVectorStore
+
+            try:
+                # Get filesystem storage path
+                index_path = Path(config.codebase_dir) / ".code-indexer" / "index"
+                fs_store = FilesystemVectorStore(
+                    base_path=index_path, project_root=Path(config.codebase_dir)
+                )
+
+                # Health check - verify filesystem accessibility
+                fs_ok = fs_store.health_check()
+                fs_status = "✅ Ready" if fs_ok else "❌ Not Accessible"
+
+                if fs_ok:
+                    # Get collection info
+                    try:
+                        embedding_provider = EmbeddingProviderFactory.create(
+                            config, console
+                        )
+                        collection_name = fs_store.resolve_collection_name(
+                            config, embedding_provider
+                        )
+
+                        if fs_store.collection_exists(collection_name):
+                            vector_count = fs_store.count_points(collection_name)
+                            # Use fast file count (accurate from metadata, instant lookup)
+                            file_count = fs_store.get_indexed_file_count_fast(
+                                collection_name
+                            )
+
+                            # Validate dimensions
+                            expected_dims = embedding_provider.get_model_info()[
+                                "dimensions"
+                            ]
+                            dims_ok = fs_store.validate_embedding_dimensions(
+                                collection_name, expected_dims
+                            )
+                            dims_status = "✅" if dims_ok else "⚠️"
+
+                            fs_details = f"Collection: {collection_name}\nVectors: {vector_count:,} | Files: {file_count} | Dims: {dims_status}{expected_dims}"
+
+                            # Check critical index files for filesystem backend
+                            collection_path = index_path / collection_name
+                            proj_matrix = collection_path / "projection_matrix.npy"
+                            hnsw_index = collection_path / "hnsw_index.bin"
+
+                            # Build index files status
+                            index_files_status = []
+
+                            # Projection matrix (CRITICAL - queries fail without it)
+                            if proj_matrix.exists():
+                                size_kb = proj_matrix.stat().st_size / 1024
+                                if size_kb < 1024:
+                                    index_files_status.append(
+                                        f"Projection Matrix: ✅ {size_kb:.0f} KB"
+                                    )
+                                else:
+                                    size_mb = size_kb / 1024
+                                    index_files_status.append(
+                                        f"Projection Matrix: ✅ {size_mb:.1f} MB"
+                                    )
+                            else:
+                                index_files_status.append(
+                                    "Projection Matrix: ❌ MISSING (index unrecoverable!)"
+                                )
+
+                            # HNSW index (IMPORTANT - queries slow without it)
+                            if hnsw_index.exists():
+                                size_mb = hnsw_index.stat().st_size / (1024 * 1024)
+                                index_files_status.append(
+                                    f"HNSW Index: ✅ {size_mb:.0f} MB"
+                                )
+                            else:
+                                index_files_status.append(
+                                    "HNSW Index: ⚠️ Missing (queries will be slow)"
+                                )
+
+                            # ID index check (binary file that persists to disk)
+                            id_index_file = collection_path / "id_index.bin"
+                            if id_index_file.exists():
+                                size_kb = id_index_file.stat().st_size / 1024
+                                index_files_status.append(
+                                    f"ID Index: ✅ {size_kb:.0f} KB"
+                                )
+                            else:
+                                index_files_status.append(
+                                    "ID Index: ⚠️ Missing (rebuilds automatically)"
+                                )
+
+                            # FTS (Full-Text Search) index check
+                            fts_index_path = (
+                                config_manager.config_path.parent / "tantivy_index"
+                            )
+                            if fts_index_path.exists() and fts_index_path.is_dir():
+                                # Check for tantivy meta files to verify it's a valid index
+                                meta_file = fts_index_path / "meta.json"
+                                managed_file = fts_index_path / ".managed.json"
+
+                                if meta_file.exists() or managed_file.exists():
+                                    # Valid FTS index exists - get size
+                                    total_size = sum(
+                                        f.stat().st_size
+                                        for f in fts_index_path.rglob("*")
+                                        if f.is_file()
+                                    )
+                                    size_mb = total_size / (1024 * 1024)
+                                    # Count index segments (*.idx files indicate indexed data)
+                                    segment_count = len(
+                                        list(fts_index_path.glob("*.idx"))
+                                    )
+                                    index_files_status.append(
+                                        f"FTS Index: ✅ {size_mb:.1f} MB ({segment_count} segments)"
+                                    )
+                                else:
+                                    index_files_status.append(
+                                        "FTS Index: ⚠️ Invalid (missing meta files)"
+                                    )
+                            else:
+                                index_files_status.append(
+                                    "FTS Index: ❌ Not created (use --fts flag)"
+                                )
+
+                            # SCIP (Code Intelligence) index check
+                            scip_dir = config_manager.config_path.parent / "scip"
+                            if scip_dir.exists() and scip_dir.is_dir():
+                                # Check for SCIP database files
+                                scip_db_files = list(scip_dir.glob("*.scip.db"))
+
+                                if scip_db_files:
+                                    # Calculate total size once (used in all branches)
+                                    total_size = sum(
+                                        db_file.stat().st_size
+                                        for db_file in scip_db_files
+                                    )
+                                    size_mb = total_size / (1024 * 1024)
+
+                                    # Fallback message for when status.json unavailable or unparseable
+                                    fallback_msg = f"SCIP Index: ✅ {size_mb:.1f} MB ({len(scip_db_files)} databases)"
+
+                                    # Try to get detailed status from status.json
+                                    status_file = scip_dir / "status.json"
+
+                                    if status_file.exists():
+                                        try:
+                                            import json
+
+                                            with open(status_file) as f:
+                                                scip_status_data = json.load(f)
+
+                                            overall_status = scip_status_data.get(
+                                                "overall_status", "unknown"
+                                            )
+                                            total_projects = scip_status_data.get(
+                                                "total_projects", 0
+                                            )
+                                            successful = scip_status_data.get(
+                                                "successful_projects", 0
+                                            )
+                                            failed = scip_status_data.get(
+                                                "failed_projects", 0
+                                            )
+
+                                            # Status emoji based on overall status
+                                            if overall_status == "success":
+                                                status_emoji = "✅"
+                                                status_text = f"{successful}/{total_projects} projects"
+                                            elif overall_status == "limbo":
+                                                status_emoji = "⚠️"
+                                                status_text = f"{successful}/{total_projects} projects ({failed} failed)"
+                                            elif overall_status == "failed":
+                                                status_emoji = "❌"
+                                                status_text = "Generation failed"
+                                            else:
+                                                status_emoji = "📊"
+                                                status_text = (
+                                                    f"{len(scip_db_files)} databases"
+                                                )
+
+                                            index_files_status.append(
+                                                f"SCIP Index: {status_emoji} {size_mb:.1f} MB ({status_text})"
+                                            )
+                                        except Exception as e:
+                                            logger.debug(
+                                                f"Failed to parse SCIP status.json: {e}"
+                                            )
+                                            # Fallback to basic display
+                                            index_files_status.append(fallback_msg)
+                                    else:
+                                        # No status.json, use basic display
+                                        index_files_status.append(fallback_msg)
+                                else:
+                                    index_files_status.append(
+                                        "SCIP Index: ❌ Not created (use: cidx scip generate)"
+                                    )
+                            else:
+                                index_files_status.append(
+                                    "SCIP Index: ❌ Not created (use: cidx scip generate)"
+                                )
+
+                            # Track missing components for recovery guidance
+                            has_projection_matrix = proj_matrix.exists()
+                            has_hnsw_index = hnsw_index.exists()
+                            has_id_index = id_index_file.exists()
+
+                            if not has_projection_matrix:
+                                missing_components.append("projection_matrix")
+                            if not has_hnsw_index:
+                                missing_components.append("hnsw")
+                            if not has_id_index:
+                                missing_components.append("id_index")
+
+                            # Store for later display
+                            fs_index_files_display = "\n".join(index_files_status)
+                        else:
+                            fs_details = f"Collection: {collection_name}\nStatus: Not created - run 'cidx index'"
+                            fs_index_files_display = None
+                    except Exception as e:
+                        fs_details = f"Error checking collection: {str(e)[:50]}"
+                        fs_index_files_display = None
+                else:
+                    fs_details = f"Storage path: {index_path}\nStatus: Not accessible"
+                    fs_index_files_display = None
+
+                table.add_row("Vector Storage", fs_status, fs_details)
+                table.add_row("Storage Path", "📁", str(index_path))
+
+                # Add index files status if available
+                if fs_index_files_display:
+                    table.add_row("Index Files", "", fs_index_files_display)
+
+                # Check for multimodal collection and display if exists
+                try:
+                    from .config import VOYAGE_MULTIMODAL_MODEL
+
+                    multimodal_collection = index_path / VOYAGE_MULTIMODAL_MODEL
+
+                    if (
+                        multimodal_collection.exists()
+                        and multimodal_collection.is_dir()
+                    ):
+                        # Get multimodal collection stats
+                        multimodal_vector_count = fs_store.count_points(
+                            VOYAGE_MULTIMODAL_MODEL
+                        )
+                        multimodal_file_count = fs_store.get_indexed_file_count_fast(
+                            VOYAGE_MULTIMODAL_MODEL
+                        )
+
+                        # Validate dimensions for multimodal model (1024)
+                        multimodal_dims = 1024
+                        multimodal_dims_ok = fs_store.validate_embedding_dimensions(
+                            VOYAGE_MULTIMODAL_MODEL, multimodal_dims
+                        )
+                        multimodal_dims_status = "✅" if multimodal_dims_ok else "⚠️"
+
+                        multimodal_details = f"Collection: {VOYAGE_MULTIMODAL_MODEL}\nVectors: {multimodal_vector_count:,} | Files: {multimodal_file_count} | Dims: {multimodal_dims_status}{multimodal_dims}"
+
+                        # Check multimodal index files
+                        multimodal_proj_matrix = (
+                            multimodal_collection / "projection_matrix.npy"
+                        )
+                        multimodal_hnsw_index = multimodal_collection / "hnsw_index.bin"
+                        multimodal_id_index = multimodal_collection / "id_index.bin"
+
+                        multimodal_index_files_status = []
+
+                        # Projection matrix
+                        if multimodal_proj_matrix.exists():
+                            size_kb = multimodal_proj_matrix.stat().st_size / 1024
+                            if size_kb < 1024:
+                                multimodal_index_files_status.append(
+                                    f"Projection Matrix: ✅ {size_kb:.0f} KB"
+                                )
+                            else:
+                                size_mb = size_kb / 1024
+                                multimodal_index_files_status.append(
+                                    f"Projection Matrix: ✅ {size_mb:.1f} MB"
+                                )
+                        else:
+                            multimodal_index_files_status.append(
+                                "Projection Matrix: ❌ MISSING"
+                            )
+
+                        # HNSW index
+                        if multimodal_hnsw_index.exists():
+                            size_mb = multimodal_hnsw_index.stat().st_size / (
+                                1024 * 1024
+                            )
+                            multimodal_index_files_status.append(
+                                f"HNSW Index: ✅ {size_mb:.0f} MB"
+                            )
+                        else:
+                            multimodal_index_files_status.append(
+                                "HNSW Index: ⚠️ Missing"
+                            )
+
+                        # ID index
+                        if multimodal_id_index.exists():
+                            size_kb = multimodal_id_index.stat().st_size / 1024
+                            multimodal_index_files_status.append(
+                                f"ID Index: ✅ {size_kb:.0f} KB"
+                            )
+                        else:
+                            multimodal_index_files_status.append("ID Index: ⚠️ Missing")
+
+                        multimodal_index_files_display = "\n".join(
+                            multimodal_index_files_status
+                        )
+
+                        table.add_row(
+                            "Multimodal Storage", "✅ Ready", multimodal_details
+                        )
+                        table.add_row(
+                            "Multimodal Index Files", "", multimodal_index_files_display
+                        )
+                except Exception as e:
+                    # Multimodal collection doesn't exist or error checking - skip silently
+                    logger.debug(f"Multimodal collection check: {e}")
+
+                # Check for temporal indexes and display per-provider stats (Story #636)
+                try:
+                    import json
+                    import subprocess
+
+                    from .services.temporal.temporal_collection_naming import (
+                        get_temporal_collections as _get_temporal_collections,
+                    )
+                    from .services.temporal.temporal_progressive_metadata import (
+                        TemporalProgressiveMetadata as _TempMeta,
+                    )
+
+                    temporal_collections = _get_temporal_collections(config, index_path)
+
+                    if not temporal_collections:
+                        # No temporal collections found — show "not configured" row
+                        table.add_row(
+                            "Temporal Index",
+                            "⚪ Not configured",
+                            "Run cidx index --index-commits to build temporal index",
+                        )
+                    else:
+                        for coll_name, coll_path in temporal_collections:
+                            try:
+                                # Read progress metadata (commit count, state)
+                                progress = _TempMeta(coll_path)
+                                data = progress.load_progress()
+                                commit_count = len(data.get("completed_commits", []))
+                                state = data.get("state", "idle")
+
+                                # Read legacy temporal_meta.json if present
+                                temporal_meta_path = coll_path / "temporal_meta.json"
+                                total_commits = commit_count
+                                files_processed = 0
+                                indexed_branches: list = []
+                                indexed_at = ""
+                                if temporal_meta_path.exists():
+                                    with open(temporal_meta_path) as f:
+                                        temporal_meta = json.load(f)
+                                    total_commits = temporal_meta.get(
+                                        "total_commits", commit_count
+                                    )
+                                    files_processed = temporal_meta.get(
+                                        "files_processed", 0
+                                    )
+                                    indexed_branches = temporal_meta.get(
+                                        "indexed_branches", []
+                                    )
+                                    indexed_at = temporal_meta.get("indexed_at", "")
+
+                                # Get vector count from collection
+                                vector_count = (
+                                    fs_store.count_points(coll_name)
+                                    if fs_store.collection_exists(coll_name)
+                                    else 0
+                                )
+
+                                # Calculate storage size via du
+                                total_size_bytes = 0
+                                if coll_path.exists():
+                                    try:
+                                        du_result = subprocess.run(
+                                            ["du", "-sb", str(coll_path)],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=5,
+                                        )
+                                        if (
+                                            du_result.returncode == 0
+                                            and du_result.stdout.strip()
+                                        ):
+                                            stdout_parts = du_result.stdout.split()
+                                            if stdout_parts:
+                                                total_size_bytes = int(stdout_parts[0])
+                                        else:
+                                            du_result = subprocess.run(
+                                                ["du", "-sk", str(coll_path)],
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=5,
+                                            )
+                                            if (
+                                                du_result.returncode == 0
+                                                and du_result.stdout.strip()
+                                            ):
+                                                stdout_parts = du_result.stdout.split()
+                                                if stdout_parts:
+                                                    total_size_bytes = (
+                                                        int(stdout_parts[0]) * 1024
+                                                    )
+                                            else:
+                                                raise subprocess.CalledProcessError(
+                                                    du_result.returncode,
+                                                    du_result.args,
+                                                )
+                                    except (
+                                        FileNotFoundError,
+                                        subprocess.CalledProcessError,
+                                        ValueError,
+                                        IndexError,
+                                    ):
+                                        for fp in coll_path.rglob("*"):
+                                            if fp.is_file():
+                                                total_size_bytes += fp.stat().st_size
+
+                                total_size_mb = total_size_bytes / (1024 * 1024)
+
+                                # Format date
+                                if indexed_at:
+                                    from datetime import datetime
+
+                                    dt = datetime.fromisoformat(
+                                        indexed_at.replace("Z", "+00:00")
+                                    )
+                                    formatted_date = dt.strftime("%Y-%m-%d %H:%M")
+                                else:
+                                    formatted_date = "Unknown"
+
+                                branch_list = (
+                                    ", ".join(indexed_branches)
+                                    if indexed_branches
+                                    else "None"
+                                )
+
+                                state_icon = (
+                                    "✅"
+                                    if state == "idle"
+                                    else ("🔄" if state == "building" else "⚠️")
+                                )
+                                temporal_status = f"{state_icon} {state.title()}"
+                                temporal_details = (
+                                    f"Provider: {coll_name}\n"
+                                    f"{total_commits} commits | {files_processed:,} files changed | {vector_count:,} vectors\n"
+                                    f"Branches: {branch_list}\n"
+                                    f"Storage: {total_size_mb:.1f} MB | Last indexed: {formatted_date}"
+                                )
+                                table.add_row(
+                                    "Temporal Index",
+                                    temporal_status,
+                                    temporal_details,
+                                )
+                            except Exception as e_coll:
+                                logger.warning(
+                                    f"Failed to read temporal collection {coll_name}: {e_coll}"
+                                )
+                                table.add_row(
+                                    "Temporal Index",
+                                    "⚠️ Error",
+                                    f"{coll_name}: {str(e_coll)[:80]}",
+                                )
+                except Exception as e:
+                    # Don't fail status command if temporal check fails, but log the error
+                    logger.warning(f"Failed to check temporal index status: {e}")
+                    table.add_row(
+                        "Temporal Index",
+                        "⚠️ Error",
+                        f"Failed to read temporal index information: {str(e)[:100]}",
+                    )
+
+            except Exception as e:
+                table.add_row("Vector Storage", "❌ Error", str(e))
+
+        # Add payload index status - only if Filesystem is running and healthy
+        if filesystem_ok and vector_store_client:
+            try:
+                embedding_provider = EmbeddingProviderFactory.create(config, console)
+                collection_name = vector_store_client.resolve_collection_name(
+                    config, embedding_provider
+                )
+                # Ensure payload indexes exist (silent for status operations)
+                vector_store_client.ensure_payload_indexes(
+                    collection_name, context="status"
+                )
+                payload_index_status = vector_store_client.get_payload_index_status(
+                    collection_name
+                )
+
+                if payload_index_status.get("healthy", False):
+                    payload_status = "✅ Healthy"
+                    payload_details = (
+                        f"{payload_index_status['total_indexes']} indexes active"
+                    )
+                else:
+                    if "error" in payload_index_status:
+                        payload_status = "❌ Error"
+                        payload_details = (
+                            f"Error: {payload_index_status['error'][:50]}..."
+                        )
+                    else:
+                        payload_status = "⚠️ Issues"
+                        missing = payload_index_status.get("missing_indexes", [])
+                        if missing:
+                            payload_details = f"Missing: {', '.join(missing)}"
+                        else:
+                            payload_details = f"{payload_index_status.get('total_indexes', 0)}/{payload_index_status.get('expected_indexes', 0)} indexes"
+
+                table.add_row("Payload Indexes", payload_status, payload_details)
+            except Exception as e:
+                # Don't fail the entire status command if payload index check fails
+                table.add_row(
+                    "Payload Indexes", "❌ Error", f"Check failed: {str(e)[:40]}..."
+                )
+
+        # Add Filesystem storage and collection information - only for Filesystem backend
+        if backend_provider != "filesystem":
+            try:
+                # Get storage path from configuration instead of container inspection
+                # Use the actual project-specific storage path from config
+                project_filesystem_dir = (
+                    Path(config.codebase_dir).resolve() / ".code-indexer" / "filesystem"
+                )
+                table.add_row(
+                    "Filesystem Storage", "📁", f"Host:\n{project_filesystem_dir}"
+                )
+
+                # Add current project collection information
+                if filesystem_ok and vector_store_client:
+                    try:
+                        embedding_provider = EmbeddingProviderFactory.create(
+                            config, console
+                        )
+                        collection_name = vector_store_client.resolve_collection_name(
+                            config, embedding_provider
+                        )
+
+                        # Check if collection exists and get basic info
+                        collection_exists = vector_store_client.collection_exists(
+                            collection_name
+                        )
+                        if collection_exists:
+                            collection_count = vector_store_client.count_points(
+                                collection_name
+                            )
+                            collection_status = "✅ Active"
+
+                            # Get local collection path - should be in project's .code-indexer/filesystem_collection/
+                            project_root = config.codebase_dir
+                            local_collection_path = (
+                                project_root
+                                / ".code-indexer"
+                                / "filesystem_collection"
+                                / collection_name
+                            )
+
+                            symlink_status = (
+                                "Local symlinked"
+                                if local_collection_path.exists()
+                                else "Global storage"
+                            )
+                            # Show full collection name and details
+                            collection_details = f"Name:\n{collection_name}\nPoints: {collection_count:,} | Storage: {symlink_status}"
+                        else:
+                            collection_status = "❌ Missing"
+                            # Show full collection name for missing collections too
+                            collection_details = f"Name:\n{collection_name}\nStatus: Not created yet - run 'index' command"
+
+                        table.add_row(
+                            "Project Collection", collection_status, collection_details
+                        )
+                    except Exception as e:
+                        table.add_row(
+                            "Project Collection",
+                            "⚠️  Error",
+                            f"Check failed: {str(e)[:50]}",
+                        )
+                else:
+                    table.add_row(
+                        "Project Collection",
+                        "❌ Unavailable",
+                        "Filesystem service down",
+                    )
+
+            except Exception as e:
+                table.add_row(
+                    "Filesystem Storage",
+                    "⚠️  Error",
+                    f"Inspection failed: {str(e)[:30]}",
+                )
+
+        # Check Data Cleaner (Filesystem-only service)
+        # Only show Data Cleaner status for Filesystem backends, not filesystem
+        if backend_provider != "filesystem":
+            # CRITICAL IMPLEMENTATION NOTE: This status check was debugged and fixed to handle
+            # the data-cleaner's netcat-based HTTP implementation which has specific limitations:
+            #
+            # PROBLEM DISCOVERED: The data-cleaner container runs a simple bash script that uses
+            # `nc -l -p 8091` (netcat) to simulate an HTTP server. This implementation:
+            # 1. Only handles ONE connection at a time
+            # 2. Resets the connection immediately after responding
+            # 3. Cycles every 10 seconds (sleep 10 in the loop)
+            # 4. Causes ConnectionResetError with Python requests library
+            # 5. Works fine with curl (which handles connection resets gracefully)
+            #
+            # SYMPTOMS OF BREAKAGE:
+            # - curl http://localhost:8091/ returns "Cleanup service ready" ✅
+            # - Python requests.get() throws ConnectionResetError ❌
+            # - Status shows "❌ Not Available" despite container running
+            # - docker ps shows container as healthy
+            #
+            # DEBUGGING NOTES:
+            # - The netcat server responds once per cycle and immediately closes
+            # - HTTP/1.1 keep-alive connections fail due to immediate connection termination
+            # - Connection: close header helps but doesn't fully solve timing issues
+            # - Port availability check works when netcat is between cycles
+            #
+            # SOLUTION IMPLEMENTED:
+            # Multi-layered approach to handle netcat server limitations robustly
+            # DO NOT simplify this logic without understanding the netcat behavior!
+            #
+            data_cleaner_available = False
+            data_cleaner_details = "Service down"
+
+            try:
+                import requests  # type: ignore[import-untyped]
+                import subprocess
+                import socket
+
+                # APPROACH 1: HTTP request with Connection: close header
+                # This works when netcat is actively listening and handles the request immediately
+                # The Connection: close header prevents HTTP/1.1 keep-alive issues with netcat
+                try:
+                    # Use project-specific calculated data cleaner port
+                    data_cleaner_port = getattr(
+                        config.project_ports, "data_cleaner_port", 8091
+                    )
+                    data_cleaner_url = f"http://localhost:{data_cleaner_port}/"
+                    response = requests.get(
+                        data_cleaner_url,
+                        timeout=3,
+                        headers={
+                            "Connection": "close"
+                        },  # Critical: prevents keep-alive issues
+                    )
+                    if response.status_code == 200:
+                        data_cleaner_available = True
+                        data_cleaner_details = "Cleanup service active"
+                except (requests.exceptions.ConnectionError, ConnectionResetError):
+                    # Expected behavior: netcat closes connection immediately after responding
+                    # This exception is NORMAL and indicates we need to try other approaches
+
+                    # APPROACH 2: Raw socket connection test
+                    # This works when netcat is between cycles (during the sleep 10 period)
+                    # We just check if something is listening on the data cleaner port
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                            sock.settimeout(1)  # Quick check to avoid delays
+                            connect_result = sock.connect_ex(
+                                ("localhost", data_cleaner_port)
+                            )
+                            if connect_result == 0:  # Port is listening
+                                data_cleaner_available = True
+                                data_cleaner_details = "Cleanup service active (netcat)"
+                    except Exception:
+                        # Socket connection failed - port not listening or refused
+                        pass
+
+                # APPROACH 3: Container status fallback
+                # If both HTTP and socket checks fail, verify the container is at least running
+                # This catches cases where the service is starting up or having issues
+                if not data_cleaner_available:
+                    try:
+                        result = subprocess.run(
+                            [
+                                "docker",
+                                "ps",
+                                "--filter",
+                                "name=data-cleaner",
+                                "--format",
+                                "{{.Names}}",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        if "data-cleaner" in result.stdout:
+                            data_cleaner_available = True
+                            data_cleaner_details = (
+                                "Container running (service may be cycling)"
+                            )
+                            # Note: This indicates container is up but netcat might be restarting
+                    except Exception:
+                        # Docker command failed - container likely not running
+                        pass
+
+            except Exception as e:
+                data_cleaner_details = f"Check failed: {str(e)[:50]}"
+
+            # FINAL STATUS DETERMINATION
+            # If ANY of the three approaches succeeded, consider the service available
+            # This robust approach handles the netcat server's unpredictable timing
+            data_cleaner_status = (
+                "✅ Ready" if data_cleaner_available else "❌ Not Available"
+            )
+
+            # WARNING FOR FUTURE DEVELOPERS:
+            # - Do NOT simplify this to just requests.get() - it will break randomly
+            # - Do NOT remove the multi-approach logic - netcat is unpredictable
+            # - If changing data-cleaner implementation, update these comments
+            # - Test thoroughly with `cidx status` command multiple times in succession
+            # - Consider replacing netcat with proper HTTP server if reliability issues persist
+
+            table.add_row("Data Cleaner", data_cleaner_status, data_cleaner_details)
+
+        # Check index with git-aware information
+        metadata_path = config_manager.config_path.parent / "metadata.json"
+        if metadata_path.exists():
+            try:
+                import json
+
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                index_status = "✅ Available"
+
+                # Build enhanced details with git info and resume capability
+                last_indexed = metadata.get("indexed_at", "unknown")
+                git_available = metadata.get("git_available", False)
+                project_id = metadata.get("project_id", "unknown")
+
+                # Check if indexing is incomplete (regardless of whether it's running or stopped)
+                has_incomplete_indexing = (
+                    metadata.get("status") == "in_progress"
+                    and len(metadata.get("files_to_index", [])) > 0
+                    and metadata.get("current_file_index", 0)
+                    < len(metadata.get("files_to_index", []))
+                )
+
+                index_details = f"Last indexed: {last_indexed}"
+                if git_available:
+                    current_branch = metadata.get("current_branch", "unknown")
+                    index_details += f" | Branch: {current_branch}"
+                index_details += f" | Project: {project_id}"
+
+                if has_incomplete_indexing:
+                    total_files = metadata.get(
+                        "total_files_to_index", len(metadata.get("files_to_index", []))
+                    )
+                    files_processed = metadata.get("files_processed", 0)
+                    remaining = max(
+                        0, total_files - files_processed
+                    )  # Ensure non-negative
+
+                    if remaining > 0:
+                        index_details += (
+                            f" | 🔄 Not complete ({remaining} files remaining)"
+                        )
+                    else:
+                        # Edge case: files_processed >= total files but status still in_progress
+                        index_details += " | 🔄 Not complete (finishing up)"
+
+            except Exception:
+                index_status = "⚠️  Corrupted"
+                index_details = "Metadata file corrupted"
+        else:
+            index_status = "❌ Not Found"
+            index_details = "Run 'index' command"
+
+        table.add_row("Semantic Index", index_status, index_details)
+
+        # Add git repository status if available
+        try:
+            from .services.git_aware_processor import GitAwareDocumentProcessor
+            from .storage.filesystem_vector_store import FilesystemVectorStore
+
+            # Initialize vector store for git processor (Story #505)
+            index_dir = config.codebase_dir / ".code-indexer" / "index"
+            vector_store = FilesystemVectorStore(
+                base_path=index_dir, project_root=config.codebase_dir
+            )
+
+            processor = GitAwareDocumentProcessor(
+                config,
+                EmbeddingProviderFactory.create(config, console),
+                vector_store,
+            )
+            # Use fast git status (no file scanning) for status display performance
+            git_status = processor.get_git_status_fast()
+
+            if git_status["git_available"]:
+                git_info = f"Branch: {git_status['current_branch']}"
+                commit_hash = git_status.get("current_commit", "unknown")
+                git_info += f" | Commit: {commit_hash}"
+
+                table.add_row("Git Repository", "✅ Available", git_info)
+            else:
+                table.add_row("Git Repository", "❌ Not Found", "Non-git project")
+        except Exception:
+            table.add_row("Git Repository", "⚠️  Error", "Could not check git status")
+
+        # Storage information
+        if filesystem_ok and vector_store_client:
+            try:
+                # Use the correct collection name for storage info too
+                embedding_provider = EmbeddingProviderFactory.create(config, console)
+                collection_name = vector_store_client.resolve_collection_name(
+                    config, embedding_provider
+                )
+                size_info = vector_store_client.get_collection_size(collection_name)
+                if "error" not in size_info:
+                    storage_details = f"Size: ~{size_info['estimated_vector_size_mb']}MB | Points: {size_info['points_count']:,}"
+                    table.add_row("Storage", "📊", storage_details)
+            except Exception:
+                pass
+
+        # Configuration info
+        codebase_value = str(config.codebase_dir)
+        config_value = str(config_manager.config_path)
+
+        table.add_row("Codebase", "📁", codebase_value)
+        table.add_row("Config", "⚙️", config_value)
+        table.add_row(
+            "File Limits",
+            "📏",
+            f"Max size: {config.indexing.max_file_size:,} bytes | Model-aware chunk sizing",
+        )
+
+        console.print(table)
+
+        # Display recovery guidance if indexes are missing (filesystem backend only)
+        if (
+            backend_provider == "filesystem"
+            and fs_index_files_display
+            and missing_components
+        ):
+            console.print("\n" + "━" * 80, style="yellow")
+            console.print("⚠️  INDEX RECOVERY GUIDANCE", style="bold yellow")
+            console.print()
+
+            if "projection_matrix" in missing_components:
+                console.print(
+                    "🚨 CRITICAL: Projection Matrix Missing", style="red bold"
+                )
+                console.print(
+                    "   The projection matrix cannot be recovered and all existing vectors are invalid."
+                )
+                console.print()
+                console.print("   Recovery Required:", style="yellow")
+                console.print("   cidx index --clear")
+                console.print()
+                console.print("   This will:", style="dim")
+                console.print("   • Delete all vectors and indexes")
+                console.print("   • Re-process all code files from scratch")
+                console.print("   • Generate new embeddings via VoyageAI API")
+                console.print("   • Create a new projection matrix")
+                console.print()
+                console.print("   ⏱️  Estimated time: 10-30 minutes")
+                console.print("   💵 Cost: VoyageAI API usage charges apply")
+                console.print()
+
+            if "hnsw" in missing_components or "id_index" in missing_components:
+                console.print("🔧 Recoverable Indexes:", style="yellow bold")
+                console.print(
+                    "   These indexes can be rebuilt from existing vector files without re-embedding."
+                )
+                console.print()
+
+                if "hnsw" in missing_components:
+                    console.print(
+                        "   • HNSW Index (affects query performance):", style="cyan"
+                    )
+                    console.print("     cidx index --rebuild-index")
+                    console.print("     Takes ~2-5 minutes, restores fast queries")
+                    console.print()
+
+                if "id_index" in missing_components:
+                    console.print(
+                        "   • ID Index (affects point lookups):", style="cyan"
+                    )
+                    console.print("     Rebuilds automatically on next query")
+                    console.print("     No manual action required")
+                    console.print()
+
+            console.print("━" * 80, style="yellow")
+
+    except Exception as e:
+        console.print(f"❌ Failed to get status: {e}", style="red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option("--quiet", "-q", is_flag=True, help="Minimal output")
+@click.option("--index-path", type=click.Path(), help="Custom index path")
+def health(output_json: bool, quiet: bool, index_path: Optional[str]):
+    """Check HNSW index health and integrity.
+
+    Performs comprehensive health checks on your HNSW index to verify:
+    - Index file exists and is accessible
+    - File integrity and readability
+    - HNSW graph structure validity
+    - Connection integrity across all nodes
+
+    \b
+    EXIT CODES:
+      0 - Index is healthy
+      1 - Index has integrity issues (corrupted)
+      2 - Index not found (run 'cidx index' to create)
+      3 - Index not readable (permission issues)
+
+    \b
+    EXAMPLES:
+      cidx health                    # Check default index
+      cidx health --json             # JSON output
+      cidx health --quiet            # Minimal output
+      cidx health --index-path /custom/path/index.bin
+    """
+    # Lazy import to avoid startup overhead
+    from .services.hnsw_health_service import HNSWHealthService
+
+    # Determine index path
+    if index_path is None:
+        # Auto-detect index path from config
+        project_root = Path.cwd()
+        config_path = project_root / ".code-indexer" / "config.json"
+
+        if config_path.exists():
+            # Load config to get voyage model (determines collection directory)
+            from .config import Config
+
+            try:
+                with open(config_path, "r") as f:
+                    config_data = json.load(f)
+                config = Config(**config_data)
+                collection_name = config.voyage_ai.model  # e.g., "voyage-code-3"
+                index_path_obj = (
+                    project_root
+                    / ".code-indexer"
+                    / "index"
+                    / collection_name
+                    / "hnsw_index.bin"
+                )
+                index_path = str(index_path_obj)
+            except Exception:
+                # Fallback to legacy path if config loading fails
+                index_path_obj = project_root / ".code-indexer" / "index" / "hnsw.bin"
+                index_path = str(index_path_obj)
+        else:
+            # No config found, use legacy path
+            index_path_obj = project_root / ".code-indexer" / "index" / "hnsw.bin"
+            index_path = str(index_path_obj)
+
+    # Create health service and perform check
+    service = HNSWHealthService(cache_ttl_seconds=300)
+    result = service.check_health(index_path, force_refresh=False)
+
+    # Determine exit code based on result
+    exit_code = 0
+    if not result.valid:
+        if not result.file_exists:
+            exit_code = 2  # Index not found
+        elif not result.readable:
+            exit_code = 3  # Index not readable (permissions)
+        else:
+            exit_code = 1  # Index unhealthy (integrity issues)
+
+    # Output based on flags
+    if output_json:
+        # JSON output
+        output_data = result.model_dump(mode="json")
+        click.echo(json.dumps(output_data, indent=2, default=str))
+        sys.exit(exit_code)
+
+    if quiet:
+        # Quiet output - single line
+        if result.valid:
+            click.echo("HEALTHY")
+        elif not result.file_exists:
+            click.echo("NOT_FOUND")
+        elif not result.readable:
+            click.echo("NOT_READABLE")
+        else:
+            click.echo("UNHEALTHY")
+        sys.exit(exit_code)
+
+    # Human-readable output
+    console.print("\nHNSW Index Health Check", style="bold cyan")
+    console.print("=" * 50)
+
+    # Status line
+    if result.valid:
+        console.print("Status: ", style="bold", end="")
+        console.print("HEALTHY", style="bold green")
+    elif not result.file_exists:
+        console.print("Status: ", style="bold", end="")
+        console.print("NOT FOUND", style="bold red")
+    elif not result.readable:
+        console.print("Status: ", style="bold", end="")
+        console.print("NOT READABLE", style="bold red")
+    else:
+        console.print("Status: ", style="bold", end="")
+        console.print("UNHEALTHY", style="bold red")
+
+    console.print()
+
+    # File information
+    console.print(f"Index Location: {result.index_path}")
+
+    if result.file_size_bytes is not None:
+        # Format file size in human-readable format
+        size_gb = result.file_size_bytes / (1024**3)
+        if size_gb >= 1.0:
+            size_str = f"{size_gb:.1f} GB"
+        else:
+            size_mb = result.file_size_bytes / (1024**2)
+            if size_mb >= 1.0:
+                size_str = f"{size_mb:.1f} MB"
+            else:
+                size_kb = result.file_size_bytes / 1024
+                size_str = f"{size_kb:.1f} KB"
+        console.print(f"File Size: {size_str}")
+
+    if result.last_modified is not None:
+        console.print(
+            f"Last Modified: {result.last_modified.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+    # Integrity metrics (if available)
+    if result.element_count is not None:
+        console.print()
+        console.print("Integrity Metrics:", style="bold")
+        console.print(f"  Element Count: {result.element_count:,}")
+        if result.connections_checked is not None:
+            console.print(f"  Connections Checked: {result.connections_checked:,}")
+        if result.min_inbound is not None:
+            console.print(f"  Min Inbound: {result.min_inbound}")
+        if result.max_inbound is not None:
+            console.print(f"  Max Inbound: {result.max_inbound}")
+
+    # Errors (if any)
+    if result.errors:
+        console.print()
+        console.print("Errors Found:", style="bold red")
+        for error in result.errors:
+            console.print(f"  - {error}", style="red")
+
+        # Recommendation for unhealthy index
+        if not result.valid and result.file_exists:
+            console.print()
+            console.print("Recommendation:", style="bold yellow")
+            console.print('  Re-index with "cidx index --force"', style="yellow")
+
+    # No index found - suggest indexing
+    if not result.file_exists:
+        console.print()
+        console.print("No index found. Create an index with:", style="yellow")
+        console.print("  cidx index", style="bold yellow")
+
+    # Timing information
+    console.print()
+    console.print(f"Check Duration: {result.check_duration_ms:.0f} ms")
+
+    sys.exit(exit_code)
+
+
+@cli.command()
+@click.pass_context
+def optimize(ctx):
+    """[REMOVED] Optimize vector database - not needed for FilesystemVectorStore."""
+    console.print(
+        "❌ The 'optimize' command has been removed (Story #505).",
+        style="red",
+    )
+    console.print(
+        "💡 FilesystemVectorStore does not require optimization.",
+        style="yellow",
+    )
+    console.print(
+        "   Filesystem container backend has been deprecated and removed.",
+        style="dim",
+    )
+    sys.exit(1)
+
+
+@cli.command("force-flush")
+@click.option("--collection", help="Specific collection to flush (optional)")
+@click.pass_context
+def force_flush(ctx, collection: Optional[str] = None):
+    """[REMOVED] Force flush - not needed for FilesystemVectorStore."""
+    console.print(
+        "❌ The 'force-flush' command has been removed (Story #505).",
+        style="red",
+    )
+    console.print(
+        "💡 FilesystemVectorStore writes are synchronous and don't require flushing.",
+        style="yellow",
+    )
+    console.print(
+        "   Filesystem container backend has been deprecated and removed.",
+        style="dim",
+    )
+    sys.exit(1)
+
+
+@cli.command("clean-data")
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="Clear data for all projects, not just current project",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output results in JSON format for automation",
+)
+@click.option(
+    "--verify",
+    is_flag=True,
+    help="Verify reset operations succeeded",
+)
+@click.pass_context
+def clean_data(
+    ctx,
+    all_projects: bool,
+    json_output: bool,
+    verify: bool,
+):
+    """Clear project data without stopping daemon.
+
+    \b
+    Removes indexed data and configuration.
+    Use this between tests or when switching projects.
+
+    \b
+    WHAT IT DOES:
+      • Clears vector indexes (current project or all projects)
+      • Removes local cache directories
+      • Removes .code-indexer/index/ directory
+      • Preserves daemon state for fast restart
+
+    \b
+    DATA OPTIONS:
+      --all-projects         Clear data for all projects
+      --verify               Verify reset operations succeeded
+      --json                 Output results in JSON format
+
+    \b
+    PERFORMANCE:
+      This is much faster than 'uninstall' since daemon stays running.
+      Perfect for rapid test cycles and project switching.
+    """
+    # Check daemon delegation (Story 2.3)
+    # CRITICAL: Skip daemon delegation if standalone flag is set (prevents recursive loop)
+    standalone_mode = ctx.obj.get("standalone", False)
+    if not standalone_mode:
+        try:
+            config_manager = ctx.obj.get("config_manager")
+            if config_manager:
+                daemon_config = config_manager.get_daemon_config()
+                if daemon_config and daemon_config.get("enabled"):
+                    # Delegate to daemon
+                    exit_code = cli_daemon_delegation._clean_data_via_daemon(
+                        all_projects=all_projects,
+                        json_output=json_output,
+                        verify=verify,
+                    )
+                    sys.exit(exit_code)
+        except Exception:
+            # Daemon delegation failed, continue with standalone mode
+            pass
+
+    try:
+        # Lazy imports for clean_data command
+
+        # Use configuration from CLI context
+        config_manager = ctx.obj["config_manager"]
+
+        # Initialize result structure for JSON output
+        from typing import Dict, Any
+
+        result: Dict[str, Any] = {
+            "success": False,
+            "containers_processed": [],
+            "collections_reset": [],
+            "cache_cleared": False,
+            "errors": [],
+        }
+
+        # Filesystem backend - no containers to clean
+        console.print("ℹ️ Filesystem backend - no containers to clean")
+        console.print("💡 Use 'cidx uninstall' to remove index data")
+        result["success"] = True
+        result["containers_processed"].append(
+            {"type": "filesystem", "status": "not_applicable"}
+        )
+
+        # Output results
+        if json_output:
+            import json
+
+            console.print(json.dumps(result, indent=2))
+        elif not result["success"]:
+            sys.exit(1)
+
+    except Exception as e:
+        if json_output:
+            import json
+
+            error_result = {
+                "success": False,
+                "error": str(e),
+                "containers_processed": [],
+                "collections_reset": [],
+                "cache_cleared": False,
+                "errors": [str(e)],
+            }
+            console.print(json.dumps(error_result, indent=2))
+        else:
+            console.print(f"❌ Data cleanup failed: {e}", style="red")
+        sys.exit(1)
+
+
+@cli.command("clean")
+@click.option(
+    "--collection",
+    help="Specific collection to clean (if not specified, cleans default collection)",
+)
+@click.option(
+    "--remove-projection-matrix",
+    is_flag=True,
+    help="Also remove projection matrix (requires re-indexing to restore)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.option(
+    "--show-recommendations",
+    is_flag=True,
+    help="Show git-aware cleanup recommendations",
+)
+@click.pass_context
+@require_mode("local", "remote")
+def clean(
+    ctx,
+    collection: Optional[str],
+    remove_projection_matrix: bool,
+    force: bool,
+    show_recommendations: bool,
+):
+    """Clear vectors from collection without removing structure.
+
+    \b
+    Removes all indexed vectors from a collection while preserving:
+      • Collection metadata
+      • Projection matrix (unless --remove-projection-matrix is specified)
+      • Collection directory structure
+
+    \b
+    This is faster than full uninstall and allows quick re-indexing
+    without recreating the collection structure.
+
+    \b
+    OPTIONS:
+      --collection NAME              Clean specific collection
+      --remove-projection-matrix     Also remove projection matrix
+      --force                        Skip confirmation prompt
+      --show-recommendations         Show git-aware cleanup recommendations
+    """
+    # Check daemon delegation (Story 2.3)
+    # CRITICAL: Skip daemon delegation if standalone flag is set (prevents recursive loop)
+    standalone_mode = ctx.obj.get("standalone", False)
+    if not standalone_mode:
+        try:
+            config_manager = ctx.obj.get("config_manager")
+            if config_manager:
+                daemon_config = config_manager.get_daemon_config()
+                if daemon_config and daemon_config.get("enabled"):
+                    # Delegate to daemon
+                    exit_code = cli_daemon_delegation._clean_via_daemon(
+                        collection=collection,
+                        remove_projection_matrix=remove_projection_matrix,
+                        force=force,
+                        show_recommendations=show_recommendations,
+                    )
+                    sys.exit(exit_code)
+        except Exception:
+            # Daemon delegation failed, continue with standalone mode
+            pass
+
+    try:
+        config_manager = ctx.obj.get("config_manager")
+        project_root = ctx.obj.get("project_root")
+
+        if not config_manager or not project_root:
+            console.print("❌ Configuration not found", style="red")
+            sys.exit(1)
+
+        config = config_manager.get_config()
+
+        # Create backend
+
+        backend = BackendFactory.create(config, project_root)
+
+        # Get vector store client
+        vector_store = backend.get_vector_store_client()
+
+        # Determine collection to clean
+        if collection is None:
+            collections = vector_store.list_collections()
+            if len(collections) == 0:
+                console.print("ℹ️  No collections found to clean", style="blue")
+                return
+            elif len(collections) == 1:
+                collection = collections[0]
+            else:
+                console.print(
+                    "❌ Multiple collections exist. Please specify --collection",
+                    style="red",
+                )
+                console.print(f"\nAvailable collections: {', '.join(collections)}")
+                sys.exit(1)
+
+        # Check if collection exists
+        if not vector_store.collection_exists(collection):
+            console.print(f"❌ Collection '{collection}' does not exist", style="red")
+            sys.exit(1)
+
+        # Get impact information
+        vector_count = vector_store.count_points(collection)
+        collection_size = 0
+        if hasattr(vector_store, "get_collection_size"):
+            collection_size = vector_store.get_collection_size(collection)
+
+        # Show git-aware recommendations if requested
+        if show_recommendations:
+            console.print("\n📋 [bold]Git-Aware Cleanup Recommendations:[/bold]")
+            try:
+                import subprocess
+
+                result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=project_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    console.print("⚠️  You have uncommitted changes:")
+                    console.print(
+                        "💡 Consider committing changes before cleanup to avoid losing indexed data for modified files"
+                    )
+                else:
+                    console.print("✅ No uncommitted changes detected")
+            except Exception:
+                pass  # Silently ignore git errors
+
+        # Show impact and confirmation
+        if not force:
+            console.print(
+                f"\n⚠️  [bold yellow]About to clean collection '{collection}'[/bold yellow]"
+            )
+            console.print(f"   • Vectors to remove: {vector_count}")
+            if collection_size > 0:
+                size_mb = collection_size / (1024 * 1024)
+                console.print(f"   • Storage to reclaim: {size_mb:.2f} MB")
+            if remove_projection_matrix:
+                console.print(
+                    "   • Projection matrix will be REMOVED (requires full re-indexing)"
+                )
+            else:
+                console.print("   • Projection matrix will be PRESERVED")
+
+            if not click.confirm("\nProceed with cleanup?"):
+                console.print("❌ Cleanup cancelled", style="yellow")
+                return
+
+        # Record size before cleanup
+        size_before = collection_size if collection_size > 0 else 0
+
+        # Perform cleanup
+        success = vector_store.clear_collection(
+            collection, remove_projection_matrix=remove_projection_matrix
+        )
+
+        if success:
+            console.print(
+                f"✅ Collection '{collection}' cleaned successfully", style="green"
+            )
+
+            # Report space reclaimed
+            if size_before > 0:
+                size_mb = size_before / (1024 * 1024)
+                console.print(f"💾 Storage reclaimed: {size_mb:.2f} MB")
+        else:
+            console.print(f"❌ Failed to clean collection '{collection}'", style="red")
+            sys.exit(1)
+
+    except Exception as e:
+        console.print(f"❌ Clean failed: {e}", style="red")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command("list-collections")
+@click.pass_context
+@require_mode("local", "remote")
+def list_collections_cmd(ctx):
+    """List all collections with metadata and statistics.
+
+    \b
+    Shows collection information including:
+      • Collection name
+      • Vector count
+      • Vector dimensions
+      • Storage size
+      • Creation date
+    """
+    try:
+        config_manager = ctx.obj.get("config_manager")
+        project_root = ctx.obj.get("project_root")
+
+        if not config_manager or not project_root:
+            console.print("❌ Configuration not found", style="red")
+            sys.exit(1)
+
+        config = config_manager.get_config()
+
+        # Create backend
+
+        backend = BackendFactory.create(config, project_root)
+
+        # Get vector store client
+        vector_store = backend.get_vector_store_client()
+
+        # Get all collections
+        collections = vector_store.list_collections()
+
+        if not collections:
+            console.print("ℹ️  No collections found", style="blue")
+            return
+
+        # Create table
+        table = Table(title="Collections")
+        table.add_column("Name", style="cyan")
+        table.add_column("Vectors", justify="right", style="green")
+        table.add_column("Dimensions", justify="right", style="yellow")
+        table.add_column("Size", justify="right", style="magenta")
+        table.add_column("Created", style="blue")
+
+        # Populate table
+        for coll_name in collections:
+            # Get vector count
+            vector_count = vector_store.count_points(coll_name)
+
+            # Get metadata
+            try:
+                metadata = vector_store.get_collection_info(coll_name)
+                vector_size = metadata.get("vector_size", "N/A")
+                created_at = metadata.get("created_at", "N/A")
+                if created_at != "N/A":
+                    # Format datetime
+                    from datetime import datetime
+
+                    dt = datetime.fromisoformat(created_at)
+                    created_at = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                vector_size = "N/A"
+                created_at = "N/A"
+
+            # Get collection size
+            collection_size = 0
+            if hasattr(vector_store, "get_collection_size"):
+                collection_size = vector_store.get_collection_size(coll_name)
+
+            size_str = "N/A"
+            if collection_size > 0:
+                size_mb = collection_size / (1024 * 1024)
+                if size_mb >= 1.0:
+                    size_str = f"{size_mb:.2f} MB"
+                else:
+                    size_kb = collection_size / 1024
+                    size_str = f"{size_kb:.2f} KB"
+
+            table.add_row(
+                coll_name, str(vector_count), str(vector_size), size_str, created_at
+            )
+
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"❌ Failed to list collections: {e}", style="red")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command("uninstall")
+@click.option(
+    "--wipe-all",
+    is_flag=True,
+    help="DANGEROUS: Perform complete system wipe including all index data, cache, and storage directories",
+)
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+@require_mode("local", "remote", "proxy")
+def uninstall(ctx, wipe_all: bool, confirm: bool):
+    """Uninstall CIDX configuration (mode-specific behavior).
+
+    \b
+    LOCAL MODE - STANDARD CLEANUP:
+      • Removes .code-indexer directory and all indexed data
+      • Removes current project's configuration and indexes
+      • Complete cleanup for fresh start
+
+    \b
+    LOCAL MODE - WITH --wipe-all (DANGEROUS):
+      • All standard cleanup operations above
+      • Removes ~/.code-indexer-data global directory (if exists)
+      • Removes any remaining global storage directories
+      • Performs aggressive filesystem cleanup
+      • May require sudo for permission-protected files
+
+    \b
+    REMOTE MODE:
+      • Safely removes remote configuration and encrypted credentials
+      • Preserves local project files and directory structure
+      • Clears repository linking information
+      • Provides guidance for re-initialization
+
+    \b
+    PROXY MODE (Story 2.3):
+      • Uninstalls services sequentially across all configured repositories
+      • Prevents resource contention during cleanup
+      • Shows progress for each repository
+
+    \b
+    The uninstall behavior automatically adapts based on your current configuration.
+    """
+    mode = ctx.obj["mode"]
+    project_root = ctx.obj["project_root"]
+
+    if mode == "proxy":
+        # Handle proxy mode (Story 2.3 - Sequential Execution)
+        from .proxy import execute_proxy_command
+
+        # Build args list from options
+        args = []
+        if wipe_all:
+            args.append("--wipe-all")
+        if confirm:
+            args.append("--confirm")
+
+        exit_code = execute_proxy_command(project_root, "uninstall", args)
+        sys.exit(exit_code)
+    elif mode == "local":
+        from .mode_specific_handlers import uninstall_local_mode
+
+        uninstall_local_mode(project_root, wipe_all, confirm)
+    elif mode == "remote":
+        from .mode_specific_handlers import uninstall_remote_mode
+
+        uninstall_remote_mode(project_root, confirm)
+    else:  # uninitialized
+        console.print("⚠️  No configuration found to uninstall.", style="yellow")
+        console.print(
+            "💡 Use 'cidx init' to initialize a new configuration.", style="blue"
+        )
+
+
+@cli.command("fix-config")
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be fixed without making changes"
+)
+@click.option("--verbose", is_flag=True, help="Show detailed information about fixes")
+@click.option("--force", is_flag=True, help="Apply fixes without confirmation prompts")
+@click.pass_context
+@require_mode("local", "remote", "proxy")
+def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
+    """Fix corrupted configuration files.
+
+    \b
+    Analyzes and repairs common configuration issues including:
+      • JSON syntax errors (trailing commas, unquoted keys, etc.)
+      • Incorrect paths pointing to temporary test directories
+      • Wrong project names (e.g., "test-codebase" instead of actual name)
+      • Outdated git information (branch, commit, availability)
+      • Invalid file references from test data
+      • Inconsistencies between config.json and metadata.json
+
+    \b
+    VALIDATION CHECKS:
+      • Verifies codebase_dir points to parent of .code-indexer folder
+      • Ensures project name matches actual directory name
+      • Updates git state to match actual repository
+      • Derives indexing statistics from vector indexes
+      • Removes invalid file paths from metadata
+
+    \b
+    SAFETY FEATURES:
+      • Creates backups before making changes
+      • Validates JSON syntax before semantic fixes
+      • Uses --dry-run to preview changes
+      • Intelligent detection from actual file system state
+
+    \b
+    EXAMPLES:
+      code-indexer fix-config --dry-run     # Preview fixes
+      code-indexer fix-config --verbose     # Show detailed fix information
+      code-indexer fix-config --force       # Apply without prompts
+
+    \b
+    COMMON USE CASES:
+      • After running tests that corrupt configuration
+      • When config points to wrong directories
+      • When git information is outdated
+      • When metadata contains test data
+    """
+    # Handle proxy mode (Story 2.2)
+    mode = ctx.obj.get("mode")
+    if mode == "proxy":
+        from .proxy import execute_proxy_command
+
+        project_root = ctx.obj["project_root"]
+
+        # Build args list for fix-config command
+        args = []
+        if dry_run:
+            args.append("--dry-run")
+        if verbose:
+            args.append("--verbose")
+        if force:
+            args.append("--force")
+
+        exit_code = execute_proxy_command(project_root, "fix-config", args)
+        sys.exit(exit_code)
+
+    try:
+        # Lazy imports for fix_config command
+        from .services.config_fixer import ConfigurationRepairer, generate_fix_report
+
+        # Use configuration from CLI context
+        config_manager = ctx.obj["config_manager"]
+        if not config_manager or not config_manager.config_path.exists():
+            console.print(
+                "❌ No configuration found. Run 'code-indexer init' first.", style="red"
+            )
+            sys.exit(1)
+
+        config_dir = config_manager.config_path.parent
+
+        console.print(
+            f"🔧 {'Analyzing' if dry_run else 'Fixing'} configuration in {config_dir}"
+        )
+
+        if verbose:
+            console.print(f"  📁 Config file: {config_manager.config_path}")
+            console.print(f"  📄 Metadata file: {config_dir / 'metadata.json'}")
+
+        # Initialize repairer
+        repairer = ConfigurationRepairer(config_dir, dry_run=dry_run)
+
+        # Run the fix process
+        result = repairer.fix_configuration()
+
+        # Generate and display report
+        report = generate_fix_report(result, dry_run=dry_run)
+        console.print(report)
+
+        # Handle user confirmation for non-dry-run mode
+        if not dry_run and result.fixes_applied and not force:
+            if not click.confirm("\nDo you want to apply these fixes?"):
+                console.print("❌ Configuration fix cancelled", style="yellow")
+                sys.exit(0)
+
+        # Show recommendations
+        if result.success and result.fixes_applied and not dry_run:
+            console.print("\n💡 Recommendations:")
+            console.print("  • Run 'code-indexer status' to verify fixes")
+            console.print(
+                "  • Consider running 'code-indexer index' to rebuild with correct config"
+            )
+
+            if result.warnings:
+                console.print(
+                    "  • Review warnings above and consider cleaning up old collections"
+                )
+
+        if result.success:
+            if dry_run:
+                console.print(
+                    "\n✨ Run without --dry-run to apply these fixes", style="blue"
+                )
+            else:
+                console.print(
+                    "\n✅ Configuration has been successfully fixed!", style="green"
+                )
+        else:
+            sys.exit(1)
+
+    except Exception as e:
+        console.print(f"❌ Configuration fix failed: {e}", style="red")
+        if verbose:
+            import traceback
+
+            console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+@cli.command("install-server")
+@click.option(
+    "--port",
+    type=int,
+    help="Preferred port for server (will find next available if busy)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Reinstall even if already installed",
+)
+@click.option(
+    "--systemd",
+    is_flag=True,
+    help="Generate systemd service file for production deployment",
+)
+@click.option(
+    "--issuer-url",
+    type=str,
+    help="OAuth issuer URL for remote access (e.g., https://your-domain.com:8383)",
+)
+@click.option(
+    "--voyage-api-key",
+    type=str,
+    help="VoyageAI API key for embeddings (optional, can use VOYAGE_API_KEY env var)",
+)
+@click.pass_context
+def install_server(
+    ctx,
+    port: Optional[int],
+    force: bool,
+    systemd: bool,
+    issuer_url: Optional[str],
+    voyage_api_key: Optional[str],
+):
+    """Install and configure CIDX multi-user server.
+
+    Sets up the CIDX multi-user server with JWT authentication, role-based
+    access control, and creates the necessary directory structure and startup scripts.
+
+    \b
+    INSTALLATION PROCESS:
+    • Creates ~/.cidx-server/ directory structure
+    • Finds available port starting from 8090 (or --port if specified)
+    • Generates server configuration (config.json)
+    • Creates executable startup script (start-server.sh)
+    • Seeds initial admin user (admin/admin)
+    • Displays startup instructions
+
+    \b
+    WHAT IT CREATES:
+    • ~/.cidx-server/config.json           # Server configuration
+    • ~/.cidx-server/users.json            # User database with hashed passwords
+    • ~/.cidx-server/logs/                 # Server logs directory
+    • ~/.cidx-server/start-server.sh       # Executable startup script
+
+    \b
+    DEFAULT CONFIGURATION:
+    • JWT tokens: 10-minute expiration, extend on API activity
+    • User roles: admin, power_user, normal_user
+    • Max golden repos: 20 system-wide
+    • Max concurrent queries: 5 per repository
+    • Repository idle timeout: 10 minutes
+
+    \b
+    INITIAL CREDENTIALS:
+    Username: admin
+    Password: admin
+    Role: admin (full access to all features)
+
+    \b
+    STARTING THE SERVER:
+    After installation, start the server with:
+      ~/.cidx-server/start-server.sh
+
+    Or manually:
+      python -m code_indexer.server.main --port <allocated-port>
+
+    \b
+    API DOCUMENTATION:
+    Once running, access Swagger UI at: http://localhost:<port>/docs
+
+    \b
+    EXAMPLES:
+      cidx install-server                    # Install with auto port allocation
+      cidx install-server --port 8080       # Try specific port first
+      cidx install-server --force           # Reinstall over existing installation
+
+    \b
+    NOTE:
+    The server runs in console mode (blocking) and requires Ctrl+C to stop.
+    All user passwords are securely hashed using bcrypt.
+    """
+    from .server.installer import ServerInstaller
+
+    try:
+        # Initialize installer
+        base_port = port if port else 8090
+        installer = ServerInstaller(base_port=base_port)
+
+        # Check existing installation
+        install_info = installer.get_installation_info()
+
+        if install_info.get("installed") and not force:
+            console.print("🔍 Checking existing installation...", style="cyan")
+
+            if install_info.get("configured"):
+                existing_port = install_info.get("port")
+                console.print(
+                    "✅ CIDX Server is already installed!", style="green bold"
+                )
+                console.print(
+                    f"📂 Server directory: {installer.server_dir}", style="dim"
+                )
+                console.print(f"🌐 Configured port: {existing_port}", style="dim")
+                console.print(
+                    f"⏰ Installed: {install_info.get('installation_time', 'Unknown')}",
+                    style="dim",
+                )
+                console.print()
+                console.print("🚀 To start the server:", style="cyan bold")
+                console.print(
+                    f"   {installer.server_dir / 'start-server.sh'}", style="white"
+                )
+                console.print()
+                console.print(
+                    "📚 API Documentation will be available at:", style="cyan bold"
+                )
+                console.print(
+                    f"   http://127.0.0.1:{existing_port}/docs", style="white"
+                )
+                console.print()
+                console.print("💡 Use --force to reinstall", style="dim yellow")
+                return
+            else:
+                console.print(
+                    "⚠️  Installation directory exists but is incomplete", style="yellow"
+                )
+                console.print(
+                    "🔧 Proceeding with installation to fix configuration...",
+                    style="cyan",
+                )
+
+        if force and install_info.get("installed"):
+            console.print(
+                "🔄 Reinstalling CIDX Server (--force specified)...", style="yellow"
+            )
+        else:
+            console.print("🚀 Installing CIDX Server...", style="cyan bold")
+
+        console.print()
+
+        # Perform installation
+        with console.status("⚙️  Setting up server installation..."):
+            allocated_port, config_path, script_path, is_new = installer.install()
+
+        # Generate systemd service if requested
+        service_path = None
+        if systemd:
+            with console.status("⚙️  Generating systemd service file..."):
+                service_path = installer.create_systemd_service(
+                    port=allocated_port,
+                    issuer_url=issuer_url,
+                    voyage_api_key=voyage_api_key,
+                )
+
+        # Display success message
+        console.print("✅ CIDX Server installed successfully!", style="green bold")
+        console.print()
+
+        # Installation details
+        console.print("📋 Installation Details:", style="cyan bold")
+        console.print(f"   📂 Server directory: {installer.server_dir}", style="white")
+        console.print(f"   🌐 Allocated port: {allocated_port}", style="white")
+        console.print(f"   ⚙️  Configuration: {config_path.name}", style="white")
+        console.print(f"   🚀 Startup script: {script_path.name}", style="white")
+        if service_path:
+            console.print(f"   🔧 Systemd service: {service_path.name}", style="white")
+        console.print()
+
+        # Initial credentials
+        console.print("🔑 Initial Admin Credentials:", style="cyan bold")
+        console.print("   Username: admin", style="white")
+        console.print("   Password: admin", style="white")
+        console.print("   Role: admin (full access)", style="white")
+        console.print()
+
+        # Startup instructions
+        console.print("🚀 Starting the Server:", style="cyan bold")
+        console.print("   Run the startup script:", style="white")
+        console.print(f"   {script_path}", style="green")
+        console.print()
+        console.print("   Or start manually:", style="white")
+        console.print(
+            f"   python -m code_indexer.server.main --port {allocated_port}",
+            style="dim",
+        )
+        console.print()
+
+        if service_path:
+            # Systemd installation instructions
+            console.print("🔧 Systemd Service Installation:", style="cyan bold")
+            console.print("   Copy service file to system:", style="white")
+            console.print(
+                f"   sudo cp {service_path} /etc/systemd/system/", style="green"
+            )
+            console.print()
+            console.print("   Enable and start service:", style="white")
+            console.print("   sudo systemctl daemon-reload", style="green")
+            console.print("   sudo systemctl enable cidx-server", style="green")
+            console.print("   sudo systemctl start cidx-server", style="green")
+            console.print()
+            console.print("   Check service status:", style="white")
+            console.print("   sudo systemctl status cidx-server", style="green")
+            console.print()
+
+        # API documentation
+        console.print("📚 API Documentation:", style="cyan bold")
+        console.print(
+            f"   Swagger UI: http://127.0.0.1:{allocated_port}/docs", style="green"
+        )
+        console.print(
+            f"   OpenAPI spec: http://127.0.0.1:{allocated_port}/openapi.json",
+            style="dim",
+        )
+        console.print()
+
+        # Security notes
+        console.print("🔒 Security Notes:", style="yellow bold")
+        console.print("   • Change admin password after first login", style="yellow")
+        console.print(
+            "   • JWT tokens expire in 10 minutes (extend on API activity)",
+            style="yellow",
+        )
+        console.print(
+            "   • All passwords are securely hashed with bcrypt", style="yellow"
+        )
+        console.print("   • Server runs on localhost only (127.0.0.1)", style="yellow")
+        console.print()
+
+        console.print(
+            "🎉 Installation complete! Start the server to begin using CIDX multi-user features.",
+            style="green bold",
+        )
+
+    except Exception as e:
+        console.print(f"❌ Server installation failed: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("repository", required=False)
+@click.option("--all", is_flag=True, help="Sync all activated repositories")
+@click.option(
+    "--full-reindex",
+    is_flag=True,
+    help="Force full re-indexing instead of incremental sync",
+)
+@click.option("--no-pull", is_flag=True, help="Skip git pull, only perform indexing")
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be synced without executing"
+)
+@click.option(
+    "--timeout", type=int, default=300, help="Job timeout in seconds (default: 300)"
+)
+@click.pass_context
+@require_mode("remote")
+def sync(
+    ctx,
+    repository: Optional[str],
+    all: bool,
+    full_reindex: bool,
+    no_pull: bool,
+    dry_run: bool,
+    timeout: int,
+):
+    """Synchronize repositories with the remote CIDX server.
+
+    \b
+    Submits repository synchronization jobs to the remote server for processing.
+    Supports both individual repository sync and bulk sync of all activated repositories.
+
+    \b
+    SYNC MODES:
+      • Individual: cidx sync [repository-alias]     # Sync specific repository
+      • Current:    cidx sync                        # Sync current repository
+      • All repos:  cidx sync --all                  # Sync all activated repositories
+
+    \b
+    SYNC OPTIONS:
+      • --full-reindex    Force complete re-indexing (slower but thorough)
+      • --no-pull         Skip git pull, only index existing files
+      • --dry-run         Preview what would be synced without execution
+      • --timeout 600     Set job timeout (default: 300 seconds)
+
+    \b
+    EXAMPLES:
+      cidx sync                           # Sync current repository
+      cidx sync my-project               # Sync specific repository
+      cidx sync --all                    # Sync all repositories
+      cidx sync --full-reindex           # Force full re-indexing
+      cidx sync --no-pull --dry-run      # Preview indexing without git pull
+      cidx sync --all --timeout 600     # Sync all with extended timeout
+
+    \b
+    The sync command submits jobs to the server and tracks their progress.
+    Use 'cidx query' after sync completion to search the updated index.
+    """
+    try:
+        # Validate command line arguments
+        if repository and all:
+            console.print(
+                "❌ Error: Cannot specify both repository and --all flag", style="red"
+            )
+            console.print(
+                "   Use either 'cidx sync <repository>' or 'cidx sync --all'",
+                style="dim",
+            )
+            sys.exit(1)
+
+        if timeout <= 0:
+            console.print("❌ Error: Timeout must be a positive number", style="red")
+            sys.exit(1)
+
+        # Import here to avoid circular imports
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.sync_execution import (
+            execute_repository_sync,
+            RemoteSyncExecutionError,
+            RepositoryNotLinkedException,
+        )
+        from .remote.credential_manager import CredentialNotFoundError
+        from .api_clients.base_client import AuthenticationError, NetworkError
+        from .sync.repository_context_detector import (
+            RepositoryContextDetector,
+            RepositoryContextError,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "   Run 'cidx init --remote <server-url> --username <user> --password <pass>' to set up remote mode",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Detect repository context for enhanced sync functionality
+        repository_context = None
+        try:
+            detector = RepositoryContextDetector()
+            repository_context = detector.detect_repository_context(Path.cwd())
+        except RepositoryContextError as e:
+            # Context detection failed, but continue with legacy behavior
+            logger.debug(f"Repository context detection failed: {e}")
+        except Exception as e:
+            # Unexpected error, log but continue with legacy behavior
+            logger.debug(f"Unexpected error during repository context detection: {e}")
+
+        # Show sync operation details with repository context awareness
+        if repository_context:
+            # Repository-aware messaging
+            if dry_run:
+                console.print(
+                    "🔍 Dry run mode - showing what would be synced:", style="blue"
+                )
+            else:
+                console.print("🔄 Starting repository synchronization...", style="blue")
+                console.print(
+                    f"   Syncing repository '{repository_context.user_alias}' with golden repository '{repository_context.golden_repo_alias}'",
+                    style="cyan",
+                )
+        else:
+            # Legacy messaging
+            if dry_run:
+                console.print(
+                    "🔍 Dry run mode - showing what would be synced:", style="blue"
+                )
+            else:
+                console.print("🔄 Starting repository synchronization...", style="blue")
+
+        if all:
+            console.print("   Target: All activated repositories", style="dim")
+        elif repository:
+            console.print(f"   Target: {repository}", style="dim")
+        else:
+            if repository_context:
+                console.print(
+                    f"   Target: {repository_context.user_alias} (detected from current directory)",
+                    style="dim",
+                )
+            else:
+                console.print("   Target: Current repository", style="dim")
+
+        sync_options = []
+        if full_reindex:
+            sync_options.append("full re-index")
+        else:
+            sync_options.append("incremental")
+
+        if no_pull:
+            sync_options.append("no git pull")
+        else:
+            sync_options.append("with git pull")
+
+        console.print(f"   Options: {', '.join(sync_options)}", style="dim")
+        console.print(f"   Timeout: {timeout} seconds", style="dim")
+
+        # Setup progress display for polling if not in dry run mode
+        progress_callback = None
+        if not dry_run:
+            from .progress.progress_display import RichLiveProgressManager
+
+            # Create rich live manager for progress display
+            rich_live_manager = RichLiveProgressManager(console=console)
+
+            # Start progress display
+            rich_live_manager.start_bottom_display()
+
+            def sync_progress_callback(
+                current, total, file_path, error=None, info=None, **kwargs
+            ):
+                """Progress callback for sync job polling."""
+                try:
+                    # Handle setup messages (total=0)
+                    if total == 0 and info:
+                        console.print(f"ℹ️ {info}", style="blue")
+                        return
+
+                    # Handle progress updates (total > 0)
+                    if total and total > 0 and info:
+                        console.print(info, style="cyan")
+
+                except Exception as e:
+                    # Don't let progress display errors break sync
+                    logger.warning(f"Progress display error: {e}")
+
+            progress_callback = sync_progress_callback
+
+        try:
+            # Execute sync
+            results = execute_repository_sync(
+                repository_alias=repository,
+                project_root=project_root,
+                sync_all=all,
+                full_reindex=full_reindex,
+                no_pull=no_pull,
+                dry_run=dry_run,
+                timeout=timeout,
+                enable_polling=not dry_run,
+                progress_callback=progress_callback,
+            )
+
+        finally:
+            # Clean up progress display
+            if progress_callback:
+                try:
+                    rich_live_manager.stop_display()
+                except Exception as e:
+                    logger.warning(f"Error stopping progress display: {e}")
+
+        # Display results
+        if not results:
+            console.print("ℹ️ No repositories to sync", style="yellow")
+            sys.exit(0)
+
+        console.print()
+        if dry_run:
+            console.print("📋 Dry run results:", style="blue bold")
+        else:
+            console.print("✅ Sync jobs submitted:", style="green bold")
+
+        for result in results:
+            if result.status == "would_sync":
+                console.print(
+                    f"   🔍 {result.repository}: {result.message}", style="blue"
+                )
+            elif result.status == "error":
+                console.print(
+                    f"   ❌ {result.repository}: {result.message}", style="red"
+                )
+            else:
+                console.print(
+                    f"   ✅ {result.repository}: {result.message}", style="green"
+                )
+                if result.job_id and not dry_run:
+                    console.print(f"      Job ID: {result.job_id}", style="dim")
+                if result.estimated_duration:
+                    console.print(
+                        f"      Estimated duration: {result.estimated_duration:.1f}s",
+                        style="dim",
+                    )
+
+        if not dry_run:
+            console.print()
+            console.print("🔔 Sync jobs are processing on the server.", style="cyan")
+            console.print(
+                "   Use 'cidx query' to search the updated index after completion.",
+                style="dim",
+            )
+
+    except RepositoryNotLinkedException as e:
+        console.print(f"❌ Repository not linked: {e}", style="red")
+        console.print(
+            "   💡 Use 'cidx link' to link this repository to the remote server",
+            style="dim",
+        )
+        sys.exit(1)
+    except CredentialNotFoundError as e:
+        console.print(f"❌ Authentication error: {e}", style="red")
+        console.print(
+            "   💡 Run 'cidx init --remote' to configure remote authentication",
+            style="dim",
+        )
+        sys.exit(1)
+    except AuthenticationError as e:
+        console.print(f"❌ Authentication failed: {e}", style="red")
+        console.print(
+            "   💡 Check your credentials with 'cidx auth update'", style="dim"
+        )
+        sys.exit(1)
+    except NetworkError as e:
+        console.print(f"❌ Network error: {e}", style="red")
+        console.print(
+            "   💡 Check your internet connection and server URL", style="dim"
+        )
+        sys.exit(1)
+    except RemoteSyncExecutionError as e:
+        console.print(f"❌ Sync failed: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Unexpected error: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+# Authentication management commands
+@cli.group("auth")
+@click.pass_context
+def auth_group(ctx):
+    """Authentication commands for remote mode.
+
+    Manage credentials and authentication for CIDX remote mode operations.
+    """
+    pass
+
+
+@auth_group.command("update")
+@click.option(
+    "--username", required=True, help="New username for remote authentication"
+)
+@click.option(
+    "--password", required=True, help="New password for remote authentication"
+)
+@click.pass_context
+def auth_update(ctx, username: str, password: str):
+    """Update remote credentials while preserving repository configuration.
+
+    Updates authentication credentials for remote mode while preserving
+    server URL, repository links, and all other settings.
+
+    Example:
+        cidx auth update --username newuser --password newpass
+    """
+    try:
+        from .remote.credential_rotation import CredentialRotationManager
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Find project root and initialize rotation manager
+        from pathlib import Path
+
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        rotation_manager = CredentialRotationManager(project_root)
+
+        with console.status("🔄 Updating credentials..."):
+            success_message = rotation_manager.update_credentials(username, password)
+
+        console.print(f"✅ {success_message}", style="green")
+        console.print("🔑 Credentials have been updated and verified", style="cyan")
+
+    except Exception as e:
+        console.print(f"❌ Credential update failed: {e}", style="red")
+        if "not in remote mode" in str(e):
+            console.print(
+                "💡 This command only works with remote mode projects", style="dim"
+            )
+        elif "Invalid credentials" in str(e):
+            console.print(
+                "💡 Check your username and password are correct", style="dim"
+            )
+        elif "No remote configuration" in str(e):
+            console.print(
+                "💡 Initialize remote mode first with appropriate setup", style="dim"
+            )
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("login")
+@click.option("--username", "-u", help="Username for authentication")
+@click.option("--password", "-p", help="Password for authentication")
+@click.pass_context
+@require_mode("remote")
+def auth_login(ctx, username: Optional[str], password: Optional[str]):
+    """Login to CIDX server with credentials.
+
+    Authenticates with the CIDX server and stores encrypted credentials
+    locally for subsequent authenticated operations.
+
+    Examples:
+        cidx auth login --username myuser --password mypass
+        cidx auth login  # Interactive prompts for credentials
+    """
+    try:
+        from .api_clients.auth_client import AuthAPIClient
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration to get server URL
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Interactive credential collection if not provided
+        if not username:
+            username = click.prompt("Username", type=str)
+
+        if not password:
+            password = getpass.getpass("Password: ")
+
+        # Validate inputs
+        if not (username or "").strip():
+            console.print("❌ Username cannot be empty", style="red")
+            sys.exit(1)
+
+        if not (password or "").strip():
+            console.print("❌ Password cannot be empty", style="red")
+            sys.exit(1)
+
+        # Create auth client and login
+        auth_client = AuthAPIClient(server_url, project_root)
+
+        with console.status("🔐 Authenticating..."):
+            auth_response = auth_client.login(
+                (username or "").strip(), (password or "").strip()
+            )
+
+        console.print(f"✅ Successfully logged in as {username}", style="green")
+        console.print("🔑 Credentials stored securely", style="cyan")
+
+        if auth_response.get("user_id"):
+            console.print(f"👤 User ID: {auth_response['user_id']}", style="dim")
+
+        # Close the client
+        auth_client.close()
+
+    except Exception as e:
+        console.print(f"❌ Login failed: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "authentication failed" in error_str or "invalid" in error_str:
+            console.print(
+                "💡 Check your username and password are correct", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+        elif "server" in error_str:
+            console.print(
+                "💡 Server may be unreachable or experiencing issues", style="dim"
+            )
+        elif "too many" in error_str:
+            console.print("💡 Wait a moment before trying again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("register")
+@click.option("--username", "-u", help="Username for new account")
+@click.option("--password", "-p", help="Password for new account")
+@click.option(
+    "--role",
+    default="user",
+    type=click.Choice(["user", "admin"]),
+    help="User role (default: user)",
+)
+@click.pass_context
+@require_mode("remote")
+def auth_register(ctx, username: Optional[str], password: Optional[str], role: str):
+    """Register new user account and login.
+
+    Creates a new user account on the CIDX server and automatically
+    logs in with the new credentials.
+
+    Examples:
+        cidx auth register --username newuser --password newpass
+        cidx auth register --username admin --role admin
+        cidx auth register  # Interactive prompts for credentials
+    """
+    try:
+        from .api_clients.auth_client import AuthAPIClient
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration to get server URL
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Interactive credential collection if not provided
+        if not username:
+            username = click.prompt("Username", type=str)
+
+        if not password:
+            password = getpass.getpass("Password: ")
+
+        # Validate inputs
+        if not (username or "").strip():
+            console.print("❌ Username cannot be empty", style="red")
+            sys.exit(1)
+
+        if not (password or "").strip():
+            console.print("❌ Password cannot be empty", style="red")
+            sys.exit(1)
+
+        # Create auth client and register
+        auth_client = AuthAPIClient(server_url, project_root)
+
+        with console.status("📝 Creating account..."):
+            auth_response = auth_client.register(
+                (username or "").strip(), (password or "").strip(), role
+            )
+
+        console.print(
+            f"✅ Successfully registered and logged in as {username}", style="green"
+        )
+        console.print(f"👤 Account role: {role}", style="cyan")
+        console.print("🔑 Credentials stored securely", style="cyan")
+
+        if auth_response.get("user_id"):
+            console.print(f"🆔 User ID: {auth_response['user_id']}", style="dim")
+
+        # Close the client
+        auth_client.close()
+
+    except Exception as e:
+        console.print(f"❌ Registration failed: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "username already exists" in error_str or "conflict" in error_str:
+            console.print(
+                "💡 Try a different username or login with existing account",
+                style="dim",
+            )
+        elif "password" in error_str and ("weak" in error_str or "policy" in error_str):
+            console.print(
+                "💡 Use a stronger password with numbers and symbols", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+        elif "server" in error_str:
+            console.print(
+                "💡 Server may be unreachable or experiencing issues", style="dim"
+            )
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("logout")
+@click.pass_context
+@require_mode("remote")
+def auth_logout(ctx):
+    """Logout and clear stored credentials.
+
+    Clears all stored authentication credentials and resets
+    authentication state for the current project.
+
+    Example:
+        cidx auth logout
+    """
+    try:
+        from .api_clients.auth_client import AuthAPIClient
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration to get server URL
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Create auth client for logout
+        auth_client = AuthAPIClient(server_url, project_root)
+
+        with console.status("🚪 Logging out..."):
+            auth_client.logout()
+
+        console.print("✅ Successfully logged out", style="green")
+        console.print("🔐 All credentials cleared", style="cyan")
+
+        # Close the client
+        auth_client.close()
+
+    except Exception as e:
+        console.print(f"❌ Logout failed: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "not authenticated" in error_str or "no credentials" in error_str:
+            console.print("💡 No stored credentials found to clear", style="dim")
+        else:
+            console.print("💡 Credentials may have been partially cleared", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("change-password")
+@click.pass_context
+@require_mode("remote")
+def auth_change_password(ctx):
+    """Change current user password with validation.
+
+    Interactively prompts for current password, new password, and confirmation.
+    Validates password strength and handles secure credential updates.
+
+    Example:
+        cidx auth change-password
+    """
+    try:
+        from .api_clients.auth_client import create_auth_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .password_policy import validate_password_strength
+
+        # Check authentication state first
+        if not _check_authentication_state(ctx):
+            return
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        console.print("🔐 Change Password", style="bold cyan")
+        console.print("Enter your passwords (input will be hidden)", style="dim")
+
+        # Interactive password collection with validation
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                # Get current password
+                current_password = getpass.getpass("Current Password: ")
+                if not current_password.strip():
+                    console.print("❌ Current password cannot be empty", style="red")
+                    continue
+
+                # Get new password with validation loop
+                while True:
+                    new_password = getpass.getpass("New Password: ")
+                    if not new_password.strip():
+                        console.print("❌ New password cannot be empty", style="red")
+                        continue
+
+                    # Validate password strength
+                    is_valid, message = validate_password_strength(new_password)
+                    if not is_valid:
+                        console.print(f"❌ {message}", style="red")
+                        from .password_policy import get_password_policy_help
+
+                        console.print("\n" + get_password_policy_help(), style="dim")
+                        continue
+                    break
+
+                # Get password confirmation
+                confirm_password = getpass.getpass("Confirm New Password: ")
+
+                # Validate confirmation
+                if new_password != confirm_password:
+                    console.print(
+                        "❌ Password confirmation does not match", style="red"
+                    )
+                    console.print("Please enter both passwords again", style="dim")
+                    continue
+
+                # All validations passed, proceed to server
+                break
+
+            except KeyboardInterrupt:
+                console.print("\n❌ Password change cancelled", style="yellow")
+                sys.exit(1)
+        else:
+            console.print("❌ Too many invalid attempts", style="red")
+            sys.exit(1)
+
+        # Create auth client and change password
+        auth_client = create_auth_client(server_url, project_root)
+        with console.status("🔒 Changing password..."):
+            auth_client.change_password(current_password.strip(), new_password.strip())
+
+        console.print("✅ Password changed successfully", style="green")
+        console.print("🔐 Credentials updated securely", style="cyan")
+
+        # Close the client
+        auth_client.close()
+
+    except Exception as e:
+        console.print(f"❌ Password change failed: {e}", style="red")
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "current password is incorrect" in error_str or "invalid" in error_str:
+            console.print("💡 Check your current password is correct", style="dim")
+        elif "password does not meet" in error_str or "too weak" in error_str:
+            console.print(
+                "💡 Ensure new password meets security requirements", style="dim"
+            )
+        elif "authentication" in error_str:
+            console.print("💡 Please login first with 'cidx auth login'", style="dim")
+        else:
+            console.print("💡 Check server connectivity and try again", style="dim")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("reset-password")
+@click.option("--username", "-u", help="Username for password reset")
+@click.pass_context
+@require_mode("remote")
+def auth_reset_password(ctx, username: Optional[str]):
+    """Initiate password reset for specified user.
+
+    Sends password reset request to server. Username can be provided
+    as parameter or entered interactively.
+
+    Examples:
+        cidx auth reset-password --username myuser
+        cidx auth reset-password  # Interactive username prompt
+    """
+    try:
+        from .api_clients.auth_client import create_auth_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Get username if not provided
+        if not username:
+            username = click.prompt("Username", type=str)
+
+        # Validate username
+        if not (username or "").strip():
+            console.print("❌ Username cannot be empty", style="red")
+            sys.exit(1)
+
+        console.print("📧 Password Reset Request", style="bold cyan")
+
+        # Create auth client and initiate reset
+        auth_client = create_auth_client(server_url, project_root)
+        with console.status("📤 Sending reset request..."):
+            auth_client.reset_password((username or "").strip())
+
+        console.print(f"✅ Password reset request sent for {username}", style="green")
+        console.print("📧 Check your email for reset instructions", style="blue")
+        console.print(
+            "🔗 Follow the link in the email to complete password reset", style="cyan"
+        )
+
+        # Close the client
+        auth_client.close()
+
+    except Exception as e:
+        console.print(f"❌ Password reset failed: {e}", style="red")
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "user not found" in error_str or "username" in error_str:
+            console.print("💡 Check the username is correct", style="dim")
+        elif "too many" in error_str or "rate" in error_str:
+            console.print("💡 Wait a few minutes before trying again", style="dim")
+        else:
+            console.print("💡 Check server connectivity and try again", style="dim")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("status")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
+@click.option("--health", is_flag=True, help="Check credential health")
+@click.pass_context
+@require_mode("remote")
+def auth_status(ctx, verbose: bool, health: bool):
+    """Display current authentication status.
+
+    Shows authentication state, username, role, token expiration,
+    and server connectivity. Use --verbose for detailed information
+    or --health for comprehensive credential diagnostics.
+
+    Examples:
+        cidx auth status                    # Basic status
+        cidx auth status --verbose          # Detailed information
+        cidx auth status --health           # Health diagnostics
+    """
+    try:
+        from .api_clients.auth_client import create_auth_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+        except FileNotFoundError:
+            console.print("❌ Remote mode not configured", style="red")
+            console.print(
+                "This command requires remote mode to be configured.", style="yellow"
+            )
+            console.print("\nTo configure remote mode:", style="dim")
+            console.print(
+                "  1. Run 'cidx init --mode remote --server <server-url>'", style="dim"
+            )
+            console.print(
+                "  2. Or connect to an existing server with 'cidx auth login'",
+                style="dim",
+            )
+            sys.exit(1)
+        except (KeyError, json.JSONDecodeError) as e:
+            console.print("❌ Remote configuration is corrupted", style="red")
+            console.print(f"Error: {str(e)}", style="red")
+            console.print(
+                "\nTry re-initializing with 'cidx init --mode remote --server <server-url>'",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Try to load existing credentials
+        username = remote_config.get("username")
+
+        # Create auth client
+        auth_client = create_auth_client(
+            server_url=server_url, project_root=project_root, username=username
+        )
+
+        def run_status_check():
+            if health:
+                # Comprehensive health check
+                health_result = auth_client.check_credential_health()
+                _display_health_status(health_result)
+            else:
+                # Regular status check
+                status = auth_client.get_auth_status()
+                _display_auth_status(status, verbose)
+
+        # Run status check
+        run_status_check()
+
+    except Exception as e:
+        console.print(f"❌ Error checking authentication status: {e}", style="red")
+        if verbose:
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("refresh")
+@click.pass_context
+@require_mode("remote")
+def auth_refresh(ctx):
+    """Manually refresh authentication token.
+
+    Attempts to refresh the current authentication token using the
+    stored refresh token. Updates stored credentials on success.
+
+    Examples:
+        cidx auth refresh                   # Refresh current token
+    """
+    try:
+        import asyncio
+        from .api_clients.auth_client import create_auth_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Try to load existing credentials
+        username = remote_config.get("username")
+        if not username:
+            console.print("❌ No stored credentials found", style="red")
+            console.print("Use 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create auth client
+        auth_client = create_auth_client(
+            server_url=server_url, project_root=project_root, username=username
+        )
+
+        async def run_refresh():
+            try:
+                console.print("🔄 Refreshing authentication token...", style="blue")
+
+                refresh_response = auth_client.refresh_token()
+
+                console.print("✅ Token refreshed successfully", style="green")
+
+                # Display new expiration time if available
+                if refresh_response.get("access_token"):
+                    from .api_clients.jwt_token_manager import JWTTokenManager
+
+                    jwt_manager = JWTTokenManager()
+                    expiry_time = jwt_manager.get_token_expiry_time(
+                        refresh_response["access_token"]
+                    )
+                    if expiry_time:
+                        console.print(
+                            f"🕒 New token expires: {expiry_time.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                            style="dim",
+                        )
+
+            except Exception as e:
+                console.print(f"❌ Token refresh failed: {e}", style="red")
+                if "expired" in str(e).lower() or "invalid" in str(e).lower():
+                    console.print(
+                        "💡 Use 'cidx auth login' to re-authenticate",
+                        style="dim yellow",
+                    )
+                else:
+                    console.print(
+                        "💡 Check server connectivity and try again", style="dim yellow"
+                    )
+                raise
+
+        # Run async refresh
+        asyncio.run(run_refresh())
+
+    except Exception:
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@auth_group.command("validate")
+@click.option("--verbose", "-v", is_flag=True, help="Show validation details")
+@click.pass_context
+@require_mode("remote")
+def auth_validate(ctx, verbose: bool):
+    """Validate current credentials (silent by default).
+
+    Silently validates current credentials and returns appropriate
+    exit codes for automation use. Use --verbose for output.
+
+    Exit codes:
+        0 - Credentials are valid
+        1 - Credentials are invalid or validation failed
+
+    Examples:
+        cidx auth validate                  # Silent validation
+        cidx auth validate --verbose        # Show validation details
+    """
+    try:
+        from .api_clients.auth_client import create_auth_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            if verbose:
+                console.print("❌ No project configuration found", style="red")
+                console.print(
+                    "Run 'cidx init' to initialize project first", style="dim"
+                )
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+        except FileNotFoundError:
+            if verbose:
+                console.print("❌ Remote mode not configured", style="red")
+                console.print(
+                    "This command requires remote mode to be configured.",
+                    style="yellow",
+                )
+                console.print("\nTo configure remote mode:", style="dim")
+                console.print(
+                    "  1. Run 'cidx init --mode remote --server <server-url>'",
+                    style="dim",
+                )
+                console.print(
+                    "  2. Or connect to an existing server with 'cidx auth login'",
+                    style="dim",
+                )
+            sys.exit(1)
+        except (KeyError, json.JSONDecodeError) as e:
+            if verbose:
+                console.print("❌ Remote configuration is corrupted", style="red")
+                console.print(f"Error: {str(e)}", style="red")
+                console.print(
+                    "\nTry re-initializing with 'cidx init --mode remote --server <server-url>'",
+                    style="dim",
+                )
+            sys.exit(1)
+
+        # Try to load existing credentials
+        username = remote_config.get("username")
+        if not username:
+            if verbose:
+                console.print("❌ No stored credentials found", style="red")
+                console.print(
+                    "Use 'cidx auth login' to authenticate first", style="dim"
+                )
+            sys.exit(1)
+
+        # Create auth client
+        auth_client = create_auth_client(
+            server_url=server_url, project_root=project_root, username=username
+        )
+
+        def run_validation():
+            if verbose:
+                console.print("🔍 Validating credentials...", style="blue")
+
+            is_valid = auth_client.validate_credentials()
+
+            if verbose:
+                if is_valid:
+                    console.print("✅ Credentials are valid", style="green")
+                else:
+                    console.print("❌ Credentials are invalid", style="red")
+                    console.print(
+                        "💡 Use 'cidx auth login' to re-authenticate",
+                        style="dim yellow",
+                    )
+
+            return is_valid
+
+        # Run validation
+        is_valid = run_validation()
+
+        # Exit with appropriate code for automation
+        sys.exit(0 if is_valid else 1)
+
+    except Exception as e:
+        if verbose:
+            console.print(f"❌ Error validating credentials: {e}", style="red")
+            if ctx.obj.get("verbose"):
+                import traceback
+
+                console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+def _display_auth_status(status, verbose: bool = False):
+    """Display authentication status with Rich formatting."""
+    console.print("\n[bold blue]CIDX Authentication Status[/bold blue]")
+    console.print("=" * 30)
+
+    # Defensive type checking to handle error propagation issues
+    if status is None:
+        console.print("❌ [red]Error: No status information available[/red]")
+        console.print(
+            "💡 [yellow]Try running 'cidx auth login' to authenticate[/yellow]"
+        )
+        return
+
+    # Check if we received an error string instead of AuthStatus object
+    if isinstance(status, str):
+        console.print(f"❌ [red]Error: {status}[/red]")
+        console.print(
+            "💡 [yellow]Try running 'cidx auth login' to authenticate[/yellow]"
+        )
+        return
+
+    # Check if we have a dict instead of AuthStatus (shouldn't happen but be defensive)
+    if isinstance(status, dict):
+        console.print("❌ [red]Error: Invalid status format received[/red]")
+        if "error" in status:
+            console.print(f"Details: {status['error']}")
+        console.print(
+            "💡 [yellow]Try running 'cidx auth login' to authenticate[/yellow]"
+        )
+        return
+
+    # Validate we have the expected AuthStatus object with required attributes
+    if not hasattr(status, "authenticated"):
+        console.print("❌ [red]Error: Invalid authentication status object[/red]")
+        console.print(
+            "💡 [yellow]Try running 'cidx auth login' to authenticate[/yellow]"
+        )
+        return
+
+    # Basic status
+    if status.authenticated:
+        console.print("✅ [green]Authenticated: Yes[/green]")
+        console.print(f"👤 Username: {status.username}")
+        console.print(f"🔑 Role: {status.role or 'unknown'}")
+
+        # Token status
+        if status.token_valid:
+            console.print("🟢 [green]Token Status: Valid[/green]")
+        else:
+            console.print("🔴 [red]Token Status: Invalid/Expired[/red]")
+
+        # Token expiration
+        if status.token_expires:
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            time_remaining = status.token_expires - now
+
+            if time_remaining.total_seconds() > 0:
+                hours = int(time_remaining.total_seconds() // 3600)
+                minutes = int((time_remaining.total_seconds() % 3600) // 60)
+                console.print(
+                    f"🕒 Token expires: {status.token_expires.strftime('%Y-%m-%d %H:%M:%S UTC')} (in {hours}h {minutes}m)"
+                )
+            else:
+                console.print(
+                    f"⏰ [red]Token expired: {status.token_expires.strftime('%Y-%m-%d %H:%M:%S UTC')}[/red]"
+                )
+
+        # Server connectivity
+        if status.server_reachable is not None:
+            if status.server_reachable:
+                console.print("🌐 [green]Server: Online[/green]")
+            else:
+                console.print("🌐 [red]Server: Unreachable[/red]")
+    else:
+        console.print("❌ [red]Authenticated: No[/red]")
+        console.print("❓ Status: Not logged in")
+        console.print("\n💡 [yellow]Use 'cidx auth login' to authenticate[/yellow]")
+
+    console.print(f"🔗 Server: {status.server_url}")
+
+    # Verbose information
+    if verbose and status.authenticated:
+        console.print("\n[bold]Detailed Information[/bold]")
+        console.print("-" * 25)
+
+        if status.last_refreshed:
+            console.print(
+                f"🔄 Last refreshed: {status.last_refreshed.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+        if status.permissions:
+            console.print(f"🛡️  Permissions: {', '.join(status.permissions)}")
+
+        if status.server_version:
+            console.print(f"📦 Server version: {status.server_version}")
+
+        if status.server_reachable is not None:
+            connectivity_status = "Online" if status.server_reachable else "Offline"
+            console.print(f"🔌 Connection status: {connectivity_status}")
+
+
+def _display_health_status(health):
+    """Display credential health status with Rich formatting."""
+    console.print("\n[bold blue]CIDX Credential Health Check[/bold blue]")
+    console.print("=" * 35)
+
+    # Defensive type checking to handle error propagation issues
+    if health is None:
+        console.print("❌ [red]Error: No health information available[/red]")
+        console.print("💡 [yellow]Unable to perform credential health check[/yellow]")
+        return
+
+    # Check if we received an error string instead of CredentialHealth object
+    if isinstance(health, str):
+        console.print(f"❌ [red]Error: {health}[/red]")
+        console.print("💡 [yellow]Check your network connection and try again[/yellow]")
+        return
+
+    # Validate we have the expected CredentialHealth object with required attributes
+    if not hasattr(health, "healthy"):
+        console.print("❌ [red]Error: Invalid health check response[/red]")
+        console.print("💡 [yellow]Unable to verify credential health status[/yellow]")
+        return
+
+    # Overall health
+    if health.healthy:
+        console.print("✅ [green]Overall Health: Healthy[/green] ✓")
+    else:
+        console.print("❌ [red]Overall Health: Issues Found[/red] ✗")
+
+    console.print("\n[bold]Checks Performed[/bold]")
+    console.print("-" * 20)
+
+    # Individual checks
+    checks = [
+        ("Credential file encryption", health.encryption_valid),
+        ("Token signature validation", health.token_signature_valid),
+        ("Server connectivity", health.server_reachable),
+        ("File permissions", health.file_permissions_correct),
+    ]
+
+    for check_name, passed in checks:
+        status_icon = "✓" if passed else "✗"
+        status_color = "green" if passed else "red"
+        console.print(f"  [{status_color}]{status_icon}[/{status_color}] {check_name}")
+
+    # Issues and suggestions
+    if health.issues:
+        console.print("\n[bold red]Issues Found[/bold red]")
+        console.print("-" * 15)
+        for issue in health.issues:
+            console.print(f"  ❗ {issue}")
+
+    if health.recovery_suggestions:
+        console.print("\n[bold yellow]Recovery Suggestions[/bold yellow]")
+        console.print("-" * 25)
+        for suggestion in health.recovery_suggestions:
+            console.print(f"  💡 {suggestion}")
+
+    if health.healthy:
+        console.print(
+            "\n🎉 [green]All credential components are functioning properly.[/green]"
+        )
+
+
+# Server lifecycle management commands
+@cli.group("server")
+@click.pass_context
+def server_group(ctx):
+    """Manage CIDX multi-user server lifecycle.
+
+    Control server start, stop, status, and restart operations with
+    proper graceful shutdown and health monitoring.
+    """
+    pass
+
+
+@server_group.command("start")
+@click.option(
+    "--server-dir",
+    type=click.Path(),
+    help="Server directory path (default: ~/.cidx-server)",
+)
+@click.pass_context
+def server_start(ctx, server_dir: Optional[str]):
+    """Start the CIDX multi-user server.
+
+    Validates configuration, starts the FastAPI server process, and
+    returns success confirmation with server URL.
+    """
+    try:
+        from .server.lifecycle.server_lifecycle_manager import (
+            ServerLifecycleManager,
+        )
+
+        manager = ServerLifecycleManager(server_dir)
+        result = manager.start_server()
+
+        console.print("✅ " + result["message"], style="green bold")
+        console.print(f"🌐 Server URL: {result['server_url']}", style="cyan")
+        console.print(f"🔢 Process ID: {result['pid']}", style="dim")
+        console.print()
+        console.print("📚 API Documentation:", style="cyan")
+        console.print(f"   {result['server_url']}/docs", style="white")
+
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        if "already running" in str(e).lower():
+            console.print(
+                "💡 Use 'cidx server status' to check current status", style="dim"
+            )
+        elif "configuration" in str(e).lower():
+            console.print(
+                "💡 Use 'cidx install-server' to set up configuration", style="dim"
+            )
+        sys.exit(1)
+
+
+@server_group.command("stop")
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Force shutdown (send SIGKILL instead of graceful SIGTERM)",
+)
+@click.option(
+    "--server-dir",
+    type=click.Path(),
+    help="Server directory path (default: ~/.cidx-server)",
+)
+@click.pass_context
+def server_stop(ctx, force: bool, server_dir: Optional[str]):
+    """Stop the CIDX multi-user server gracefully.
+
+    Performs graceful shutdown by default, waiting for background jobs
+    to complete and saving pending data. Use --force for immediate shutdown.
+    """
+    try:
+        from .server.lifecycle.server_lifecycle_manager import (
+            ServerLifecycleManager,
+        )
+
+        manager = ServerLifecycleManager(server_dir)
+        result = manager.stop_server(force=force)
+
+        console.print("✅ " + result["message"], style="green bold")
+        if "shutdown_time" in result:
+            console.print(
+                f"⏱️ Shutdown time: {result['shutdown_time']:.1f}s", style="dim"
+            )
+
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        if "not running" in str(e).lower():
+            console.print(
+                "💡 Use 'cidx server status' to check current status", style="dim"
+            )
+        sys.exit(1)
+
+
+@server_group.command("status")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed health information")
+@click.option(
+    "--server-dir",
+    type=click.Path(),
+    help="Server directory path (default: ~/.cidx-server)",
+)
+@click.pass_context
+def server_status(ctx, verbose: bool, server_dir: Optional[str]):
+    """Check CIDX multi-user server status and health.
+
+    Shows server status, uptime, port, active jobs, and recent errors.
+    Use --verbose for detailed health information including resource usage.
+    """
+    try:
+        from .server.lifecycle.server_lifecycle_manager import (
+            ServerLifecycleManager,
+        )
+
+        manager = ServerLifecycleManager(server_dir)
+        status = manager.get_status()
+
+        # Status display
+        status_color = "green" if status.status.value == "running" else "red"
+        console.print(
+            f"Status: {status.status.value.upper()}", style=f"{status_color} bold"
+        )
+
+        if status.status.value == "running":
+            console.print(f"PID: {status.pid}", style="dim")
+            if status.uptime:
+                hours = status.uptime // 3600
+                minutes = (status.uptime % 3600) // 60
+                if hours > 0:
+                    uptime_str = f"{hours} hour{'s' if hours != 1 else ''}, {minutes} minute{'s' if minutes != 1 else ''}"
+                else:
+                    uptime_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                console.print(f"Uptime: {uptime_str}", style="dim")
+            if status.port:
+                console.print(f"Port: {status.port}", style="dim")
+                console.print(f"Host: {status.host or '127.0.0.1'}", style="dim")
+            console.print(f"Active Jobs: {status.active_jobs}", style="dim")
+
+            # Verbose health information
+            if verbose:
+                try:
+                    health = manager.get_server_health()
+                    console.print()
+                    console.print("📊 Health Information:", style="cyan bold")
+                    console.print(
+                        f"Health: {health.get('status', 'unknown')}", style="dim"
+                    )
+                    if "memory_usage" in health:
+                        console.print(
+                            f"Memory Usage: {health['memory_usage']}", style="dim"
+                        )
+                    if "recent_errors" in health:
+                        errors = health["recent_errors"]
+                        if errors:
+                            console.print(
+                                f"Recent Errors: {len(errors)}", style="yellow"
+                            )
+                        else:
+                            console.print("Recent Errors: None", style="dim")
+                except Exception:
+                    console.print(
+                        "Health: Unable to retrieve detailed health info",
+                        style="yellow",
+                    )
+
+            sys.exit(0)  # Running = exit code 0
+        else:
+            console.print("The server is not currently running.", style="dim")
+            sys.exit(1)  # Stopped = exit code 1
+
+    except Exception as e:
+        console.print(f"❌ Error checking server status: {str(e)}", style="red")
+        sys.exit(1)
+
+
+@server_group.command("restart")
+@click.option(
+    "--server-dir",
+    type=click.Path(),
+    help="Server directory path (default: ~/.cidx-server)",
+)
+@click.pass_context
+def server_restart(ctx, server_dir: Optional[str]):
+    """Restart the CIDX multi-user server.
+
+    Gracefully stops the server if running, waits for proper shutdown,
+    then starts with updated configuration. If not running, simply starts.
+    """
+    try:
+        from .server.lifecycle.server_lifecycle_manager import (
+            ServerLifecycleManager,
+        )
+
+        manager = ServerLifecycleManager(server_dir)
+        result = manager.restart_server()
+
+        console.print("✅ " + result["message"], style="green bold")
+        console.print(f"🌐 Server URL: {result['server_url']}", style="cyan")
+        if "restart_time" in result:
+            console.print(f"⏱️ Restart time: {result['restart_time']:.1f}s", style="dim")
+        console.print()
+        console.print("📚 API Documentation:", style="cyan")
+        console.print(f"   {result['server_url']}/docs", style="white")
+
+    except KeyboardInterrupt:
+        console.print("\n❌ Operation cancelled by user", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+@server_group.command("add-index")
+@click.argument("alias")
+@click.argument(
+    "index_type", type=click.Choice(["semantic", "fts", "temporal", "scip"])
+)
+@click.option("--quiet", is_flag=True, help="Minimal output for scripting")
+@click.option("--wait", is_flag=True, help="Wait for job completion")
+@click.option(
+    "--timeout", default=1800, help="Timeout in seconds for --wait (default: 1800)"
+)
+@click.pass_context
+def server_add_index(
+    ctx, alias: str, index_type: str, quiet: bool, wait: bool, timeout: int
+):
+    """Add an index type to a golden repository.
+
+    ALIAS is the golden repository alias.
+    INDEX_TYPE is one of: semantic, fts, temporal, scip
+    """
+    try:
+        from .api_clients.admin_client import AdminAPIClient
+        from .remote.config import RemoteConfig
+
+        # Get project root
+        project_root = find_project_root(Path.cwd())
+
+        # Load remote configuration
+        remote_config = RemoteConfig(project_root)
+        decrypted_creds = remote_config.get_decrypted_credentials()
+        server_url = remote_config.server_url
+
+        if not decrypted_creds or not server_url:
+            console.print(
+                "❌ Error: Not authenticated. Run 'cidx server login' first.",
+                style="red",
+            )
+            sys.exit(1)
+
+        # Convert DecryptedCredentials to dict for AdminAPIClient
+        credentials = {
+            "username": decrypted_creds.username,
+            "password": decrypted_creds.password,
+        }
+
+        # Create admin client and call add_index_to_golden_repo
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=None,
+        )
+
+        result = run_async(admin_client.add_index_to_golden_repo(alias, index_type))
+
+        job_id = result.get("job_id")
+
+        if not quiet:
+            console.print(f"✅ Job submitted: {job_id}", style="green")
+
+        # If --wait flag is set, poll job status until completion
+        if wait:
+            start_time = time.time()
+
+            while True:
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    admin_client.close()
+                    console.print(
+                        "❌ Error: Timeout waiting for job completion", style="red"
+                    )
+                    sys.exit(2)
+
+                # Get job status
+                job_status = run_async(admin_client.get_job_status(job_id))
+                status = job_status.get("status")
+
+                if status == "completed":
+                    if not quiet:
+                        console.print(
+                            f"✅ Index '{index_type}' added to '{alias}' successfully",
+                            style="green",
+                        )
+                    admin_client.close()
+                    sys.exit(0)
+
+                if status == "failed":
+                    error = job_status.get("error", "Unknown error")
+                    console.print(
+                        f"❌ Error: Index addition failed: {error}", style="red"
+                    )
+                    admin_client.close()
+                    sys.exit(1)
+
+                # Display progress if not quiet
+                if not quiet:
+                    progress = job_status.get("progress", 0)
+                    console.print(f"Progress: {progress}%", end="\r")
+
+                # Wait 2 seconds before polling again
+                time.sleep(2)
+        else:
+            # No --wait flag, just output job_id
+            if quiet:
+                console.print(job_id)
+            admin_client.close()
+            sys.exit(0)
+
+    except Exception as e:
+        # Ensure cleanup on error
+        if "admin_client" in locals():
+            admin_client.close()
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+@server_group.command("list-indexes")
+@click.argument("alias")
+@click.option("--json", "json_output", is_flag=True, help="JSON output")
+@click.pass_context
+def server_list_indexes(ctx, alias: str, json_output: bool):
+    """List index status for a golden repository.
+
+    ALIAS is the golden repository alias.
+    """
+    try:
+        from .api_clients.admin_client import AdminAPIClient
+        from .remote.config import RemoteConfig
+        import json as json_lib
+
+        # Get project root
+        project_root = find_project_root(Path.cwd())
+
+        # Load remote configuration
+        remote_config = RemoteConfig(project_root)
+        decrypted_creds = remote_config.get_decrypted_credentials()
+        server_url = remote_config.server_url
+
+        if not decrypted_creds or not server_url:
+            console.print(
+                "❌ Error: Not authenticated. Run 'cidx server login' first.",
+                style="red",
+            )
+            sys.exit(1)
+
+        # Convert DecryptedCredentials to dict for AdminAPIClient
+        credentials = {
+            "username": decrypted_creds.username,
+            "password": decrypted_creds.password,
+        }
+
+        # Create admin client and call get_golden_repo_indexes
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=None,
+        )
+
+        result = run_async(admin_client.get_golden_repo_indexes(alias))
+
+        if json_output:
+            console.print(json_lib.dumps(result, indent=2))
+        else:
+            # Display formatted output
+            console.print(f"\nIndex Status for '{result['alias']}':", style="cyan bold")
+            console.print()
+            indexes = result.get("indexes", {})
+            for index_type in ["semantic", "fts", "temporal", "scip"]:
+                index_info = indexes.get(index_type, {})
+                present = index_info.get("present", False)
+                status = "present" if present else "not present"
+                style = "green" if present else "dim"
+                console.print(f"  {index_type:15} {status}", style=style)
+            console.print()
+
+        admin_client.close()
+        sys.exit(0)
+
+    except Exception as e:
+        # Ensure cleanup on error
+        if "admin_client" in locals():
+            admin_client.close()
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+@server_group.command("install-auto-update")
+@click.pass_context
+def server_install_auto_update(ctx):
+    """Install and enable auto-update service for CIDX server.
+
+    Installs systemd service and timer that automatically deploys
+    updates when changes are pushed to the master branch.
+    """
+    try:
+        import subprocess
+        import os
+        import tempfile
+        from pathlib import Path
+
+        # Get template directory
+        template_dir = Path(__file__).parent / "server" / "auto_update" / "templates"
+
+        if not template_dir.exists():
+            console.print(
+                f"❌ Error: Template directory not found: {template_dir}", style="red"
+            )
+            sys.exit(1)
+
+        service_template = template_dir / "cidx-auto-update.service"
+        timer_file = template_dir / "cidx-auto-update.timer"
+
+        if not service_template.exists() or not timer_file.exists():
+            console.print("❌ Error: Service/timer templates not found", style="red")
+            sys.exit(1)
+
+        # Detect current user and repository path
+        current_user = os.getenv("USER") or os.getenv("LOGNAME")
+        if not current_user:
+            console.print("❌ Error: Cannot detect current user", style="red")
+            sys.exit(1)
+
+        # Get absolute path to current git repository
+        try:
+            repo_path = subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=Path.cwd(),
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except subprocess.CalledProcessError:
+            # If not in a git repo, use current directory
+            repo_path = str(Path.cwd().resolve())
+
+        # Read service template and substitute placeholders
+        service_content = service_template.read_text()
+        service_content = service_content.replace("{USER}", current_user)
+        service_content = service_content.replace("{REPO_PATH}", repo_path)
+
+        # Write substituted service file to temp location
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".service", delete=False
+        ) as tmp_service:
+            tmp_service.write(service_content)
+            tmp_service_path = tmp_service.name
+
+        try:
+            # Copy service and timer files to systemd directory
+            console.print("Installing systemd service and timer files...", style="cyan")
+
+            subprocess.run(
+                [
+                    "sudo",
+                    "cp",
+                    tmp_service_path,
+                    "/etc/systemd/system/cidx-auto-update.service",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["sudo", "cp", str(timer_file), "/etc/systemd/system/"],
+                check=True,
+            )
+        finally:
+            # Clean up temp file
+            Path(tmp_service_path).unlink(missing_ok=True)
+
+        # Reload systemd daemon
+        console.print("Reloading systemd daemon...", style="cyan")
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+
+        # Enable and start timer
+        console.print("Enabling and starting auto-update timer...", style="cyan")
+        subprocess.run(
+            ["sudo", "systemctl", "enable", "cidx-auto-update.timer"],
+            check=True,
+        )
+        subprocess.run(
+            ["sudo", "systemctl", "start", "cidx-auto-update.timer"],
+            check=True,
+        )
+
+        console.print()
+        console.print(
+            "✅ Auto-update service installed and enabled", style="green bold"
+        )
+        console.print()
+        console.print(
+            "The service will check for updates every 60 seconds.", style="dim"
+        )
+        console.print(
+            "Use 'cidx server auto-update-status' to check status.", style="dim"
+        )
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"❌ Error: Installation failed: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+@server_group.command("uninstall-auto-update")
+@click.pass_context
+def server_uninstall_auto_update(ctx):
+    """Uninstall and disable auto-update service for CIDX server.
+
+    Stops and disables the systemd timer, removes service files.
+    """
+    try:
+        import subprocess
+
+        # Stop and disable timer
+        console.print("Stopping and disabling auto-update timer...", style="cyan")
+        subprocess.run(
+            ["sudo", "systemctl", "stop", "cidx-auto-update.timer"],
+            check=False,  # Don't fail if not running
+        )
+        subprocess.run(
+            ["sudo", "systemctl", "disable", "cidx-auto-update.timer"],
+            check=False,  # Don't fail if not enabled
+        )
+
+        # Remove service files
+        console.print("Removing systemd service files...", style="cyan")
+        subprocess.run(
+            ["sudo", "rm", "-f", "/etc/systemd/system/cidx-auto-update.service"],
+            check=True,
+        )
+        subprocess.run(
+            ["sudo", "rm", "-f", "/etc/systemd/system/cidx-auto-update.timer"],
+            check=True,
+        )
+
+        # Reload systemd daemon
+        console.print("Reloading systemd daemon...", style="cyan")
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+
+        console.print()
+        console.print("✅ Auto-update service removed", style="green bold")
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"❌ Error: Uninstallation failed: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+def _get_auto_update_timer_info():
+    """Get timer status information."""
+
+    result = subprocess.run(
+        ["systemctl", "is-active", "cidx-auto-update.timer"],
+        capture_output=True,
+        text=True,
+    )
+    timer_active = result.stdout.strip() == "active"
+    return {
+        "active": timer_active,
+        "status": "active" if timer_active else "inactive",
+        "style": "green" if timer_active else "red",
+    }
+
+
+def _get_auto_update_last_run():
+    """Get last run timestamp."""
+
+    result = subprocess.run(
+        [
+            "systemctl",
+            "show",
+            "cidx-auto-update.service",
+            "--property=ExecMainExitTimestamp",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip().split("=", 1)[1] if "=" in result.stdout else "Never"
+
+
+def _get_auto_update_last_result():
+    """Get last deployment result."""
+
+    result = subprocess.run(
+        ["systemctl", "show", "cidx-auto-update.service", "--property=Result"],
+        capture_output=True,
+        text=True,
+    )
+    last_result = (
+        result.stdout.strip().split("=", 1)[1] if "=" in result.stdout else "unknown"
+    )
+    result_style = (
+        "green"
+        if last_result == "success"
+        else "red"
+        if last_result == "failed"
+        else "dim"
+    )
+    return {"result": last_result, "style": result_style}
+
+
+def _get_repository_status(repo_path):
+    """Get git repository status."""
+
+    if not repo_path.exists():
+        return {"error": f"Repository not found: {repo_path}"}
+
+    # Get local ref
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    local_ref = result.stdout.strip()[:8] if result.returncode == 0 else "unknown"
+
+    # Get remote ref
+    result = subprocess.run(
+        ["git", "rev-parse", "origin/master"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    remote_ref = result.stdout.strip()[:8] if result.returncode == 0 else "unknown"
+
+    # Determine status
+    if local_ref != "unknown" and remote_ref != "unknown":
+        up_to_date = local_ref == remote_ref
+        status = "up to date" if up_to_date else "behind remote"
+        status_style = "green" if up_to_date else "yellow"
+    else:
+        status = "unknown"
+        status_style = "dim"
+
+    return {
+        "local_ref": local_ref,
+        "remote_ref": remote_ref,
+        "status": status,
+        "style": status_style,
+    }
+
+
+@server_group.command("auto-update-status")
+@click.pass_context
+def server_auto_update_status(ctx):
+    """Check status of auto-update service.
+
+    Shows timer status, last run time, and deployment result.
+    """
+    try:
+        import subprocess
+        from pathlib import Path
+
+        # Repository path - try to detect from current directory or environment
+        repo_path_str = os.environ.get("CIDX_SERVER_REPO_PATH")
+        if not repo_path_str:
+            try:
+                repo_path_str = subprocess.check_output(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=Path.cwd(),
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except subprocess.CalledProcessError:
+                repo_path_str = str(Path.cwd().resolve())
+
+        CIDX_SERVER_REPO_PATH = Path(repo_path_str)
+
+        console.print()
+        console.print("Auto-Update Service Status", style="cyan bold")
+        console.print("=" * 50, style="dim")
+        console.print()
+
+        # Timer status
+        timer_info = _get_auto_update_timer_info()
+        console.print(
+            f"Timer Status: {timer_info['status']}", style=timer_info["style"]
+        )
+
+        # Last run
+        last_run = _get_auto_update_last_run()
+        console.print(f"Last Run: {last_run}", style="white")
+
+        # Last result
+        result_info = _get_auto_update_last_result()
+        console.print(
+            f"Last Result: {result_info['result']}", style=result_info["style"]
+        )
+
+        # Repository status
+        console.print()
+        console.print("Repository Status", style="cyan bold")
+        console.print("-" * 50, style="dim")
+
+        repo_status = _get_repository_status(CIDX_SERVER_REPO_PATH)
+        if "error" in repo_status:
+            console.print(repo_status["error"], style="red")
+        else:
+            console.print(f"Local commit: {repo_status['local_ref']}", style="white")
+            console.print(f"Remote commit: {repo_status['remote_ref']}", style="white")
+            console.print(
+                f"Status: {repo_status['status']}", style=repo_status["style"]
+            )
+
+        console.print()
+
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+# SSH Key Management commands
+@cli.group("ssh-key")
+@click.pass_context
+def ssh_key_group(ctx):
+    """Manage SSH keys for private repository access.
+
+    Create, list, delete, and assign SSH keys for authenticating
+    with private Git repositories (GitHub, GitLab, etc.).
+
+    Available commands:
+      create       - Generate new SSH key pair
+      list         - List all managed and unmanaged keys
+      delete       - Delete key and remove mappings
+      show-public  - Display public key for copying
+      assign       - Assign key to remote host
+    """
+    pass
+
+
+@ssh_key_group.command("create")
+@click.argument("name")
+@click.option(
+    "--key-type",
+    "-t",
+    type=click.Choice(["ed25519", "rsa"]),
+    default="ed25519",
+    help="Type of SSH key to generate (default: ed25519)",
+)
+@click.option(
+    "--email",
+    "-e",
+    help="Email comment to include in the key",
+)
+@click.option(
+    "--description",
+    "-d",
+    help="Human-readable description for the key",
+)
+@click.pass_context
+def ssh_key_create(ctx, name: str, key_type: str, email: str, description: str):
+    """Create a new SSH key pair.
+
+    NAME is the name for the key (used as filename in ~/.ssh/).
+    """
+    try:
+        from .server.services.ssh_key_manager import SSHKeyManager
+
+        manager = SSHKeyManager()
+        metadata = manager.create_key(
+            name=name,
+            key_type=key_type,
+            email=email,
+            description=description,
+        )
+
+        console.print(f"[green]SSH key '{name}' created successfully[/green]")
+        console.print()
+        console.print("[cyan]Public key (copy this to GitHub/GitLab):[/cyan]")
+        console.print()
+        console.print(metadata.public_key)
+        console.print()
+        console.print(f"[dim]Fingerprint: {metadata.fingerprint}[/dim]")
+        console.print(f"[dim]Key type: {metadata.key_type}[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+@ssh_key_group.command("list")
+@click.pass_context
+def ssh_key_list(ctx):
+    """List all SSH keys.
+
+    Shows both CIDX-managed keys and unmanaged keys found in ~/.ssh/.
+    """
+    try:
+        from .server.services.ssh_key_manager import SSHKeyManager
+
+        manager = SSHKeyManager()
+        result = manager.list_keys()
+
+        if not result.managed and not result.unmanaged:
+            console.print("[yellow]No SSH keys found.[/yellow]")
+            return
+
+        if result.managed:
+            console.print("[bold cyan]Managed Keys:[/bold cyan]")
+            for key in result.managed:
+                hosts_str = ", ".join(key.hosts) if key.hosts else "none"
+                console.print(f"  [green]{key.name}[/green]")
+                console.print(f"    Type: {key.key_type}")
+                console.print(f"    Fingerprint: {key.fingerprint}")
+                console.print(f"    Hosts: {hosts_str}")
+                console.print()
+
+        if result.unmanaged:
+            console.print("[bold yellow]Unmanaged Keys:[/bold yellow]")
+            for key in result.unmanaged:  # type: ignore[assignment]
+                console.print(f"  [yellow]{key.name}[/yellow]")
+                console.print(f"    Path: {key.private_path}")
+                if key.fingerprint:
+                    console.print(f"    Fingerprint: {key.fingerprint}")
+                console.print()
+
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+@ssh_key_group.command("delete")
+@click.argument("name")
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Delete without confirmation",
+)
+@click.pass_context
+def ssh_key_delete(ctx, name: str, force: bool):
+    """Delete an SSH key and its host mappings.
+
+    NAME is the name of the key to delete.
+    """
+    if not force:
+        if not click.confirm(f"Delete SSH key '{name}' and all its host mappings?"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
+
+    try:
+        from .server.services.ssh_key_manager import SSHKeyManager
+
+        manager = SSHKeyManager()
+        manager.delete_key(name)
+
+        console.print(f"[green]SSH key '{name}' deleted successfully[/green]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+@ssh_key_group.command("show-public")
+@click.argument("name")
+@click.pass_context
+def ssh_key_show_public(ctx, name: str):
+    """Display the public key for copying.
+
+    NAME is the name of the key.
+    """
+    try:
+        from .server.services.ssh_key_manager import SSHKeyManager
+
+        manager = SSHKeyManager()
+        public_key = manager.get_public_key(name)
+
+        console.print(public_key)
+
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+@ssh_key_group.command("assign")
+@click.argument("name")
+@click.option(
+    "--host",
+    "-h",
+    required=True,
+    help="Hostname to assign (e.g., github.com)",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Override user section conflicts",
+)
+@click.pass_context
+def ssh_key_assign(ctx, name: str, host: str, force: bool):
+    """Assign an SSH key to a remote host.
+
+    NAME is the name of the key to assign.
+    This updates ~/.ssh/config to use this key for the specified host.
+    """
+    try:
+        from .server.services.ssh_key_manager import SSHKeyManager
+
+        manager = SSHKeyManager()
+        metadata = manager.assign_key_to_host(name, host, force=force)
+
+        console.print(f"[green]Key '{name}' assigned to '{host}'[/green]")
+        console.print()
+        console.print("[dim]Host mappings for this key:[/dim]")
+        for h in metadata.hosts:
+            console.print(f"  - {h}")
+
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+# System monitoring commands
+@cli.group("system")
+@click.pass_context
+@require_mode("remote")
+def system_group(ctx):
+    """System monitoring and health check commands.
+
+    Monitor CIDX server health, check system status, and view performance metrics.
+    Provides access to server health endpoints for system diagnostics.
+
+    Available commands:
+      health         - Check system health status
+    """
+    pass
+
+
+@system_group.command("health")
+@click.option(
+    "--detailed",
+    "-d",
+    is_flag=True,
+    help="Show detailed health information including component status",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show verbose health information with additional details",
+)
+@click.pass_context
+@require_mode("remote")
+def system_health(ctx, detailed: bool, verbose: bool):
+    """Check system health status.
+
+    Performs health checks on the CIDX server to monitor system status,
+    component health, and performance metrics. Provides both basic and
+    detailed health information with response time measurement.
+
+    Examples:
+        cidx system health                    # Basic health check
+        cidx system health --detailed         # Detailed component status
+        cidx system health --verbose          # Verbose information
+        cidx system health --detailed --verbose  # Combined detailed and verbose
+    """
+    try:
+        from .api_clients.system_client import create_system_client
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+        except FileNotFoundError:
+            console.print("❌ Remote mode not configured", style="red")
+            console.print(
+                "This command requires remote mode to be configured.", style="yellow"
+            )
+            console.print("\nTo configure remote mode:", style="dim")
+            console.print(
+                "  1. Run 'cidx init --mode remote --server <server-url>'", style="dim"
+            )
+            console.print(
+                "  2. Or connect to an existing server with 'cidx auth login'",
+                style="dim",
+            )
+            sys.exit(1)
+        except (KeyError, json.JSONDecodeError) as e:
+            console.print("❌ Remote configuration is corrupted", style="red")
+            console.print(f"Error: {str(e)}", style="red")
+            console.print(
+                "\nTry re-initializing with 'cidx init --mode remote --server <server-url>'",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Try to load existing credentials
+        username = remote_config.get("username")
+
+        # Create system client
+        system_client = create_system_client(
+            server_url=server_url, project_root=project_root, username=username
+        )
+
+        def run_health_check():
+            try:
+                if detailed or verbose:
+                    # Use detailed health endpoint for rich information
+                    health_result = system_client.check_detailed_health()
+                    _display_detailed_health_status(health_result, verbose)
+                else:
+                    # Use basic health endpoint for simple check
+                    health_result = system_client.check_basic_health()
+                    _display_basic_health_status(health_result)
+
+            except Exception as e:
+                from .api_clients.base_client import AuthenticationError, APIClientError
+
+                if isinstance(e, AuthenticationError):
+                    console.print("❌ Authentication failed", style="red")
+                    console.print(f"Error: {str(e)}", style="red")
+                    console.print("Try running 'cidx auth login' first", style="dim")
+                    sys.exit(1)
+                elif isinstance(e, APIClientError):
+                    console.print("❌ Health check failed", style="red")
+                    console.print(f"Error: {str(e)}", style="red")
+                    sys.exit(1)
+                else:
+                    console.print(
+                        "❌ Unexpected error during health check", style="red"
+                    )
+                    console.print(f"Error: {str(e)}", style="red")
+                    sys.exit(1)
+
+        # Run health check
+        run_health_check()
+
+    except KeyboardInterrupt:
+        console.print("\n❌ Operation cancelled by user", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error: {str(e)}", style="red")
+        sys.exit(1)
+
+
+def _display_basic_health_status(health_result: dict):
+    """Display basic health status in a clean format."""
+    # Defensive type checking to handle error propagation issues
+    if health_result is None:
+        console.print("❌ [red]Error: No health information available[/red]")
+        console.print(
+            "💡 [yellow]Server may be unreachable. Check your connection[/yellow]"
+        )
+        return
+
+    # Check if we received an error string instead of dict
+    if isinstance(health_result, str):
+        console.print(f"❌ [red]Health Check Error: {health_result}[/red]")
+        console.print(
+            "💡 [yellow]Server may be experiencing issues. Try again later[/yellow]"
+        )
+        return
+
+    # Ensure we have a dict-like object with get method
+    if not hasattr(health_result, "get"):
+        console.print("❌ [red]Error: Invalid health check response format[/red]")
+        console.print(f"Received type: {type(health_result).__name__}")
+        return
+
+    status = health_result.get("status", "unknown")
+    message = health_result.get("message", "No status message")
+    response_time = health_result.get("response_time_ms", 0)
+
+    # Convert status to display format
+    status_display = status.upper() if status == "ok" else status.title()
+
+    console.print(
+        f"System Health: {status_display}", style="green" if status == "ok" else "red"
+    )
+    console.print(f"Response Time: {response_time}ms", style="cyan")
+    console.print(f"Status: {message}", style="dim")
+
+
+def _display_detailed_health_status(health_result: dict, verbose: bool = False):
+    """Display detailed health status with rich formatting."""
+    # Defensive type checking to handle error propagation issues
+    if health_result is None:
+        console.print("❌ [red]Error: No detailed health information available[/red]")
+        console.print(
+            "💡 [yellow]Server may be unreachable. Check your connection[/yellow]"
+        )
+        return
+
+    # Check if we received an error string instead of dict
+    if isinstance(health_result, str):
+        console.print(f"❌ [red]Detailed Health Check Error: {health_result}[/red]")
+        console.print(
+            "💡 [yellow]Server may be experiencing issues. Try again later[/yellow]"
+        )
+        return
+
+    # Ensure we have a dict-like object with get method
+    if not hasattr(health_result, "get"):
+        console.print("❌ [red]Error: Invalid detailed health response format[/red]")
+        console.print(f"Received type: {type(health_result).__name__}")
+        return
+
+    status = health_result.get("status", "unknown")
+    response_time = health_result.get("response_time_ms", 0)
+    services = health_result.get("services", {})
+    system_info = health_result.get("system", {})
+    timestamp = health_result.get("timestamp", "")
+
+    # Overall status section
+    console.print("=== System Health Status ===", style="bold blue")
+    status_display = status.upper() if status in ["ok", "healthy"] else status.title()
+    console.print(
+        f"Overall Status: {status_display}",
+        style="green" if status in ["ok", "healthy"] else "red",
+    )
+    console.print(f"Response Time: {response_time}ms", style="cyan")
+
+    # Detailed component status
+    if services:
+        console.print("\n=== Detailed Component Status ===", style="bold blue")
+        for service_name, service_info in services.items():
+            service_status = service_info.get("status", "unknown")
+            service_name_display = service_name.replace("_", " ").title()
+
+            status_color = "green" if service_status in ["ok", "healthy"] else "red"
+            console.print(
+                f"{service_name_display}: {service_status}", style=status_color
+            )
+
+            if verbose and service_info.get("response_time_ms") is not None:
+                console.print(
+                    f"  Response Time: {service_info['response_time_ms']}ms",
+                    style="dim",
+                )
+
+            if service_info.get("error_message"):
+                console.print(f"  Error: {service_info['error_message']}", style="red")
+
+    # System information
+    if system_info:
+        console.print("\n=== System Information ===", style="bold blue")
+        if "memory_usage_percent" in system_info:
+            console.print(
+                f"Memory Usage: {system_info['memory_usage_percent']}%", style="yellow"
+            )
+        if "cpu_usage_percent" in system_info:
+            console.print(
+                f"CPU Usage: {system_info['cpu_usage_percent']}%", style="yellow"
+            )
+        if "active_jobs" in system_info:
+            console.print(f"Active Jobs: {system_info['active_jobs']}", style="cyan")
+        if "disk_free_space_gb" in system_info:
+            console.print(
+                f"Disk Free Space: {system_info['disk_free_space_gb']} GB", style="cyan"
+            )
+
+    # Verbose information
+    if verbose:
+        console.print("\n=== Verbose Health Information ===", style="bold blue")
+        if timestamp:
+            console.print(f"Timestamp: {timestamp}", style="dim")
+
+        # Show individual service response times
+        if services:
+            for service_name, service_info in services.items():
+                if service_info.get("response_time_ms") is not None:
+                    service_name_display = service_name.replace("_", " ").title()
+                    console.print(
+                        f"{service_name_display} Response Time: {service_info['response_time_ms']}ms",
+                        style="dim",
+                    )
+
+
+# Repository management commands
+@cli.group("repos")
+@click.pass_context
+@require_mode("remote")
+def repos_group(ctx):
+    """Repository management commands.
+
+    Browse, discover, and manage your repositories in the CIDX system.
+
+    Available commands:
+      list           - List your activated repositories
+      available      - Browse available golden repositories
+      discover       - Discover repositories from remote sources
+      status         - Show comprehensive repository status overview
+      info           - Show detailed repository information
+      switch-branch  - Switch branch in activated repository
+      activate       - Activate a golden repository for personal use
+      deactivate     - Deactivate a personal repository
+    """
+    pass
+
+
+@repos_group.command(name="list")
+@click.option("--filter", help="Filter repositories by pattern")
+@click.pass_context
+def list_repos(ctx, filter: Optional[str]):
+    """List activated repositories.
+
+    Shows your currently activated repositories with their sync status,
+    current branch, and last sync information.
+
+    EXAMPLES:
+      cidx repos list                     # List all activated repositories
+      cidx repos list --filter web        # Filter repositories containing 'web'
+    """
+    try:
+        from pathlib import Path
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Create client and fetch repositories with proper cleanup
+
+        def fetch_repositories():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.list_activated_repositories(filter_pattern=filter)
+            finally:
+                # Ensure client is properly closed to avoid resource warnings
+                client.close()
+
+        repositories = fetch_repositories()
+
+        # Display results
+        if not repositories:
+            console.print("📦 No repositories activated", style="yellow")
+            console.print("\n💡 To activate repositories:", style="blue")
+            console.print(
+                "   cidx repos available    # Browse available repositories",
+                style="dim",
+            )
+            return
+
+        # Format and display repository table
+        table = Table(title="Activated Repositories", show_header=True)
+        table.add_column("Alias", style="cyan")
+        table.add_column("Branch", style="green")
+        table.add_column("Sync Status", style="yellow")
+        table.add_column("Last Sync", style="magenta")
+        table.add_column("Actions", style="white")
+
+        for repo in repositories:
+            # Format sync status with icons
+            if repo.sync_status == "synced":
+                status = "✓ Synced"
+                status_style = "green"
+            elif repo.sync_status == "needs_sync":
+                status = "⚠ Needs sync"
+                status_style = "yellow"
+            elif repo.sync_status == "conflict":
+                status = "✗ Conflict"
+                status_style = "red"
+            else:
+                status = repo.sync_status
+                status_style = "white"
+
+            # Format last sync time
+            from datetime import datetime, timezone
+
+            try:
+                last_sync = datetime.fromisoformat(
+                    repo.last_sync.replace("Z", "+00:00")
+                )
+                now = datetime.now(timezone.utc)
+                diff = now - last_sync
+
+                if diff.days > 0:
+                    time_str = f"{diff.days}d ago"
+                elif diff.seconds > 3600:
+                    time_str = f"{diff.seconds // 3600}h ago"
+                else:
+                    time_str = f"{diff.seconds // 60}m ago"
+            except (ValueError, TypeError, AttributeError):
+                time_str = "Unknown"
+
+            # Suggest actions
+            actions = ""
+            if repo.sync_status == "needs_sync":
+                actions = "sync"
+            elif repo.sync_status == "conflict":
+                actions = "resolve"
+
+            table.add_row(
+                repo.alias,
+                repo.current_branch,
+                f"[{status_style}]{status}[/{status_style}]",
+                time_str,
+                actions,
+            )
+
+        console.print(table)
+        console.print(f"\n📊 Total: {len(repositories)} repositories", style="blue")
+
+    except ImportError as e:
+        console.print(f"❌ Missing dependency: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error listing repositories: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="available")
+@click.option("--search", help="Search available repositories")
+@click.pass_context
+def available(ctx, search: Optional[str]):
+    """Show available golden repositories.
+
+    Browse golden repositories available for activation, showing which
+    ones you already have activated.
+
+    EXAMPLES:
+      cidx repos available                  # List all available repositories
+      cidx repos available --search web     # Search for repositories containing 'web'
+    """
+    try:
+        from pathlib import Path
+        import asyncio
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Create client and fetch repositories
+        async def fetch_repositories():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.list_available_repositories(search_term=search)
+            finally:
+                client.close()
+
+        repositories = asyncio.run(fetch_repositories())
+
+        # Display results
+        if not repositories:
+            console.print("📦 No repositories available", style="yellow")
+            return
+
+        # Format and display repository table
+        table = Table(title="Available Golden Repositories", show_header=True)
+        table.add_column("Alias", style="cyan")
+        table.add_column("Description", style="white", max_width=50)
+        table.add_column("Default Branch", style="green")
+        table.add_column("Branches", style="yellow")
+        table.add_column("Status", style="magenta")
+
+        for repo in repositories:
+            # Format activation status
+            if repo.is_activated:
+                status = "✓ Already activated"
+                status_style = "green"
+            else:
+                status = "Available"
+                status_style = "yellow"
+
+            # Format branches (show first few)
+            branches = repo.indexed_branches[:3]
+            if len(repo.indexed_branches) > 3:
+                branches_str = (
+                    ", ".join(branches) + f" (+{len(repo.indexed_branches) - 3} more)"
+                )
+            else:
+                branches_str = ", ".join(branches)
+
+            # GoldenRepository.description is Optional (server may not persist it)
+            description_text = repo.description or ""
+            table.add_row(
+                repo.alias,
+                (
+                    description_text[:47] + "..."
+                    if len(description_text) > 50
+                    else description_text
+                ),
+                repo.default_branch,
+                branches_str,
+                f"[{status_style}]{status}[/{status_style}]",
+            )
+
+        console.print(table)
+        console.print(f"\n📊 Total: {len(repositories)} repositories", style="blue")
+
+        # Show activation guidance
+        available_count = sum(1 for repo in repositories if not repo.is_activated)
+        if available_count > 0:
+            console.print(
+                f"\n💡 {available_count} repositories available for activation",
+                style="blue",
+            )
+            console.print(
+                "   Use: cidx activate <alias>     # Activate a repository", style="dim"
+            )
+
+    except ImportError as e:
+        console.print(f"❌ Missing dependency: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error listing available repositories: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="discover")
+@click.option("--source", required=True, help="Repository source to discover")
+@click.pass_context
+def discover(ctx, source: str):
+    """Discover repositories from remote sources.
+
+    Search for repositories in GitHub organizations, GitLab groups,
+    or specific Git URLs to see what's available for addition.
+
+    EXAMPLES:
+      cidx repos discover --source github.com/myorg      # GitHub organization
+      cidx repos discover --source gitlab.com/mygroup    # GitLab group
+      cidx repos discover --source https://git.example.com/repo.git  # Direct URL
+    """
+    try:
+        from pathlib import Path
+        import asyncio
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Create client and discover repositories
+        console.print(f"🔍 Discovering repositories from: {source}", style="blue")
+
+        async def discover_repositories():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.discover_repositories(source)
+            finally:
+                client.close()
+
+        result = asyncio.run(discover_repositories())
+
+        # Display results
+        if not result.discovered_repositories:
+            console.print("📦 No repositories discovered", style="yellow")
+            return
+
+        # Format and display discovery results
+        table = Table(
+            title=f"Discovered Repositories from {result.source}", show_header=True
+        )
+        table.add_column("Name", style="cyan")
+        table.add_column("Description", style="white", max_width=40)
+        table.add_column("Default Branch", style="green")
+        table.add_column("Availability", style="magenta")
+        table.add_column("Accessibility", style="yellow")
+
+        for repo in result.discovered_repositories:
+            # Format availability status
+            if repo.is_available:
+                availability = "✓ Already available"
+                availability_style = "green"
+            else:
+                availability = "Not available"
+                availability_style = "yellow"
+
+            # Format accessibility
+            accessibility = "✓ Accessible" if repo.is_accessible else "✗ Not accessible"
+            accessibility_style = "green" if repo.is_accessible else "red"
+
+            table.add_row(
+                repo.name,
+                (
+                    repo.description[:37] + "..."
+                    if len(repo.description) > 40
+                    else repo.description
+                ),
+                repo.default_branch,
+                f"[{availability_style}]{availability}[/{availability_style}]",
+                f"[{accessibility_style}]{accessibility}[/{accessibility_style}]",
+            )
+
+        console.print(table)
+        console.print(f"\n📊 Total discovered: {result.total_discovered}", style="blue")
+
+        # Show access errors if any
+        if result.access_errors:
+            console.print(
+                f"\n⚠️ Access errors ({len(result.access_errors)}):", style="yellow"
+            )
+            for error in result.access_errors:
+                console.print(f"   • {error}", style="dim")
+
+        # Show next steps
+        available_count = sum(
+            1
+            for repo in result.discovered_repositories
+            if not repo.is_available and repo.is_accessible
+        )
+        if available_count > 0:
+            console.print(
+                f"\n💡 {available_count} repositories can be requested for addition",
+                style="blue",
+            )
+            console.print(
+                "   Contact your administrator to add these repositories to the system",
+                style="dim",
+            )
+
+    except ImportError as e:
+        console.print(f"❌ Missing dependency: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error discovering repositories: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command("status")
+@click.pass_context
+def repos_status(ctx):
+    """Show comprehensive repository status overview.
+
+    Displays a dashboard-style summary of all repository information
+    including activated repositories, available repositories, sync status,
+    and personalized recommendations.
+    """
+    try:
+        from pathlib import Path
+        import asyncio
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Create client and fetch status
+
+        async def fetch_status():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.get_repository_status_summary()
+            finally:
+                client.close()
+
+        summary = asyncio.run(fetch_status())
+
+        # Display comprehensive status
+        console.print("📊 Repository Status Overview", style="bold blue")
+        console.print()
+
+        # Activated repositories summary
+        activated = summary.activated_repositories
+        console.print("🔗 Activated Repositories", style="bold cyan")
+        console.print(f"   Total: {activated.total_count}", style="white")
+        console.print(f"   ✓ Synced: {activated.synced_count}", style="green")
+        console.print(f"   ⚠ Need sync: {activated.needs_sync_count}", style="yellow")
+        console.print(f"   ✗ Conflicts: {activated.conflict_count}", style="red")
+        console.print()
+
+        # Available repositories summary
+        available = summary.available_repositories
+        console.print("📦 Available Repositories", style="bold cyan")
+        console.print(f"   Total available: {available.total_count}", style="white")
+        console.print(
+            f"   Not activated: {available.not_activated_count}", style="yellow"
+        )
+        console.print()
+
+        # Recent activity
+        if summary.recent_activity.recent_syncs:
+            console.print("📈 Recent Activity", style="bold cyan")
+            for sync in summary.recent_activity.recent_syncs[:3]:  # Show last 3
+                try:
+                    from datetime import datetime, timezone
+
+                    sync_time = datetime.fromisoformat(
+                        sync.get("sync_date", "").replace("Z", "+00:00")
+                    )
+                    now = datetime.now(timezone.utc)
+                    diff = now - sync_time
+
+                    if diff.days > 0:
+                        time_str = f"{diff.days}d ago"
+                    elif diff.seconds > 3600:
+                        time_str = f"{diff.seconds // 3600}h ago"
+                    else:
+                        time_str = f"{diff.seconds // 60}m ago"
+                except (ValueError, TypeError, AttributeError):
+                    time_str = "recently"
+
+                status_icon = "✓" if sync.get("status") == "success" else "⚠"
+                console.print(
+                    f"   {status_icon} {sync.get('alias', 'unknown')} synced {time_str}",
+                    style="white",
+                )
+            console.print()
+
+        # Recent activations
+        if activated.recent_activations:
+            console.print("🆕 Recent Activations", style="bold cyan")
+            for activation in activated.recent_activations[:3]:  # Show last 3
+                console.print(
+                    f"   ✓ {activation.get('alias', 'unknown')}", style="green"
+                )
+            console.print()
+
+        # Recommendations
+        if summary.recommendations:
+            console.print("💡 Recommendations", style="bold cyan")
+            for rec in summary.recommendations:
+                console.print(f"   • {rec}", style="white")
+            console.print()
+
+        # Quick actions
+        console.print("🚀 Quick Actions", style="bold cyan")
+        console.print(
+            "   cidx repos list         # View your repositories", style="dim"
+        )
+        console.print(
+            "   cidx repos available    # Browse new repositories", style="dim"
+        )
+        console.print("   cidx sync --all         # Sync all repositories", style="dim")
+
+    except ImportError as e:
+        console.print(f"❌ Missing dependency: {e}", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Error getting repository status: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="activate")
+@click.argument("golden_alias")
+@click.option("--as", "user_alias", help="Alias for activated repository")
+@click.option("--branch", help="Initial branch to activate")
+@click.pass_context
+def activate(ctx, golden_alias: str, user_alias: str, branch: str):
+    """Activate a golden repository for personal use.
+
+    Creates a personal instance of a golden repository with CoW cloning
+    for efficient storage sharing while providing independent access.
+
+    Examples:
+      cidx repos activate web-service                        # Use same alias
+      cidx repos activate web-service --as my-web-app        # Custom alias
+      cidx repos activate web-service --branch feature-v2    # Specific branch
+    """
+    try:
+        # Default user_alias to golden_alias if not provided
+        if not user_alias:
+            user_alias = golden_alias
+
+        execute_repository_activation(
+            golden_alias=golden_alias, user_alias=user_alias, target_branch=branch
+        )
+    except Exception as e:
+        console.print(f"❌ Error activating repository: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="deactivate")
+@click.argument("user_alias")
+@click.option(
+    "--force", is_flag=True, help="Force deactivation of problematic repositories"
+)
+@click.confirmation_option(
+    prompt="Deactivate repository? This will remove all local data."
+)
+@click.pass_context
+def deactivate(ctx, user_alias: str, force: bool):
+    """Deactivate a personal repository.
+
+    Removes the activated repository and cleans up associated resources
+    including containers, configuration, and local data.
+
+    Examples:
+      cidx repos deactivate my-repo                # Normal deactivation
+      cidx repos deactivate broken-repo --force    # Force cleanup
+    """
+    try:
+        execute_repository_deactivation(
+            user_alias=user_alias,
+            force=force,
+            confirmed=True,  # Already confirmed by click.confirmation_option
+        )
+    except Exception as e:
+        console.print(f"❌ Error deactivating repository: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="info")
+@click.argument("user_alias")
+@click.option("--branches", is_flag=True, help="Show detailed branch information")
+@click.option("--health", is_flag=True, help="Show repository health status")
+@click.option("--activity", is_flag=True, help="Show recent repository activity")
+@click.pass_context
+def info(ctx, user_alias: str, branches: bool, health: bool, activity: bool):
+    """Show detailed repository information.
+
+    Displays comprehensive information about an activated repository including
+    basic metadata, branch information, health status, and recent activity.
+
+    EXAMPLES:
+      cidx repos info my-project                    # Basic repository information
+      cidx repos info my-project --branches        # Include branch details
+      cidx repos info my-project --health          # Include health monitoring
+      cidx repos info my-project --activity        # Include activity tracking
+      cidx repos info my-project --branches --health --activity  # Show everything
+    """
+    try:
+        import asyncio
+        from pathlib import Path
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Execute repository info retrieval
+        asyncio.run(
+            _execute_repository_info(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+                user_alias=user_alias,
+                branches=branches,
+                health=health,
+                activity=activity,
+            )
+        )
+    except Exception as e:
+        console.print(f"❌ Error retrieving repository information: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command(name="switch-branch")
+@click.argument("user_alias")
+@click.argument("branch_name")
+@click.option("--create", is_flag=True, help="Create branch if it doesn't exist")
+@click.pass_context
+def switch_branch(ctx, user_alias: str, branch_name: str, create: bool):
+    """Switch branch in activated repository.
+
+    Switches the specified repository to a different branch, with support
+    for creating new branches and handling remote tracking branches.
+
+    EXAMPLES:
+      cidx repos switch-branch my-project develop           # Switch to existing branch
+      cidx repos switch-branch my-project feature/new --create  # Create and switch
+    """
+    try:
+        import asyncio
+        from pathlib import Path
+        from .mode_detection.command_mode_detector import find_project_root
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            from .remote.sync_execution import (
+                _load_remote_configuration,
+                _load_and_decrypt_credentials,
+            )
+
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Execute branch switching
+        asyncio.run(
+            _execute_branch_switch(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+                user_alias=user_alias,
+                branch_name=branch_name,
+                create=create,
+            )
+        )
+    except Exception as e:
+        console.print(f"❌ Error switching repository branch: {e}", style="red")
+        sys.exit(1)
+
+
+@repos_group.command("sync")
+@click.argument("user_alias", required=False)
+@click.option("--all", is_flag=True, help="Sync all activated repositories")
+@click.option("--force", is_flag=True, help="Force sync by cancelling existing jobs")
+@click.option(
+    "--full-reindex", is_flag=True, help="Force full re-indexing instead of incremental"
+)
+@click.option("--no-pull", is_flag=True, help="Skip git pull, only perform indexing")
+@click.option("--timeout", type=int, default=300, help="Job timeout in seconds")
+@click.pass_context
+def repos_sync(
+    ctx,
+    user_alias: Optional[str],
+    all: bool,
+    force: bool,
+    full_reindex: bool,
+    no_pull: bool,
+    timeout: int,
+):
+    """Sync repositories with golden repositories.
+
+    \b
+    Synchronize activated repositories with their corresponding golden repositories.
+    Supports both individual repository sync and bulk sync operations.
+
+    \b
+    SYNC MODES:
+      • Individual: cidx repos sync my-project        # Sync specific repository
+      • All repos:  cidx repos sync --all             # Sync all activated repositories
+
+    \b
+    SYNC OPTIONS:
+      • --force           Cancel existing jobs and force new sync
+      • --full-reindex    Force complete re-indexing (slower but thorough)
+      • --no-pull         Skip git pull, only index existing files
+      • --timeout 600     Set job timeout (default: 300 seconds)
+
+    \b
+    EXAMPLES:
+      cidx repos sync my-project              # Sync specific repository
+      cidx repos sync --all                   # Sync all repositories
+      cidx repos sync --all --force           # Force sync all repositories
+      cidx repos sync my-project --no-pull    # Sync without git pull
+    """
+    try:
+        # Import here to avoid circular imports
+        from .mode_detection.command_mode_detector import find_project_root
+        from .api_clients.base_client import (
+            AuthenticationError,
+            NetworkError,
+            APIClientError,
+        )
+
+        # Validate arguments
+        if user_alias and all:
+            console.print(
+                "❌ Error: Cannot specify both repository alias and --all flag",
+                style="red",
+            )
+            console.print(
+                "   Use either 'cidx repos sync <alias>' or 'cidx repos sync --all'",
+                style="dim",
+            )
+            sys.exit(1)
+
+        if timeout <= 0:
+            console.print("❌ Error: Timeout must be a positive number", style="red")
+            sys.exit(1)
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "   Run 'cidx init --remote' to set up remote mode", style="dim"
+            )
+            sys.exit(1)
+
+        # Create repos client - use synchronous wrapper
+        from .api_clients.repos_client import SyncReposAPIClient
+
+        repos_client = SyncReposAPIClient(project_root)
+
+        # Show sync operation details
+        if all:
+            console.print("🔄 Syncing all activated repositories...", style="blue")
+        elif user_alias:
+            console.print(f"🔄 Syncing repository '{user_alias}'...", style="blue")
+        else:
+            console.print(
+                "❌ Error: Must specify repository alias or use --all flag", style="red"
+            )
+            console.print(
+                "   Use 'cidx repos sync <alias>' or 'cidx repos sync --all'",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Execute sync operation
+        if all:
+            results = repos_client.sync_all_repositories(
+                force_sync=force,
+                incremental=not full_reindex,
+                pull_remote=not no_pull,
+                timeout=timeout,
+            )
+        else:
+            # Type guard - we've already validated user_alias is not None above
+            assert user_alias is not None
+            result = repos_client.sync_repository(
+                user_alias,
+                force_sync=force,
+                incremental=not full_reindex,
+                pull_remote=not no_pull,
+                timeout=timeout,
+            )
+            results = [result]
+
+        # Display results
+        console.print()
+        console.print("✅ Sync operation results:", style="green bold")
+
+        successful_count = 0
+        failed_count = 0
+
+        for result in results:
+            if result.status in ["completed", "success"]:
+                console.print(
+                    f"   ✅ {result.repository}: {result.message}", style="green"
+                )
+                successful_count += 1
+            elif result.status in ["failed", "error"]:
+                console.print(
+                    f"   ❌ {result.repository}: {result.message}", style="red"
+                )
+                failed_count += 1
+            elif result.status == "conflict":
+                console.print(
+                    f"   ⚠️  {result.repository}: Sync conflicts detected",
+                    style="yellow",
+                )
+                console.print(f"      {result.message}", style="dim")
+                console.print("      Manual resolution required", style="yellow")
+                failed_count += 1
+            else:
+                console.print(
+                    f"   ℹ️ {result.repository}: {result.message}", style="blue"
+                )
+
+        if len(results) > 1:
+            console.print()
+            console.print(
+                f"📊 Summary: {successful_count} successful, {failed_count} failed",
+                style="cyan",
+            )
+
+        if failed_count > 0:
+            sys.exit(1)
+
+    except AuthenticationError as e:
+        console.print(f"❌ Authentication failed: {e}", style="red")
+        console.print(
+            "   💡 Check your credentials with 'cidx auth update'", style="dim"
+        )
+        sys.exit(1)
+    except NetworkError as e:
+        console.print(f"❌ Network error: {e}", style="red")
+        console.print(
+            "   💡 Check your internet connection and server URL", style="dim"
+        )
+        sys.exit(1)
+    except APIClientError as e:
+        console.print(f"❌ API error: {e}", style="red")
+        if e.status_code == 404:
+            console.print(
+                "   💡 Repository not found - check repository alias", style="dim"
+            )
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Failed to sync repository: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@repos_group.command("sync-status")
+@click.argument("user_alias", required=False)
+@click.option("--detailed", is_flag=True, help="Show detailed sync history")
+@click.pass_context
+def repos_sync_status(ctx, user_alias: Optional[str], detailed: bool):
+    """Show repository sync status.
+
+    \b
+    Display synchronization status for activated repositories including
+    last sync time, current status, and conflict information.
+
+    \b
+    STATUS MODES:
+      • All repos:  cidx repos sync-status              # Show status for all repositories
+      • Individual: cidx repos sync-status my-project   # Show status for specific repository
+
+    \b
+    STATUS OPTIONS:
+      • --detailed    Show comprehensive sync history and details
+
+    \b
+    EXAMPLES:
+      cidx repos sync-status                    # Show status for all repositories
+      cidx repos sync-status my-project        # Show status for specific repository
+      cidx repos sync-status --detailed        # Show detailed status for all repositories
+    """
+    try:
+        # Import here to avoid circular imports
+        from .mode_detection.command_mode_detector import find_project_root
+        from .api_clients.base_client import (
+            AuthenticationError,
+            NetworkError,
+            APIClientError,
+        )
+        from rich.table import Table
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "   Run 'cidx init --remote' to set up remote mode", style="dim"
+            )
+            sys.exit(1)
+
+        # Create repos client - use synchronous wrapper
+        from .api_clients.repos_client import SyncReposAPIClient
+
+        repos_client = SyncReposAPIClient(project_root)
+
+        # Get sync status
+        if user_alias:
+            # Get status for specific repository
+            console.print(f"🔍 Sync Status for '{user_alias}'", style="blue bold")
+
+            status = repos_client.get_sync_status(user_alias)
+
+            # Display repository status
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("Property", style="dim")
+            table.add_column("Value")
+
+            # Basic status information
+            status_style = (
+                "green"
+                if status["sync_status"] == "synced"
+                else "yellow"
+                if status["sync_status"] == "needs_sync"
+                else "red"
+            )
+            table.add_row(
+                "Status", f"[{status_style}]{status['sync_status']}[/{status_style}]"
+            )
+            table.add_row("Current Branch", status["current_branch"])
+            table.add_row("Last Sync", status.get("last_sync_time", "Never"))
+            table.add_row(
+                "Has Conflicts", "Yes" if status.get("has_conflicts", False) else "No"
+            )
+
+            console.print(table)
+
+            # Show detailed history if requested
+            if detailed and "sync_history" in status:
+                console.print("\n📋 Detailed Sync History", style="blue bold")
+
+                history_table = Table(show_header=True, header_style="bold cyan")
+                history_table.add_column("Timestamp")
+                history_table.add_column("Status")
+                history_table.add_column("Message")
+                history_table.add_column("Files", justify="right")
+                history_table.add_column("Duration", justify="right")
+
+                for entry in status["sync_history"][:10]:  # Show last 10 entries
+                    status_style = "green" if entry["status"] == "completed" else "red"
+                    history_table.add_row(
+                        entry["timestamp"],
+                        f"[{status_style}]{entry['status']}[/{status_style}]",
+                        entry["message"],
+                        str(entry.get("files_synced", "N/A")),
+                        f"{entry.get('duration', 0):.1f}s",
+                    )
+
+                console.print(history_table)
+        else:
+            # Get status for all repositories
+            console.print("📊 Repository Sync Status", style="blue bold")
+
+            status_data = repos_client.get_sync_status_all()
+
+            if not status_data:
+                console.print("ℹ️ No activated repositories found", style="yellow")
+                return
+
+            # Create status table
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("Repository", style="bold")
+            table.add_column("Status")
+            table.add_column("Branch")
+            table.add_column("Last Sync")
+            table.add_column("Conflicts")
+
+            for repo_alias, repo_status in status_data.items():
+                status_style = (
+                    "green"
+                    if repo_status["sync_status"] == "synced"
+                    else (
+                        "yellow"
+                        if repo_status["sync_status"] == "needs_sync"
+                        else "red"
+                    )
+                )
+                conflicts_indicator = (
+                    "⚠️" if repo_status.get("has_conflicts", False) else "✅"
+                )
+
+                table.add_row(
+                    repo_alias,
+                    f"[{status_style}]{repo_status['sync_status']}[/{status_style}]",
+                    repo_status["current_branch"],
+                    repo_status.get("last_sync_time", "Never"),
+                    conflicts_indicator,
+                )
+
+            console.print(table)
+
+            # Show summary
+            total_repos = len(status_data)
+            synced_repos = sum(
+                1
+                for status in status_data.values()
+                if status["sync_status"] == "synced"
+            )
+            conflict_repos = sum(
+                1
+                for status in status_data.values()
+                if status.get("has_conflicts", False)
+            )
+
+            console.print()
+            console.print(
+                f"📈 Summary: {synced_repos}/{total_repos} repositories synced",
+                style="cyan",
+            )
+            if conflict_repos > 0:
+                console.print(
+                    f"⚠️  {conflict_repos} repositories have conflicts requiring attention",
+                    style="yellow",
+                )
+
+    except AuthenticationError as e:
+        console.print(f"❌ Authentication failed: {e}", style="red")
+        console.print(
+            "   💡 Check your credentials with 'cidx auth update'", style="dim"
+        )
+        sys.exit(1)
+    except NetworkError as e:
+        console.print(f"❌ Network error: {e}", style="red")
+        console.print(
+            "   💡 Check your internet connection and server URL", style="dim"
+        )
+        sys.exit(1)
+    except APIClientError as e:
+        console.print(f"❌ API error: {e}", style="red")
+        if e.status_code == 404:
+            console.print(
+                "   💡 Repository not found - check repository alias", style="dim"
+            )
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Failed to get sync status: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@repos_group.command("files")
+@click.argument("user_alias")
+@click.option("--path", default="", help="Directory path to list")
+@click.pass_context
+def repos_files(ctx, user_alias: str, path: str):
+    """Browse repository files and directories.
+
+    \b
+    Display files and directories in your activated repositories. Navigate
+    through the file tree to explore repository content.
+
+    \b
+    EXAMPLES:
+      cidx repos files my-project                    # List files in root
+      cidx repos files my-project --path src         # List files in src/
+      cidx repos files my-project --limit 50         # Show max 50 files
+    """
+    try:
+        from pathlib import Path
+        import asyncio
+        from .mode_detection.command_mode_detector import find_project_root
+        from .cli_repos_files import get_repo_id_from_alias_sync, display_file_tree
+        from .remote.sync_execution import (
+            _load_remote_configuration,
+            _load_and_decrypt_credentials,
+        )
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Verify repository exists
+        try:
+            _ = get_repo_id_from_alias_sync(
+                server_url, credentials, user_alias, project_root
+            )
+        except ValueError as e:
+            console.print(f"❌ {e}", style="red")
+            sys.exit(1)
+
+        # Fetch files from API
+        from .api_clients.repos_client import ReposAPIClient
+
+        async def fetch_files():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.list_repository_files(repo_alias=user_alias, path=path)
+            finally:
+                client.close()
+
+        files = asyncio.run(fetch_files())
+
+        # Display results
+        display_file_tree(files.get("files", []), path if path else "/")
+
+    except Exception as e:
+        console.print(f"❌ Failed to list files: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@repos_group.command("cat")
+@click.argument("user_alias")
+@click.argument("file_path")
+@click.option("--no-highlight", is_flag=True, help="Disable syntax highlighting")
+@click.pass_context
+def repos_cat(ctx, user_alias: str, file_path: str, no_highlight: bool):
+    """View repository file contents.
+
+    \b
+    Display the contents of a file from your activated repository with
+    optional syntax highlighting and line numbers.
+
+    \b
+    EXAMPLES:
+      cidx repos cat my-project README.md              # View README
+      cidx repos cat my-project src/main.py           # View Python file
+      cidx repos cat my-project config.json --no-highlight  # Plain text
+    """
+    try:
+        from pathlib import Path
+        from .mode_detection.command_mode_detector import find_project_root
+        from .cli_repos_files import (
+            get_repo_id_from_alias_sync,
+            display_with_line_numbers,
+            apply_syntax_highlighting,
+            format_file_size,
+        )
+        from .remote.sync_execution import (
+            _load_remote_configuration,
+            _load_and_decrypt_credentials,
+        )
+
+        # Get project root and credentials
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ Not in a CIDX project directory", style="red")
+            sys.exit(1)
+
+        # Load remote configuration and credentials
+        try:
+            remote_config = _load_remote_configuration(project_root)
+            server_url = remote_config["server_url"]
+            credentials = _load_and_decrypt_credentials(project_root)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "   Please run 'cidx init --remote' to configure authentication.",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Verify repository exists
+        try:
+            _ = get_repo_id_from_alias_sync(
+                server_url, credentials, user_alias, project_root
+            )
+        except ValueError as e:
+            console.print(f"❌ {e}", style="red")
+            sys.exit(1)
+
+        # Fetch file content from API
+        from .api_clients.repos_client import ReposAPIClient
+
+        def fetch_file_content():
+            client = ReposAPIClient(
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            )
+            try:
+                return client.get_file_content(
+                    repo_alias=user_alias, file_path=file_path
+                )
+            finally:
+                client.close()
+
+        file_data = fetch_file_content()
+
+        # Check if binary file
+        if file_data.get("is_binary"):
+            size = file_data.get("size", 0)
+            console.print(
+                f"📦 Binary file (size: {format_file_size(size)})", style="yellow"
+            )
+            return
+
+        # Get content
+        content = file_data.get("content", "")
+
+        # Apply syntax highlighting unless disabled
+        if not no_highlight:
+            content = apply_syntax_highlighting(content, file_path)
+
+        # Display with line numbers
+        display_with_line_numbers(content)
+
+    except Exception as e:
+        console.print(f"❌ Failed to view file: {e}", style="red")
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+class ActivationProgressDisplay:
+    """Display class for repository activation progress."""
+
+    def __init__(self):
+        """Initialize progress display."""
+        from rich.progress import (
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+            BarColumn,
+            TaskProgressColumn,
+        )
+        from rich.console import Console
+
+        self.console = Console()
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=self.console,
+        )
+
+    def show_activation_progress(self, golden_alias: str, user_alias: str):
+        """Display activation progress with real-time updates."""
+        self.console.print(
+            f"🚀 Activating repository '{golden_alias}' as '{user_alias}'",
+            style="bold blue",
+        )
+        self.console.print(
+            "   This may take a moment for large repositories...", style="dim"
+        )
+
+    def show_activation_complete(self, user_alias: str, next_steps: List[str]):
+        """Display completion message with next steps."""
+        self.console.print(
+            f"✅ Repository '{user_alias}' activated successfully!", style="bold green"
+        )
+
+        if next_steps:
+            self.console.print("\n💡 Next Steps:", style="bold cyan")
+            for step in next_steps:
+                self.console.print(f"   • {step}", style="dim")
+
+
+def execute_repository_activation(
+    golden_alias: str, user_alias: str, target_branch: Optional[str] = None
+):
+    """Execute repository activation with progress monitoring."""
+    import asyncio
+    from pathlib import Path
+    from .mode_detection.command_mode_detector import find_project_root
+
+    # Get project root and credentials
+    project_root = find_project_root(Path.cwd())
+    if not project_root:
+        raise Exception("Not in a CIDX project directory")
+
+    from .remote.sync_execution import _load_and_decrypt_credentials
+
+    credentials = _load_and_decrypt_credentials(project_root)
+
+    if not credentials:
+        raise Exception("No remote credentials found. Use 'cidx init-remote' first.")
+
+    # Initialize progress display
+    progress_display = ActivationProgressDisplay()
+    progress_display.show_activation_progress(golden_alias, user_alias)
+
+    # Create client and execute activation
+
+    async def do_activation():
+        client = ReposAPIClient(
+            server_url=credentials["server_url"],
+            credentials=credentials,
+            project_root=project_root,
+        )
+        try:
+            return client.activate_repository(
+                golden_alias=golden_alias,
+                user_alias=user_alias,
+                target_branch=target_branch,
+            )
+        finally:
+            client.close()
+
+    asyncio.run(do_activation())
+
+    # Show completion with next steps
+    next_steps = [
+        'Query the repository: cidx query "your search terms"',
+        "Check repository status: cidx repos list",
+        f"Switch branches: cidx repos branch {user_alias} <branch-name>",
+    ]
+
+    progress_display.show_activation_complete(user_alias, next_steps)
+
+
+def execute_repository_deactivation(
+    user_alias: str, force: bool = False, confirmed: bool = False
+):
+    """Execute repository deactivation with cleanup."""
+    import asyncio
+    from pathlib import Path
+    from .mode_detection.command_mode_detector import find_project_root
+
+    # Get project root and credentials
+    project_root = find_project_root(Path.cwd())
+    if not project_root:
+        raise Exception("Not in a CIDX project directory")
+
+    from .remote.sync_execution import _load_and_decrypt_credentials
+
+    credentials = _load_and_decrypt_credentials(project_root)
+
+    if not credentials:
+        raise Exception("No remote credentials found. Use 'cidx init-remote' first.")
+
+    if not confirmed:
+        raise Exception("Deactivation not confirmed")
+
+    # Create client and execute deactivation
+    console.print(f"🗑️  Deactivating repository '{user_alias}'...", style="yellow")
+
+    async def do_deactivation():
+        client = ReposAPIClient(
+            server_url=credentials["server_url"],
+            credentials=credentials,
+            project_root=project_root,
+        )
+        try:
+            return client.deactivate_repository(user_alias=user_alias, force=force)
+        finally:
+            client.close()
+
+    result = asyncio.run(do_deactivation())
+
+    # Show completion message
+    console.print(
+        f"✅ Repository '{user_alias}' deactivated successfully", style="bold green"
+    )
+
+    if "cleanup_summary" in result:
+        summary = result["cleanup_summary"]
+        console.print("📊 Cleanup Summary:", style="bold cyan")
+        if "containers_stopped" in summary:
+            console.print(
+                f"   • Containers stopped: {summary['containers_stopped']}", style="dim"
+            )
+        if "storage_freed" in summary:
+            console.print(
+                f"   • Storage freed: {summary['storage_freed']}", style="dim"
+            )
+
+    if "warnings" in result:
+        for warning in result["warnings"]:
+            console.print(f"⚠️  {warning}", style="yellow")
+
+
+async def _execute_repository_info(
+    server_url: str,
+    credentials: Dict[str, Any],
+    project_root: Path,
+    user_alias: str,
+    branches: bool = False,
+    health: bool = False,
+    activity: bool = False,
+):
+    """Execute repository information retrieval with rich formatting."""
+
+    # Create client and fetch repository information
+    client = ReposAPIClient(
+        server_url=server_url, credentials=credentials, project_root=project_root
+    )
+
+    try:
+        repo_info = client.get_repository_info(
+            user_alias=user_alias, branches=branches, health=health, activity=activity
+        )
+
+        # Display repository information with rich formatting
+        _display_repository_info(repo_info, branches, health, activity)
+
+    except Exception as e:
+        console.print(f"❌ Failed to get repository info: {e}", style="red")
+        raise
+    finally:
+        client.close()
+
+
+async def _execute_branch_switch(
+    server_url: str,
+    credentials: Dict[str, Any],
+    project_root: Path,
+    user_alias: str,
+    branch_name: str,
+    create: bool = False,
+):
+    """Execute repository branch switching."""
+
+    # Create client and switch branch
+    client = ReposAPIClient(
+        server_url=server_url, credentials=credentials, project_root=project_root
+    )
+
+    try:
+        result = client.switch_repository_branch(
+            user_alias=user_alias, branch_name=branch_name, create=create
+        )
+
+        # Display switch result
+        _display_branch_switch_result(result)
+
+    except Exception as e:
+        console.print(f"❌ Failed to switch branch: {e}", style="red")
+        raise
+    finally:
+        client.close()
+
+
+def _display_repository_info(
+    repo_info: Dict[str, Any], branches: bool, health: bool, activity: bool
+):
+    """Display repository information with rich formatting."""
+
+    alias = repo_info.get("alias", "Unknown")
+    console.print(f"\n[bold cyan]Repository Information: {alias}[/bold cyan]")
+    console.print("=" * (25 + len(alias)))
+
+    # Basic Information Section
+    console.print("\n[bold]Basic Information:[/bold]")
+    basic_info = [
+        f"  Alias: {repo_info.get('alias', 'N/A')}",
+        f"  Golden Repository: {repo_info.get('golden_repository', 'N/A')}",
+        f"  Git URL: {repo_info.get('git_url', 'N/A')}",
+        f"  Current Branch: {repo_info.get('current_branch', 'N/A')}",
+        f"  Activated: {repo_info.get('activation_date', 'N/A')}",
+    ]
+    for info in basic_info:
+        console.print(info)
+
+    # Branch Information Section
+    if branches and "branches" in repo_info:
+        console.print("\n[bold]Branch Information:[/bold]")
+        for branch in repo_info["branches"]:
+            if branch.get("is_current", False):
+                console.print(
+                    f"  * [green]{branch['name']} (current)[/green]",
+                    style="bold",
+                )
+            else:
+                console.print(f"    {branch['name']}")
+
+            if "last_commit" in branch:
+                commit = branch["last_commit"]
+                console.print(
+                    f"    └── Last commit: {commit.get('message', 'N/A')} "
+                    f"({commit.get('timestamp', 'N/A')})",
+                    style="dim",
+                )
+
+    # Status Section
+    console.print("\n[bold]Status:[/bold]")
+    sync_status = repo_info.get("sync_status", "unknown")
+    if sync_status == "up_to_date":
+        console.print("  Sync Status: ✓ Up to date with golden repository")
+    else:
+        console.print(f"  Sync Status: ⚠️  {sync_status}")
+
+    console.print(f"  Last Sync: {repo_info.get('last_sync', 'N/A')}")
+
+    container_status = repo_info.get("container_status", "unknown")
+    if container_status == "running":
+        console.print("  Container Status: ✓ Running and ready for queries")
+    else:
+        console.print(f"  Container Status: ⚠️  {container_status}")
+
+    index_status = repo_info.get("index_status", "unknown")
+    if index_status == "complete":
+        console.print("  Index Status: ✓ Fully indexed")
+    else:
+        console.print(f"  Index Status: ⚠️  {index_status}")
+
+    query_ready = repo_info.get("query_ready", False)
+    if query_ready:
+        console.print("  Query Readiness: ✓ Ready")
+    else:
+        console.print("  Query Readiness: ❌ Not ready")
+
+    # Health Information Section
+    if health and "health" in repo_info:
+        console.print("\n[bold]Health Information:[/bold]")
+        health_info = repo_info["health"]
+
+        console.print(
+            f"  Container Status: ✓ {health_info.get('container_status', 'N/A')}"
+        )
+
+        if "services" in health_info:
+            console.print("  Services:")
+            for service, details in health_info["services"].items():
+                status = details.get("status", "unknown")
+                port = details.get("port", "N/A")
+                if status == "healthy":
+                    console.print(f"    {service}: ✓ Healthy (port {port})")
+                else:
+                    console.print(f"    {service}: ❌ {status} (port {port})")
+
+        # Storage Information
+        if "storage" in health_info:
+            console.print("\n[bold]Storage Information:[/bold]")
+            storage = health_info["storage"]
+            console.print(f"  Disk Usage: {storage.get('disk_usage_mb', 'N/A')} MB")
+            console.print(
+                f"  Available Space: {storage.get('available_space_gb', 'N/A')} GB"
+            )
+            console.print(f"  Index Size: {storage.get('index_size_mb', 'N/A')} MB")
+
+        # Recommendations
+        if "recommendations" in health_info and health_info["recommendations"]:
+            console.print("\n[bold]Recommendations:[/bold]")
+            for rec in health_info["recommendations"]:
+                console.print(f"  • {rec}", style="dim")
+
+    # Activity Information Section
+    if activity and "activity" in repo_info:
+        console.print("\n[bold]Activity Information:[/bold]")
+        activity_info = repo_info["activity"]
+
+        if "recent_commits" in activity_info:
+            console.print("  Recent Commits:")
+            for commit in activity_info["recent_commits"][:5]:  # Show last 5
+                console.print(
+                    f"    {commit.get('commit_hash', 'N/A')[:7]}: "
+                    f"{commit.get('message', 'N/A')}",
+                    style="dim",
+                )
+
+        if "sync_history" in activity_info:
+            console.print("  Sync History:")
+            for sync in activity_info["sync_history"][:3]:  # Show last 3
+                console.print(
+                    f"    {sync.get('timestamp', 'N/A')}: "
+                    f"{sync.get('status', 'N/A')} - {sync.get('changes', 'N/A')}",
+                    style="dim",
+                )
+
+        if "query_activity" in activity_info:
+            query_activity = activity_info["query_activity"]
+            console.print("  Query Activity:")
+            console.print(
+                f"    Recent queries: {query_activity.get('recent_queries', 'N/A')}"
+            )
+            console.print(f"    Last query: {query_activity.get('last_query', 'N/A')}")
+
+        if "branch_operations" in activity_info:
+            console.print("  Branch Operations:")
+            for op in activity_info["branch_operations"][:3]:  # Show last 3
+                console.print(
+                    f"    {op.get('operation', 'N/A')}: "
+                    f"{op.get('from_branch', 'N/A')} → {op.get('to_branch', 'N/A')}",
+                    style="dim",
+                )
+
+    console.print()  # Add spacing
+
+
+def _display_branch_switch_result(result: Dict[str, Any]):
+    """Display branch switch operation result."""
+    status = result.get("status", "unknown")
+    message = result.get("message", "Branch switch completed")
+
+    if status == "success":
+        console.print(f"✅ {message}", style="bold green")
+    else:
+        console.print(f"❌ {message}", style="red")
+
+    # Show additional details
+    if "previous_branch" in result:
+        console.print(f"   Previous branch: {result['previous_branch']}", style="dim")
+
+    if "new_branch" in result:
+        console.print(f"   New branch: {result['new_branch']}", style="dim")
+
+    if result.get("branch_created", False):
+        console.print("   ✨ New branch created", style="green")
+
+    if result.get("tracking_branch_created", False):
+        console.print(
+            f"   🔗 Created local tracking branch for {result.get('remote_origin', 'remote')}",
+            style="green",
+        )
+
+    if result.get("uncommitted_changes_preserved", False):
+        console.print("   💾 Uncommitted changes preserved", style="yellow")
+        if "preserved_files" in result:
+            console.print("   Preserved files:", style="dim")
+            for file in result["preserved_files"][:5]:  # Show first 5
+                console.print(f"     • {file}", style="dim")
+
+    if result.get("container_updated", False):
+        console.print("   🔄 Container configuration updated", style="blue")
+
+    if result.get("container_restart_required", False):
+        console.print(
+            "   ⚠️  Container restart may be required for full functionality",
+            style="yellow",
+        )
+
+
+# Repository formatting functions for table display
+def format_repository_list(repositories):
+    """Format activated repository list as a rich table.
+
+    Args:
+        repositories: List of ActivatedRepository objects
+
+    Returns:
+        str: Formatted table output
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from datetime import datetime, timezone
+    from io import StringIO
+
+    # Create table
+    table = Table(title="Activated Repositories", show_header=True)
+    table.add_column("Alias", style="cyan")
+    table.add_column("Branch", style="green")
+    table.add_column("Sync Status", style="yellow")
+    table.add_column("Last Sync", style="magenta")
+    table.add_column("Actions", style="white")
+
+    for repo in repositories:
+        # Format sync status with icons
+        if repo.sync_status == "synced":
+            status = "✓ Synced"
+            status_style = "green"
+        elif repo.sync_status == "needs_sync":
+            status = "⚠ Needs sync"
+            status_style = "yellow"
+        elif repo.sync_status == "conflict":
+            status = "✗ Conflict"
+            status_style = "red"
+        else:
+            status = repo.sync_status
+            status_style = "white"
+
+        # Format last sync time
+        try:
+            last_sync = datetime.fromisoformat(repo.last_sync.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            diff = now - last_sync
+
+            if diff.days > 0:
+                time_str = f"{diff.days}d ago"
+            elif diff.seconds > 3600:
+                time_str = f"{diff.seconds // 3600}h ago"
+            else:
+                time_str = f"{diff.seconds // 60}m ago"
+        except (ValueError, TypeError, AttributeError):
+            time_str = "Unknown"
+
+        # Suggest actions
+        actions = ""
+        if repo.sync_status == "needs_sync":
+            actions = "sync"
+        elif repo.sync_status == "conflict":
+            actions = "resolve"
+
+        table.add_row(
+            repo.alias,
+            repo.current_branch,
+            f"[{status_style}]{status}[/{status_style}]",
+            time_str,
+            actions,
+        )
+
+    # Capture table output
+    console = Console(file=StringIO(), width=120)
+    console.print(table)
+    output = console.file.getvalue()  # type: ignore[attr-defined]
+    console.file.close()
+    return output
+
+
+def format_available_repositories(repositories):
+    """Format available repository list as a rich table.
+
+    Args:
+        repositories: List of GoldenRepository objects
+
+    Returns:
+        str: Formatted table output
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from io import StringIO
+
+    # Create table
+    table = Table(title="Available Golden Repositories", show_header=True)
+    table.add_column("Alias", style="cyan")
+    table.add_column("Description", style="white", max_width=50)
+    table.add_column("Default Branch", style="green")
+    table.add_column("Branches", style="yellow")
+    table.add_column("Status", style="magenta")
+
+    for repo in repositories:
+        # Format activation status
+        if repo.is_activated:
+            status = "✓ Already activated"
+            status_style = "green"
+        else:
+            status = "Available"
+            status_style = "yellow"
+
+        # Format branches (show first few)
+        branches = repo.indexed_branches[:3]
+        if len(repo.indexed_branches) > 3:
+            branches_str = (
+                ", ".join(branches) + f" (+{len(repo.indexed_branches) - 3} more)"
+            )
+        else:
+            branches_str = ", ".join(branches)
+
+        table.add_row(
+            repo.alias,
+            repo.description,
+            repo.default_branch,
+            branches_str,
+            f"[{status_style}]{status}[/{status_style}]",
+        )
+
+    # Capture table output
+    console = Console(file=StringIO(), width=120)
+    console.print(table)
+    output = console.file.getvalue()  # type: ignore[attr-defined]
+    console.file.close()
+    return output
+
+
+def format_discovery_results(discovery_result):
+    """Format repository discovery results.
+
+    Args:
+        discovery_result: RepositoryDiscoveryResult object
+
+    Returns:
+        str: Formatted discovery output
+    """
+    from rich.table import Table
+    from rich.console import Console
+    from io import StringIO
+
+    output_lines = []
+
+    # Header
+    output_lines.append("🔍 Repository Discovery Results")
+    output_lines.append(f"Source: {discovery_result.source}")
+    output_lines.append(f"Total discovered: {discovery_result.total_discovered}")
+    output_lines.append("")
+
+    if discovery_result.discovered_repositories:
+        # Create table for discovered repositories
+        table = Table(title="Discovered Repositories", show_header=True)
+        table.add_column("Name", style="cyan")
+        table.add_column("Description", style="white", max_width=40)
+        table.add_column("URL", style="blue", max_width=50)
+        table.add_column("Status", style="yellow")
+
+        for repo in discovery_result.discovered_repositories:
+            # Format status
+            if repo.is_available:
+                status = "✓ Available"
+                status_style = "green"
+            elif repo.is_accessible:
+                status = "⚠ Accessible"
+                status_style = "yellow"
+            else:
+                status = "✗ Inaccessible"
+                status_style = "red"
+
+            table.add_row(
+                repo.name,
+                repo.description,
+                repo.url,
+                f"[{status_style}]{status}[/{status_style}]",
+            )
+
+        # Capture table output
+        console = Console(file=StringIO(), width=120)
+        console.print(table)
+        table_output = console.file.getvalue()  # type: ignore[attr-defined]
+        console.file.close()
+        output_lines.append(table_output)
+
+    # Access errors
+    if discovery_result.access_errors:
+        output_lines.append("\n⚠️ Access Errors:")
+        for error in discovery_result.access_errors:
+            output_lines.append(f"   • {error}")
+
+    return "\n".join(output_lines)
+
+
+def format_status_summary(summary):
+    """Format repository status summary in dashboard-style layout.
+
+    Args:
+        summary: RepositoryStatusSummary object
+
+    Returns:
+        str: Formatted dashboard output
+    """
+
+    output_lines = []
+
+    # Title
+    output_lines.append("📊 Repository Status Dashboard")
+    output_lines.append("")
+
+    # Activated repositories summary
+    activated = summary.activated_repositories
+    output_lines.append("📦 Activated Repositories:")
+    output_lines.append(f"   Total: {activated.total_count}")
+    output_lines.append(f"   ✓ Synced: {activated.synced_count}")
+    output_lines.append(f"   ⚠ Need sync: {activated.needs_sync_count}")
+    output_lines.append(f"   ✗ Conflicts: {activated.conflict_count}")
+    output_lines.append("")
+
+    # Available repositories summary
+    available = summary.available_repositories
+    output_lines.append("🏛️ Available Repositories:")
+    output_lines.append(f"   Total: {available.total_count}")
+    output_lines.append(f"   Not activated: {available.not_activated_count}")
+    output_lines.append("")
+
+    # Recent activity
+    if summary.recent_activity.recent_syncs:
+        output_lines.append("🔄 Recent Activity:")
+        for sync in summary.recent_activity.recent_syncs:
+            status_icon = "✓" if sync["status"] == "success" else "✗"
+            output_lines.append(
+                f"   {status_icon} {sync['alias']} - {sync['sync_date']}"
+            )
+        output_lines.append("")
+
+    # Recent activations
+    if activated.recent_activations:
+        output_lines.append("🆕 Recent Activations:")
+        for activation in activated.recent_activations:
+            output_lines.append(
+                f"   • {activation['alias']} - {activation['activation_date']}"
+            )
+        output_lines.append("")
+
+    # Recommendations
+    if summary.recommendations:
+        output_lines.append("💡 Recommendations:")
+        for rec in summary.recommendations:
+            output_lines.append(f"   • {rec}")
+
+    return "\n".join(output_lines)
+
+
+# Jobs command group
+@cli.group()
+def jobs():
+    """Manage background jobs and monitor their status."""
+    pass
+
+
+@jobs.command("list")
+@click.option(
+    "--status",
+    type=click.Choice(["running", "completed", "failed", "cancelled"]),
+    help="Filter jobs by status",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=10,
+    help="Maximum number of jobs to display (default: 10)",
+)
+@click.pass_context
+@require_mode("remote")
+def list_jobs(ctx, status: Optional[str], limit: int):
+    """List background jobs with their current status.
+
+    \b
+    Shows running, completed, failed, and cancelled jobs with details including:
+    • Job ID and operation type
+    • Current status and progress
+    • Started time and completion time
+    • Associated repository
+
+    \b
+    EXAMPLES:
+      cidx jobs list                    # Show all recent jobs
+      cidx jobs list --status running  # Show only running jobs
+      cidx jobs list --limit 20        # Show up to 20 jobs
+    """
+    from pathlib import Path
+    from .api_clients.jobs_client import JobsAPIClient
+    from .remote.credential_manager import load_encrypted_credentials
+    from .remote.config import load_remote_configuration
+
+    try:
+        # Find project root
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+        except FileNotFoundError:
+            console.print("❌ No remote configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=remote_config["username"],
+                repo_path=str(project_root),
+                server_url=remote_config["server_url"],
+            )
+
+            # Create credentials dict for JobsAPIClient
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+                "server_url": decrypted_creds.server_url,
+            }
+            server_url = decrypted_creds.server_url
+
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Create jobs client and list jobs
+        def _list_jobs():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            ) as client:
+                jobs_response = client.list_jobs(
+                    status=status,
+                    limit=limit,
+                )
+                return jobs_response
+
+        jobs_response = _list_jobs()
+
+        # Display results
+        _display_jobs_table(jobs_response, status)
+
+    except Exception as e:
+        console.print(f"❌ Failed to list jobs: {e}", style="red")
+        sys.exit(1)
+
+
+@jobs.command("cancel")
+@click.argument("job_id", required=True)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation prompt and cancel immediately",
+)
+@click.pass_context
+@require_mode("remote")
+def cancel_job(ctx, job_id: str, force: bool):
+    """Cancel a background job.
+
+    \b
+    Cancels a running or queued background job. By default, prompts for
+    confirmation before cancelling. Use --force to skip confirmation.
+
+    \b
+    EXAMPLES:
+      cidx jobs cancel job-123-abc            # Cancel with confirmation
+      cidx jobs cancel job-456-def --force    # Cancel without confirmation
+    """
+    from pathlib import Path
+    from .api_clients.jobs_client import JobsAPIClient
+    from .remote.credential_manager import load_encrypted_credentials
+    from .remote.config import load_remote_configuration
+
+    try:
+        # Find project root
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+        except FileNotFoundError:
+            console.print("❌ No remote configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=remote_config["username"],
+                repo_path=str(project_root),
+                server_url=remote_config["server_url"],
+            )
+
+            # Create credentials dict for JobsAPIClient
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+                "server_url": decrypted_creds.server_url,
+            }
+            server_url = decrypted_creds.server_url
+
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Confirmation prompt unless --force is used
+        if not force:
+            console.print(
+                f"⚠️  You are about to cancel job: [bold]{job_id}[/bold]", style="yellow"
+            )
+            confirmation = (
+                input("Are you sure you want to cancel this job? (y/N): ")
+                .lower()
+                .strip()
+            )
+            if confirmation not in ["y", "yes"]:
+                console.print("Operation cancelled", style="yellow")
+                return
+
+        # Cancel the job
+        def _cancel_job():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            ) as client:
+                result = client.cancel_job(job_id)
+                return result
+
+        result = _cancel_job()
+
+        # Display success
+        console.print(f"✅ Job {job_id} cancelled successfully", style="green")
+        if "message" in result:
+            console.print(f"   {result['message']}", style="dim")
+
+    except Exception as e:
+        console.print(f"❌ Failed to cancel job: {e}", style="red")
+        sys.exit(1)
+
+
+@jobs.command("status")
+@click.argument("job_id", required=True)
+@click.pass_context
+@require_mode("remote")
+def job_status(ctx, job_id: str):
+    """Show detailed status of a specific job.
+
+    \b
+    Displays comprehensive information about a background job including:
+    • Job ID and operation type
+    • Current status and progress percentage
+    • Timestamps (created, started, completed)
+    • Associated repository and user
+    • Error details (if failed)
+
+    \b
+    EXAMPLES:
+      cidx jobs status job-123-abc     # Show detailed job status
+    """
+    from pathlib import Path
+    from .api_clients.jobs_client import JobsAPIClient
+    from .remote.credential_manager import load_encrypted_credentials
+    from .remote.config import load_remote_configuration
+
+    try:
+        # Find project root
+        project_root = find_project_root(Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load remote configuration
+        try:
+            remote_config = load_remote_configuration(project_root)
+        except FileNotFoundError:
+            console.print("❌ No remote configuration found", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=remote_config["username"],
+                repo_path=str(project_root),
+                server_url=remote_config["server_url"],
+            )
+
+            # Create credentials dict for JobsAPIClient
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+                "server_url": decrypted_creds.server_url,
+            }
+            server_url = decrypted_creds.server_url
+
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            console.print(
+                "Run 'cidx init --remote <server-url> --username <user> --password <pass>' first"
+            )
+            sys.exit(1)
+
+        # Get job status
+        def _get_job_status():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
+                server_url=server_url,
+                credentials=credentials,
+                project_root=project_root,
+            ) as client:
+                status = client.get_job_status(job_id)
+                return status
+
+        job_data = _get_job_status()
+
+        # Display detailed status
+        _display_job_details(job_data)
+
+    except Exception as e:
+        console.print(f"❌ Failed to get job status: {e}", style="red")
+        sys.exit(1)
+
+
+def _display_job_details(job_data: dict):
+    """Display detailed job information in a formatted way."""
+    from rich.table import Table
+    from rich.panel import Panel
+    from datetime import datetime
+
+    job_id = job_data.get("id") or job_data.get("job_id", "unknown")
+    operation_type = job_data.get("operation_type", "unknown")
+    status = job_data.get("status", "unknown")
+    progress = job_data.get("progress", 0)
+
+    # Create header with job ID and status
+    if status == "running":
+        status_emoji = "🔄"
+        status_style = "blue"
+    elif status == "completed":
+        status_emoji = "✅"
+        status_style = "green"
+    elif status == "failed":
+        status_emoji = "❌"
+        status_style = "red"
+    elif status == "cancelled":
+        status_emoji = "⏹️"
+        status_style = "yellow"
+    else:
+        status_emoji = "❓"
+        status_style = "white"
+
+    title = f"{status_emoji} Job {job_id[:12]}{'...' if len(job_id) > 12 else ''}"
+
+    # Create details table
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("Field", style="bold cyan", width=15)
+    table.add_column("Value", style="white")
+
+    # Basic info
+    table.add_row("Job ID", job_id)
+    table.add_row("Operation", operation_type.replace("operation_", "").title())
+    table.add_row(
+        "Status", f"[{status_style}]{status_emoji} {status.title()}[/{status_style}]"
+    )
+    table.add_row("Progress", f"{progress}%")
+
+    # Timestamps
+    for field, label in [
+        ("created_at", "Created"),
+        ("started_at", "Started"),
+        ("completed_at", "Completed"),
+        ("updated_at", "Last Update"),
+    ]:
+        timestamp = job_data.get(field, "")
+        if timestamp:
+            try:
+                # Parse ISO format and display in readable format
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                table.add_row(label, formatted_time)
+            except Exception:
+                table.add_row(label, timestamp)
+
+    # Additional info
+    if "repository_id" in job_data:
+        table.add_row("Repository", job_data["repository_id"])
+    if "username" in job_data:
+        table.add_row("User", job_data["username"])
+
+    # Error details for failed jobs
+    if status == "failed" and "error_details" in job_data:
+        table.add_row("Error", f"[red]{job_data['error_details']}[/red]")
+
+    # Display in panel
+    panel = Panel(table, title=title, title_align="left", border_style=status_style)
+    console.print(panel)
+
+
+def _display_jobs_table(jobs_response: dict, status_filter: Optional[str]):
+    """Display jobs in a formatted table."""
+    from rich.table import Table
+    from datetime import datetime
+    import re
+
+    jobs = jobs_response.get("jobs", [])
+    total = jobs_response.get("total", 0)
+
+    if not jobs:
+        if status_filter:
+            console.print(
+                f"No jobs found with status '{status_filter}'", style="yellow"
+            )
+        else:
+            console.print("No jobs found", style="yellow")
+        return
+
+    # Create table
+    table = Table(title=f"Background Jobs ({total} total)")
+    table.add_column("Job ID", style="cyan", no_wrap=True)
+    table.add_column("Type", style="blue")
+    table.add_column("Status", style="green")
+    table.add_column("Progress", style="yellow", justify="right")
+    table.add_column("Started", style="magenta")
+    table.add_column("Username", style="dim")
+
+    for job in jobs:
+        # Format job ID (show first 8 characters)
+        job_id = job.get("id") or job.get("job_id", "")
+        job_id_short = job_id[:8]
+
+        # Format operation type
+        operation_type = job.get("operation_type", "unknown")
+        operation_type = re.sub(r"operation_", "", operation_type)
+
+        # Format status with appropriate styling
+        status = job.get("status", "unknown")
+        if status == "running":
+            status_display = f"🔄 {status}"
+        elif status == "completed":
+            status_display = f"✅ {status}"
+        elif status == "failed":
+            status_display = f"❌ {status}"
+        elif status == "cancelled":
+            status_display = f"⏹️ {status}"
+        else:
+            status_display = f"❓ {status}"
+
+        # Format progress
+        progress = job.get("progress", 0)
+        progress_display = f"{progress}%"
+
+        # Format started time
+        started_at = job.get("started_at", "")
+        if started_at:
+            try:
+                # Parse ISO format and display relative time
+                started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                now = datetime.now(started_dt.tzinfo)
+                diff = now - started_dt
+
+                if diff.days > 0:
+                    time_display = f"{diff.days}d ago"
+                elif diff.seconds > 3600:
+                    hours = diff.seconds // 3600
+                    time_display = f"{hours}h ago"
+                elif diff.seconds > 60:
+                    minutes = diff.seconds // 60
+                    time_display = f"{minutes}m ago"
+                else:
+                    time_display = "just now"
+            except Exception:
+                time_display = started_at[:16]  # fallback
+        else:
+            time_display = "unknown"
+
+        # Get username
+        username = job.get("username", "unknown")
+
+        table.add_row(
+            job_id_short,
+            operation_type,
+            status_display,
+            progress_display,
+            time_display,
+            username,
+        )
+
+    console.print(table)
+
+    # Show filter info if applied
+    if status_filter:
+        console.print(f"\nFiltered by status: {status_filter}", style="dim")
+
+
+# Administrative commands
+
+
+def _load_admin_credentials(project_root: Path):
+    """Load and decrypt admin credentials for API client.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        Tuple of (credentials_dict, server_url)
+
+    Raises:
+        SystemExit: If credentials cannot be loaded
+    """
+    from .remote.config import load_remote_configuration
+    from .remote.credential_manager import (
+        CredentialNotFoundError,
+        load_encrypted_credentials,
+    )
+
+    # Load remote configuration
+    remote_config = load_remote_configuration(project_root)
+    server_url = remote_config["server_url"]
+
+    # Load and decrypt credentials
+    try:
+        encrypted_data = load_encrypted_credentials(project_root)
+        credential_manager = ProjectCredentialManager()
+
+        username_for_creds = remote_config.get("username")
+        if not username_for_creds:
+            console.print("❌ No username found in remote configuration", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        decrypted_creds = credential_manager.decrypt_credentials(
+            encrypted_data=encrypted_data,
+            username=username_for_creds,
+            repo_path=str(project_root),
+            server_url=server_url,
+        )
+
+        credentials = {
+            "username": decrypted_creds.username,
+            "password": decrypted_creds.password,
+        }
+        return credentials, server_url
+
+    except CredentialNotFoundError:
+        console.print("❌ No credentials found", style="red")
+        console.print("Run 'cidx auth login' to authenticate first", style="dim")
+        sys.exit(1)
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        console.print(f"❌ Failed to load credentials: {e}", style="red")
+        console.print("Run 'cidx auth login' to authenticate first", style="dim")
+        sys.exit(1)
+
+
+@cli.group("admin")
+@click.pass_context
+@require_mode("remote")
+def admin_group(ctx):
+    """Administrative commands for CIDX server management.
+
+    Provides administrative functionality including user management,
+    system monitoring, and server configuration. Requires admin privileges.
+    """
+    pass
+
+
+@admin_group.group("users")
+@click.pass_context
+def admin_users_group(ctx):
+    """User management commands.
+
+    Administrative commands for creating, listing, and managing
+    user accounts on the CIDX server.
+    """
+    pass
+
+
+@admin_users_group.command("create")
+@click.argument("username", required=True)
+@click.option(
+    "--email", help="Email address for the new user (optional but recommended)"
+)
+@click.option(
+    "--password", help="Password for the new user (will be prompted if not provided)"
+)
+@click.option(
+    "--role",
+    default="normal_user",
+    type=click.Choice(["admin", "power_user", "normal_user"]),
+    help="Role for the new user (default: normal_user)",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_create(
+    ctx,
+    username: str,
+    email: Optional[str],
+    password: Optional[str],
+    role: str,
+    json_output: bool,
+):
+    """Create a new user account with specified role.
+
+    Creates a new user account on the CIDX server with the specified
+    username, role, and optionally email. Requires admin privileges.
+
+    Examples:
+        cidx admin users create johndoe --email john@example.com --role power_user
+        cidx admin users create admin_user --role admin
+        cidx admin users create regular_user  # Uses normal_user role by default
+    """
+    try:
+        from .validation.user_validation import (
+            validate_username,
+            validate_email,
+            validate_password,
+            validate_role,
+            UserValidationError,
+        )
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+
+            # We need username from remote config for decryption
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "Run 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Validate input parameters
+        try:
+            username = validate_username(username)
+            role = validate_role(role)
+
+            if email:
+                email = validate_email(email)
+
+        except UserValidationError as e:
+            console.print(f"❌ Validation error: {e}", style="red")
+            sys.exit(1)
+
+        # Get password if not provided
+        if not password:
+            password = getpass.getpass("Password for new user: ")
+            if not password:
+                console.print("❌ Password cannot be empty", style="red")
+                sys.exit(1)
+
+            # Confirm password
+            password_confirm = getpass.getpass("Confirm password: ")
+            if password != password_confirm:
+                console.print("❌ Passwords do not match", style="red")
+                sys.exit(1)
+
+        # Validate password
+        try:
+            password = validate_password(password)
+        except UserValidationError as e:
+            console.print(f"❌ Password validation error: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client and create user
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        with console.status("👤 Creating user account..."):
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.create_user(
+                        username=username, password=password, role=role
+                    )
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+        # Close the client
+        admin_client.close()
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            user_data: dict = {
+                "username": username,
+                "role": role,
+                "email": email,
+            }
+            if "user" in user_response and isinstance(user_response["user"], dict):
+                user_data.update(user_response["user"])
+            result = {
+                "success": True,
+                "message": f"Successfully created user: {username}",
+                "user": user_data,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        console.print(f"✅ Successfully created user: {username}", style="green")
+        console.print(f"👤 Role: {role}", style="cyan")
+        if email:
+            console.print(f"📧 Email: {email}", style="cyan")
+
+        # Display user details if available
+        if "user" in user_response:
+            user_info = user_response["user"]
+            if "username" in user_info:
+                console.print(f"🆔 Username: {user_info['username']}", style="dim")
+            if "created_at" in user_info:
+                console.print(f"📅 Created: {user_info['created_at']}", style="dim")
+
+    except Exception as e:
+        console.print(f"❌ User creation failed: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "insufficient privileges" in error_str or "admin role required" in error_str:
+            console.print("💡 You need admin privileges to create users", style="dim")
+        elif "authentication failed" in error_str:
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "already exists" in error_str or "conflict" in error_str:
+            console.print(
+                "💡 User already exists, try a different username", style="dim"
+            )
+        elif "validation" in error_str:
+            console.print("💡 Check username format and password strength", style="dim")
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_users_group.command("list")
+@click.option(
+    "--limit",
+    default=10,
+    type=int,
+    help="Maximum number of users to display (default: 10)",
+)
+@click.option(
+    "--offset",
+    default=0,
+    type=int,
+    help="Number of users to skip for pagination (default: 0)",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_list(ctx, limit: int, offset: int, json_output: bool):
+    """List all users in the system.
+
+    Lists all user accounts registered on the CIDX server with their
+    roles and creation information. Requires admin privileges.
+
+    Examples:
+        cidx admin users list
+        cidx admin users list --limit 20
+        cidx admin users list --limit 5 --offset 10
+    """
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+
+            # We need username from remote config for decryption
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "Run 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create admin client and list users
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        with console.status("👥 Retrieving user list..."):
+            users_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.list_users(limit=limit, offset=offset)
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+        # Close the client
+        admin_client.close()
+
+        users = users_response.get("users", [])
+        total = users_response.get("total", len(users))
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "users": users,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        # Rich table output
+        table = Table(title="Users")
+        table.add_column("Username", style="cyan", no_wrap=True)
+        table.add_column("Role", style="green")
+        table.add_column("Created", style="dim")
+
+        if not users:
+            console.print("ℹ️ No users found", style="yellow")
+        else:
+            for user in users:
+                user_name = user.get("username", "unknown")
+                role = user.get("role", "unknown")
+                created_at = user.get("created_at", "unknown")
+
+                # Format created date
+                if created_at != "unknown":
+                    try:
+                        # Just show the date part for readability
+                        created_display = created_at[:10]
+                    except Exception:
+                        created_display = created_at
+                else:
+                    created_display = "unknown"
+
+                table.add_row(user_name, role, created_display)
+
+            console.print(table)
+
+            # Show pagination info
+            if total > limit:
+                showing_start = offset + 1
+                showing_end = min(offset + limit, total)
+                console.print(
+                    f"\nShowing {showing_start}-{showing_end} of {total} users",
+                    style="dim",
+                )
+
+    except Exception as e:
+        console.print(f"❌ Failed to list users: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "insufficient privileges" in error_str or "admin role required" in error_str:
+            console.print("💡 You need admin privileges to list users", style="dim")
+        elif "authentication failed" in error_str:
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+def _validate_username(username: str) -> bool:
+    """Validate username format.
+
+    Args:
+        username: Username to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not username or len(username.strip()) == 0:
+        return False
+    if len(username) < 3 or len(username) > 50:
+        return False
+    # Allow alphanumeric, underscore, hyphen
+    import re
+
+    if not re.match(r"^[a-zA-Z0-9_-]+$", username):
+        return False
+    return True
+
+
+@admin_users_group.command("show")
+@click.argument("username", required=True)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_show(ctx, username: str, json_output: bool):
+    """Show detailed information for a specific user.
+
+    Displays detailed information for the specified user including
+    username, role, and creation date. Requires admin privileges.
+
+    Examples:
+        cidx admin users show johndoe
+        cidx admin users show admin_user
+    """
+    # Validate username format
+    if not _validate_username(username):
+        console.print("❌ Invalid username format", style="red")
+        console.print(
+            "💡 Username must be 3-50 characters, alphanumeric, underscore, or hyphen only",
+            style="dim",
+        )
+        sys.exit(1)
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "Run 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create admin client and get user
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        with console.status(f"👤 Retrieving user '{username}'..."):
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(admin_client.get_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+        # Close the client
+        admin_client.close()
+
+        # Get user details
+        user = user_response.get("user", {})
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "user": user,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        # Create a simple details display
+        console.print(f"\n[bold cyan]User Details: {username}[/bold cyan]")
+        console.print(f"Username: [green]{user.get('username', 'unknown')}[/green]")
+        console.print(f"Role: [yellow]{user.get('role', 'unknown')}[/yellow]")
+
+        created_at = user.get("created_at", "unknown")
+        if created_at != "unknown":
+            try:
+                # Format the date for better readability
+                created_display = created_at[:19].replace("T", " ")
+            except Exception:
+                created_display = created_at
+        else:
+            created_display = "unknown"
+        console.print(f"Created: [dim]{created_display}[/dim]")
+
+    except Exception as e:
+        console.print(f"❌ Failed to show user: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "not found" in error_str:
+            console.print(f"💡 User '{username}' does not exist", style="dim")
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print(
+                "💡 You need admin privileges to view user details", style="dim"
+            )
+        elif "authentication failed" in error_str:
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_users_group.command("update")
+@click.argument("username", required=True)
+@click.option(
+    "--role",
+    required=True,
+    type=click.Choice(["admin", "power_user", "normal_user"]),
+    help="New role for the user",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_update(ctx, username: str, role: str, json_output: bool):
+    """Update a user's role.
+
+    Updates the role of an existing user. Requires admin privileges.
+    Available roles: admin, power_user, normal_user.
+
+    Examples:
+        cidx admin users update johndoe --role power_user
+        cidx admin users update testuser --role admin
+    """
+    # Validate username format
+    if not _validate_username(username):
+        console.print("❌ Invalid username format", style="red")
+        console.print(
+            "💡 Username must be 3-50 characters, alphanumeric, underscore, or hyphen only",
+            style="dim",
+        )
+        sys.exit(1)
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "Run 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create admin client
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        # Check current user role for warnings
+        try:
+            current_user_info = run_async(admin_client.get_user(username))
+            current_role = current_user_info.get("user", {}).get("role", "unknown")
+
+            # Warn about role downgrades for admins
+            if current_role == "admin" and role != "admin":
+                console.print(
+                    f"⚠️  [bold yellow]WARNING:[/bold yellow] Downgrading admin '{username}' to '{role}'",
+                    style="yellow",
+                )
+                console.print("This will remove admin privileges!", style="dim yellow")
+
+                confirm = click.confirm("Are you sure you want to continue?")
+                if not confirm:
+                    admin_client.close()
+                    console.print("❌ Role update cancelled", style="yellow")
+                    sys.exit(0)
+
+            # Warn about admin promotion
+            elif role == "admin" and current_role != "admin":
+                console.print(
+                    f"⚠️  [bold yellow]INFO:[/bold yellow] Promoting '{username}' to admin role",
+                    style="yellow",
+                )
+                console.print(
+                    "This will grant full administrative privileges!",
+                    style="dim yellow",
+                )
+
+        except Exception:
+            # If we can't get current role, continue without warning
+            pass
+
+        with console.status(f"🔄 Updating user '{username}' role to '{role}'..."):
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.update_user(username, role)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+        # Close the client
+        admin_client.close()
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "message": f"Successfully updated user '{username}' role to '{role}'",
+                "user": {
+                    "username": username,
+                    "role": role,
+                },
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        console.print(
+            f"✅ Successfully updated user '{username}' role to '{role}'", style="green"
+        )
+
+    except Exception as e:
+        console.print(f"❌ Failed to update user: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "not found" in error_str:
+            console.print(f"💡 User '{username}' does not exist", style="dim")
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print("💡 You need admin privileges to update users", style="dim")
+        elif "authentication failed" in error_str:
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_users_group.command("delete")
+@click.argument("username", required=True)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
+    """Delete a user account.
+
+    Deletes the specified user account from the server. This action
+    cannot be undone. Requires admin privileges and confirmation.
+    Last admin user cannot be deleted.
+
+    Examples:
+        cidx admin users delete testuser
+        cidx admin users delete olduser --force
+    """
+    # Validate username format
+    if not _validate_username(username):
+        console.print("❌ Invalid username format", style="red")
+        console.print(
+            "💡 Username must be 3-50 characters, alphanumeric, underscore, or hyphen only",
+            style="dim",
+        )
+        sys.exit(1)
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "Run 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("Run 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Self-deletion prevention check
+        if username_for_creds == username:
+            console.print(
+                f"❌ Cannot delete your own account '{username}'", style="red"
+            )
+            console.print(
+                "💡 Ask another admin to delete your account if needed", style="dim"
+            )
+            sys.exit(1)
+
+        # Confirmation prompt (unless --force is used)
+        if not force:
+            console.print(
+                f"⚠️  [bold red]WARNING:[/bold red] You are about to delete user '[yellow]{username}[/yellow]'"
+            )
+            console.print("This action cannot be undone!")
+
+            # Lazy import for admin client (needed for confirmation display)
+            from .api_clients.admin_client import AdminAPIClient as TempAdminAPIClient
+
+            # Show user details before deletion for confirmation
+            try:
+                temp_client = TempAdminAPIClient(
+                    server_url=server_url,
+                    credentials=credentials,
+                    project_root=project_root,
+                )
+                user_info = temp_client.get_user(username)
+                user = user_info.get("user", {})
+                console.print(
+                    f"User role: [yellow]{user.get('role', 'unknown')}[/yellow]"
+                )
+                console.print(
+                    f"Created: [dim]{user.get('created_at', 'unknown')[:10]}[/dim]"
+                )
+                temp_client.close()
+            except Exception:
+                # If we can't get user info, continue with deletion prompt
+                pass
+
+            confirm = click.confirm("Are you sure you want to proceed?")
+            if not confirm:
+                console.print("❌ User deletion cancelled", style="yellow")
+                sys.exit(0)
+
+        # Create admin client and delete user
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        with console.status(f"🗑️  Deleting user '{username}'..."):
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.delete_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+        # Close the client
+        admin_client.close()
+
+        # Handle JSON output
+        if json_output:
+            import json
+
+            result = {
+                "success": True,
+                "message": f"Successfully deleted user '{username}'",
+                "deleted_user": username,
+            }
+            print(json.dumps(result, indent=2))
+            return
+
+        console.print(f"✅ Successfully deleted user '{username}'", style="green")
+
+    except Exception as e:
+        console.print(f"❌ Failed to delete user: {e}", style="red")
+
+        # Provide helpful error guidance
+        error_str = str(e).lower()
+        if "not found" in error_str:
+            console.print(f"💡 User '{username}' does not exist", style="dim")
+        elif "last admin" in error_str or "cannot delete" in error_str:
+            console.print("💡 Cannot delete the last admin user", style="dim")
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print("💡 You need admin privileges to delete users", style="dim")
+        elif "authentication failed" in error_str:
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("💡 Check server connectivity and try again", style="dim")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_users_group.command("change-password")
+@click.argument("username", required=True)
+@click.option(
+    "--password",
+    help="New password for the user (will be prompted securely if not provided)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_users_change_password(
+    ctx, username: str, password: str, force: bool, json_output: bool
+):
+    """Change a user's password (admin only).
+
+    Changes the password for the specified user account. This operation
+    requires admin privileges and can change any user's password without
+    knowing the old password. Use with caution.
+
+    Examples:
+        cidx admin users change-password johndoe
+        cidx admin users change-password testuser --password NewPass123!
+        cidx admin users change-password olduser --force
+    """
+    import getpass
+
+    # Validate username format
+    if not _validate_username(username):
+        console.print("❌ Invalid username format", style="red")
+        console.print(
+            "💡 Username must be 3-50 characters, alphanumeric, underscore, or hyphen only",
+            style="dim",
+        )
+        sys.exit(1)
+
+    # Get password if not provided
+    if not password:
+        console.print(
+            f"📝 Enter new password for user '{username}':", style="bold blue"
+        )
+        password = getpass.getpass("New password: ")
+
+        if not password:
+            console.print("❌ Password cannot be empty", style="red")
+            sys.exit(1)
+
+        # Confirm password
+        password_confirm = getpass.getpass("Confirm password: ")
+        if password != password_confirm:
+            console.print("❌ Passwords do not match", style="red")
+            sys.exit(1)
+
+    # Validate password strength using existing validation
+    is_valid, validation_message = _validate_password_strength(password)
+    if not is_valid:
+        console.print(f"❌ {validation_message}", style="red")
+        from .password_policy import get_password_policy_help
+
+        console.print("\n💡 Password Requirements:", style="dim yellow")
+        console.print(get_password_policy_help(), style="dim")
+        sys.exit(1)
+
+    # Confirmation prompt (unless --force)
+    if not force:
+        console.print(
+            f"⚠️  [bold yellow]WARNING:[/bold yellow] You are about to change the password for user '{username}'",
+            style="yellow",
+        )
+        console.print("This action cannot be undone.", style="dim yellow")
+
+        if not click.confirm("Do you want to continue?"):
+            console.print("❌ Password change cancelled", style="yellow")
+            sys.exit(0)
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+        )
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print(
+                "💡 Run 'cidx remote init' to set up remote mode", style="dim"
+            )
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        if not remote_config:
+            console.print("❌ No remote configuration found", style="red")
+            console.print(
+                "💡 Run 'cidx remote init' to set up remote access", style="dim"
+            )
+            sys.exit(1)
+
+        # Load credentials
+        try:
+            from .remote.sync_execution import _load_and_decrypt_credentials
+
+            credentials = _load_and_decrypt_credentials(project_root)
+        except CredentialNotFoundError:
+            console.print("❌ No stored credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create admin client
+        from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
+
+        admin_client = AdminAPIClient(
+            server_url=remote_config["server_url"],
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            # First verify the user exists by getting user info
+            user_info = run_async(admin_client.get_user(username))
+            current_role = user_info["user"]["role"]
+
+            # Extra warning when changing admin password
+            if current_role == "admin" and not force:
+                console.print(
+                    f"⚠️  [bold yellow]NOTICE:[/bold yellow] User '{username}' has admin role",
+                    style="yellow",
+                )
+                console.print(
+                    "Changing admin password will affect their access!",
+                    style="dim yellow",
+                )
+                if not click.confirm("Are you sure you want to continue?"):
+                    admin_client.close()
+                    console.print("❌ Password change cancelled", style="yellow")
+                    sys.exit(0)
+
+            # Change the password
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.change_user_password(username, password)
+                ),
+                session=admin_client.session,
+                server_url=remote_config["server_url"],
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            # Handle JSON output
+            if json_output:
+                import json
+
+                result = {
+                    "success": True,
+                    "message": f"Password changed successfully for user '{username}'",
+                    "username": username,
+                }
+                print(json.dumps(result, indent=2))
+            else:
+                console.print(
+                    f"✅ Password changed successfully for user '{username}'",
+                    style="green",
+                )
+                console.print(
+                    "💡 User should log in with the new password", style="dim"
+                )
+
+        finally:
+            admin_client.close()
+
+    except ImportError as e:
+        console.print(f"❌ Import error: {e}", style="red")
+        console.print("💡 Required dependencies not available", style="dim")
+        sys.exit(1)
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if "not found" in error_str:
+            console.print(f"❌ User '{username}' not found", style="red")
+            console.print(
+                "💡 Use 'cidx admin users list' to see available users", style="dim"
+            )
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print("❌ Insufficient privileges for password change", style="red")
+            console.print(
+                "💡 You need admin privileges to change user passwords", style="dim"
+            )
+        elif "invalid password" in error_str or "password" in error_str:
+            console.print("❌ Password validation failed", style="red")
+            console.print("💡 Password must meet security requirements", style="dim")
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to change password: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+# =============================================================================
+# MCP Credentials Management Commands (Story #748)
+# =============================================================================
+
+
+@admin_group.group("mcp-credentials")
+@click.pass_context
+def admin_mcp_credentials_group(ctx):
+    """MCP credential management commands.
+
+    Commands for creating, listing, and deleting MCP credentials.
+    Includes admin-only commands for managing other users' credentials.
+    """
+    pass
+
+
+@admin_mcp_credentials_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_list(ctx, json_output: bool):
+    """List all MCP credentials for the current user."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.list_mcp_credentials())
+        mcp_creds = result.get("credentials", [])
+
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
+        else:
+            if not mcp_creds:
+                console.print("No MCP credentials found", style="yellow")
+            else:
+                table = Table(title="MCP Credentials")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for cred in mcp_creds:
+                    table.add_row(
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("create")
+@click.option("--description", default="", help="Description for the MCP credential")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_create(ctx, description: str, json_output: bool):
+    """Create a new MCP credential for the current user.
+
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.create_mcp_credential(description=description))
+
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
+        else:
+            console.print("[bold green]MCP Credential Created[/bold green]")
+            console.print(f"Credential ID: {result.get('credential_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("delete")
+@click.argument("cred_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_delete(ctx, cred_id: str, confirm: bool, json_output: bool):
+    """Delete an MCP credential.
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
+        sys.exit(1)
+
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        run_async(client.delete_mcp_credential(cred_id))
+
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(f"MCP credential '{cred_id}' deleted", style="green")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("list-user")
+@click.argument("username")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_list_user(ctx, username: str, json_output: bool):
+    """List all MCP credentials for a specific user (Admin only)."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.admin_list_user_mcp_credentials(username))
+        mcp_creds = result.get("credentials", [])
+
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
+        else:
+            if not mcp_creds:
+                console.print(
+                    f"No MCP credentials found for user '{username}'", style="yellow"
+                )
+            else:
+                table = Table(title=f"MCP Credentials for {username}")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for cred in mcp_creds:
+                    table.add_row(
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("create-for-user")
+@click.argument("username")
+@click.option("--description", default="", help="Description for the MCP credential")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_create_for_user(
+    ctx, username: str, description: str, json_output: bool
+):
+    """Create a new MCP credential for a specific user (Admin only).
+
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(
+            client.admin_create_user_mcp_credential(
+                username=username, description=description
+            )
+        )
+
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
+        else:
+            console.print(
+                f"[bold green]MCP Credential Created for {username}[/bold green]"
+            )
+            console.print(f"Credential ID: {result.get('credential_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("delete-for-user")
+@click.argument("username")
+@click.argument("cred_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_delete_for_user(
+    ctx, username: str, cred_id: str, confirm: bool, json_output: bool
+):
+    """Delete an MCP credential for a specific user (Admin only).
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
+        sys.exit(1)
+
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        run_async(client.admin_delete_user_mcp_credential(username, cred_id))
+
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(
+                f"MCP credential '{cred_id}' for user '{username}' deleted",
+                style="green",
+            )
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_mcp_credentials_group.command("list-all")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_mcp_credentials_list_all(ctx, json_output: bool):
+    """List all MCP credentials across all users (Admin only)."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.admin_list_all_mcp_credentials())
+        mcp_creds = result.get("credentials", [])
+
+        if json_output:
+            print(
+                json_module.dumps({"success": True, "credentials": mcp_creds}, indent=2)
+            )
+        else:
+            if not mcp_creds:
+                console.print("No MCP credentials found", style="yellow")
+            else:
+                table = Table(title="All MCP Credentials")
+                table.add_column("Username", style="magenta")
+                table.add_column("Credential ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for cred in mcp_creds:
+                    table.add_row(
+                        cred.get("username", ""),
+                        str(cred.get("credential_id", "")),
+                        cred.get("description", ""),
+                        str(cred.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+# =============================================================================
+# Admin Jobs Commands
+# =============================================================================
+
+
+@admin_group.group("jobs")
+@click.pass_context
+def admin_jobs_group(ctx):
+    """Background job management commands."""
+    pass
+
+
+@admin_jobs_group.command("list")
+@click.option("--limit", default=10, type=int, help="Maximum jobs to display")
+@click.option("--offset", default=0, type=int, help="Jobs to skip for pagination")
+@click.option(
+    "--status",
+    type=click.Choice(["pending", "running", "completed", "failed", "cancelled"]),
+    help="Filter jobs by status",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_jobs_list(
+    ctx, limit: int, offset: int, status: Optional[str], json_output: bool
+):
+    """List background jobs in the system."""
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    import json as json_mod
+    import requests
+
+    project_root = find_project_root(Path.cwd())
+    if not project_root:
+        console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    remote_config = load_remote_configuration(project_root)
+    creds_file = project_root / ".code-indexer" / ".credentials"
+    credentials = json_mod.loads(creds_file.read_text()) if creds_file.exists() else {}
+
+    server_url = remote_config.get("server_url")
+    token = credentials.get("token")
+    if not server_url or not token:
+        console.print("Missing server configuration or credentials", style="red")
+        sys.exit(1)
+
+    params: dict = {"limit": limit, "offset": offset}
+    if status:
+        params["status"] = status
+
+    try:
+        response = requests.get(
+            f"{server_url}/api/admin/jobs",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        if response.status_code == 401:
+            console.print("Authentication failed", style="red")
+            sys.exit(1)
+        elif response.status_code == 403:
+            console.print("Admin privileges required", style="red")
+            sys.exit(1)
+        elif response.status_code != 200:
+            console.print(f"Server error (HTTP {response.status_code})", style="red")
+            sys.exit(1)
+
+        result = response.json()
+        jobs = result.get("jobs", [])
+        total = result.get("total", len(jobs))
+
+        if json_output:
+            print(
+                json_mod.dumps(
+                    {"success": True, "jobs": jobs, "total": total}, indent=2
+                )
+            )
+            return
+
+        _display_admin_jobs_list_table(jobs, total, limit, offset)
+
+    except requests.exceptions.RequestException as e:
+        console.print(f"Network error: {e}", style="red")
+        sys.exit(1)
+
+
+def _display_admin_jobs_list_table(
+    jobs: list, total: int, limit: int, offset: int
+) -> None:
+    """Display admin jobs list in a Rich table format."""
+    if not jobs:
+        console.print("No jobs found", style="yellow")
+        return
+
+    table = Table(title="Background Jobs")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Type", style="green")
+    table.add_column("Status", style="yellow")
+    table.add_column("Created", style="dim")
+
+    for job in jobs:
+        # Truncate ID to first 8 chars (standard short ID format)
+        job_id = str(job.get("id", "unknown"))[:8]
+        job_type = job.get("type", "unknown")
+        job_status = job.get("status", "unknown")
+        created_at = job.get("created_at", "unknown")
+        # Format ISO datetime (YYYY-MM-DDTHH:MM:SS) to readable format
+        created_display = (
+            created_at[:19].replace("T", " ") if created_at != "unknown" else created_at
+        )
+        table.add_row(job_id, job_type, job_status, created_display)
+
+    console.print(table)
+    if total > limit:
+        console.print(
+            f"\nShowing {offset + 1}-{min(offset + limit, total)} of {total} jobs",
+            style="dim",
+        )
+
+
+@admin_jobs_group.command("cleanup")
+@click.option(
+    "--older-than", default=30, type=int, help="Delete jobs older than N days"
+)
+@click.option(
+    "--status",
+    type=click.Choice(["completed", "failed", "cancelled"]),
+    help="Only cleanup jobs with this status",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be deleted without deleting"
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_jobs_cleanup(
+    ctx, older_than: int, status: Optional[str], dry_run: bool, json_output: bool
+):
+    """Cleanup old jobs from the system."""
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from pathlib import Path
+    import json
+
+    project_root = find_project_root(Path.cwd())
+    remote_config = load_remote_configuration(project_root)
+
+    # Simple credential loading for now - just read the file
+    creds_file = project_root / ".code-indexer" / ".credentials"
+    if creds_file.exists():
+        credentials = json.loads(creds_file.read_text())
+    else:
+        credentials = {}
+
+    server_url = remote_config.get("server_url")
+    token = credentials.get("token")
+
+    from typing import Dict, Union
+
+    params: Dict[str, Union[str, int]] = {"max_age_hours": older_than * 24}
+    if status:
+        params["status"] = status
+    if dry_run:
+        params["dry_run"] = "true"
+
+    import requests
+    import json
+
+    try:
+        response = requests.delete(
+            f"{server_url}/api/admin/jobs/cleanup",
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+
+        if response.status_code == 401:
+            console.print("❌ Authentication failed", style="red")
+            sys.exit(1)
+        elif response.status_code == 403:
+            console.print("❌ Admin privileges required", style="red")
+            sys.exit(1)
+        elif response.status_code != 200:
+            console.print(f"❌ Server error (HTTP {response.status_code})", style="red")
+            sys.exit(1)
+
+        result = response.json()
+        cleaned_count = result.get("cleaned_count", 0)
+
+        # Handle JSON output
+        if json_output:
+            output = {
+                "success": True,
+                "cleaned_count": cleaned_count,
+                "dry_run": dry_run,
+                "older_than_days": older_than,
+            }
+            if status:
+                output["status_filter"] = status
+            print(json.dumps(output, indent=2))
+            return
+
+        console.print(f"✅ Cleaned up {cleaned_count} jobs", style="green")
+    except requests.exceptions.Timeout:
+        console.print("❌ Request timed out", style="red")
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        console.print(f"❌ Network error: {e}", style="red")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        console.print("❌ Invalid response from server", style="red")
+        sys.exit(1)
+
+
+@admin_jobs_group.command("stats")
+@click.option("--start", help="Start date (YYYY-MM-DD)")
+@click.option("--end", help="End date (YYYY-MM-DD)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_jobs_stats(ctx, start: Optional[str], end: Optional[str], json_output: bool):
+    """View job statistics and analytics."""
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from pathlib import Path
+    import json
+
+    project_root = find_project_root(Path.cwd())
+    remote_config = load_remote_configuration(project_root)
+
+    # Simple credential loading
+    creds_file = project_root / ".code-indexer" / ".credentials"
+    if creds_file.exists():
+        credentials = json.loads(creds_file.read_text())
+    else:
+        credentials = {}
+
+    server_url = remote_config.get("server_url")
+    token = credentials.get("token")
+
+    params = {}
+    if start:
+        params["start_date"] = start
+    if end:
+        params["end_date"] = end
+
+    import requests
+
+    response = requests.get(
+        f"{server_url}/api/admin/jobs/stats",
+        params=params,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+
+    if response.status_code == 401:
+        console.print("❌ Authentication failed", style="red")
+        sys.exit(1)
+    elif response.status_code == 403:
+        console.print("❌ Admin privileges required", style="red")
+        sys.exit(1)
+
+    stats = response.json()
+
+    # Handle JSON output
+    if json_output:
+        output = {
+            "success": True,
+            **stats,
+        }
+        print(json.dumps(output, indent=2))
+        return
+
+    console.print(f"Total Jobs: {stats['total_jobs']}")
+
+    # Display status breakdown
+    if stats.get("by_status"):
+        for status_name, count in stats["by_status"].items():
+            console.print(f"{status_name.title()}: {count}")
+
+    # Display type breakdown
+    if stats.get("by_type"):
+        for job_type, count in stats["by_type"].items():
+            formatted = job_type.replace("_", " ").title()
+            console.print(f"{formatted}: {count}")
+
+    # Display success rate
+    if "success_rate" in stats:
+        console.print(f"Success Rate: {stats['success_rate']:.1f}%")
+
+    # Display average duration
+    if "average_duration" in stats:
+        console.print(f"Average Duration: {stats['average_duration']:.1f}s")
+
+
+# =============================================================================
+# Admin Repos Commands
+# =============================================================================
+
+
+@admin_group.group("repos")
+@click.pass_context
+def admin_repos_group(ctx):
+    """Repository management commands.
+
+    Administrative commands for adding, managing, and configuring
+    golden repositories on the CIDX server.
+    """
+    pass
+
+
+@admin_repos_group.command("add")
+@click.argument("git_url")
+@click.argument("alias")
+@click.option(
+    "--description", default=None, help="Optional description for the repository"
+)
+@click.option(
+    "--default-branch", default="main", help="Default branch name (default: main)"
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_add(
+    ctx,
+    git_url: str,
+    alias: str,
+    description: str,
+    default_branch: str,
+    json_output: bool,
+):
+    """Add a new golden repository from Git URL.
+
+    Adds a new golden repository to the CIDX server from the specified
+    Git URL. The repository will be cloned and indexed automatically.
+    Requires admin privileges.
+
+    Args:
+        git_url: Git repository URL (https, ssh, or git protocol)
+        alias: Unique alias for the repository
+
+    Examples:
+        cidx admin repos add https://github.com/example/repo.git example-repo
+        cidx admin repos add git@github.com:example/repo.git example-repo --description "Example repository"
+        cidx admin repos add https://github.com/example/repo.git example-repo --default-branch develop
+    """
+    import re
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        # Basic validation
+        if not git_url or not git_url.strip():
+            console.print("❌ Git URL cannot be empty", style="red")
+            sys.exit(1)
+
+        if not alias or not alias.strip():
+            console.print("❌ Alias cannot be empty", style="red")
+            sys.exit(1)
+
+        # Validate Git URL format
+        git_url_pattern = re.compile(
+            r"^(https?://|git@|git://)"
+            r"([a-zA-Z0-9.-]+)"
+            r"[:/]"
+            r"([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)"
+            r"(\.git)?/?$"
+        )
+
+        if not git_url_pattern.match(git_url):
+            console.print("❌ Invalid Git URL format", style="red")
+            console.print("💡 Supported formats: https://, git@, git://", style="dim")
+            sys.exit(1)
+
+        # Validate alias format
+        alias_pattern = re.compile(r"^[a-zA-Z0-9._-]+$")
+        if not alias_pattern.match(alias):
+            console.print("❌ Invalid alias format", style="red")
+            console.print(
+                "💡 Alias must contain only alphanumeric characters, dots, underscores, and hyphens",
+                style="dim",
+            )
+            sys.exit(1)
+
+        # Find project root
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project configuration found", style="red")
+            console.print("💡 Run 'cidx init' to initialize project first", style="dim")
+            sys.exit(1)
+
+        # Load remote configuration
+        remote_config = load_remote_configuration(project_root)
+        server_url = remote_config["server_url"]
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+
+            # We need username from remote config for decryption
+            username_for_creds = remote_config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print(
+                    "💡 Use 'cidx auth login' to authenticate first", style="dim"
+                )
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except (CredentialNotFoundError, Exception):
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate first", style="dim")
+            sys.exit(1)
+
+        # Create admin client
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            if not json_output:
+                console.print(
+                    f"📁 Adding golden repository '{alias}' from {git_url}...",
+                    style="blue",
+                )
+
+            # Add golden repository
+            result = run_async(
+                admin_client.add_golden_repository(
+                    git_url=git_url,
+                    alias=alias,
+                    description=description,
+                    default_branch=default_branch,
+                )
+            )
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+            else:
+                # Display success with job information
+                console.print(
+                    "✅ Golden repository addition job submitted successfully",
+                    style="green",
+                )
+                console.print(f"📋 Job ID: {result['job_id']}", style="cyan")
+                console.print(f"📝 Status: {result['status']}", style="dim")
+
+                if "message" in result:
+                    console.print(f"💬 {result['message']}", style="dim")
+
+                console.print(
+                    "\n💡 Use 'cidx jobs status' to monitor the addition progress",
+                    style="dim",
+                )
+
+        finally:
+            admin_client.close()
+
+    except ImportError as e:
+        console.print(f"❌ Import error: {e}", style="red")
+        console.print("💡 Required dependencies not available", style="dim")
+        sys.exit(1)
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if "invalid request data" in error_str or "invalid" in error_str:
+            console.print("❌ Invalid repository data", style="red")
+            console.print(
+                "💡 Check Git URL format and repository accessibility", style="dim"
+            )
+        elif "repository conflict" in error_str or "already exists" in error_str:
+            console.print(f"❌ Repository alias '{alias}' already exists", style="red")
+            console.print(
+                "💡 Choose a different alias or check existing repositories",
+                style="dim",
+            )
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print(
+                "❌ Insufficient privileges for repository addition", style="red"
+            )
+            console.print(
+                "💡 You need admin privileges to add golden repositories", style="dim"
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to add golden repository: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_repos_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_list(ctx, json_output: bool):
+    """List all golden repositories.
+
+    Displays a formatted table of all golden repositories with their
+    status, last refresh information, and repository details.
+    Requires admin privileges.
+
+    Examples:
+        cidx admin repos list
+    """
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+        from rich.table import Table
+        from datetime import datetime
+        from dateutil import parser as dateutil_parser  # type: ignore[import-untyped]
+
+        console = Console()
+
+        # Find project root for configuration and credentials
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project root found", style="red")
+            console.print(
+                "💡 Run this command from within a project directory", style="dim"
+            )
+            sys.exit(1)
+
+        # Check command mode and load configuration
+        try:
+            config = load_remote_configuration(project_root)
+            if not config:
+                console.print("❌ No remote configuration found", style="red")
+                console.print(
+                    "💡 Use 'cidx remote init' to configure remote access", style="dim"
+                )
+                sys.exit(1)
+
+            server_url = config.get("server_url")
+            if not server_url:
+                console.print("❌ Server URL not found in configuration", style="red")
+                sys.exit(1)
+
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+        # Load and decrypt credentials
+        try:
+            encrypted_data = load_encrypted_credentials(project_root)
+            from .remote.credential_manager import ProjectCredentialManager
+
+            credential_manager = ProjectCredentialManager()
+
+            # We need username from remote config for decryption
+            username_for_creds = config.get("username")
+            if not username_for_creds:
+                console.print(
+                    "❌ No username found in remote configuration", style="red"
+                )
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                sys.exit(1)
+
+            decrypted_creds = credential_manager.decrypt_credentials(
+                encrypted_data=encrypted_data,
+                username=username_for_creds,
+                repo_path=str(project_root),
+                server_url=server_url,
+            )
+
+            credentials = {
+                "username": decrypted_creds.username,
+                "password": decrypted_creds.password,
+            }
+        except CredentialNotFoundError:
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client and list repositories with proper cleanup
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+
+            def fetch_admin_data():
+                try:
+                    return admin_client.list_golden_repositories()
+                finally:
+                    # Ensure client is properly closed to avoid resource warnings
+                    admin_client.close()
+
+            result = fetch_admin_data()
+            repositories = result.get("golden_repositories", [])
+            total = result.get("total", 0)
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
+
+            if total == 0:
+                console.print("📂 No golden repositories found", style="yellow")
+                console.print(
+                    "💡 Use 'cidx admin repos add' to add repositories", style="dim"
+                )
+                return
+
+            # Create rich table
+            table = Table(title=f"Golden Repositories ({total})")
+            table.add_column("Alias", style="cyan", no_wrap=True)
+            table.add_column("Repository URL", style="blue")
+            table.add_column("Last Refresh", style="green")
+            table.add_column("Status", style="white")
+
+            for repo in repositories:
+                alias = repo.get("alias", "N/A")
+                repo_url = repo.get("repo_url", "N/A")
+                last_refresh = repo.get("last_refresh")
+                status = repo.get("status", "unknown")
+
+                # Format last refresh time
+                if last_refresh:
+                    try:
+                        refresh_time = dateutil_parser.parse(last_refresh)
+                        now = datetime.now(refresh_time.tzinfo)
+                        time_diff = now - refresh_time
+
+                        if time_diff.days > 0:
+                            refresh_str = f"{time_diff.days} days ago"
+                        elif time_diff.seconds > 3600:
+                            hours = time_diff.seconds // 3600
+                            refresh_str = f"{hours} hours ago"
+                        elif time_diff.seconds > 60:
+                            minutes = time_diff.seconds // 60
+                            refresh_str = f"{minutes} minutes ago"
+                        else:
+                            refresh_str = "Just now"
+                    except Exception:
+                        refresh_str = str(last_refresh)
+                else:
+                    refresh_str = "Never"
+
+                # Format status with indicators
+                if status.lower() == "ready":
+                    status_display = "✓ Ready"
+                elif status.lower() == "indexing":
+                    status_display = "⚡ Indexing"
+                elif status.lower() == "failed":
+                    status_display = "✗ Failed"
+                elif status.lower() == "stale":
+                    status_display = "⚠ Stale"
+                else:
+                    status_display = f"? {status}"
+
+                table.add_row(alias, repo_url, refresh_str, status_display)
+
+            console.print(table)
+
+        finally:
+            admin_client.close()
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "insufficient privileges" in error_str or "admin role required" in error_str:
+            console.print(
+                "❌ Insufficient privileges for repository listing", style="red"
+            )
+            console.print(
+                "💡 You need admin privileges to list golden repositories", style="dim"
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to list golden repositories: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_repos_group.command("show")
+@click.argument("alias")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_show(ctx, alias: str, json_output: bool):
+    """Show detailed information for a golden repository.
+
+    Displays comprehensive details about a specific golden repository
+    including status, branch information, indexing details, and metadata.
+    Requires admin privileges.
+
+    Args:
+        alias: Repository alias to show details for
+
+    Examples:
+        cidx admin repos show web-app
+        cidx admin repos show api-service
+    """
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+        )
+        from datetime import datetime
+        from dateutil import parser as dateutil_parser  # type: ignore[import-untyped]
+
+        console = Console()
+
+        # Find project root for configuration and credentials
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project root found", style="red")
+            console.print(
+                "💡 Run this command from within a project directory", style="dim"
+            )
+            sys.exit(1)
+
+        # Check command mode and load configuration
+        try:
+            config = load_remote_configuration(project_root)
+            if not config:
+                console.print("❌ No remote configuration found", style="red")
+                console.print(
+                    "💡 Use 'cidx remote init' to configure remote access", style="dim"
+                )
+                sys.exit(1)
+
+            server_url = config.get("server_url")
+            if not server_url:
+                console.print("❌ Server URL not found in configuration", style="red")
+                sys.exit(1)
+
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+        # Load credentials
+        try:
+            from .remote.sync_execution import _load_and_decrypt_credentials
+
+            credentials = _load_and_decrypt_credentials(project_root)
+            if not credentials:
+                console.print("❌ No credentials found", style="red")
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                sys.exit(1)
+
+        except CredentialNotFoundError:
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client and find repository
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            # List all repositories and find the specific one
+            result = run_async(admin_client.list_golden_repositories())
+            repositories = result.get("golden_repositories", [])
+
+            target_repo = None
+            for repo in repositories:
+                if repo.get("alias") == alias:
+                    target_repo = repo
+                    break
+
+            if not target_repo:
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps(
+                            {"error": f"Repository '{alias}' not found"}, indent=2
+                        )
+                    )
+                else:
+                    console.print(f"❌ Repository '{alias}' not found", style="red")
+                    console.print(
+                        "💡 Use 'cidx admin repos list' to see available repositories",
+                        style="dim",
+                    )
+                sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(target_repo, indent=2))
+                return
+
+            # Display detailed repository information
+            console.print(f"\n[bold cyan]Repository Details: {alias}[/bold cyan]")
+            console.print("=" * 60)
+
+            # Basic information
+            console.print(f"[bold]Alias:[/bold] {target_repo.get('alias', 'N/A')}")
+            console.print(
+                f"[bold]Repository URL:[/bold] {target_repo.get('repo_url', 'N/A')}"
+            )
+            console.print(
+                f"[bold]Default Branch:[/bold] {target_repo.get('default_branch', 'N/A')}"
+            )
+
+            description = target_repo.get("description")
+            if description:
+                console.print(f"[bold]Description:[/bold] {description}")
+
+            # Status information
+            status = target_repo.get("status", "unknown")
+            if status.lower() == "ready":
+                status_display = "[green]✓ Ready[/green]"
+            elif status.lower() == "indexing":
+                status_display = "[yellow]⚡ Indexing[/yellow]"
+            elif status.lower() == "failed":
+                status_display = "[red]✗ Failed[/red]"
+            elif status.lower() == "stale":
+                status_display = "[yellow]⚠ Stale[/yellow]"
+            else:
+                status_display = f"[white]? {status}[/white]"
+
+            console.print(f"[bold]Status:[/bold] {status_display}")
+
+            # Timestamp information
+            last_refresh = target_repo.get("last_refresh")
+            if last_refresh:
+                try:
+                    refresh_time = dateutil_parser.parse(last_refresh)
+                    console.print(
+                        f"[bold]Last Refresh:[/bold] {refresh_time.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    )
+
+                    now = datetime.now(refresh_time.tzinfo)
+                    time_diff = now - refresh_time
+
+                    if time_diff.days > 0:
+                        refresh_str = f"{time_diff.days} days ago"
+                    elif time_diff.seconds > 3600:
+                        hours = time_diff.seconds // 3600
+                        refresh_str = f"{hours} hours ago"
+                    elif time_diff.seconds > 60:
+                        minutes = time_diff.seconds // 60
+                        refresh_str = f"{minutes} minutes ago"
+                    else:
+                        refresh_str = "Just now"
+
+                    console.print(f"[bold]Time Since Refresh:[/bold] {refresh_str}")
+                except Exception:
+                    console.print(f"[bold]Last Refresh:[/bold] {last_refresh}")
+            else:
+                console.print("[bold]Last Refresh:[/bold] [yellow]Never[/yellow]")
+
+            # Additional metadata if available
+            created_at = target_repo.get("created_at")
+            if created_at:
+                try:
+                    create_time = dateutil_parser.parse(created_at)
+                    console.print(
+                        f"[bold]Created:[/bold] {create_time.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                    )
+                except Exception:
+                    console.print(f"[bold]Created:[/bold] {created_at}")
+
+            # Indexing statistics if available
+            file_count = target_repo.get("indexed_files")
+            if file_count is not None:
+                console.print(f"[bold]Indexed Files:[/bold] {file_count:,}")
+
+            branch_count = target_repo.get("indexed_branches")
+            if branch_count is not None:
+                console.print(f"[bold]Indexed Branches:[/bold] {branch_count}")
+
+            # Current job information if available
+            current_job = target_repo.get("current_job_id")
+            if current_job:
+                console.print(f"[bold]Current Job:[/bold] {current_job}")
+
+            console.print(
+                "\n💡 Use 'cidx admin repos refresh {}' to update this repository".format(
+                    alias
+                ),
+                style="dim",
+            )
+
+        finally:
+            admin_client.close()
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "insufficient privileges" in error_str or "admin role required" in error_str:
+            console.print(
+                "❌ Insufficient privileges for repository details", style="red"
+            )
+            console.print(
+                "💡 You need admin privileges to view repository details", style="dim"
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to show repository details: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_repos_group.command("refresh")
+@click.argument("alias")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_refresh(ctx, alias: str, json_output: bool):
+    """Refresh a golden repository.
+
+    Triggers a refresh and re-indexing of the specified golden repository.
+    This will pull the latest changes from the Git repository and update
+    the search index. The operation runs asynchronously in the background.
+    Requires admin privileges.
+
+    Args:
+        alias: Repository alias to refresh
+
+    Examples:
+        cidx admin repos refresh web-app
+        cidx admin repos refresh api-service
+    """
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+        )
+
+        console = Console()
+
+        # Find project root for configuration and credentials
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project root found", style="red")
+            console.print(
+                "💡 Run this command from within a project directory", style="dim"
+            )
+            sys.exit(1)
+
+        # Check command mode and load configuration
+        try:
+            config = load_remote_configuration(project_root)
+            if not config:
+                console.print("❌ No remote configuration found", style="red")
+                console.print(
+                    "💡 Use 'cidx remote init' to configure remote access", style="dim"
+                )
+                sys.exit(1)
+
+            server_url = config.get("server_url")
+            if not server_url:
+                console.print("❌ Server URL not found in configuration", style="red")
+                sys.exit(1)
+
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+        # Load credentials
+        try:
+            from .remote.sync_execution import _load_and_decrypt_credentials
+
+            credentials = _load_and_decrypt_credentials(project_root)
+            if not credentials:
+                console.print("❌ No credentials found", style="red")
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                sys.exit(1)
+
+        except CredentialNotFoundError:
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client and refresh repository
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            if not json_output:
+                console.print(
+                    f"🔄 Initiating refresh for repository '{alias}'...", style="yellow"
+                )
+
+            result = run_async(admin_client.refresh_golden_repository(alias))
+
+            # Validate response type
+            if not isinstance(result, dict):
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps({"error": "Invalid response from server"}, indent=2)
+                    )
+                else:
+                    console.print("❌ Invalid response from server", style="red")
+                sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
+
+            job_id = result.get("job_id")
+            if not job_id:
+                console.print(
+                    "⚠️  Refresh completed but no job ID returned", style="yellow"
+                )
+
+            message = result.get("message", "Refresh job submitted successfully")
+
+            console.print(f"✅ {message}", style="green")
+
+            if job_id:
+                console.print(f"📋 Job ID: {job_id}", style="cyan")
+                console.print(
+                    "💡 Use 'cidx jobs show {}' to track progress".format(job_id),
+                    style="dim",
+                )
+                console.print(
+                    "💡 Use 'cidx admin repos show {}' to check repository status".format(
+                        alias
+                    ),
+                    style="dim",
+                )
+            else:
+                console.print(
+                    "💡 Use 'cidx admin repos list' to check repository status",
+                    style="dim",
+                )
+
+        finally:
+            admin_client.close()
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "repository" in error_str and "not found" in error_str:
+            console.print(f"❌ Repository '{alias}' not found", style="red")
+            console.print(
+                "💡 Use 'cidx admin repos list' to see available repositories",
+                style="dim",
+            )
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print(
+                "❌ Insufficient privileges for repository refresh", style="red"
+            )
+            console.print(
+                "💡 You need admin privileges to refresh golden repositories",
+                style="dim",
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to refresh repository: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_repos_group.command("branches")
+@click.argument("alias")
+@click.option("--detailed", is_flag=True, help="Show detailed branch information")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_branches(ctx, alias: str, detailed: bool, json_output: bool):
+    """List branches in a golden repository.
+
+    Displays all available branches in the specified golden repository
+    with commit information and active user counts. Use --detailed flag
+    for additional health and status information.
+    Requires admin privileges.
+
+    Args:
+        alias: Repository alias to list branches for
+
+    Examples:
+        cidx admin repos branches web-app
+        cidx admin repos branches api-service --detailed
+    """
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import CredentialNotFoundError
+
+        console = Console()
+
+        # Find project root for configuration and credentials
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project root found", style="red")
+            console.print(
+                "💡 Run this command from within a project directory", style="dim"
+            )
+            sys.exit(1)
+
+        # Check command mode and load configuration
+        try:
+            config = load_remote_configuration(project_root)
+            if not config:
+                console.print("❌ No remote configuration found", style="red")
+                console.print(
+                    "💡 Use 'cidx remote init' to configure remote access", style="dim"
+                )
+                sys.exit(1)
+
+            server_url = config.get("server_url")
+            if not server_url:
+                console.print("❌ Server URL not found in configuration", style="red")
+                sys.exit(1)
+
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+        # Load credentials
+        try:
+            from .remote.sync_execution import _load_and_decrypt_credentials
+
+            credentials = _load_and_decrypt_credentials(project_root)
+            if not credentials:
+                console.print("❌ No credentials found", style="red")
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                sys.exit(1)
+
+        except CredentialNotFoundError:
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client and fetch branches
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            result = run_async(admin_client.get_golden_repository_branches(alias))
+
+            # Validate response type
+            if not isinstance(result, dict):
+                console.print("❌ Invalid response from server", style="red")
+                sys.exit(1)
+
+            branches = result.get("branches")
+            if branches is None:
+                if json_output:
+                    import json
+
+                    print(
+                        json.dumps(
+                            {"error": "Server response missing branch data"}, indent=2
+                        )
+                    )
+                else:
+                    console.print("❌ Server response missing branch data", style="red")
+                sys.exit(1)
+
+            if json_output:
+                import json
+
+                print(json.dumps(result, indent=2))
+                return
+
+            # Display Rich table
+            table = Table(title=f"Golden Repository Branches: {alias}")
+            table.add_column("Branch", style="cyan", no_wrap=True)
+            table.add_column("Commit", style="yellow", no_wrap=True)
+            table.add_column("Date", style="green")
+            table.add_column("Active Users", justify="right", style="magenta")
+
+            if detailed:
+                table.add_column("Health", style="blue")
+
+            if not branches:
+                console.print(
+                    f"ℹ️ No branches found for repository '{alias}'", style="yellow"
+                )
+            else:
+                for branch in branches:
+                    name = branch.get("name", branch.get("branch_name", "unknown"))
+                    commit_hash = branch.get("commit_hash", "N/A")
+                    commit_date = branch.get(
+                        "commit_date", branch.get("last_commit_date", "N/A")
+                    )
+                    active_users = str(branch.get("active_users", 0))
+
+                    # Truncate commit hash to 8 characters
+                    short_hash = commit_hash[:8] if commit_hash != "N/A" else "N/A"
+
+                    row = [name, short_hash, commit_date, active_users]
+
+                    if detailed:
+                        health = branch.get("health", "unknown")
+                        if health == "healthy":
+                            health_display = "✅ healthy"
+                        elif health == "warning":
+                            health_display = "⚠️ warning"
+                        elif health == "error":
+                            health_display = "❌ error"
+                        else:
+                            health_display = "❓ unknown"
+                        row.append(health_display)
+
+                    table.add_row(*row)
+
+                console.print(table)
+                console.print(
+                    f"\n{len(branches)} branch{'es' if len(branches) != 1 else ''} total\n"
+                )
+
+        finally:
+            admin_client.close()
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "repository" in error_str and "not found" in error_str:
+            console.print(f"❌ Repository '{alias}' not found", style="red")
+            console.print(
+                "💡 Use 'cidx admin repos list' to see available repositories",
+                style="dim",
+            )
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print(
+                "❌ Insufficient privileges for viewing repository branches",
+                style="red",
+            )
+            console.print(
+                "💡 You need admin privileges to view golden repository branches",
+                style="dim",
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to fetch branches: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@admin_repos_group.command("delete")
+@click.argument("alias")
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Confirm deletion (required to proceed with deletion)",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation prompt (for automation scenarios)",
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_repos_delete(ctx, alias: str, confirm: bool, force: bool, json_output: bool):
+    """Delete a golden repository (admin only).
+
+    DESTRUCTIVE OPERATION: This will permanently delete the specified
+    golden repository and all its associated data. This action cannot be undone.
+
+    Deletes a golden repository from the CIDX server including:
+    - Repository metadata and configuration
+    - All indexed content and vector embeddings
+    - Background job history for this repository
+    - All user activations of this repository
+
+    Requires admin privileges for execution.
+
+    SAFETY FEATURES:
+    - Requires --confirm flag to proceed with deletion
+    - Repository existence validation before deletion
+    - Warning if repository has active user instances
+    - Comprehensive error handling and rollback on failures
+
+    Args:
+        alias: Repository alias to delete
+
+    Options:
+        --confirm: Required flag to confirm deletion
+        --force: Skip interactive confirmation prompt (still requires --confirm)
+        --json: Output as JSON for automation
+
+    Examples:
+        # Delete with confirmation flag (required)
+        cidx admin repos delete web-app --confirm
+
+        # Force delete without interactive prompts (for automation)
+        cidx admin repos delete web-app --confirm --force
+
+        # Show repository details before deciding
+        cidx admin repos show web-app
+        cidx admin repos delete web-app --confirm
+    """
+    import json as json_module  # Import once for JSON output handling
+
+    # Check if --confirm flag is provided (required for deletion)
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps(
+                    {
+                        "error": "Deletion requires --confirm flag",
+                        "hint": "Use --confirm to confirm deletion of the repository",
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console = Console()
+            console.print("❌ Deletion requires --confirm flag", style="red")
+            console.print(
+                f"💡 Use --confirm to confirm deletion: cidx admin repos delete {alias} --confirm",
+                style="dim",
+            )
+        sys.exit(1)
+
+    try:
+        from .mode_detection.command_mode_detector import find_project_root
+        from .remote.config import load_remote_configuration
+        from .remote.credential_manager import (
+            CredentialNotFoundError,
+        )
+
+        console = Console()
+
+        # Find project root for configuration and credentials
+        project_root = find_project_root(start_path=Path.cwd())
+        if not project_root:
+            console.print("❌ No project root found", style="red")
+            console.print(
+                "💡 Run this command from within a project directory", style="dim"
+            )
+            sys.exit(1)
+
+        # Check command mode and load configuration
+        try:
+            config = load_remote_configuration(project_root)
+            if not config:
+                console.print("❌ No remote configuration found", style="red")
+                console.print(
+                    "💡 Use 'cidx remote init' to configure remote access", style="dim"
+                )
+                sys.exit(1)
+
+            server_url = config.get("server_url")
+            if not server_url:
+                console.print("❌ Server URL not found in configuration", style="red")
+                sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load configuration: {e}", style="red")
+            sys.exit(1)
+
+        # Load credentials
+        try:
+            from .remote.sync_execution import _load_and_decrypt_credentials
+
+            credentials = _load_and_decrypt_credentials(project_root)
+            if not credentials:
+                console.print("❌ No credentials found", style="red")
+                console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+                sys.exit(1)
+        except CredentialNotFoundError:
+            console.print("❌ No credentials found", style="red")
+            console.print("💡 Use 'cidx auth login' to authenticate", style="dim")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"❌ Failed to load credentials: {e}", style="red")
+            sys.exit(1)
+
+        # Create admin client
+        from .api_clients.admin_client import AdminAPIClient
+
+        admin_client = AdminAPIClient(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+        try:
+            # If not force and not json_output, show interactive confirmation prompt
+            if not force and not json_output:
+                # Get repository details for confirmation
+                try:
+                    repos_result = run_async(admin_client.list_golden_repositories())
+                    repositories = repos_result.get("golden_repositories", [])
+                    target_repo = None
+
+                    for repo in repositories:
+                        if repo.get("alias") == alias:
+                            target_repo = repo
+                            break
+
+                    if not target_repo:
+                        console.print(f"❌ Repository '{alias}' not found", style="red")
+                        console.print(
+                            "💡 Use 'cidx admin repos list' to see available repositories",
+                            style="dim",
+                        )
+                        sys.exit(1)
+
+                    # Show confirmation prompt with repository details
+                    console.print(
+                        f"\n⚠️  This will permanently delete the golden repository '{alias}'.",
+                        style="yellow bold",
+                    )
+                    console.print(
+                        f"📍 Repository: {target_repo.get('repo_url', 'N/A')}"
+                    )
+                    console.print(
+                        f"📂 Description: {target_repo.get('description', 'No description')}"
+                    )
+                    console.print(
+                        f"🌿 Default branch: {target_repo.get('default_branch', 'N/A')}"
+                    )
+
+                    status = target_repo.get("status", "Unknown")
+                    if status == "ready":
+                        console.print("✅ Status: Ready (indexed and available)")
+                    elif status == "indexing":
+                        console.print("🔄 Status: Currently indexing")
+                    else:
+                        console.print(f"📊 Status: {status}")
+
+                    console.print(
+                        "\n🔄 This action cannot be undone.", style="red bold"
+                    )
+
+                    # Prompt for confirmation
+                    confirmation = click.confirm(
+                        f"\nAre you sure you want to delete '{alias}'?", default=False
+                    )
+
+                    if not confirmation:
+                        console.print("❌ Deletion cancelled", style="yellow")
+                        sys.exit(0)
+
+                except Exception:
+                    # If we can't get repository details, still prompt for basic confirmation
+                    console.print(
+                        f"\n⚠️  This will permanently delete the golden repository '{alias}'.",
+                        style="yellow bold",
+                    )
+                    console.print("🔄 This action cannot be undone.", style="red bold")
+
+                    confirmation = click.confirm(
+                        f"\nAre you sure you want to delete '{alias}'?", default=False
+                    )
+
+                    if not confirmation:
+                        console.print("❌ Deletion cancelled", style="yellow")
+                        sys.exit(0)
+
+            # Perform deletion
+            if not json_output:
+                console.print(
+                    f"🗑️  Deleting golden repository '{alias}'...", style="red"
+                )
+
+            result = run_async(
+                admin_client.delete_golden_repository(alias, force=force)
+            )
+
+            if json_output:
+                output = {
+                    "status": "success",
+                    "alias": alias,
+                    "message": f"Golden repository '{alias}' deleted successfully",
+                }
+                if isinstance(result, dict):
+                    output.update(result)
+                print(json_module.dumps(output, indent=2))
+            else:
+                console.print(
+                    f"✅ Golden repository '{alias}' deleted successfully",
+                    style="green",
+                )
+                console.print(
+                    "💡 Use 'cidx admin repos list' to see remaining repositories",
+                    style="dim",
+                )
+
+        finally:
+            admin_client.close()
+
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if "repository not found" in error_str or "not found" in error_str:
+            console.print(f"❌ Repository '{alias}' not found", style="red")
+            console.print(
+                "💡 Use 'cidx admin repos list' to see available repositories",
+                style="dim",
+            )
+        elif (
+            "repository deletion conflict" in error_str
+            or "active instances" in error_str
+        ):
+            console.print(
+                f"❌ Cannot delete repository '{alias}' - it has active instances",
+                style="red",
+            )
+            console.print(
+                "💡 Deactivate all user instances before deleting the golden repository",
+                style="dim",
+            )
+        elif (
+            "insufficient privileges" in error_str or "admin role required" in error_str
+        ):
+            console.print(
+                "❌ Insufficient privileges for repository deletion", style="red"
+            )
+            console.print(
+                "💡 You need admin privileges to delete golden repositories",
+                style="dim",
+            )
+        elif "authentication" in error_str or "unauthorized" in error_str:
+            console.print("❌ Authentication failed", style="red")
+            console.print(
+                "💡 Check your authentication with 'cidx auth login'", style="dim"
+            )
+        elif "service unavailable" in error_str:
+            console.print("❌ Service temporarily unavailable", style="red")
+            console.print(
+                "💡 Repository deletion failed due to service issues - please try again later",
+                style="dim",
+            )
+        elif "connection" in error_str or "network" in error_str:
+            console.print("❌ Connection error", style="red")
+            console.print("💡 Check server connectivity and try again", style="dim")
+        else:
+            console.print(f"❌ Failed to delete repository: {e}", style="red")
+
+        if ctx.obj.get("verbose"):
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+# =============================================================================
+# ADMIN GROUPS COMMANDS - Story #747
+# Group and Access Management from CLI Remote Mode
+# =============================================================================
+
+
+@admin_group.group("groups")
+@click.pass_context
+def admin_groups_group(ctx):
+    """Group and access management commands.
+
+    Administrative commands for creating, managing, and configuring
+    user groups and repository access on the CIDX server.
+    """
+    pass
+
+
+@admin_groups_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_list(ctx, json_output: bool):
+    """List all groups with member counts and repository access."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.list_groups()),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+            groups = result.get("groups", [])
+
+            if json_output:
+                print(json_module.dumps({"success": True, "groups": groups}, indent=2))
+            else:
+                if not groups:
+                    console.print("No groups found", style="yellow")
+                else:
+                    table = Table(title="Groups")
+                    table.add_column("ID", style="cyan")
+                    table.add_column("Name", style="green")
+                    table.add_column("Members", justify="right")
+                    table.add_column("Repos", justify="right")
+
+                    for g in groups:
+                        table.add_row(
+                            str(g.get("id", "")),
+                            g.get("name", ""),
+                            str(g.get("member_count", 0)),
+                            str(g.get("repo_count", 0)),
+                        )
+                    console.print(table)
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("create")
+@click.option("--name", required=True, help="Name for the new group")
+@click.option("--description", default="", help="Description for the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_create(ctx, name: str, description: str, json_output: bool):
+    """Create a new custom group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = with_elevation_retry(
+                fn=lambda: run_async(
+                    client.create_group(name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True, **result}, indent=2))
+            else:
+                console.print(
+                    f"Group '{name}' created with ID {result.get('group_id')}",
+                    style="green",
+                )
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("show")
+@click.argument("group_id", type=int)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_show(ctx, group_id: int, json_output: bool):
+    """Show detailed information about a specific group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.get_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True, **result}, indent=2))
+            else:
+                console.print(f"[bold]Group: {result.get('name')}[/bold]")
+                console.print(f"ID: {result.get('id')}")
+                console.print(f"Description: {result.get('description', 'N/A')}")
+                console.print(
+                    f"Members: {', '.join(result.get('members', [])) or 'None'}"
+                )
+                console.print(
+                    f"Repositories: {', '.join(result.get('repos', [])) or 'None'}"
+                )
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("update")
+@click.argument("group_id", type=int)
+@click.option("--name", default=None, help="New name for the group")
+@click.option("--description", default=None, help="New description for the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_update(
+    ctx, group_id: int, name: str, description: str, json_output: bool
+):
+    """Update a custom group's name and/or description."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    if name is None and description is None:
+        if json_output:
+            print(
+                json_module.dumps(
+                    {"error": "At least --name or --description required"}
+                )
+            )
+        else:
+            console.print("At least --name or --description required", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    client.update_group(group_id, name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"Group {group_id} updated successfully", style="green")
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("delete")
+@click.argument("group_id", type=int)
+@click.option(
+    "--confirm", is_flag=True, required=True, help="Required flag to confirm deletion"
+)
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
+    """Delete a custom group (requires --confirm flag)."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            with_elevation_retry(
+                fn=lambda: run_async(client.delete_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"Group {group_id} deleted successfully", style="green")
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("add-member")
+@click.argument("group_id", type=int)
+@click.option("--user", required=True, help="Username to add to the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
+    """Assign a user to a group."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            with_elevation_retry(
+                fn=lambda: run_async(client.add_member(group_id, user_id=user)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(f"User '{user}' added to group {group_id}", style="green")
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("add-repos")
+@click.argument("group_id", type=int)
+@click.option("--repos", required=True, help="Comma-separated list of repository names")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
+    """Grant a group access to one or more repositories."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    repo_names = [r.strip() for r in repos.split(",") if r.strip()]
+    if not repo_names:
+        if json_output:
+            print(json_module.dumps({"error": "No repository names provided"}))
+        else:
+            console.print("No repository names provided", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.add_repos(group_id, repo_names=repo_names)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+            added = result.get("added_count", 0)
+
+            if json_output:
+                print(
+                    json_module.dumps({"success": True, "added_count": added}, indent=2)
+                )
+            else:
+                console.print(
+                    f"Added {added} repositories to group {group_id}", style="green"
+                )
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("remove-repo")
+@click.argument("group_id", type=int)
+@click.option("--repo", required=True, help="Repository name to remove from the group")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
+    """Revoke a group's access to a single repository."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            with_elevation_retry(
+                fn=lambda: run_async(client.remove_repo(group_id, repo_name=repo)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+
+            if json_output:
+                print(json_module.dumps({"success": True}, indent=2))
+            else:
+                console.print(
+                    f"Repository '{repo}' removed from group {group_id}", style="green"
+                )
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+@admin_groups_group.command("remove-repos")
+@click.argument("group_id", type=int)
+@click.option("--repos", required=True, help="Comma-separated list of repository names")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool):
+    """Revoke a group's access to multiple repositories."""
+    import json as json_module
+    from .mode_detection.command_mode_detector import find_project_root
+    from .remote.config import load_remote_configuration
+    from .remote.sync_execution import _load_and_decrypt_credentials
+    from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
+
+    console = Console()
+    project_root = find_project_root(Path.cwd())
+
+    if not project_root:
+        if json_output:
+            print(json_module.dumps({"error": "No project configuration found"}))
+        else:
+            console.print("No project configuration found", style="red")
+        sys.exit(1)
+
+    repo_names = [r.strip() for r in repos.split(",") if r.strip()]
+    if not repo_names:
+        if json_output:
+            print(json_module.dumps({"error": "No repository names provided"}))
+        else:
+            console.print("No repository names provided", style="red")
+        sys.exit(1)
+
+    try:
+        config = load_remote_configuration(project_root)
+        credentials = _load_and_decrypt_credentials(project_root)
+        server_url = config.get("server_url")
+
+        if not server_url or not credentials:
+            if json_output:
+                print(
+                    json_module.dumps({"error": "Missing configuration or credentials"})
+                )
+            else:
+                console.print(
+                    "Missing server configuration or credentials", style="red"
+                )
+            sys.exit(1)
+
+        client = GroupAPIClient(
+            server_url=server_url, credentials=credentials, project_root=project_root
+        )
+
+        try:
+            result = with_elevation_retry(
+                fn=lambda: run_async(
+                    client.remove_repos(group_id, repo_names=repo_names)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
+            removed = result.get("removed_count", 0)
+
+            if json_output:
+                print(
+                    json_module.dumps(
+                        {"success": True, "removed_count": removed}, indent=2
+                    )
+                )
+            else:
+                console.print(
+                    f"Removed {removed} repositories from group {group_id}",
+                    style="green",
+                )
+        finally:
+            client.close()
+
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+
+
+# =============================================================================
+# API Keys Management Commands (Story #748)
+# =============================================================================
+
+
+@admin_group.group("api-keys")
+@click.pass_context
+def admin_api_keys_group(ctx):
+    """API key management commands.
+
+    Commands for creating, listing, and deleting API keys
+    for the current user.
+    """
+    pass
+
+
+@admin_api_keys_group.command("list")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_list(ctx, json_output: bool):
+    """List all API keys for the current user."""
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.list_api_keys())
+        api_keys = result.get("api_keys", [])
+
+        if json_output:
+            print(json_module.dumps({"success": True, "api_keys": api_keys}, indent=2))
+        else:
+            if not api_keys:
+                console.print("No API keys found", style="yellow")
+            else:
+                table = Table(title="API Keys")
+                table.add_column("Key ID", style="cyan")
+                table.add_column("Description", style="green")
+                table.add_column("Created", style="dim")
+
+                for key in api_keys:
+                    table.add_row(
+                        str(key.get("key_id", "")),
+                        key.get("description", ""),
+                        str(key.get("created_at", "")),
+                    )
+                console.print(table)
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_api_keys_group.command("create")
+@click.option("--description", default="", help="Description for the API key")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_create(ctx, description: str, json_output: bool):
+    """Create a new API key for the current user.
+
+    The secret will be displayed ONCE. Save it securely.
+    """
+    import json as json_module
+
+    console = Console()
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        result = run_async(client.create_api_key(description=description))
+
+        if json_output:
+            print(json_module.dumps({"success": True, **result}, indent=2))
+        else:
+            console.print("[bold green]API Key Created[/bold green]")
+            console.print(f"Key ID: {result.get('key_id')}")
+            console.print(f"[bold yellow]Secret: {result.get('secret')}[/bold yellow]")
+            console.print("[dim]Save this secret - it will not be shown again![/dim]")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@admin_api_keys_group.command("delete")
+@click.argument("key_id")
+@click.option("--confirm", is_flag=True, help="Confirm deletion (required)")
+@click.option(
+    "--json", "json_output", is_flag=True, help="Output as JSON for automation"
+)
+@click.pass_context
+def admin_api_keys_delete(ctx, key_id: str, confirm: bool, json_output: bool):
+    """Delete an API key.
+
+    Requires --confirm flag for safety.
+    """
+    import json as json_module
+
+    console = Console()
+
+    if not confirm:
+        if json_output:
+            print(
+                json_module.dumps({"error": "--confirm flag is required for deletion"})
+            )
+        else:
+            console.print("--confirm flag is required for deletion", style="red")
+        sys.exit(1)
+
+    client, _ = _get_credential_client_and_config(json_output)
+
+    try:
+        run_async(client.delete_api_key(key_id))
+
+        if json_output:
+            print(json_module.dumps({"success": True}, indent=2))
+        else:
+            console.print(f"API key '{key_id}' deleted", style="green")
+    except Exception as e:
+        if json_output:
+            print(json_module.dumps({"error": str(e)}))
+        else:
+            console.print(f"Error: {e}", style="red")
+        sys.exit(1)
+    finally:
+        client.close()
+
+
+@cli.group("global")
+@click.pass_context
+def global_group(ctx):
+    """Manage global repository activations.
+
+    Commands for activating golden repos globally and managing global aliases.
+    """
+    pass
+
+
+@global_group.command("activate")
+@click.argument("repo_name")
+@click.pass_context
+def global_activate(ctx, repo_name: str):
+    """Activate a golden repository globally for querying.
+
+    Creates a global alias ({repo-name}-global) that allows querying
+    the repository from any directory using the --repo flag.
+
+    \b
+    USAGE:
+      cidx global activate my-repo
+
+    This creates an alias 'my-repo-global' that can be used with:
+      cidx query "search term" --repo my-repo-global
+
+    \b
+    WHEN TO USE:
+      - After a golden repo registration fails to activate automatically
+      - To retry global activation for an existing golden repo
+      - To manually activate a golden repo that was registered without activation
+    """
+    import os
+    from pathlib import Path
+    from .global_repos.global_activation import GlobalActivator, GlobalActivationError
+
+    console = Console()
+
+    # Get golden repos directory
+    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+    if not golden_repos_dir:
+        golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
+
+    # Find the golden repo
+    repos_dir = Path(golden_repos_dir) / "repos"
+    repo_path = repos_dir / repo_name
+
+    if not repo_path.exists():
+        console.print(f"[red]Error: Golden repo '{repo_name}' not found[/red]")
+        console.print(f"[yellow]Expected location: {repo_path}[/yellow]")
+        console.print(
+            "[yellow]Available repos: Use 'cidx golden list' to see registered golden repos[/yellow]"
+        )
+        sys.exit(1)
+
+    # Get the index path
+    index_path = repo_path / ".code-indexer" / "index"
+    if not index_path.exists():
+        console.print(
+            f"[red]Error: Index not found for golden repo '{repo_name}'[/red]"
+        )
+        console.print(f"[yellow]Expected index location: {index_path}[/yellow]")
+        console.print("[yellow]Try re-indexing the repository first[/yellow]")
+        sys.exit(1)
+
+    # Activate globally
+    try:
+        activator = GlobalActivator(golden_repos_dir)
+
+        # For retry, we need a repo URL - we can use a placeholder or read from registry
+        # For now, use a placeholder since this is a retry operation
+        repo_url = f"local://{repo_path}"
+
+        activator.activate_golden_repo(
+            repo_name=repo_name, repo_url=repo_url, clone_path=str(index_path)
+        )
+
+        alias_name = f"{repo_name}-global"
+        console.print(f"[green]✓ Successfully activated '{repo_name}' globally[/green]")
+        console.print(f"[blue]Global alias: {alias_name}[/blue]")
+        console.print()
+        console.print("You can now query this repo from anywhere:")
+        console.print(f'  [cyan]cidx query "search term" --repo {alias_name}[/cyan]')
+
+    except GlobalActivationError as e:
+        console.print(f"[red]Error: Failed to activate '{repo_name}' globally[/red]")
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
+@global_group.command("list")
+@click.pass_context
+def global_list(ctx):
+    """List all globally activated repositories.
+
+    Shows all repositories that have been activated globally and can be
+    queried from any directory using the --repo flag.
+
+    \b
+    USAGE:
+      cidx global list
+
+    \b
+    OUTPUT:
+      Displays a table with:
+      - Global alias name (for use with --repo)
+      - Repository name
+      - Repository URL (or 'N/A' for local repos)
+      - Last refresh timestamp
+
+    \b
+    WHEN TO USE:
+      - To verify which repos are globally activated
+      - To check catalog completeness (AC4)
+      - To find the global alias name for a repository
+    """
+    import os
+    from pathlib import Path
+    from .global_repos.global_registry import GlobalRegistry
+    from rich.table import Table
+
+    console = Console()
+
+    # Get golden repos directory
+    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+    if not golden_repos_dir:
+        golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
+
+    try:
+        # Load registry
+        registry = GlobalRegistry(golden_repos_dir)
+        repos = registry.list_global_repos()
+
+        if not repos:
+            console.print("[yellow]No global repositories registered[/yellow]")
+            console.print()
+            console.print("To activate a golden repo globally, use:")
+            console.print("  [cyan]cidx global activate <repo-name>[/cyan]")
+            return
+
+        # Create table
+        table = Table(title=f"Global Repositories ({len(repos)} total)")
+        table.add_column("Alias", style="cyan", no_wrap=True)
+        table.add_column("Repo Name", style="blue")
+        table.add_column("URL", style="green")
+        table.add_column("Last Refresh", style="yellow")
+
+        # Add rows
+        for repo in repos:
+            alias = repo["alias_name"]
+            name = repo["repo_name"]
+            url = repo["repo_url"] if repo["repo_url"] else "[dim](local)[/dim]"
+            last_refresh = repo.get("last_refresh", "N/A")
+
+            # Format timestamp if it's ISO format
+            if last_refresh != "N/A" and "T" in last_refresh:
+                from datetime import datetime
+
+                try:
+                    dt = datetime.fromisoformat(last_refresh.replace("Z", "+00:00"))
+                    last_refresh = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+
+            table.add_row(alias, name, url, last_refresh)
+
+        console.print(table)
+
+    except Exception as e:
+        console.print("[red]Error: Failed to list global repositories[/red]")
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
+@global_group.command("status")
+@click.argument("alias_name")
+@click.pass_context
+def global_status(ctx, alias_name: str):
+    """Show status and metadata for a global repository.
+
+    Displays detailed information about a globally activated repository,
+    including catalog freshness indicators.
+
+    \b
+    USAGE:
+      cidx global status <alias-name>
+
+    \b
+    EXAMPLE:
+      cidx global status cidx-meta-global
+      cidx global status my-repo-global
+
+    \b
+    OUTPUT:
+      Shows:
+      - Repository name and alias
+      - Repository URL
+      - Index storage location
+      - Creation timestamp
+      - Last refresh timestamp (catalog freshness - AC5)
+
+    \b
+    WHEN TO USE:
+      - To check catalog freshness (AC5)
+      - To verify repository metadata
+      - To find the index storage location
+    """
+    import os
+    from pathlib import Path
+    from .global_repos.global_registry import GlobalRegistry
+    from .global_repos.alias_manager import AliasManager
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+
+    # Get golden repos directory
+    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+    if not golden_repos_dir:
+        golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
+
+    try:
+        # Load registry
+        registry = GlobalRegistry(golden_repos_dir)
+        repo = registry.get_global_repo(alias_name)
+
+        if not repo:
+            console.print(
+                f"[red]Error: Repository '{alias_name}' not found in global registry[/red]"
+            )
+            console.print()
+            console.print(
+                "Use [cyan]cidx global list[/cyan] to see all registered repos"
+            )
+            sys.exit(1)
+
+        # Get CURRENT index_path from alias (not stale registry path)
+        alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+        current_index_path = alias_manager.read_alias(alias_name)
+        if not current_index_path:
+            current_index_path = repo.get("index_path", "N/A")
+
+        # Format timestamps
+        created_at = repo.get("created_at", "N/A")
+        last_refresh = repo.get("last_refresh", "N/A")
+
+        if created_at != "N/A" and "T" in created_at:
+            from datetime import datetime
+
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                created_at = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                pass
+
+        if last_refresh != "N/A" and "T" in last_refresh:
+            from datetime import datetime
+
+            try:
+                dt = datetime.fromisoformat(last_refresh.replace("Z", "+00:00"))
+                last_refresh = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                pass
+
+        # Create status table
+        table = Table(show_header=False, box=None)
+        table.add_column("Field", style="cyan", width=20)
+        table.add_column("Value", style="white")
+
+        table.add_row("Alias", f"[bold]{repo['alias_name']}[/bold]")
+        table.add_row("Repo Name", repo["repo_name"])
+        table.add_row(
+            "URL",
+            repo["repo_url"] if repo["repo_url"] else "[dim](local repository)[/dim]",
+        )
+        table.add_row("Index Path", current_index_path)
+        table.add_row("Created", created_at)
+        table.add_row("Last Refresh", f"[yellow]{last_refresh}[/yellow]")
+
+        # Display in panel
+        panel = Panel(
+            table,
+            title=f"[bold]Repository Status: {alias_name}[/bold]",
+            border_style="blue",
+        )
+        console.print(panel)
+
+    except Exception as e:
+        console.print("[red]Error: Failed to get repository status[/red]")
+        console.print(f"[red]{e}[/red]")
+        import traceback
+
+        console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+@global_group.command("regex-search")
+@click.argument("repo_identifier")
+@click.argument("pattern")
+@click.option("--path", "-p", default=None, help="Subdirectory to search within")
+@click.option(
+    "--include",
+    "-i",
+    "include_patterns",
+    multiple=True,
+    help="Glob patterns to include",
+)
+@click.option(
+    "--exclude",
+    "-e",
+    "exclude_patterns",
+    multiple=True,
+    help="Glob patterns to exclude",
+)
+@click.option(
+    "--case-sensitive/--no-case-sensitive",
+    default=True,
+    help="Case-sensitive search (default: true)",
+)
+@click.option(
+    "--context",
+    "-C",
+    "context_lines",
+    default=0,
+    help="Context lines before/after match",
+)
+@click.option("--max-results", "-n", default=100, help="Maximum number of results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def global_regex_search(
+    ctx,
+    repo_identifier: str,
+    pattern: str,
+    path: str,
+    include_patterns: tuple,
+    exclude_patterns: tuple,
+    case_sensitive: bool,
+    context_lines: int,
+    max_results: int,
+    output_json: bool,
+):
+    """Search files in a global repository using regex patterns.
+
+    Uses ripgrep (rg) for fast pattern matching with grep as fallback.
+
+    \b
+    USAGE:
+      cidx global regex-search <repo-identifier> <pattern> [options]
+
+    \b
+    EXAMPLES:
+      # Search for function definitions
+      cidx global regex-search cidx-meta-global "def.*authenticate"
+
+      # Search only Python files
+      cidx global regex-search my-repo-global "TODO" --include "*.py"
+
+      # Case-insensitive search with context
+      cidx global regex-search my-repo-global "error" --no-case-sensitive -C 2
+
+      # Search in specific subdirectory
+      cidx global regex-search my-repo-global "import" --path src/
+
+    \b
+    OUTPUT:
+      Shows matching files with line numbers and content.
+      Use --json for machine-readable output.
+    """
+    import json as json_module
+    import os
+    from pathlib import Path
+    from .global_repos.global_registry import GlobalRegistry
+    from .global_repos.regex_search import RegexSearchService
+    from rich.text import Text
+
+    # rich imports removed - not needed for this output format
+
+    console = Console()
+
+    # Get golden repos directory
+    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
+    if not golden_repos_dir:
+        golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
+
+    try:
+        # Resolve repository path
+        registry = GlobalRegistry(golden_repos_dir)
+
+        # Try with -global suffix if not present
+        alias_to_try = repo_identifier
+        if not alias_to_try.endswith("-global"):
+            alias_to_try = f"{repo_identifier}-global"
+
+        repo = registry.get_global_repo(alias_to_try)
+        if not repo:
+            # Try original identifier
+            repo = registry.get_global_repo(repo_identifier)
+
+        if not repo:
+            console.print(
+                f"[red]Error: Repository '{repo_identifier}' not found in global registry[/red]"
+            )
+            console.print()
+            console.print(
+                "Use [cyan]cidx global list[/cyan] to see all registered repos"
+            )
+            sys.exit(1)
+
+        # Get index path from registry
+        index_path = repo.get("index_path")
+        if not index_path:
+            console.print(
+                f"[red]Error: Index path for '{repo_identifier}' not found[/red]"
+            )
+            sys.exit(1)
+
+        repo_path = Path(index_path)
+        if not repo_path.exists():
+            console.print(
+                f"[red]Error: Repository path does not exist: {repo_path}[/red]"
+            )
+            sys.exit(1)
+
+        # Create service and execute search
+        service = RegexSearchService(repo_path)
+        result = run_async(
+            service.search(
+                pattern=pattern,
+                path=path,
+                include_patterns=list(include_patterns) if include_patterns else None,
+                exclude_patterns=list(exclude_patterns) if exclude_patterns else None,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                max_results=max_results,
+            )
+        )
+
+        if output_json:
+            # JSON output
+            output = {
+                "success": True,
+                "matches": [
+                    {
+                        "file_path": m.file_path,
+                        "line_number": m.line_number,
+                        "column": m.column,
+                        "line_content": m.line_content,
+                        "context_before": m.context_before,
+                        "context_after": m.context_after,
+                    }
+                    for m in result.matches
+                ],
+                "total_matches": result.total_matches,
+                "truncated": result.truncated,
+                "search_engine": result.search_engine,
+                "search_time_ms": result.search_time_ms,
+            }
+            console.print(json_module.dumps(output, indent=2))
+        else:
+            # Rich formatted output
+            if not result.matches:
+                console.print(
+                    f"[yellow]No matches found for pattern: {pattern}[/yellow]"
+                )
+                return
+
+            console.print(
+                f"[green]Found {result.total_matches} matches[/green] "
+                f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
+            )
+            console.print()
+
+            for match in result.matches:
+                # Show file path and line number
+                console.print(
+                    f"[cyan]{match.file_path}[/cyan]:[yellow]{match.line_number}[/yellow]"
+                )
+
+                # Show context before
+                for ctx_line in match.context_before:
+                    text = Text("  ")
+                    text.append(ctx_line, style="dim")
+                    console.print(text)
+
+                # Show matching line
+                text = Text("  ")
+                text.append(match.line_content, style="bold")
+                console.print(text)
+
+                # Show context after
+                for ctx_line in match.context_after:
+                    text = Text("  ")
+                    text.append(ctx_line, style="dim")
+                    console.print(text)
+
+                console.print()
+
+            if result.truncated:
+                console.print(
+                    "[yellow]Results truncated. Use --max-results to see more.[/yellow]"
+                )
+
+    except Exception as e:
+        if output_json:
+            console.print(json_module.dumps({"success": False, "error": str(e)}))
+        else:
+            console.print("[red]Error: Failed to perform regex search[/red]")
+            console.print(f"[red]{e}[/red]")
+            import traceback
+
+            console.print(traceback.format_exc(), style="dim red")
+        sys.exit(1)
+
+
+def main():
+    """Main entry point."""
+    try:
+        cli(obj={})
+    except KeyboardInterrupt:
+        console.print("\n❌ Interrupted by user", style="red")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"❌ Unexpected error: {str(e)}", style="red", markup=False)
+        sys.exit(1)
+
+
+@cli.command("start")
+@click.pass_context
+@require_mode("local")
+def start_command(ctx):
+    """Start CIDX daemon manually.
+
+    Only available when daemon.enabled: true in config.
+    Normally daemon auto-starts on first query, but this allows
+    explicit control for debugging or pre-loading.
+    """
+    exit_code = cli_daemon_lifecycle.start_daemon_command()
+    sys.exit(exit_code)
+
+
+@cli.command("stop")
+@click.pass_context
+@require_mode("local")
+def stop_command(ctx):
+    """Stop CIDX daemon gracefully.
+
+    Gracefully shuts down daemon:
+    - Stops any active watch
+    - Clears cache
+    - Closes connections
+    - Exits daemon process
+    """
+    exit_code = cli_daemon_lifecycle.stop_daemon_command()
+    sys.exit(exit_code)
+
+
+@cli.command("watch-stop")
+@click.pass_context
+@require_mode("local")
+def watch_stop_command(ctx):
+    """Stop watch mode running in daemon.
+
+    Only available in daemon mode. Use this to stop watch
+    without stopping the entire daemon. Queries continue to work.
+    """
+    exit_code = cli_daemon_lifecycle.watch_stop_command()
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# SCIP commands registered via cli_scip import

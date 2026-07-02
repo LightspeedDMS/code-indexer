@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Introduction to Astronomy</title>
+    <script src="https://unpkg.com/htmx.org@1.9.0"></script>
+</head>
+<body>
+    <h1>Introduction to Astronomy</h1>
+
+    <p>Explore the wonders of the night sky and our place in the cosmos.</p>
+
+    <h2>The Solar System</h2>
+
+    <div hx-get="/api/planets" hx-trigger="load">
+        <p>Our solar system consists of eight planets orbiting the Sun:</p>
+
+        <ul>
+            <li><strong>Mercury</strong>: Smallest planet, closest to the Sun</li>
+            <li><strong>Venus</strong>: Hottest planet due to greenhouse effect</li>
+            <li><strong>Earth</strong>: The only known planet with liquid water on its surface</li>
+            <li><strong>Mars</strong>: The Red Planet, target of many exploration missions</li>
+            <li><strong>Jupiter</strong>: Largest planet, famous for its Great Red Spot</li>
+            <li><strong>Saturn</strong>: Known for its spectacular ring system</li>
+            <li><strong>Uranus</strong>: Rotates on its side, unique among planets</li>
+            <li><strong>Neptune</strong>: Windiest planet with storms reaching 1,200 mph</li>
+        </ul>
+    </div>
+
+    <h2>Celestial Navigation Chart</h2>
+
+    <img src="../../images/api-flow.jpg" alt="Star Chart Reference">
+
+    <h2>Observing Tips</h2>
+
+    <div hx-get="/api/conditions" hx-trigger="revealed">
+        <h3>Best Viewing Conditions</h3>
+        <p>For optimal stargazing experience:</p>
+        <ul>
+            <li>Find a location away from city lights (dark sky sites)</li>
+            <li>Allow 20-30 minutes for your eyes to adapt to darkness</li>
+            <li>Check the moon phase - new moon provides darkest skies</li>
+            <li>Use red flashlights to preserve night vision</li>
+        </ul>
+
+        <h3>Seasonal Highlights</h3>
+        <p>Each season offers unique celestial events:</p>
+        <ul>
+            <li><strong>Spring</strong>: Leo constellation, galaxies in Virgo cluster</li>
+            <li><strong>Summer</strong>: Milky Way at its brightest, Perseid meteor shower</li>
+            <li><strong>Autumn</strong>: Andromeda Galaxy visible to naked eye</li>
+            <li><strong>Winter</strong>: Orion constellation, brightest stars of the year</li>
+        </ul>
+    </div>
+</body>
+</html>

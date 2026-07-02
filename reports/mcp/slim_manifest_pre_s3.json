@@ -1,0 +1,841 @@
+{
+  "branch_cut_sha": "2cbc3372",
+  "tool_count": 167,
+  "tools": [
+    {
+      "name": "activate_repository",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/activate_repository.md"
+    },
+    {
+      "name": "add_golden_repo",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/add_golden_repo.md"
+    },
+    {
+      "name": "add_golden_repo_index",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/add_golden_repo_index.md"
+    },
+    {
+      "name": "add_member_to_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/add_member_to_group.md"
+    },
+    {
+      "name": "add_repos_to_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/add_repos_to_group.md"
+    },
+    {
+      "name": "admin_create_user_mcp_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_create_user_mcp_credential.md"
+    },
+    {
+      "name": "admin_delete_user_mcp_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_delete_user_mcp_credential.md"
+    },
+    {
+      "name": "admin_list_all_mcp_credentials",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_list_all_mcp_credentials.md"
+    },
+    {
+      "name": "admin_list_system_mcp_credentials",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_list_system_mcp_credentials.md"
+    },
+    {
+      "name": "admin_list_user_mcp_credentials",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_list_user_mcp_credentials.md"
+    },
+    {
+      "name": "admin_logs_export",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_logs_export.md"
+    },
+    {
+      "name": "admin_logs_query",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/admin_logs_query.md"
+    },
+    {
+      "name": "authenticate",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/authenticate.md"
+    },
+    {
+      "name": "browse_directory",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/browse_directory.md"
+    },
+    {
+      "name": "bulk_add_provider_index",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/bulk_add_provider_index.md"
+    },
+    {
+      "name": "bulk_remove_repos_from_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/bulk_remove_repos_from_group.md"
+    },
+    {
+      "name": "change_golden_repo_branch",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/change_golden_repo_branch.md"
+    },
+    {
+      "name": "check_health",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/check_health.md"
+    },
+    {
+      "name": "check_hnsw_health",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/check_hnsw_health.md"
+    },
+    {
+      "name": "cidx_fetch_cached_payload",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/cidx_fetch_cached_payload.md"
+    },
+    {
+      "name": "cidx_quick_reference",
+      "category": "guides",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/guides/cidx_quick_reference.md"
+    },
+    {
+      "name": "cidx_ssh_key_assign_host",
+      "category": "ssh",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/ssh/cidx_ssh_key_assign_host.md"
+    },
+    {
+      "name": "cidx_ssh_key_create",
+      "category": "ssh",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/ssh/cidx_ssh_key_create.md"
+    },
+    {
+      "name": "cidx_ssh_key_delete",
+      "category": "ssh",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/ssh/cidx_ssh_key_delete.md"
+    },
+    {
+      "name": "cidx_ssh_key_list",
+      "category": "ssh",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/ssh/cidx_ssh_key_list.md"
+    },
+    {
+      "name": "cidx_ssh_key_show_public",
+      "category": "ssh",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/ssh/cidx_ssh_key_show_public.md"
+    },
+    {
+      "name": "close_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/close_pull_request.md"
+    },
+    {
+      "name": "comment_on_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/comment_on_pull_request.md"
+    },
+    {
+      "name": "configure_git_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/configure_git_credential.md"
+    },
+    {
+      "name": "create_api_key",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/create_api_key.md"
+    },
+    {
+      "name": "create_file",
+      "category": "files",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/files/create_file.md"
+    },
+    {
+      "name": "create_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/create_group.md"
+    },
+    {
+      "name": "create_mcp_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/create_mcp_credential.md"
+    },
+    {
+      "name": "create_memory",
+      "category": "memory",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/memory/create_memory.md"
+    },
+    {
+      "name": "create_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/create_pull_request.md"
+    },
+    {
+      "name": "create_user",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/create_user.md"
+    },
+    {
+      "name": "cs_check_health",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/cs_check_health.md"
+    },
+    {
+      "name": "cs_list_repositories",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/cs_list_repositories.md"
+    },
+    {
+      "name": "cs_register_repository",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/cs_register_repository.md"
+    },
+    {
+      "name": "deactivate_repository",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/deactivate_repository.md"
+    },
+    {
+      "name": "delete_api_key",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/delete_api_key.md"
+    },
+    {
+      "name": "delete_file",
+      "category": "files",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/files/delete_file.md"
+    },
+    {
+      "name": "delete_git_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/delete_git_credential.md"
+    },
+    {
+      "name": "delete_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/delete_group.md"
+    },
+    {
+      "name": "delete_mcp_credential",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/delete_mcp_credential.md"
+    },
+    {
+      "name": "delete_memory",
+      "category": "memory",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/memory/delete_memory.md"
+    },
+    {
+      "name": "dependency_analysis_workflow",
+      "category": "guides",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/guides/dependency_analysis_workflow.md"
+    },
+    {
+      "name": "depmap_find_consumers",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_find_consumers.md"
+    },
+    {
+      "name": "depmap_get_cross_domain_graph",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_get_cross_domain_graph.md"
+    },
+    {
+      "name": "depmap_get_domain_summary",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_get_domain_summary.md"
+    },
+    {
+      "name": "depmap_get_hub_domains",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_get_hub_domains.md"
+    },
+    {
+      "name": "depmap_get_repo_domains",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_get_repo_domains.md"
+    },
+    {
+      "name": "depmap_get_stale_domains",
+      "category": "depmap",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/depmap/depmap_get_stale_domains.md"
+    },
+    {
+      "name": "directory_tree",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/directory_tree.md"
+    },
+    {
+      "name": "discover_repositories",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/discover_repositories.md"
+    },
+    {
+      "name": "edit_file",
+      "category": "files",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/files/edit_file.md"
+    },
+    {
+      "name": "edit_memory",
+      "category": "memory",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/memory/edit_memory.md"
+    },
+    {
+      "name": "end_trace",
+      "category": "tracing",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/tracing/end_trace.md"
+    },
+    {
+      "name": "enter_write_mode",
+      "category": "files",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/files/enter_write_mode.md"
+    },
+    {
+      "name": "execute_delegation_function",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/execute_delegation_function.md"
+    },
+    {
+      "name": "execute_open_delegation",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/execute_open_delegation.md"
+    },
+    {
+      "name": "exit_write_mode",
+      "category": "files",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/files/exit_write_mode.md"
+    },
+    {
+      "name": "first_time_user_guide",
+      "category": "guides",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/guides/first_time_user_guide.md"
+    },
+    {
+      "name": "get_all_repositories_status",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_all_repositories_status.md"
+    },
+    {
+      "name": "get_branches",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_branches.md"
+    },
+    {
+      "name": "get_cached_content",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/get_cached_content.md"
+    },
+    {
+      "name": "get_file_content",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/get_file_content.md"
+    },
+    {
+      "name": "get_global_config",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_global_config.md"
+    },
+    {
+      "name": "get_golden_repo_indexes",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_golden_repo_indexes.md"
+    },
+    {
+      "name": "get_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/get_group.md"
+    },
+    {
+      "name": "get_index_status",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_index_status.md"
+    },
+    {
+      "name": "get_job_details",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/get_job_details.md"
+    },
+    {
+      "name": "get_job_statistics",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/get_job_statistics.md"
+    },
+    {
+      "name": "get_maintenance_status",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/get_maintenance_status.md"
+    },
+    {
+      "name": "get_provider_health",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_provider_health.md"
+    },
+    {
+      "name": "get_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/get_pull_request.md"
+    },
+    {
+      "name": "get_repository_statistics",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_repository_statistics.md"
+    },
+    {
+      "name": "get_repository_status",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/get_repository_status.md"
+    },
+    {
+      "name": "get_tool_categories",
+      "category": "guides",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/guides/get_tool_categories.md"
+    },
+    {
+      "name": "git_amend",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_amend.md"
+    },
+    {
+      "name": "git_blame",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_blame.md"
+    },
+    {
+      "name": "git_branch_create",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_branch_create.md"
+    },
+    {
+      "name": "git_branch_delete",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_branch_delete.md"
+    },
+    {
+      "name": "git_branch_list",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_branch_list.md"
+    },
+    {
+      "name": "git_branch_switch",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_branch_switch.md"
+    },
+    {
+      "name": "git_checkout_file",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_checkout_file.md"
+    },
+    {
+      "name": "git_clean",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_clean.md"
+    },
+    {
+      "name": "git_commit",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_commit.md"
+    },
+    {
+      "name": "git_conflict_status",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_conflict_status.md"
+    },
+    {
+      "name": "git_diff",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_diff.md"
+    },
+    {
+      "name": "git_fetch",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_fetch.md"
+    },
+    {
+      "name": "git_file_at_revision",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_file_at_revision.md"
+    },
+    {
+      "name": "git_file_history",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_file_history.md"
+    },
+    {
+      "name": "git_log",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_log.md"
+    },
+    {
+      "name": "git_mark_resolved",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_mark_resolved.md"
+    },
+    {
+      "name": "git_merge",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_merge.md"
+    },
+    {
+      "name": "git_merge_abort",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_merge_abort.md"
+    },
+    {
+      "name": "git_pull",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_pull.md"
+    },
+    {
+      "name": "git_push",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_push.md"
+    },
+    {
+      "name": "git_reset",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_reset.md"
+    },
+    {
+      "name": "git_search_commits",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_search_commits.md"
+    },
+    {
+      "name": "git_search_diffs",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_search_diffs.md"
+    },
+    {
+      "name": "git_show_commit",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_show_commit.md"
+    },
+    {
+      "name": "git_stage",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_stage.md"
+    },
+    {
+      "name": "git_stash",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_stash.md"
+    },
+    {
+      "name": "git_status",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_status.md"
+    },
+    {
+      "name": "git_unstage",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/git_unstage.md"
+    },
+    {
+      "name": "github_actions_cancel_run",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_cancel_run.md"
+    },
+    {
+      "name": "github_actions_get_job_logs",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_get_job_logs.md"
+    },
+    {
+      "name": "github_actions_get_run",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_get_run.md"
+    },
+    {
+      "name": "github_actions_list_runs",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_list_runs.md"
+    },
+    {
+      "name": "github_actions_retry_run",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_retry_run.md"
+    },
+    {
+      "name": "github_actions_search_logs",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/github_actions_search_logs.md"
+    },
+    {
+      "name": "gitlab_ci_cancel_pipeline",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_cancel_pipeline.md"
+    },
+    {
+      "name": "gitlab_ci_get_job_logs",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_get_job_logs.md"
+    },
+    {
+      "name": "gitlab_ci_get_pipeline",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_get_pipeline.md"
+    },
+    {
+      "name": "gitlab_ci_list_pipelines",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_list_pipelines.md"
+    },
+    {
+      "name": "gitlab_ci_retry_pipeline",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_retry_pipeline.md"
+    },
+    {
+      "name": "gitlab_ci_search_logs",
+      "category": "cicd",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/cicd/gitlab_ci_search_logs.md"
+    },
+    {
+      "name": "global_repo_status",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/global_repo_status.md"
+    },
+    {
+      "name": "list_api_keys",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_api_keys.md"
+    },
+    {
+      "name": "list_delegation_functions",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_delegation_functions.md"
+    },
+    {
+      "name": "list_files",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/list_files.md"
+    },
+    {
+      "name": "list_git_credentials",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_git_credentials.md"
+    },
+    {
+      "name": "list_global_repos",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/list_global_repos.md"
+    },
+    {
+      "name": "list_groups",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_groups.md"
+    },
+    {
+      "name": "list_mcp_credentials",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_mcp_credentials.md"
+    },
+    {
+      "name": "list_pull_request_comments",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/list_pull_request_comments.md"
+    },
+    {
+      "name": "list_pull_requests",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/list_pull_requests.md"
+    },
+    {
+      "name": "list_repo_categories",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/list_repo_categories.md"
+    },
+    {
+      "name": "list_repositories",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/list_repositories.md"
+    },
+    {
+      "name": "list_users",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/list_users.md"
+    },
+    {
+      "name": "manage_composite_repository",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/manage_composite_repository.md"
+    },
+    {
+      "name": "manage_provider_indexes",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/manage_provider_indexes.md"
+    },
+    {
+      "name": "merge_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/merge_pull_request.md"
+    },
+    {
+      "name": "poll_delegation_job",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/poll_delegation_job.md"
+    },
+    {
+      "name": "query_audit_logs",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/query_audit_logs.md"
+    },
+    {
+      "name": "refresh_golden_repo",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/refresh_golden_repo.md"
+    },
+    {
+      "name": "regex_search",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/regex_search.md"
+    },
+    {
+      "name": "remove_golden_repo",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/remove_golden_repo.md"
+    },
+    {
+      "name": "remove_member_from_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/remove_member_from_group.md"
+    },
+    {
+      "name": "remove_repo_from_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/remove_repo_from_group.md"
+    },
+    {
+      "name": "scip_callchain",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_callchain.md"
+    },
+    {
+      "name": "scip_cleanup_history",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_cleanup_history.md"
+    },
+    {
+      "name": "scip_cleanup_status",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_cleanup_status.md"
+    },
+    {
+      "name": "scip_cleanup_workspaces",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_cleanup_workspaces.md"
+    },
+    {
+      "name": "scip_context",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_context.md"
+    },
+    {
+      "name": "scip_definition",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_definition.md"
+    },
+    {
+      "name": "scip_dependencies",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_dependencies.md"
+    },
+    {
+      "name": "scip_dependents",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_dependents.md"
+    },
+    {
+      "name": "scip_impact",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_impact.md"
+    },
+    {
+      "name": "scip_pr_history",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_pr_history.md"
+    },
+    {
+      "name": "scip_references",
+      "category": "scip",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/scip/scip_references.md"
+    },
+    {
+      "name": "search_code",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/search_code.md"
+    },
+    {
+      "name": "set_global_config",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/set_global_config.md"
+    },
+    {
+      "name": "set_session_impersonation",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/set_session_impersonation.md"
+    },
+    {
+      "name": "start_trace",
+      "category": "tracing",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/tracing/start_trace.md"
+    },
+    {
+      "name": "switch_branch",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/switch_branch.md"
+    },
+    {
+      "name": "sync_repository",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/sync_repository.md"
+    },
+    {
+      "name": "trigger_dependency_analysis",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/trigger_dependency_analysis.md"
+    },
+    {
+      "name": "trigger_reindex",
+      "category": "repos",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/repos/trigger_reindex.md"
+    },
+    {
+      "name": "update_group",
+      "category": "admin",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/admin/update_group.md"
+    },
+    {
+      "name": "update_pull_request",
+      "category": "git",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/git/update_pull_request.md"
+    },
+    {
+      "name": "wiki_article_analytics",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/wiki_article_analytics.md"
+    },
+    {
+      "name": "xray_dump_ast",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/xray_dump_ast.md"
+    },
+    {
+      "name": "xray_explore",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/xray_explore.md"
+    },
+    {
+      "name": "xray_search",
+      "category": "search",
+      "path": "/home/jsbattig/Dev/code-indexer-clone-3/src/code_indexer/server/mcp/tool_docs/search/xray_search.md"
+    }
+  ]
+}

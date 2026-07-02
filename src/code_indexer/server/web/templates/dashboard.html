@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <h1>Dashboard</h1>
+    <div class="dashboard-actions">
+        <button
+            id="refresh-btn"
+            class="outline"
+            onclick="refreshAll()"
+        >
+            Refresh
+        </button>
+    </div>
+</div>
+
+<p>Welcome, <strong>{{ username }}</strong>!</p>
+
+<!-- System Health Section - Story #30 AC5: HTMX lazy-load -->
+<section id="health-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-health"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <!-- Loading indicator shown until HTMX fetches health data -->
+    <div class="loading-indicator">
+        <h2>System Health</h2>
+        <p>Loading health data...</p>
+    </div>
+</section>
+
+<!-- Statistics Section -->
+<section id="stats-section" class="dashboard-section">
+    {% include "partials/dashboard_stats.html" %}
+</section>
+
+<script src="/admin/static/js/chart.min.js?v={{ static_version }}"></script>
+<script>
+let autoRefreshInterval = null;
+let _refreshInProgress = false;
+
+// Shared fetch options - used by refreshAll() and dropdown handlers in dashboard_stats.html
+var _fetchOpts = { credentials: 'same-origin' };
+
+// ---- Persistent carousel state (survives #health-section DOM replacements) ----
+// Timestamp-based cycling: the 2s DOM refresh drives advancement instead of setInterval.
+var _nmCurrent = 0;          // currently visible slide index
+var _nmPinned = false;       // true when user clicked a dot to lock the slide
+var _nmLastAdvance = 0;      // Date.now() when we last auto-advanced
+var _NM_CYCLE_MS = 10000;    // auto-cycle interval (10 seconds)
+var _NM_STALE_MS = 30000;    // age threshold for "stale" badge
+
+// Called after dashboard_health.html partial is injected into the DOM (every 2s).
+// Checks if 5s elapsed since last advance and moves to next slide if so.
+window.nmRebindCarousel = function() {
+    var carousel = document.getElementById('nm-carousel');
+    if (!carousel) return;
+
+    var nodeCount = parseInt(carousel.dataset.nodeCount, 10);
+    if (isNaN(nodeCount) || nodeCount < 1) return;
+
+    // Clamp current index in case node count changed
+    if (_nmCurrent >= nodeCount) _nmCurrent = 0;
+
+    // Auto-advance: if not pinned, >1 node, and enough time elapsed
+    if (nodeCount > 1 && !_nmPinned) {
+        var now = Date.now();
+        if (_nmLastAdvance === 0) _nmLastAdvance = now; // first call
+        if (now - _nmLastAdvance >= _NM_CYCLE_MS) {
+            _nmCurrent = (_nmCurrent + 1) % nodeCount;
+            _nmLastAdvance = now;
+        }
+    }
+
+    // Show the current slide and update dots/stale markers
+    _nmShowSlide(_nmCurrent, nodeCount);
+
+    // Restore pinned dot styling
+    if (_nmPinned) {
+        var dot = document.getElementById('nm-dot-' + _nmCurrent);
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+        if (dot) dot.classList.add('pinned');
+    }
+};
+
+function _nmShowSlide(idx, nodeCount) {
+    for (var i = 0; i < nodeCount; i++) {
+        var slide = document.getElementById('nm-slide-' + i);
+        var dot = document.getElementById('nm-dot-' + i);
+        if (slide) slide.style.display = (i === idx) ? '' : 'none';
+        if (dot) dot.classList.toggle('active', i === idx);
+    }
+    _nmCurrent = idx;
+    var label = document.getElementById('nm-node-label');
+    var activeSlide = document.getElementById('nm-slide-' + idx);
+    if (label && activeSlide) label.textContent = '(' + activeSlide.dataset.nodeId + ')';
+    // Update stale markers
+    var now = Date.now();
+    for (var j = 0; j < nodeCount; j++) {
+        var s = document.getElementById('nm-slide-' + j);
+        var badge = document.getElementById('nm-stale-' + j);
+        if (!s || !badge) continue;
+        var ts = s.dataset.timestamp;
+        if (!ts) { badge.style.display = 'none'; continue; }
+        try {
+            badge.style.display = (now - new Date(ts).getTime() > _NM_STALE_MS) ? '' : 'none';
+        } catch(e) { badge.style.display = 'none'; }
+    }
+}
+
+// Global pin handler called by dot onclick
+window.nmPinSlide = function(idx) {
+    var carousel = document.getElementById('nm-carousel');
+    if (!carousel) return;
+    var nodeCount = parseInt(carousel.dataset.nodeCount, 10);
+
+    if (_nmPinned && _nmCurrent === idx) {
+        // Toggle off: unpin and resume auto-cycling
+        _nmPinned = false;
+        _nmLastAdvance = Date.now(); // reset timer so it doesn't immediately advance
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+    } else {
+        // Pin this slide
+        _nmPinned = true;
+        _nmShowSlide(idx, nodeCount);
+        document.querySelectorAll('.nm-dot').forEach(function(d) { d.classList.remove('pinned'); });
+        var dot = document.getElementById('nm-dot-' + idx);
+        if (dot) dot.classList.add('pinned');
+    }
+};
+// ---- End persistent carousel state ----
+
+// Cache of last fetched HTML per target — used to skip redundant DOM updates
+// that cause chart flicker when data hasn't changed.
+var _lastContent = {};
+
+// Shared response handler - used by refreshAll() and dropdown handlers in dashboard_stats.html
+function applyResponse(response, targetSelector) {
+    if (response.status === 401) {
+        if (!window._cidxRedirecting) {
+            window._cidxRedirecting = true;
+            window.location.href = '/login';
+            setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+        }
+        return Promise.resolve();
+    }
+    if (response.ok) {
+        return response.text().then(function(html) {
+            var el = document.querySelector(targetSelector);
+            if (el) {
+                // Skip DOM update if fetched content is identical to last
+                // poll — prevents chart flicker and unnecessary script
+                // re-execution when underlying data hasn't changed.
+                if (_lastContent[targetSelector] === html) {
+                    return;
+                }
+                _lastContent[targetSelector] = html;
+                el.innerHTML = html;
+                // Re-execute inline scripts (innerHTML doesn't run them)
+                var scripts = el.querySelectorAll('script');
+                scripts.forEach(function(oldScript) {
+                    var newScript = document.createElement('script');
+                    newScript.textContent = oldScript.textContent;
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                });
+                // After health section refresh, rebind carousel with persistent state
+                if (targetSelector === '#health-section') {
+                    if (typeof window.nmRebindCarousel === 'function') {
+                        window.nmRebindCarousel();
+                    }
+                }
+            }
+        });
+    }
+    return Promise.resolve();
+}
+
+function refreshAll() {
+    // Re-entrancy guard: skip if a refresh cycle is already in flight
+    if (_refreshInProgress) return;
+    _refreshInProgress = true;
+
+    // Story #69: Surgical DOM updates - refresh ONLY data sections, not dropdowns
+
+    // Preserve current filter selections during auto-refresh
+    // Use optional chaining because elements may not exist on first page load
+    const timeFilter = document.getElementById('time-filter')?.value || '24h';
+    const apiFilter = document.getElementById('api-filter')?.value || '900';
+
+    // Fire all requests in parallel using fetch(); use Promise.allSettled so
+    // one failure does not block the others from updating the DOM.
+    // Story #69: Granular refresh targets - dropdowns stay untouched
+    // Story #201: Recent Activity hardcoded to 24h (no dropdown)
+    // All dashboard sections refresh together on the 2s cycle so per-user
+    // totals stay in sync with the aggregate metrics (Bug #678/#679 follow-up).
+    Promise.allSettled([
+        fetch('/admin/partials/dashboard-health', _fetchOpts),
+        fetch(`/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, _fetchOpts),
+        fetch('/admin/partials/dashboard-recent-jobs?recent_filter=24h', _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-per-user?api_filter=${apiFilter}`, _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-chart?api_filter=${apiFilter}`, _fetchOpts)
+    ]).then(function(results) {
+        var updates = [];
+        var targets = [
+            '#health-section',
+            '#job-counts-data',
+            '#recent-jobs-tbody',
+            '#api-metrics-data',
+            '#api-per-user-section',
+            '#api-chart-section'
+        ];
+        results.forEach(function(result, i) {
+            if (result.status === 'fulfilled') {
+                updates.push(applyResponse(result.value, targets[i]));
+            }
+        });
+        return Promise.all(updates);
+    }).finally(function() {
+        _refreshInProgress = false;
+    });
+}
+
+// Start auto-refresh on page load (every 2 seconds for responsive metrics)
+document.addEventListener('DOMContentLoaded', function() {
+    autoRefreshInterval = setInterval(refreshAll, 2000);
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', function() {
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+    }
+});
+</script>
+{% endblock %}

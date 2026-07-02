@@ -1,0 +1,389 @@
+# Code-Indexer (CIDX) Project Instructions
+
+## Sandbox Rule
+
+NEVER modify files outside this project's working directory. For running tests use `PYTHONPATH=<this-project-root>/src pytest ...`. See memory: `feedback_never_touch_other_repos.md`.
+
+## Documentation Standards
+
+No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.
+
+---
+
+## Credentials and Access
+
+- **Credentials**: ALWAYS read from `.local-testing` (gitignored, project root) for SSH usernames/passwords, CIDX admin credentials, API keys (Langfuse, GitHub, GitLab, Anthropic, Voyage), MCPB deployment details, E2E test credentials. Declare as secret file before reading. Never guess.
+- **SSH**: NEVER use `ssh` via Bash -- use MCP SSH tools only. See memory: `feedback_ssh_mcp_only.md`.
+- **SSH server restart**: systemd only -- NEVER `kill -15 && nohup ...`. See memory: `feedback_ssh_systemd_restart.md`.
+- **Admin password (dev AND staging)**: NEVER change. Breaks MCPB auto-login, E2E automation, REST/MCP testing, encrypted credentials on client machines. Recovery requires DB bypass on every client. See memory: `feedback_admin_password_sacred.md`.
+- **Port config**: NEVER change cidx-server, HAProxy, or firewall ports. See memory: `feedback_port_config_locked.md`.
+- **Production access**: NEVER deploy or test on production until the user explicitly approves ("commit and push to master" or "deploy manually to production server").
+
+---
+
+## Git Branching and Deployment
+
+### Branch Structure
+
+| Branch | Purpose | Direct Commits | Auto-deploy |
+|--------|---------|----------------|-------------|
+| `development` | Active work, MINOR version bumps | YES | No |
+| `staging` | Staging env | NO (merge only) | staging server |
+| `master` | Production | HOTFIX ONLY (see below) | production |
+
+Tags transfer automatically during merges. Before ANY work: `git branch --show-current`. OK on `development`/`feature/*`/`bugfix/*`. On `staging` or `master` -- STOP, ask user.
+
+### Normal Workflow: dev -> staging -> master
+
+Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), tag, push. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
+
+### Hotfix Workflow: surgical fix directly on master
+
+**ABSOLUTE RULE**: A hotfix NEVER merges development into master. Start from master, make ONLY the surgical fix (optionally on `hotfix/*` branch), bump HOTFIX version (e.g. 10.5.0 -> 10.5.1), tag, push master. Then back-merge master INTO development. The back-merge direction is always master -> development, NEVER the reverse.
+
+### Push-to-master Authorization (HIGHEST SEVERITY)
+
+NEVER push to `master` without explicit user authorization in the **current conversation**.
+
+**Counts as authorization**: "push to master", "promote to production", "deploy to production", "commit and push to master", "merge to master and push".
+
+**Does NOT count**: completing a story or bug fix, "deploy to staging", prior-conversation authorization, assumed authorization because "the work is done".
+
+**Default on work completion**: push to `development` (with version bump and tag), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
+
+### Security-Sensitive Commit Discipline (Story #929)
+
+Security-sensitive changes (permission-model edits, prompt-template edits for capability-granted agents, auth-boundary changes) MUST be isolated in their own commit -- never bundled with unrelated work. Raise in code review when violated.
+
+---
+
+## Testing
+
+### Three Suites -- All Must Pass Before Work Is Done
+
+| Suite | Scope | When Required | Time |
+|-------|-------|---------------|------|
+| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
+| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
+| `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
+
+`fast-automation.sh` does NOT run server tests -- it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
+
+`e2e-automation.sh` (Epic #700) is the final regression gate. No mocks -- real CLI subprocess, FastAPI server, VoyageAI, golden-repo registration. Non-negotiable for epic/story completion. Pure doc/config edits may waive with explicit user approval.
+
+### Hierarchy
+
+1. Targeted tests (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
+2. Manual testing
+3. `fast-automation.sh` (zero failures, under 10 min -- MANDATORY 600000ms timeout)
+4. `server-fast-automation.sh` when server code touched
+5. `e2e-automation.sh` (final gate)
+
+### fast-automation.sh Remediation
+
+- **NEVER** "continue monitoring" after 10-min timeout -- the process is dead
+- Thresholds: `<5s` target, `>10s` investigate, `>30s` MUST exclude via `@pytest.mark.slow`
+- Fix root cause, not symptoms. Failures on untouched code = regression.
+
+### e2e-automation.sh Usage
+
+```bash
+./e2e-automation.sh              # All 5 phases
+./e2e-automation.sh --phase 1    # CLI standalone
+./e2e-automation.sh --phase 2    # CLI daemon
+./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
+./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
+./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
+```
+
+Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing.
+
+### Post-E2E Log Audit (MANDATORY)
+
+After every E2E test, query the server log store for ERROR/WARNING entries. Use `sqlite3 ~/.cidx-server/logs.db` (solo) or `psql "$POSTGRES_DSN"` (cluster) to check `logs` table for `level IN ('ERROR','WARNING')`. Zero new entries attributable to your changes before declaring done.
+
+### Lint and CI
+
+```bash
+./lint.sh                         # ruff, black, mypy
+git push && gh run list --limit 5
+gh run view <run-id> --log-failed
+ruff check --fix src/ tests/
+```
+
+Zero tolerance -- never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
+
+Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`. CI gate is full `./lint.sh` (ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
+
+---
+
+## Critical Architecture Invariants
+
+### Query Is Everything
+
+Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
+
+### X-Ray Module Lazy-Load Invariant (Epic #968 / Story #969)
+
+`src/code_indexer/xray/` wraps tree-sitter. Lazy-load discipline: `tree_sitter` and `tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__()`. CLI startup unaffected (~0.57s, budget 2.0s).
+
+**CI gate**: `tests/unit/xray/test_lazy_load.py` -- SUBPROCESS test asserting tree-sitter absent from `sys.modules` after CLI import. BLOCKING.
+
+**Key invariants**:
+- Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
+- `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present).
+- 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform optional 11th.
+- **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
+
+### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
+
+Three defense layers: AST whitelist (Layer 1) + stripped builtins (Layer 2) + multiprocessing isolation (Layer 3). Dunder-access block via 24-name `DUNDER_ATTR_BLOCKLIST`. Timeout: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), +1.0s SIGKILL grace. Pipe read BEFORE `is_alive()`. NO `signal.alarm` (FastAPI worker threads).
+
+-> Full reference: `docs/xray-sandbox.md`
+
+### X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
+
+Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRayNode` ASTs.
+
+**Key invariants**:
+- v10.4.0 evaluator contract: 6 globals (`node`, `root`, `source`, `lang`, `file_path`, `match_positions`). Must return `{"matches": [...], "value": <any>}` -- bool REJECTED. Legacy `match_byte_offset`/`match_line_number`/`match_line_content` always `None`.
+- v10.4.0 allowed nodes: Groups C (If/For/While/Break/Continue/Pass), D (Try/ExceptHandler/Raise), E (BinOp/operator), F (Import/ImportFrom with STDLIB_WHITELIST: re, collections, itertools, functools), G (FunctionDef/Lambda/arguments/arg). Still banned: `class`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`. SAFE_BUILTIN_NAMES: 34 entries (25 value + 9 exception types). Structured `ValidationResult` fields: `error_code`, `offending_construct`, `offending_line`.
+- Omni multi-repo: `repository_alias` accepts string, list-of-strings, or JSON array. Multi-repo returns `{job_ids, errors}`.
+- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `sandbox.validate()` before job submission. `await_seconds` in [0.0, 120.0] (warning logged at >30.0).
+- v10.5.0 evaluator extensions: `match_positions[i]["ast_node"]` (XRayNode at byte offset), `{"skip": True}` early bail-out, `{"file_role": str}` in return dict surfaced in `file_metadata[]`. XRayNode helpers: `is_in_try_resources()`, `enclosing_method_body()`, `node_at_byte_offset()`.
+
+-> Full reference: `docs/xray-architecture.md`
+
+### X-Ray Spawn-Driver Architecture (Bug #994)
+
+`XRaySearchEngine.run()` delegates Phase 2 evaluator execution to `PythonEvaluatorSandbox.run_batch()`, which spawns a clean driver process via `multiprocessing.get_context("spawn")`. The driver imports tree-sitter once, then forks per-file evaluators via `sandbox.run()` (inheriting the driver's clean ~50MB state, not the parent's potentially 2GB+ state).
+
+**Key invariants**:
+- Parent (main process): validates evaluator code, reads files, detects languages, builds file_specs -- NO tree-sitter in this path (just extension mapping).
+- Driver (spawn'd): imports tree-sitter + AstSearchEngine, creates PythonEvaluatorSandbox, processes files via ThreadPoolExecutor, each file fork-evaluated from driver state.
+- Results pipe back as `List[Tuple[matches, errors, meta]]`.
+- `_evaluate_file()` kept as lower-level test API -- existing unit tests call it directly.
+- `_run_inline_batch()` path still exists (activated by passing `ast_engine` to `run_batch`) -- reserved for in-process testing.
+
+### TOTP Step-Up Elevation (Epic #922 / Story #923)
+
+**Essential invariants** -- NEVER refactor these:
+- Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401).
+- Kill switch returns HTTP **503 NOT 403**.
+- Recovery codes (10, bcrypt-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
+- TOTP replay prevention via atomic CAS on `last_used_otp_timestamp`.
+
+-> Full reference: `docs/totp-elevation.md`
+
+### CLI Elevation Retry (Story #980)
+
+`with_elevation_retry` wraps ALL `cidx admin users` and `cidx admin groups` commands. On 403 `elevation_required` -> prompt TOTP -> `POST /auth/elevate` -> single retry. On `totp_setup_required`/`elevation_failed`: `sys.exit(1)`, no retry loop. Always unwrap via `body.get("detail", {})` (FastAPI wraps HTTPException detail).
+
+-> Full reference: `docs/totp-elevation.md`
+
+### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
+
+Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
+
+### Golden Repo Versioned Path (IMMUTABLE)
+
+- **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
+- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE -- served to queries
+
+Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+
+### Database Migrations Must Be Backward Compatible
+
+Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.
+
+- **Allowed**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, new nullable columns / columns with defaults
+- **NEVER**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE/COLUMN`, `ALTER COLUMN TYPE`, removing NOT NULL
+
+### No Environment Variables for Server Settings
+
+Runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never use `os.environ["CIDX_SETTING"]`.
+
+### Config Bootstrap vs Runtime (Story #578)
+
+`config.json` is BOOTSTRAP ONLY (keys needed before DB: `server_dir`, `host`, `port`, `workers`, `log_level`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster.node_id`). Runtime settings in database via Web UI. NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
+
+### Auto-Updater Idempotent Deployment
+
+All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
+
+### Pace-Maker Pre-Invocation Guard (Story #997)
+
+Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step 12 in `DeploymentExecutor.execute()`). Fresh install sets master switch OFF. Updates never touch config.
+
+**Config split**: `pace_maker_clone_path` (bootstrap, written by installer/auto-updater) + `pace_maker_mode` (runtime, Web UI, default `"disabled"`).
+
+**Three-way mode** (`enforce_pace_maker_config()` in `pace_maker_guard.py`): `"disabled"` = no-op, never touches pace-maker (safe for dev machines). `"on"` = enforce pacing-only mode (5h + weekly limits ON, everything else OFF). `"off"` = actively disable pace-maker master switch.
+
+**Two injection points**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()`. NOT CodexInvoker (Codex uses OpenAI credits). Guard is non-fatal -- all failures logged, never raised.
+
+### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
+
+**Key invariants** (see `docs/server-memory-invariants.md` for full detail):
+- Cleanup daemon: once per app lifetime, started/stopped in lifespan. NEVER piggyback in `get_connection()`, NEVER call `_cleanup_all_instances()` from daemon loop, NEVER remove `try/finally` in `BackgroundJobManager._execute_job`.
+- HNSW/FTS cache: `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. Hot-reload narrow-scoped to `index_cache_max_size_mb`/`fts_cache_max_size_mb`.
+- Omni fan-out: `omni_wildcard_expansion_cap` (50) + `omni_max_repos_per_search` (50). Fan-out passes `hnsw_cache=None`.
+- Bug #897 mitigations default ON: `enable_malloc_trim`, `enable_malloc_arena_max` (bootstrap-only flags).
+
+### Depmap Parser Module Split (Story #887, Epic #886)
+
+Four modules: mcp_parser, parser_tables, parser_hygiene, parser_graph. Anomalies self-classify via `AnomalyType.channel`. Dual API: `get_cross_domain_graph()` (legacy 2-tuple) and `get_cross_domain_graph_with_channels()` (4-tuple). Self-loop preservation unconditional.
+
+-> Full reference: `docs/depmap-parser-architecture.md`
+
+### cidx-meta backup contract (Story #926)
+
+Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only (`get_cidx_meta_path()`). NEVER inside `.versioned/` snapshots. Push failures deferred (after indexing); conflict failures short-circuit immediately. Conflict resolution via Claude CLI (600s timeout).
+
+-> Full reference: `docs/cidx-meta-backup.md`
+
+---
+
+## Operational Modes
+
+| Mode | Storage | Use Case |
+|------|---------|----------|
+| **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
+| **Daemon** | Same + in-memory cache, Unix socket at `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
+
+Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-3), 1536 (voyage-3-large).
+
+**Server mode**: separate deployment. Cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
+
+---
+
+## CIDX Quick Reference
+
+```bash
+cidx init                              # Create .code-indexer/
+cidx index                             # Index codebase
+cidx query "authentication" --quiet    # Semantic search
+cidx query "def.*" --fts --regex       # FTS/regex search
+cidx config --daemon && cidx start     # Daemon mode
+cidx watch / watch-stop / stop         # Daemon controls
+```
+
+**Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`.
+
+---
+
+## Performance Rules
+
+- **NEVER** add `time.sleep()` to production. See memory: `feedback_no_sleep_in_production.md`.
+- **Progress reporting is delicate** -- ask confirmation before ANY changes. See memory: `feedback_progress_reporting_delicate.md`.
+- **FTS lazy import**: NEVER import Tantivy/FTS at module level in CLI startup files. Use `TYPE_CHECKING` guards. Verify: `python3 -c "import sys; from src.code_indexer.cli import cli; print('tantivy' in sys.modules)"` (expect False).
+- **Smart indexer**: Always consider `--reconcile` (non git-aware) -- maintain feature parity.
+- **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
+- **Import budget**: current startup ~329ms.
+
+---
+
+## Embedding Provider (VoyageAI)
+
+Only provider in v8.0+. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-3 (1024 dims, default), voyage-3-large (1536 dims).
+
+---
+
+## Server Development
+
+### Local server
+
+```bash
+PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host <bind-address> --port 8000
+pkill -f "uvicorn code_indexer.server.app"
+```
+
+Common errors: `No module named 'code_indexer'` -> missing `PYTHONPATH=./src`. Exits immediately -> port in use.
+
+### E2E REST/MCP gotchas
+
+- Auth: **JSON body** (`-H "Content-Type: application/json"`), NOT form-urlencoded. Endpoint is `/auth/login`, NOT `/admin/login`.
+- Golden repo add: returns **HTTP 202** with `job_id` -- poll `/api/jobs/{job_id}`.
+- Query field: `"query_text"` (not `"query"`). Global repo suffix: `"-global"`.
+- Token expiry: 10 minutes. Timing display: CLI only, not MCP/REST.
+
+### Claude CLI Integration
+
+Two subsystems: **ClaudeCliManager** (queue-based thread pool, batch processing) and **ResearchAssistantService** (direct thread per request, interactive UX).
+
+**MCP self-registration**: SINGLE source of truth at `invoke_claude_cli` in `repo_analyzer.py` (Story #885 A10). NEVER add parallel `ensure_registered()` calls elsewhere.
+
+**Codex/Claude MCP registration**: Both use same persistent `client_id:client_secret` from `MCPCredentialManager`. Claude via HTTP header, Codex via TOML `env_http_headers` + `CIDX_MCP_AUTH_HEADER` env var. Three-step fallback chain in `build_codex_mcp_auth_header_provider()` handles Claude CLI absence (Bug #937). Hook parity NOT achieved (codex has no `PostToolUse` hook).
+
+---
+
+## Background Jobs (MANDATORY Checklist)
+
+Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin UI visibility. (2) Confirm frontend reporting pattern with user before implementing.
+
+---
+
+## MCP Tool Documentation
+
+Externalized to `src/code_indexer/server/mcp/tool_docs/` (YAML frontmatter + markdown). Adding a tool: (1) `TOOL_REGISTRY` in `tools.py`; (2) `python3 tools/verify_tool_docs.py` (CI gate). NEVER run `convert_tool_docs.py` -- see memory: `feedback_convert_tool_docs_destructive.md`.
+
+---
+
+## SCIP Index File Lifecycle
+
+`cidx scip generate` produces `index.scip.db` (SQLite) from intermediate `index.scip` (protobuf). **Original `.scip` deleted after conversion.** Only `.scip.db` remains.
+
+---
+
+## Version Bump
+
+### Versioning: MAJOR.MINOR.HOTFIX
+
+| Component | When | Where |
+|-----------|------|-------|
+| **MAJOR** (X) | User explicitly says "major version" | Resets Y.Z to 0.0 |
+| **MINOR** (Y) | Normal dev cycles on `development` | Resets Z to 0 |
+| **HOTFIX** (Z) | Production hotfixes on `master` only | Never on development |
+
+Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `README.md` badge (line 5), `CHANGELOG.md`, `docs/architecture.md`, `docs/query-guide.md`. Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
+
+DO NOT bump: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
+
+---
+
+## Python Compatibility
+
+Always `python3 -m pip install --break-system-packages` -- never bare `pip`.
+
+---
+
+## Fault Injection Harness (non-prod only, disabled by default)
+
+Bootstrap-only config: `fault_injection_enabled` + `fault_injection_nonprod_ack` (both false). Enabled without ack OR in production = `sys.exit(1)`. All outbound async HTTP MUST go through `HttpClientFactory` (anti-regression test in `test_http_client_factory.py`).
+
+-> Full reference: `docs/fault-injection-operator-guide.md`
+
+---
+
+## Memory Retrieval (Story #883)
+
+Parallel pipeline on semantic/hybrid search: VoyageAI vector -> HNSW -> floors -> hydration -> nudge. Kill switch: `memory_retrieval_enabled = false` (Web UI, immediate). Path confinement via `Path.relative_to()`. Body hydration faults drop candidate with WARNING, never raise.
+
+-> Full reference: `docs/memory-retrieval-operator-guide.md`
+
+---
+
+### Phase 3.7 Dep-Map Graph-Channel Repair (Epic #907)
+
+Repairs graph-channel anomalies (SELF_LOOP, MALFORMED_YAML, GARBAGE_DOMAIN_REJECTED deterministic; BIDIRECTIONAL_MISMATCH Claude-audited). Bootstrap flag `enable_graph_channel_repair` (default True). Append-only JSONL journal at `~/.cidx-server/dep_map_repair_journal.jsonl`. Prompt template externalized to `bidirectional_mismatch_audit.md`.
+
+-> Full reference: `docs/depmap-phase37-architecture.md`
+
+---
+
+## Further Reading
+
+- Architecture: `docs/architecture.md`
+- Server deployment: `docs/server-deployment.md`
+- Cluster architecture: `docs/cluster-architecture.md`
+- Fault injection: `docs/fault-injection-operator-guide.md`
+- Memory retrieval: `docs/memory-retrieval-operator-guide.md`

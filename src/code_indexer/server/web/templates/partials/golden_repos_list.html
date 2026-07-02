@@ -1,0 +1,899 @@
+<h2>Golden Repositories</h2>
+
+<button id="toggle-grouped" class="outline small" onclick="toggleGroupedView()" style="margin-bottom: 0.5rem;">Group by Category</button>
+
+<table class="golden-repos-table" role="grid">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Category</th>
+            <th>Global Alias</th>
+            <th>Version</th>
+            <th>Indexes</th>
+            <th>Path/URL</th>
+            <th style="min-width: 100px;">Status</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% if repos %}
+        {% for repo in repos %}
+        <tr data-repo-alias="{{ repo.alias }}" data-category-id="{{ repo.category_id or '' }}" data-category-name="{{ repo.category_name or 'Unassigned' }}" data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
+            <td>{{ repo.alias }}</td>
+            <td class="category-cell">
+                <select class="category-select" data-repo-alias="{{ repo.alias }}" data-original="{{ repo.category_id or '' }}" onchange="onCategoryChange(this)">
+                    <option value="" {% if not repo.category_id %}selected{% endif %}>Unassigned</option>
+                    {% for cat in categories %}
+                    <option value="{{ cat.id }}" {% if repo.category_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
+                    {% endfor %}
+                </select>
+                <button class="outline small category-ok" onclick="saveCategory('{{ repo.alias }}', this)" title="Save" style="display: none;">OK</button>
+                <button class="outline small category-cancel" onclick="cancelCategory(this)" title="Cancel" style="display: none;">Cancel</button>
+            </td>
+            <td>
+                {% if repo.global_alias %}
+                <code class="global-alias">{{ repo.global_alias }}</code>
+                {% else %}
+                <span class="no-global">-</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if repo.version %}
+                <code class="version-tag">{{ repo.version }}</code>
+                {% else %}
+                <span class="no-version">-</span>
+                {% endif %}
+            </td>
+            <td class="indexes-cell">
+                {% if repo.has_semantic %}<span class="index-badge semantic" title="Semantic search available">Semantic</span>{% endif %}
+                {% if repo.has_fts %}<span class="index-badge fts" title="Full-text search available">FTS</span>{% endif %}
+                {% if repo.has_temporal %}<span class="index-badge temporal" title="Git history search available">Temporal</span>{% endif %}
+                {% if repo.has_scip %}<span class="index-badge scip" title="SCIP code intelligence available">SCIP</span>{% endif %}
+                {% if not repo.has_semantic and not repo.has_fts and not repo.has_temporal and not repo.has_scip %}<span class="no-indexes">None</span>{% endif %}
+            </td>
+            <td class="repo-url" title="{{ repo.repo_url }}">{{ repo.repo_url }}</td>
+            <td class="status-cell" style="white-space: nowrap;">
+                {% if repo.status == 'indexing' %}
+                <span class="status-indicator status-indexing" title="Indexing in progress">
+                    <span class="spinner"></span> Indexing
+                </span>
+                {% elif repo.status == 'error' %}
+                <span class="status-indicator status-error" title="Error: {{ repo.error_message }}">
+                    Error
+                </span>
+                {% else %}
+                <span class="status-indicator status-ready">
+                    Ready
+                </span>
+                {% endif %}
+            </td>
+            <td class="actions-cell">
+                <button class="outline small" onclick="toggleDetails('{{ repo.alias }}')" title="View details">Details</button>
+                <button class="small" onclick="showActivateModal('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Activate for a user"{% endif %}>Activate</button>
+                <button class="outline small" onclick="confirmRefresh('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Re-index repository"{% endif %}>Refresh</button>
+                {% if not repo.repo_url.startswith('local://') %}
+                <button class="outline small warning" onclick="confirmForceResync('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Force reset and re-sync from remote (discards local divergence)"{% endif %}>Force Re-sync</button>
+                {% endif %}
+                <button class="outline small danger" onclick="confirmDelete('{{ repo.alias }}')" title="Delete repository">Delete</button>
+            </td>
+        </tr>
+
+        <!-- Details Row (hidden by default, content lazy-loaded via htmx.ajax on expand) -->
+        <tr id="details-{{ repo.alias }}" class="details-row" style="display: none;" data-loaded="">
+            <td id="details-content-{{ repo.alias }}" colspan="8"><!-- lazy-loaded via htmx.ajax -->
+            </td>
+        </tr>
+
+        <!-- Delete Form (hidden) -->
+        <form id="delete-form-{{ repo.alias }}" method="post" action="/admin/golden-repos/{{ repo.alias }}/delete" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        </form>
+
+        <!-- Refresh Form (hidden) -->
+        <form id="refresh-form-{{ repo.alias }}" method="post" action="/admin/golden-repos/{{ repo.alias }}/refresh" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        </form>
+
+        <!-- Force Re-sync Form (hidden) - Story #272 -->
+        {% if not repo.repo_url.startswith('local://') %}
+        <form id="force-resync-form-{{ repo.alias }}" method="post" action="/admin/golden-repos/{{ repo.alias }}/force-resync" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        </form>
+        {% endif %}
+        {% endfor %}
+        {% else %}
+        <tr>
+            <td colspan="8" class="no-data">No golden repositories configured. Click "Add Repository" to add one.</td>
+        </tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<script src="/admin/static/js/repo_categories.js?v={{ static_version }}"></script>
+<script>applyStoredGroupedView();</script>
+
+<style>
+/* Table layout to prevent horizontal overflow (Story #183) */
+.golden-repos-table {
+    table-layout: fixed;
+    width: 100%;
+}
+.golden-repos-table th:nth-child(1) { width: 15%; }  /* Name */
+.golden-repos-table th:nth-child(2) { width: 15%; }  /* Category */
+.golden-repos-table th:nth-child(3) { width: 14%; }  /* Global Alias */
+.golden-repos-table th:nth-child(4) { width: 7%; }   /* Version */
+.golden-repos-table th:nth-child(5) { width: 10%; }  /* Indexes */
+.golden-repos-table th:nth-child(6) { width: 14%; }  /* Path/URL */
+.golden-repos-table th:nth-child(7) { width: 5%; }   /* Status */
+.golden-repos-table th:nth-child(8) { width: 20%; }  /* Actions */
+
+/* Category column layout */
+.category-cell {
+    white-space: nowrap;
+    overflow: hidden;
+}
+.category-cell .category-select {
+    display: inline-block;
+    width: auto;
+    min-width: 80px;
+    max-width: 110px;
+    padding: 0.2rem 0.3rem;
+    margin: 0;
+    font-size: 0.8rem;
+    vertical-align: middle;
+}
+.category-cell .category-ok,
+.category-cell .category-cancel {
+    display: inline-block;
+    padding: 0.1rem 0.3rem;
+    margin-left: 0.15rem;
+    font-size: 0.7rem;
+    vertical-align: middle;
+}
+/* Truncate name and version columns - but NOT Path/URL or Global Alias */
+.golden-repos-table td:nth-child(1),
+.golden-repos-table td:nth-child(4) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Global Alias column: wrap on word boundary instead of truncating */
+.golden-repos-table td:nth-child(3) {
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: normal;
+}
+/* Path/URL column: wrap on character boundary instead of truncating */
+.golden-repos-table td:nth-child(6) {
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: normal;
+}
+/* Actions cell needs to show all buttons */
+.golden-repos-table .actions-cell {
+    white-space: nowrap;
+    overflow: visible;
+}
+/* Allow index badges to wrap when column is narrow */
+.golden-repos-table .indexes-cell {
+    white-space: normal;
+}
+.indexes-cell .index-badge {
+    margin-bottom: 2px;
+}
+/* Prevent detail item text overflow in expanded cards */
+.details-grid .detail-item {
+    min-width: 0;
+    overflow: visible;
+}
+.details-grid .detail-item span {
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: normal;
+}
+/* Ensure code elements inside detail items also wrap */
+.details-grid .detail-item span code {
+    word-break: break-all;
+    white-space: normal;
+}
+/* Group header bar must span full row width including overflow */
+.category-group-header td {
+    overflow: visible;
+    white-space: nowrap;
+}
+.index-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    margin: 1px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+.index-badge.semantic {
+    background-color: #e3f2fd;
+    color: #1565c0;
+}
+.index-badge.fts {
+    background-color: #f3e5f5;
+    color: #7b1fa2;
+}
+.index-badge.temporal {
+    background-color: #fff3e0;
+    color: #e65100;
+}
+.index-badge.scip {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+}
+.no-indexes {
+    color: #999;
+    font-style: italic;
+}
+.version-tag {
+    font-size: 0.8rem;
+    background-color: #f5f5f5;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.no-version {
+    color: #999;
+}
+.global-alias {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.no-global {
+    color: #999;
+}
+.index-checkboxes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+}
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+}
+.rebuild-label {
+    color: #ff9800;
+    font-size: 0.8rem;
+    font-style: italic;
+}
+
+/* Repository Description Section Styles (Story #218) */
+.repo-description-section h4 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+}
+.repo-description-box {
+    overflow-y: auto;
+    overflow-x: hidden;
+    resize: vertical;
+    min-height: 80px;
+    max-height: 400px;
+    height: 200px;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+    background-color: var(--pico-card-background-color);
+    font-size: 0.9rem;
+    line-height: 1.6;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+}
+.repo-description-box h1,
+.repo-description-box h2,
+.repo-description-box h3,
+.repo-description-box h4 {
+    margin-top: 0.75rem;
+    margin-bottom: 0.25rem;
+    font-size: 1rem;
+}
+.repo-description-box h1 { font-size: 1.2rem; }
+.repo-description-box h2 { font-size: 1.1rem; }
+.repo-description-box ul,
+.repo-description-box ol {
+    margin: 0.25rem 0;
+    padding-left: 1.5rem;
+}
+.repo-description-box p {
+    margin: 0.25rem 0;
+}
+.repo-description-box code {
+    background-color: rgba(128, 128, 128, 0.15);
+    padding: 0 3px;
+    border-radius: 3px;
+    font-size: 0.85rem;
+}
+.repo-description-box a {
+    color: var(--pico-primary);
+}
+.description-error {
+    color: var(--pico-color-red-550);
+    font-style: italic;
+    font-size: 0.9rem;
+}
+
+/* Global Activated Section Styles (Story #161) */
+.global-activated-section {
+    padding: 1rem;
+    border-radius: 4px;
+}
+.global-activated-section h4 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+}
+.global-activated-section h5 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+}
+.global-activated-info {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+}
+.global-indexes-section,
+.global-health-section {
+    margin-top: 1rem;
+}
+</style>
+
+<script>
+/**
+ * Golden Repos Dual-View JavaScript Functions (Story #161)
+ *
+ * Provides functionality for loading and displaying global activated repository data
+ * within golden repository cards.
+ */
+
+/**
+ * Load cidx-meta description for a golden repo (Story #218).
+ *
+ * Fetches GET /api/repositories/{alias}/description, renders the markdown body
+ * using marked.js, and injects it into the description box.  On 404 displays
+ * the canonical "no description found" message.  On other errors displays a
+ * generic failure message.  The box is always visible.
+ *
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function loadRepoDescription(repoAlias) {
+    const box = document.getElementById('desc-' + repoAlias);
+    if (!box) return;
+
+    try {
+        const response = await fetch(
+            '/api/repositories/' + encodeURIComponent(repoAlias) + '/description',
+            { credentials: 'same-origin' }
+        );
+
+        if (response.status === 404) {
+            box.innerHTML = '<div class="description-error">No cidx-meta description found for this repository.</div>';
+            return;
+        }
+
+        if (!response.ok) {
+            box.innerHTML = '<div class="description-error">Failed to load description (HTTP ' + response.status + ').</div>';
+            return;
+        }
+
+        const data = await response.json();
+        const markdownBody = data.description || '';
+
+        if (markdownBody.trim() === '') {
+            box.innerHTML = '<div class="description-error">No cidx-meta description found for this repository.</div>';
+            return;
+        }
+
+        // Render markdown - use marked.js if available, else plain text fallback
+        // DOMPurify sanitization prevents XSS from untrusted markdown content (Story #218)
+        // Both marked AND DOMPurify must be present; if either is missing, fall back to
+        // safe plain-text display to avoid XSS via unsanitized HTML (Bug #242).
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function' && typeof DOMPurify !== 'undefined') {
+            box.innerHTML = DOMPurify.sanitize(marked.parse(markdownBody));
+        } else {
+            // Plain-text fallback when marked.js or DOMPurify are not loaded yet
+            const pre = document.createElement('pre');
+            pre.style.whiteSpace = 'pre-wrap';
+            pre.style.fontFamily = 'inherit';
+            pre.textContent = markdownBody;
+            box.innerHTML = '';
+            box.appendChild(pre);
+        }
+    } catch (error) {
+        console.error('[CIDX] Failed to load description for ' + repoAlias + ':', error);
+        box.innerHTML = '<div class="description-error">Failed to load description.</div>';
+    }
+}
+
+/**
+ * Load global activated data for all golden repos with global_alias
+ */
+function loadAllGlobalActivatedData() {
+    // Find all global activated sections
+    const globalSections = document.querySelectorAll('.global-activated-section');
+
+    globalSections.forEach(section => {
+        // Extract repo alias from the section's parent structure
+        const detailsRow = section.closest('.details-row');
+        if (!detailsRow) return;
+
+        const detailsId = detailsRow.id;
+        const repoAlias = detailsId.replace('details-', '');
+
+        // Get global alias from the code element
+        const globalAliasCode = section.querySelector('code.global-alias');
+        if (!globalAliasCode) return;
+
+        const globalAlias = globalAliasCode.textContent.trim();
+
+        // Load indexes only (health data loaded on user click)
+        loadGlobalActivatedIndexes(repoAlias, globalAlias);
+    });
+}
+
+/**
+ * Fetch and display global activated indexes
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias (e.g., "repo-global")
+ */
+async function loadGlobalActivatedIndexes(repoAlias, globalAlias) {
+    try {
+        // Use new /api/repositories/{repo_alias}/indexes endpoint (Story #161)
+        // This endpoint supports multi-strategy resolution (golden repos, -global suffix, activated repos)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/indexes`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const indexData = await response.json();
+
+        // Update index status grid
+        const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+        indexTypes.forEach(type => {
+            const statusSpan = document.getElementById(`global-index-status-${type}-${repoAlias}`);
+            if (statusSpan) {
+                const hasIndex = indexData[`has_${type}`];
+                statusSpan.innerHTML = hasIndex
+                    ? '<span class="status-icon present">✓</span> <span class="status-text">Present</span>'
+                    : '<span class="status-icon not-present">-</span> <span class="status-text">Not Present</span>';
+            }
+        });
+    } catch (error) {
+        console.error(`Failed to load global activated indexes for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found) or other error
+        const is404 = error.message && error.message.includes('404');
+        const displayText = is404 ? 'N/A' : 'Error';
+
+        // Show appropriate state based on error type
+        const indexTypes = ['semantic', 'fts', 'temporal', 'scip'];
+        indexTypes.forEach(type => {
+            const statusSpan = document.getElementById(`global-index-status-${type}-${repoAlias}`);
+            if (statusSpan) {
+                statusSpan.innerHTML = `<span class="status-icon not-present">-</span> <span class="status-text">${displayText}</span>`;
+            }
+        });
+    }
+}
+
+/**
+ * Fetch and display global activated health indicator
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias
+ */
+async function loadGlobalActivatedHealthIndicator(repoAlias, globalAlias) {
+    try {
+        // Use new /api/repositories/{repo_alias}/health endpoint (Story #161)
+        // This endpoint supports multi-strategy resolution (golden repos, -global suffix, activated repos)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const healthData = await response.json();
+
+        // Update health indicator using renderHealthIndicator from repo_health.js
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+        }
+    } catch (error) {
+        console.error(`Failed to load global activated health for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found/indexed) or other error
+        const is404 = error.message && error.message.includes('404');
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+
+        if (indicatorContainer) {
+            if (is404) {
+                // Neutral message for missing/unindexed repo
+                indicatorContainer.innerHTML = '<span class="health-status health-info" style="background-color: #e0e0e0; color: #666;">Not indexed yet</span>';
+            } else {
+                // Error state for actual errors
+                indicatorContainer.innerHTML = '<span class="health-status health-unknown">Error loading health</span>';
+            }
+        }
+    }
+}
+
+/**
+ * Toggle global health details expansion
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function toggleGlobalHealthDetails(repoAlias) {
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    const indicator = document.getElementById(`global-health-indicator-${repoAlias}`);
+
+    if (!detailsContainer) {
+        console.error(`Global health details container not found for: ${repoAlias}`);
+        return;
+    }
+
+    // Toggle visibility
+    const isExpanded = detailsContainer.style.display !== 'none';
+
+    if (isExpanded) {
+        // Collapse
+        detailsContainer.style.display = 'none';
+        if (indicator) {
+            indicator.classList.remove('expanded');
+        }
+    } else {
+        // Expand
+        detailsContainer.style.display = 'block';
+        if (indicator) {
+            indicator.classList.add('expanded');
+        }
+
+        // Load health data if not already loaded
+        if (detailsContainer.dataset.loaded !== 'true') {
+            // Get global alias
+            const globalAliasCode = detailsContainer.closest('.global-activated-section').querySelector('code.global-alias');
+            if (globalAliasCode) {
+                const globalAlias = globalAliasCode.textContent.trim();
+                await loadGlobalHealthDetails(repoAlias, globalAlias, false);
+            }
+        }
+    }
+}
+
+/**
+ * Load and display global health details
+ * @param {string} repoAlias - Golden repo alias
+ * @param {string} globalAlias - Global activated alias
+ * @param {boolean} forceRefresh - Whether to bypass cache
+ */
+async function loadGlobalHealthDetails(repoAlias, globalAlias, forceRefresh = false) {
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    const refreshBtn = document.getElementById(`global-health-refresh-${repoAlias}`);
+
+    if (!detailsContainer) {
+        return;
+    }
+
+    try {
+        // Show loading spinner
+        detailsContainer.innerHTML = `
+            <div class="health-loading">
+                <span class="spinner"></span> Loading health data...
+            </div>
+        `;
+
+        // Disable refresh button during load
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+        }
+
+        // Fetch health data using /api/repositories/{repo_alias}/health endpoint (Story #161)
+        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health${forceRefresh ? '?force_refresh=true' : ''}`;
+
+        const response = await fetch(url, {
+            credentials: 'same-origin'
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const healthData = await response.json();
+
+        // Render details using renderHealthDetails from repo_health.js
+        if (typeof renderHealthDetails === 'function') {
+            detailsContainer.innerHTML = renderHealthDetails(healthData);
+        } else {
+            detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
+        }
+        detailsContainer.dataset.loaded = 'true';
+
+        // Update indicator if present
+        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+        }
+
+    } catch (error) {
+        console.error(`Failed to load global health details for ${globalAlias}:`, error);
+
+        // Check if it's a 404 (repo not found/indexed) or other error
+        const is404 = error.message && error.message.includes('404');
+
+        if (is404) {
+            // Neutral message for missing/unindexed repo
+            detailsContainer.innerHTML = `
+                <p class="health-info" style="color: #666; font-style: italic;">
+                    Global repository not indexed yet. Index data will appear here once the repository is indexed.
+                </p>
+            `;
+        } else {
+            // Error state for actual errors
+            detailsContainer.innerHTML = `
+                <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
+                <button class="outline small" onclick="loadGlobalHealthDetails('${escapeHtml(repoAlias)}', '${escapeHtml(globalAlias)}', false)">Retry</button>
+            `;
+        }
+    } finally {
+        // Re-enable refresh button
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Refresh global health data with force_refresh=true
+ * @param {string} repoAlias - Golden repo alias
+ */
+async function refreshGlobalHealthData(repoAlias) {
+    // Get global alias
+    const globalAliasCode = document.querySelector(`#details-${repoAlias} .global-activated-section code.global-alias`);
+    if (!globalAliasCode) {
+        console.error(`Global alias not found for: ${repoAlias}`);
+        return;
+    }
+
+    const globalAlias = globalAliasCode.textContent.trim();
+
+    // Reset loaded flag to force reload
+    const detailsContainer = document.getElementById(`global-health-details-${repoAlias}`);
+    if (detailsContainer) {
+        detailsContainer.dataset.loaded = 'false';
+    }
+
+    // Reload health indicator
+    await loadGlobalActivatedHealthIndicator(repoAlias, globalAlias);
+
+    // If details are expanded, reload them too
+    if (detailsContainer && detailsContainer.style.display !== 'none') {
+        await loadGlobalHealthDetails(repoAlias, globalAlias, true);
+    }
+}
+
+/**
+ * Lazy-load branches for a golden repo branch dropdown on first focus.
+ * @param {HTMLSelectElement} selectEl - The branch select element
+ */
+async function loadBranches(selectEl) {
+    if (selectEl.dataset.loaded === 'true') return;
+    selectEl.dataset.loaded = 'true';
+
+    const alias = selectEl.dataset.repoAlias;
+    const currentBranch = selectEl.dataset.current;
+
+    try {
+        const response = await fetch('/admin/golden-repos/' + encodeURIComponent(alias) + '/branches', {
+            credentials: 'include'
+        });
+        if (!response.ok) {
+            console.error('Failed to load branches:', response.status);
+            selectEl.dataset.loaded = 'false';
+            return;
+        }
+        const data = await response.json();
+        const branches = data.branches || [];
+
+        // Clear existing options
+        selectEl.innerHTML = '';
+
+        // Add branches as options
+        branches.forEach(function(b) {
+            const opt = document.createElement('option');
+            opt.value = b.name;
+            opt.textContent = b.name + (b.is_default ? ' (default)' : '') + ' [' + b.branch_type + ']';
+            if (b.name === currentBranch) {
+                opt.selected = true;
+            }
+            selectEl.appendChild(opt);
+        });
+
+        // If no branches returned, restore original
+        if (branches.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = currentBranch;
+            opt.textContent = currentBranch;
+            opt.selected = true;
+            selectEl.appendChild(opt);
+        }
+    } catch (err) {
+        console.error('Error loading branches:', err);
+        selectEl.dataset.loaded = 'false';
+    }
+}
+
+/**
+ * POST to change-branch endpoint and start polling for async job completion.
+ * No confirmation dialog — action is immediate on dropdown change.
+ * @param {HTMLSelectElement} selectEl - The branch select element
+ */
+async function confirmBranchChange(selectEl) {
+    const alias = selectEl.dataset.repoAlias;
+    const currentBranch = selectEl.dataset.current;
+    const newBranch = selectEl.value;
+
+    if (newBranch === currentBranch) return;
+
+    const spinner = document.getElementById('branch-spinner-' + alias);
+    const statusMsg = document.getElementById('branch-status-' + alias);
+
+    function showStatus(msg, color) {
+        if (statusMsg) {
+            statusMsg.textContent = msg;
+            statusMsg.style.color = color || '';
+        }
+    }
+
+    function resetDropdown() {
+        selectEl.value = currentBranch;
+        selectEl.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+    }
+
+    if (spinner) spinner.style.display = 'inline';
+    selectEl.disabled = true;
+    showStatus('Submitting...', '');
+
+    try {
+        const response = await fetch(
+            '/admin/golden-repos/' + encodeURIComponent(alias) + '/change-branch',
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({branch: newBranch})
+            }
+        );
+
+        const data = await response.json();
+
+        if (response.status === 200 && data.success) {
+            // Already on the target branch — no job needed
+            if (spinner) spinner.style.display = 'none';
+            selectEl.disabled = false;
+            showStatus('Already on this branch.', '#888');
+            setTimeout(() => showStatus('', ''), 4000);
+            return;
+        }
+
+        if (response.status === 409) {
+            resetDropdown();
+            showStatus('Branch change already in progress.', 'orange');
+            setTimeout(() => showStatus('', ''), 6000);
+            return;
+        }
+
+        if (response.status === 202 && data.job_id) {
+            // Job accepted — start polling
+            showStatus('Branch change in progress...', '');
+            pollBranchChangeJob(selectEl, alias, newBranch, currentBranch, data.job_id, spinner, statusMsg);
+            return;
+        }
+
+        // Unexpected error response
+        resetDropdown();
+        showStatus('Error: ' + (data.error || 'Unknown error'), 'red');
+        setTimeout(() => showStatus('', ''), 8000);
+
+    } catch (err) {
+        resetDropdown();
+        showStatus('Request failed: ' + err.message, 'red');
+        setTimeout(() => showStatus('', ''), 8000);
+    }
+}
+
+/**
+ * Poll GET /api/jobs/{jobId} every 3 seconds until the branch change job completes.
+ * @param {HTMLSelectElement} selectEl - The branch select dropdown
+ * @param {string} alias - Repository alias
+ * @param {string} newBranch - Branch being switched to
+ * @param {string} currentBranch - Previous branch (to revert on failure)
+ * @param {string} jobId - Background job ID to poll
+ * @param {Element} spinner - Spinner element
+ * @param {Element} statusMsg - Status message element
+ */
+function pollBranchChangeJob(selectEl, alias, newBranch, currentBranch, jobId, spinner, statusMsg) {
+    const pollInterval = 3000; // 3 seconds
+    let pollCount = 0;
+    const maxPolls = 600; // 30 minutes max
+
+    function showStatus(msg, color) {
+        if (statusMsg) {
+            statusMsg.textContent = msg;
+            statusMsg.style.color = color || '';
+        }
+    }
+
+    function resetDropdown() {
+        selectEl.value = currentBranch;
+        selectEl.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+    }
+
+    const poll = async () => {
+        pollCount++;
+
+        if (pollCount > maxPolls) {
+            resetDropdown();
+            showStatus('Branch change timed out. Refresh to check status.', 'orange');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/jobs/' + encodeURIComponent(jobId), {
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                resetDropdown();
+                showStatus('Failed to check job status (HTTP ' + response.status + ').', 'red');
+                return;
+            }
+
+            const job = await response.json();
+
+            if (job.status === 'pending' || job.status === 'running') {
+                showStatus('Branch change in progress...', '');
+                setTimeout(poll, pollInterval);
+            } else if (job.status === 'completed') {
+                selectEl.dataset.current = newBranch;
+                selectEl.disabled = false;
+                if (spinner) spinner.style.display = 'none';
+                showStatus('Branch changed to "' + newBranch + '".', 'green');
+                setTimeout(() => showStatus('', ''), 6000);
+            } else {
+                // failed, cancelled, or unknown
+                resetDropdown();
+                const errMsg = (job.result && job.result.error) ? job.result.error : job.status;
+                showStatus('Branch change failed: ' + errMsg, 'red');
+                setTimeout(() => showStatus('', ''), 8000);
+            }
+        } catch (err) {
+            resetDropdown();
+            showStatus('Polling error: ' + err.message, 'red');
+        }
+    };
+
+    // Start polling immediately
+    poll();
+}
+
+</script>

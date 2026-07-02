@@ -1,0 +1,781 @@
+"""
+Regex search service for global repository file pattern matching.
+
+Provides ripgrep-style regex search with grep fallback for searching
+directly against files on disk in global repositories.
+"""
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+from code_indexer.server.services.subprocess_executor import (
+    SubprocessExecutor,
+    ExecutionStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+# Default timeout for search operations (5 minutes)
+DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
+
+# Timeout for PCRE2 availability check subprocess
+_PCRE2_CHECK_TIMEOUT_SEC = 5
+
+
+class RipgrepExecutionError(Exception):
+    """Raised when ripgrep/grep exits with a non-zero code AND has stderr output.
+
+    Finding 3.1 (v10.4.4): Previously these errors were swallowed (log + return
+    empty), causing callers to see COMPLETED status with silently empty results.
+    Raising here lets XRaySearchEngine surface phase1_failed in the job result.
+    """
+
+
+@dataclass
+class RegexMatch:
+    """A single regex match result."""
+
+    file_path: str
+    line_number: int
+    column: int
+    line_content: str
+    context_before: List[str] = field(default_factory=list)
+    context_after: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RegexSearchResult:
+    """Result of a regex search operation."""
+
+    matches: List[RegexMatch]
+    total_matches: int
+    truncated: bool
+    search_engine: str
+    search_time_ms: float
+
+
+class RegexSearchService:
+    """Service for performing regex searches on repository files."""
+
+    def __init__(self, repo_path: Path, subprocess_max_workers: int = 2):
+        """Initialize the regex search service.
+
+        Args:
+            repo_path: Path to the repository root
+            subprocess_max_workers: Maximum concurrent workers for subprocess execution
+                (default: 2, per Story #27 resource audit recommendation)
+
+        Raises:
+            RuntimeError: If neither ripgrep nor grep is available
+        """
+        self.repo_path = repo_path
+        self._subprocess_max_workers = subprocess_max_workers
+        self._search_engine = self._detect_search_engine()
+        self._pcre2_supported: Optional[bool] = None  # Lazy-detected, cached
+
+    def _detect_search_engine(self) -> str:
+        """Detect available search engine (ripgrep preferred).
+
+        Returns:
+            String identifying the search engine ("ripgrep" or "grep")
+
+        Raises:
+            RuntimeError: If neither ripgrep nor grep is found
+        """
+        if shutil.which("rg"):
+            return "ripgrep"
+        elif shutil.which("grep"):
+            return "grep"
+        else:
+            raise RuntimeError("Neither ripgrep nor grep found on system")
+
+    def _detect_pcre2_support(self) -> bool:
+        """Detect whether ripgrep has PCRE2 support. Result is cached."""
+        if self._pcre2_supported is not None:
+            return self._pcre2_supported
+        try:
+            result = subprocess.run(
+                ["rg", "--pcre2-version"],
+                capture_output=True,
+                text=True,
+                timeout=_PCRE2_CHECK_TIMEOUT_SEC,
+            )
+            self._pcre2_supported = result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            self._pcre2_supported = False
+        return self._pcre2_supported
+
+    async def search(
+        self,
+        pattern: str,
+        path: Optional[str] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        case_sensitive: bool = True,
+        context_lines: int = 0,
+        max_results: int = 100,
+        timeout_seconds: Optional[int] = None,
+        multiline: bool = False,
+        pcre2: bool = False,
+    ) -> RegexSearchResult:
+        """Execute regex search and return structured results.
+
+        Args:
+            pattern: Regular expression pattern to search for
+            path: Subdirectory to search within (relative to repo root)
+            include_patterns: Glob patterns for files to include
+            exclude_patterns: Glob patterns for files to exclude
+            case_sensitive: Whether search is case-sensitive
+            context_lines: Number of context lines before/after match
+            max_results: Maximum number of matches to return
+            timeout_seconds: Maximum execution time in seconds (optional)
+            multiline: Enable multi-line matching (pattern spans lines)
+            pcre2: Enable PCRE2 engine for lookahead/lookbehind
+
+        Returns:
+            RegexSearchResult with matches and metadata
+
+        Raises:
+            ValueError: If path doesn't exist or PCRE2 unavailable
+            TimeoutError: If search exceeds timeout_seconds
+        """
+        # Story #4 AC2: Regex metrics tracked at MCP handler layer with
+        # correct username attribution (_legacy.py:245). Removed duplicate
+        # increment_regex_search() call here that caused _anonymous attribution.
+
+        if pcre2 and not self._detect_pcre2_support():
+            raise ValueError(
+                "PCRE2 not available. Install libpcre2 and ensure ripgrep "
+                "is built with PCRE2 support (rg --pcre2-version)."
+            )
+
+        start_time = time.time()
+
+        search_path = self.repo_path / path if path else self.repo_path
+        if not search_path.exists():
+            raise ValueError(f"Path does not exist: {path}")
+
+        if self._search_engine == "ripgrep":
+            matches, total = await self._search_ripgrep(
+                pattern,
+                search_path,
+                include_patterns,
+                exclude_patterns,
+                case_sensitive,
+                context_lines,
+                max_results,
+                timeout_seconds,
+                multiline=multiline,
+                pcre2=pcre2,
+            )
+        else:
+            matches, total = await self._search_grep(
+                pattern,
+                search_path,
+                include_patterns,
+                exclude_patterns,
+                case_sensitive,
+                context_lines,
+                max_results,
+                timeout_seconds,
+                multiline=multiline,
+                pcre2=pcre2,
+            )
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        return RegexSearchResult(
+            matches=matches,
+            total_matches=total,
+            truncated=total > max_results,
+            search_engine=self._search_engine,
+            search_time_ms=elapsed_ms,
+        )
+
+    def _extract_line_text(self, lines_data: dict) -> str:
+        """Extract text content from ripgrep JSON lines data.
+
+        Ripgrep uses two formats for line content:
+        - {"text": "..."} for valid UTF-8 content
+        - {"bytes": "..."} for binary/non-UTF8 (base64-encoded)
+        """
+        if "text" in lines_data:
+            return str(lines_data["text"]).rstrip("\n")
+        elif "bytes" in lines_data:
+            import base64
+
+            return (
+                base64.b64decode(lines_data["bytes"])
+                .decode("utf-8", errors="replace")
+                .rstrip("\n")
+            )
+        return ""
+
+    def _parse_ripgrep_json_output(
+        self,
+        output: str,
+        max_results: int,
+        context_lines: int,
+    ) -> tuple:
+        """Parse ripgrep JSON output into RegexMatch objects.
+
+        Args:
+            output: JSON output from ripgrep command
+            max_results: Maximum number of matches to return
+            context_lines: Number of context lines (used for context parsing)
+
+        Returns:
+            Tuple of (matches list, total count)
+        """
+        matches: List[RegexMatch] = []
+        total = 0
+        context_before: List[str] = []
+
+        for line in output.splitlines():
+            try:
+                data = json.loads(line)
+                if data.get("type") == "match":
+                    total += 1
+                    if len(matches) < max_results:
+                        match_data = data["data"]
+                        abs_path = self._extract_line_text(match_data["path"])
+                        try:
+                            rel_path = str(Path(abs_path).relative_to(self.repo_path))
+                        except ValueError:
+                            rel_path = abs_path
+
+                        submatches = match_data.get("submatches", [])
+                        column = submatches[0]["start"] + 1 if submatches else 1
+
+                        matches.append(
+                            RegexMatch(
+                                file_path=rel_path,
+                                line_number=match_data["line_number"],
+                                column=column,
+                                line_content=self._extract_line_text(
+                                    match_data["lines"]
+                                ),
+                                context_before=context_before.copy(),
+                                context_after=[],
+                            )
+                        )
+                        context_before = []
+                elif data.get("type") == "context" and context_lines > 0:
+                    ctx = self._extract_line_text(data["data"]["lines"])
+                    if (
+                        matches
+                        and data["data"]["line_number"] > matches[-1].line_number
+                    ):
+                        matches[-1].context_after.append(ctx)
+                    else:
+                        context_before.append(ctx)
+            except json.JSONDecodeError:
+                logger.debug(
+                    f"Skipping non-JSON line from ripgrep output: {line[:100]}"
+                )
+                continue
+
+        return matches, total
+
+    async def _search_ripgrep(
+        self,
+        pattern: str,
+        search_path: Path,
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+        case_sensitive: bool,
+        context_lines: int,
+        max_results: int,
+        timeout_seconds: Optional[int],
+        multiline: bool = False,
+        pcre2: bool = False,
+    ) -> tuple:
+        """Search using ripgrep with JSON output and timeout protection."""
+        cmd = ["rg", "--json", pattern]
+
+        if multiline:
+            cmd.extend(["--multiline", "--multiline-dotall"])
+        if pcre2:
+            cmd.append("--pcre2")
+
+        if not case_sensitive:
+            cmd.append("-i")
+        if context_lines > 0:
+            cmd.extend(["-C", str(context_lines)])
+
+        if include_patterns:
+            for pat in include_patterns:
+                cmd.extend(["-g", pat])
+        if exclude_patterns:
+            for pat in exclude_patterns:
+                cmd.extend(["-g", f"!{pat}"])
+
+        # Always exclude CIDX internal directories (Bug #158)
+        cmd.extend(["-g", "!.code-indexer/**"])
+        cmd.extend(["-g", "!.git/**"])
+
+        cmd.append(str(search_path))
+
+        # Create temp file for output
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="rg_search_")
+        os.close(temp_fd)
+
+        try:
+            # Execute with SubprocessExecutor for async + timeout protection
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
+            try:
+                result = await executor.execute_with_limits(
+                    command=cmd,
+                    working_dir=str(self.repo_path),
+                    timeout_seconds=timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS,
+                    output_file_path=temp_path,
+                )
+
+                if result.timed_out:
+                    raise TimeoutError(
+                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"(pattern='{pattern}', path='{search_path}')"
+                    )
+
+                if result.status == ExecutionStatus.ERROR:
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal ripgrep behavior)
+                        logger.debug("ripgrep found no matches (exit code 1)")
+                        return [], 0
+                    else:
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
+                        )
+
+                # Read output from temp file
+                with open(temp_path, "r") as f:
+                    output = f.read()
+
+            finally:
+                executor.shutdown(wait=True)
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        return self._parse_ripgrep_json_output(output, max_results, context_lines)
+
+    async def _find_files_by_patterns(
+        self,
+        search_path: Path,
+        include_patterns: List[str],
+        exclude_patterns: Optional[List[str]],
+        timeout_seconds: int,
+    ) -> List[str]:
+        """Use subprocess-based glob script with timeout and process isolation.
+
+        Supports the following pattern types to match ripgrep's -g flag behavior:
+        - "**/file.java" - Recursive search from search_path
+        - "code/**/file.java" - Recursive search from search_path/code
+        - "code/src/file.java" - Explicit path (non-recursive)
+        - "*.java" - Simple pattern (recursive from search_path)
+
+        Args:
+            search_path: Base directory to search from. All patterns resolved relative to this path.
+            include_patterns: List of glob patterns following ripgrep -g flag syntax.
+            exclude_patterns: Optional list of patterns to exclude from results.
+            timeout_seconds: Maximum time to spend searching (enforced via subprocess timeout).
+
+        Returns:
+            List of relative file paths as strings for all files matching include patterns
+            and not matching exclude patterns. Empty list if no matches found.
+
+        Raises:
+            ValueError: If search_path doesn't exist.
+            TimeoutError: If file discovery exceeds timeout_seconds.
+        """
+        # Validate search path exists
+        if not search_path.exists():
+            raise ValueError(f"Search path does not exist: {search_path}")
+
+        # Create temp files for config and output
+        config_fd, config_path = tempfile.mkstemp(suffix=".json", prefix="glob_config_")
+        output_fd, output_path = tempfile.mkstemp(suffix=".json", prefix="glob_output_")
+        os.close(config_fd)
+        os.close(output_fd)
+
+        try:
+            # Write glob config to temp file
+            config = {
+                "search_path": str(search_path),
+                "include_patterns": include_patterns,
+                "exclude_patterns": exclude_patterns,
+            }
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+
+            # Get path to glob_files.py script (in scripts/ directory)
+            # Path from src/code_indexer/global_repos/regex_search.py -> project_root/scripts/glob_files.py
+            script_path = (
+                Path(__file__).parent.parent.parent.parent / "scripts" / "glob_files.py"
+            )
+            if not script_path.exists():
+                raise RuntimeError(f"glob_files.py script not found at {script_path}")
+
+            # Execute glob script with subprocess executor for timeout + async protection
+            cmd = ["python3", str(script_path), config_path]
+
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
+            try:
+                result = await executor.execute_with_limits(
+                    command=cmd,
+                    working_dir=str(self.repo_path),
+                    timeout_seconds=timeout_seconds,
+                    output_file_path=output_path,
+                )
+
+                if result.timed_out:
+                    raise TimeoutError(
+                        f"File discovery timed out after {timeout_seconds} seconds"
+                    )
+
+                if result.status == ExecutionStatus.ERROR:
+                    logger.warning(f"glob_files.py failed: {result.error_message}")
+                    # Return empty list on error (graceful degradation)
+                    return []
+
+                # Read and parse JSON output
+                with open(output_path, "r") as f:
+                    output = f.read().strip()
+                    if not output:
+                        return []
+
+                    try:
+                        files = json.loads(output)
+                        if not isinstance(files, list):
+                            logger.warning(
+                                f"glob_files.py returned non-list: {type(files)}"
+                            )
+                            return []
+                        return files
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse glob output as JSON: {e}")
+                        return []
+
+            finally:
+                executor.shutdown(wait=True)
+
+        finally:
+            # Clean up temp files
+            if os.path.exists(config_path):
+                os.remove(config_path)
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+    def _build_grep_command(
+        self,
+        pattern: str,
+        case_sensitive: bool,
+        context_lines: int,
+        recursive: bool,
+        file_list: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Build grep command with common flags.
+
+        Always includes -H flag to force filename output even when searching
+        a single file. This ensures consistent parsing of grep output where
+        the regex expects 'filename:line:content' format.
+        """
+        cmd = ["grep", "-E", "-H"]
+        if recursive:
+            cmd.append("-rn")
+        else:
+            cmd.append("-n")
+        if not case_sensitive:
+            cmd.append("-i")
+        if context_lines > 0:
+            cmd.extend(["-C", str(context_lines)])
+        cmd.append(pattern)
+        if file_list:
+            cmd.extend(file_list)
+        return cmd
+
+    def _parse_grep_output(
+        self,
+        output: str,
+        max_results: int,
+        context_lines: int,
+    ) -> tuple:
+        """Parse grep output into RegexMatch objects with context lines.
+
+        Handles grep's output format with:
+        - Match lines: filename:linenum:content (colon separators)
+        - Context lines: filename-linenum-content (dash separators)
+        - Group separators: -- (between match groups)
+
+        The -- separator indicates separate context groups. When encountered,
+        any subsequent context lines belong to the next match (context_before),
+        not the previous match (context_after).
+
+        When matches are adjacent and context overlaps, grep omits the --
+        separator. In this case, we limit context_after to context_lines count
+        to prevent over-collection.
+
+        Args:
+            output: Raw grep output text
+            max_results: Maximum number of matches to return
+            context_lines: Number of context lines requested (for limiting context_after)
+
+        Returns:
+            Tuple of (matches list, total count)
+        """
+        matches: List[RegexMatch] = []
+        total = 0
+        context_before: List[str] = []
+        collecting_context_after = False
+
+        for line in output.splitlines():
+            # Group separator indicates end of current match's context group
+            if line.strip() == "--":
+                collecting_context_after = False
+                context_before = []
+                continue
+
+            # Try matching as match line (colon separator)
+            match_line = re.match(r"^(.+?):(\d+):(.*)$", line)
+            if match_line:
+                total += 1
+                if len(matches) < max_results:
+                    file_path = match_line.group(1)
+                    try:
+                        rel_path = str(Path(file_path).relative_to(self.repo_path))
+                    except ValueError:
+                        rel_path = file_path
+
+                    # Parse line number with error handling
+                    try:
+                        line_num = int(match_line.group(2))
+                    except ValueError:
+                        logger.warning(f"Invalid line number in grep output: {line}")
+                        continue
+
+                    matches.append(
+                        RegexMatch(
+                            file_path=rel_path,
+                            line_number=line_num,
+                            column=1,
+                            line_content=match_line.group(3),
+                            context_before=context_before.copy(),
+                            context_after=[],
+                        )
+                    )
+                    context_before = []
+                    collecting_context_after = True
+                continue
+
+            # Try matching as context line (dash separator)
+            context_line = re.match(r"^(.+?)-(\d+)-(.*)$", line)
+            if context_line:
+                line_content = context_line.group(3)
+
+                # Determine if this is context_before or context_after
+                if collecting_context_after and matches:
+                    # Check if we've already collected enough context_after lines
+                    if len(matches[-1].context_after) < context_lines:
+                        # This is context AFTER the last match
+                        matches[-1].context_after.append(line_content)
+                    else:
+                        # We've collected enough context_after, this is context_before for next match
+                        context_before.append(line_content)
+                        collecting_context_after = False
+                else:
+                    # This is context BEFORE the next match
+                    context_before.append(line_content)
+
+        return matches, total
+
+    def _search_python_multiline(
+        self,
+        pattern: str,
+        search_path: Path,
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+        case_sensitive: bool,
+        max_results: int,
+    ) -> tuple:
+        """Python re.DOTALL search for multiline patterns.
+
+        Used when multiline=True on the grep engine path, or as a fallback
+        when ripgrep is unavailable.
+        """
+        from fnmatch import fnmatch
+
+        flags = re.DOTALL
+        if not case_sensitive:
+            flags |= re.IGNORECASE
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern: {e}") from e
+
+        matches: List[RegexMatch] = []
+        total = 0
+
+        for root, _dirs, files in os.walk(search_path):
+            # Skip internal directories
+            rel_root = os.path.relpath(root, search_path)
+            if rel_root.startswith(".code-indexer") or rel_root.startswith(".git"):
+                continue
+
+            for fname in files:
+                file_path = os.path.join(root, fname)
+                try:
+                    rel_path = str(Path(file_path).relative_to(self.repo_path))
+                except ValueError:
+                    rel_path = file_path
+
+                if include_patterns and not any(
+                    fnmatch(fname, p) for p in include_patterns
+                ):
+                    continue
+                if exclude_patterns and any(
+                    fnmatch(fname, p) for p in exclude_patterns
+                ):
+                    continue
+
+                try:
+                    with open(file_path, "r", errors="replace") as f:
+                        content = f.read()
+                except (OSError, UnicodeDecodeError):
+                    logger.debug("Skipping unreadable file: %s", file_path)
+                    continue
+
+                for m in compiled.finditer(content):
+                    total += 1
+                    if len(matches) < max_results:
+                        start_line = content[: m.start()].count("\n") + 1
+                        col = m.start() - content.rfind("\n", 0, m.start())
+                        matches.append(
+                            RegexMatch(
+                                file_path=rel_path,
+                                line_number=start_line,
+                                column=col,
+                                line_content=m.group(0),
+                                context_before=[],
+                                context_after=[],
+                            )
+                        )
+
+        return matches, total
+
+    async def _search_grep(
+        self,
+        pattern: str,
+        search_path: Path,
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+        case_sensitive: bool,
+        context_lines: int,
+        max_results: int,
+        timeout_seconds: Optional[int],
+        multiline: bool = False,
+        pcre2: bool = False,
+    ) -> tuple:
+        """Fallback search using grep with timeout protection."""
+        # For multiline searches, use Python re.DOTALL fallback
+        if multiline:
+            return self._search_python_multiline(
+                pattern,
+                search_path,
+                include_patterns,
+                exclude_patterns,
+                case_sensitive,
+                max_results,
+            )
+
+        timeout = timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS
+        has_path_patterns = include_patterns and any(
+            "/" in pat for pat in include_patterns
+        )
+
+        if has_path_patterns:
+            # Use find to get files matching all patterns (both path and simple)
+            # Type assertion: include_patterns is not None here (checked by has_path_patterns)
+            assert include_patterns is not None
+            file_list = await self._find_files_by_patterns(
+                search_path, include_patterns, exclude_patterns, timeout
+            )
+            if not file_list:
+                return [], 0
+
+            cmd = self._build_grep_command(
+                pattern, case_sensitive, context_lines, False, file_list
+            )
+        else:
+            # Original behavior: recursive grep with --include/--exclude
+            cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
+            if include_patterns:
+                for pat in include_patterns:
+                    cmd.extend(["--include", pat])
+            if exclude_patterns:
+                for pat in exclude_patterns:
+                    cmd.extend(["--exclude", pat])
+            # Always exclude CIDX internal directories (Bug #158)
+            cmd.extend(["--exclude-dir", ".code-indexer"])
+            cmd.extend(["--exclude-dir", ".git"])
+            cmd.append(str(search_path))
+
+        # Create temp file for output
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="grep_search_")
+        os.close(temp_fd)
+
+        try:
+            # Execute with SubprocessExecutor for async + timeout protection
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
+            try:
+                result = await executor.execute_with_limits(
+                    command=cmd,
+                    working_dir=str(self.repo_path),
+                    timeout_seconds=timeout,
+                    output_file_path=temp_path,
+                )
+
+                if result.timed_out:
+                    raise TimeoutError(
+                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"(pattern='{pattern}', path='{search_path}')"
+                    )
+
+                if result.status == ExecutionStatus.ERROR:
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal grep behavior)
+                        logger.debug("grep found no matches (exit code 1)")
+                        return [], 0
+                    else:
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"grep failed: exit_code={result.exit_code}, stderr={stderr}"
+                        )
+
+                # Read output from temp file
+                with open(temp_path, "r") as f:
+                    output = f.read()
+
+            finally:
+                executor.shutdown(wait=True)
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+        # Parse grep output with context line support
+        matches, total = self._parse_grep_output(output, max_results, context_lines)
+        return matches, total

@@ -1,0 +1,898 @@
+"""
+Dashboard Data Service.
+
+Aggregates data from various internal services for the admin dashboard.
+Following CLAUDE.md Foundation #1: No mocks - uses real service integrations.
+"""
+
+from code_indexer.server.middleware.correlation import get_correlation_id
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+
+from .api_metrics_service import api_metrics_service
+from .health_service import health_service
+from ..models.api_models import (
+    HealthCheckResponse,
+    HealthStatus,
+    ServiceHealthInfo,
+    SystemHealthInfo,
+)
+from code_indexer.server.logging_utils import format_error_log
+
+logger = logging.getLogger(__name__)
+
+# Period thresholds for label formatting (in seconds)
+_PERIOD_1H = 3600
+_PERIOD_24H = 86400
+_PERIOD_7D = 604800
+
+
+def _format_time_label(bucket_start: str, period_seconds: int) -> str:
+    """Format a bucket_start ISO string into a human-readable x-axis label.
+
+    Args:
+        bucket_start: ISO 8601 datetime string (e.g. '2024-01-15T10:05:00').
+        period_seconds: The overall query period (e.g. 3600, 86400, 604800).
+
+    Returns:
+        Formatted label string keyed to the five supported granulations:
+            period < 24h  (<86400):  'HH:MM'   (e.g. '10:05') - minute precision
+            period == 24h (==86400): 'HH:00'   (e.g. '10:00') - 2-hour bucket display
+            period >= 7d  (>=604800): 'Mmm DD' (e.g. 'Jan 15') - month abbreviation + day
+            other periods:           'HH:MM'   fallback
+    """
+    try:
+        dt = datetime.fromisoformat(bucket_start)
+    except ValueError:
+        logger.warning("Invalid bucket_start format, using raw value: %s", bucket_start)
+        return bucket_start
+
+    if period_seconds >= _PERIOD_7D:
+        # Multi-day periods (7d, 15d): abbreviated month name + zero-padded day
+        return dt.strftime("%b %d")
+    elif period_seconds == _PERIOD_24H:
+        # 24-hour period uses 2-hour buckets: show HH:00 (suppress minutes)
+        return dt.strftime("%H:00")
+    else:
+        # Sub-day periods (15min, 1h) and unlisted periods: show HH:MM
+        return dt.strftime("%H:%M")
+
+
+@dataclass
+class JobCounts:
+    """Job count statistics."""
+
+    running: int = 0
+    queued: int = 0
+    completed_24h: int = 0
+    failed_24h: int = 0
+
+
+@dataclass
+class RepoCounts:
+    """Repository count statistics."""
+
+    golden: int = 0
+    activated: int = 0
+
+
+@dataclass
+class RecentJob:
+    """Recent job information."""
+
+    job_id: str
+    repo_name: str
+    job_type: str
+    completion_time: str
+    status: str
+
+
+@dataclass
+class DashboardData:
+    """Complete dashboard data aggregate."""
+
+    health: HealthCheckResponse
+    job_counts: JobCounts
+    repo_counts: RepoCounts
+    recent_jobs: List[RecentJob]
+
+
+class DashboardService:
+    """Service for aggregating dashboard data from various internal sources."""
+
+    def __init__(self):
+        """Initialize dashboard service with caches."""
+        # M9: Folder stats cache (60s TTL)
+        self._folder_stats_cache: Optional[dict] = None
+        self._folder_stats_cache_time: Optional[datetime] = None
+
+    def get_dashboard_data(
+        self, username: str, user_role: str = "user"
+    ) -> DashboardData:
+        """
+        Get all dashboard data for display.
+
+        Args:
+            username: Current user's username
+            user_role: User role ('admin' or 'user'), defaults to 'user'
+
+        Returns:
+            DashboardData containing all sections
+        """
+        # Bug #266: Return a placeholder HealthCheckResponse instead of calling
+        # _get_health_data(), which triggers 40 uncached SQLite operations.
+        # The real health data is loaded lazily via get_health_partial() by the
+        # HTMX partial at /admin/partials/dashboard-health after page load.
+        # Using DEGRADED (not HEALTHY) avoids false-positive green indicators
+        # before the real check completes.
+        health_data = HealthCheckResponse(
+            status=HealthStatus.DEGRADED,
+            timestamp=datetime.now(timezone.utc),
+            services={
+                "database": ServiceHealthInfo(
+                    status=HealthStatus.DEGRADED,
+                    response_time_ms=0,
+                    error_message="Loading...",
+                ),
+                "storage": ServiceHealthInfo(
+                    status=HealthStatus.DEGRADED,
+                    response_time_ms=0,
+                    error_message="Loading...",
+                ),
+            },
+            system=SystemHealthInfo(
+                memory_usage_percent=0.0,
+                cpu_usage_percent=0.0,
+                active_jobs=0,
+                disk_free_space_gb=0.0,
+            ),
+        )
+
+        # Get job statistics
+        job_counts = self._get_job_counts(username)
+
+        # Get repository statistics
+        repo_counts = self._get_repo_counts(username, user_role)
+
+        # Get recent jobs
+        recent_jobs = self._get_recent_jobs(username)
+
+        return DashboardData(
+            health=health_data,
+            job_counts=job_counts,
+            repo_counts=repo_counts,
+            recent_jobs=recent_jobs,
+        )
+
+    def get_health_partial(self) -> HealthCheckResponse:
+        """Get health data for partial refresh."""
+        return self._get_health_data()
+
+    def get_stats_partial(
+        self,
+        username: str,
+        time_filter: str = "24h",
+        recent_filter: str = "30d",
+        user_role: str = "user",
+        api_window: int = 86400,
+        api_metrics_backend=None,
+    ) -> Dict[str, Any]:
+        """
+        Get statistics data for partial refresh.
+
+        Args:
+            username: Current user's username
+            time_filter: Time filter for job stats ("24h", "7d", "30d")
+            recent_filter: Time filter for recent activity ("24h", "7d", "30d")
+            user_role: User role ('admin' or 'user') - AC6 fix to prevent count flash
+            api_window: Time window in seconds for API metrics (default 86400 = 24h).
+                Common values: 900 (15 min), 3600 (1 hour), 86400 (24 hours),
+                604800 (7 days), 1296000 (15 days)
+            api_metrics_backend: Optional ApiMetricsBackend instance (Story #503).
+                When provided, used instead of the singleton api_metrics_service.
+                In cluster mode this is the PostgreSQL backend which aggregates
+                counts from all nodes; in standalone mode this is the SQLite backend.
+
+        Returns:
+            Dictionary containing job counts, repo counts, recent jobs, and API metrics
+        """
+        # Story #503 AC1 / Story #673: Use api_metrics_backend when available for
+        # cluster-wide aggregation. Use get_metrics_bucketed (Story #673) which reads
+        # from the pre-aggregated api_metrics_buckets table for efficient period queries.
+        if api_metrics_backend is not None:
+            api_metrics = api_metrics_backend.get_metrics_bucketed(
+                period_seconds=api_window
+            )
+        else:
+            api_metrics = api_metrics_service.get_metrics_bucketed(
+                period_seconds=api_window
+            )
+
+        return {
+            "job_counts": self._get_job_counts(username, time_filter),
+            "repo_counts": self._get_repo_counts(username, user_role),
+            "recent_jobs": self._get_recent_jobs(username, recent_filter),
+            "api_metrics": api_metrics,
+        }
+
+    def get_chart_data(
+        self,
+        period_seconds: int,
+        api_metrics_backend=None,
+    ) -> Dict[str, Any]:
+        """Return Chart.js-ready stacked bar chart data for the given period.
+
+        Calls get_metrics_timeseries to obtain (bucket_start, metric_type, count)
+        tuples and reshapes them into 4 labelled datasets suitable for a Chart.js
+        stacked bar chart.  Missing metric types within a bucket are zero-filled so
+        every dataset always has the same length as the labels list.
+
+        Args:
+            period_seconds: Duration in seconds. Passed directly to
+                get_metrics_timeseries.
+            api_metrics_backend: Optional backend instance. When provided, used
+                instead of the singleton api_metrics_service (cluster mode).
+
+        Returns:
+            dict with keys:
+                labels   - list of human-readable time strings (x-axis)
+                datasets - list of 4 dicts, each with label, data, backgroundColor
+        """
+        if api_metrics_backend is not None:
+            timeseries = api_metrics_backend.get_metrics_timeseries(period_seconds)
+        else:
+            timeseries = api_metrics_service.get_metrics_timeseries(period_seconds)
+
+        # Build sorted unique label set (chronological order)
+        labels_set = sorted(set(t[0] for t in timeseries))
+        label_index = {label: i for i, label in enumerate(labels_set)}
+        num_labels = len(labels_set)
+
+        metric_types = ["semantic", "other_index", "regex", "other_api"]
+        datasets_data: Dict[str, List[int]] = {
+            mt: [0] * num_labels for mt in metric_types
+        }
+
+        for bucket_start, metric_type, count in timeseries:
+            if metric_type in datasets_data and bucket_start in label_index:
+                datasets_data[metric_type][label_index[bucket_start]] = count
+
+        formatted_labels = [
+            _format_time_label(label, period_seconds) for label in labels_set
+        ]
+
+        colors = {
+            "semantic": "#4e79a7",
+            "other_index": "#59a14f",
+            "regex": "#f28e2b",
+            "other_api": "#e15759",
+        }
+
+        return {
+            "labels": formatted_labels,
+            "datasets": [
+                {
+                    "label": mt.replace("_", " ").title(),
+                    "data": datasets_data[mt],
+                    "backgroundColor": colors[mt],
+                }
+                for mt in metric_types
+            ],
+        }
+
+    def get_per_user_stats(
+        self,
+        period_seconds: int,
+        api_metrics_backend=None,
+    ) -> List[Dict[str, Any]]:
+        """Get per-user API usage breakdown for the given period.
+
+        Transforms the raw per-user metric dict from api_metrics_service into a
+        sorted list of row dicts suitable for template rendering.
+
+        Args:
+            period_seconds: Duration in seconds for the metric window.
+            api_metrics_backend: Optional backend instance. When provided, used
+                instead of the singleton api_metrics_service (cluster mode).
+
+        Returns:
+            List of dicts sorted by total descending, each with keys:
+                username, semantic, other_index, regex, other_api, total.
+        """
+        if api_metrics_backend is not None:
+            raw = api_metrics_backend.get_metrics_by_user(period_seconds)
+        else:
+            raw = api_metrics_service.get_metrics_by_user(period_seconds)
+
+        rows = []
+        for username, counts in raw.items():
+            semantic = counts.get("semantic", 0)
+            other_index = counts.get("other_index", 0)
+            regex = counts.get("regex", 0)
+            other_api = counts.get("other_api", 0)
+            total = semantic + other_index + regex + other_api
+            rows.append(
+                {
+                    "username": username,
+                    "semantic": semantic,
+                    "other_index": other_index,
+                    "regex": regex,
+                    "other_api": other_api,
+                    "total": total,
+                }
+            )
+
+        rows.sort(key=lambda r: r["total"], reverse=True)
+        return rows
+
+    def _get_health_data(self) -> HealthCheckResponse:
+        """Get system health data."""
+        try:
+            result: HealthCheckResponse = health_service.get_system_health()
+            return result
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-019",
+                    f"Failed to get health data: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            # Return degraded status on error
+            return HealthCheckResponse(
+                status=HealthStatus.UNHEALTHY,
+                timestamp=datetime.now(timezone.utc),
+                services={
+                    "database": ServiceHealthInfo(
+                        status=HealthStatus.UNHEALTHY,
+                        response_time_ms=0,
+                        error_message="Unable to check health",
+                    ),
+                    "storage": ServiceHealthInfo(
+                        status=HealthStatus.UNHEALTHY,
+                        response_time_ms=0,
+                        error_message="Unable to check health",
+                    ),
+                },
+                system=SystemHealthInfo(
+                    memory_usage_percent=0.0,
+                    cpu_usage_percent=0.0,
+                    active_jobs=0,
+                    disk_free_space_gb=0.0,
+                ),
+            )
+
+    def _get_job_counts(self, username: str, time_filter: str = "24h") -> JobCounts:
+        """
+        Get job count statistics.
+
+        Args:
+            username: Current user's username
+            time_filter: Time filter ("24h", "7d", "30d")
+
+        Returns:
+            JobCounts dataclass
+        """
+        try:
+            # Access global background job manager
+            job_manager = self._get_background_job_manager()
+            if not job_manager:
+                return JobCounts()
+
+            # Story #541 AC3: Use time-filtered job stats
+            stats = job_manager.get_job_stats_with_filter(time_filter)
+
+            # Story #311: Read active/pending counts from JobTracker when available
+            # (AC5) — falls back to job_manager when tracker is None
+            job_tracker = self._get_job_tracker()
+            if job_tracker is not None:
+                running = job_tracker.get_active_job_count()
+                queued = job_tracker.get_pending_job_count()
+            else:
+                running = job_manager.get_active_job_count()
+                queued = job_manager.get_pending_job_count()
+
+            return JobCounts(
+                running=running,
+                queued=queued,
+                completed_24h=stats["completed"],
+                failed_24h=stats["failed"],
+            )
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-020",
+                    f"Failed to get job counts: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return JobCounts()
+
+    def _get_repo_counts(self, username: str, user_role: str = "user") -> RepoCounts:
+        """
+        Get repository count statistics.
+
+        Args:
+            username: Current user's username
+            user_role: User role ('admin' or 'user'), defaults to 'user'
+
+        Returns:
+            RepoCounts dataclass
+        """
+        golden_count = 0
+        activated_count = 0
+
+        # Get golden repos count
+        try:
+            golden_manager = self._get_golden_repo_manager()
+            if golden_manager:
+                golden_repos = golden_manager.list_golden_repos()
+                golden_count = len(golden_repos) if golden_repos else 0
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-021",
+                    f"Failed to get golden repos count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Get activated repos count
+        try:
+            activated_manager = self._get_activated_repo_manager()
+            if activated_manager:
+                # Bug #671: Admin users see all activated repos across all users
+                if user_role == "admin":
+                    activated_repos = (
+                        activated_manager.list_all_activated_repositories()
+                    )
+                else:
+                    activated_repos = activated_manager.list_activated_repositories(
+                        username
+                    )
+                activated_count = len(activated_repos) if activated_repos else 0
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-022",
+                    f"Failed to get activated repos count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return RepoCounts(
+            golden=golden_count,
+            activated=activated_count,
+        )
+
+    def _get_recent_jobs(
+        self, username: str, time_filter: str = "30d"
+    ) -> List[RecentJob]:
+        """
+        Get recent completed jobs.
+
+        Args:
+            username: Current user's username
+            time_filter: Time filter ("24h", "7d", "30d"), default 30d
+
+        Returns:
+            List of RecentJob objects (up to 20)
+        """
+        try:
+            job_manager = self._get_background_job_manager()
+            if not job_manager:
+                return []
+
+            # Story #311 AC6: Read recent jobs from JobTracker when available;
+            # fall back to job_manager for backward compatibility when tracker absent.
+            job_tracker = self._get_job_tracker()
+            if job_tracker is not None:
+                recent_jobs_data = job_tracker.get_recent_jobs(
+                    limit=20, time_filter=time_filter
+                )
+            else:
+                # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
+                recent_jobs_data = job_manager.get_recent_jobs_with_filter(
+                    time_filter=time_filter, limit=20
+                )
+
+            recent = []
+            for job in recent_jobs_data:
+                # Extract repo name: prefer repo_alias (works for running/pending),
+                # fallback to result dict (for backward compatibility)
+                repo_name = job.get("repo_alias")
+                if not repo_name:
+                    # Fallback to result dict for completed jobs or legacy data
+                    result = job.get("result", {}) or {}
+                    if isinstance(result, dict):
+                        # Check alias (golden repos), user_alias (activated repos), repository
+                        repo_name = (
+                            result.get("alias")
+                            or result.get("user_alias")
+                            or result.get("repository")
+                        )
+                # Final fallback: synthetic label for lifecycle_backfill, else "Unknown"
+                if not repo_name:
+                    op = job.get("operation_type") or ""
+                    if op == "lifecycle_backfill":
+                        total = (job.get("metadata") or {}).get("cluster_wide_total")
+                        repo_name = (
+                            f"{total} repos" if total is not None else "all repos"
+                        )
+                    else:
+                        repo_name = "Unknown"
+
+                recent.append(
+                    RecentJob(
+                        job_id=job.get("job_id", ""),
+                        repo_name=repo_name,
+                        job_type=job.get("operation_type", "unknown"),
+                        completion_time=job.get("completed_at", ""),
+                        status=job.get("status", "unknown"),
+                    )
+                )
+
+            return recent
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "AUTH-GENERAL-023",
+                    f"Failed to get recent jobs: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return []
+
+    def _get_background_job_manager(self) -> Optional[Any]:
+        """Get the background job manager instance."""
+        try:
+            from ..app import background_job_manager
+
+            return background_job_manager
+        except Exception:
+            return None
+
+    def _get_job_tracker(self) -> Optional[Any]:
+        """Get the JobTracker instance (Story #311: Epic #261 Story 1B).
+
+        Returns None gracefully when job_tracker is not set in the app module
+        (e.g. in tests or before server lifespan initialises it).
+        """
+        try:
+            from ..app import job_tracker  # type: ignore[attr-defined]
+
+            return job_tracker
+        except Exception:
+            return None
+
+    def _get_golden_repo_manager(self) -> Optional[Any]:
+        """Get the golden repo manager instance."""
+        try:
+            from ..app import golden_repo_manager
+
+            return golden_repo_manager
+        except Exception:
+            return None
+
+    def _get_activated_repo_manager(self) -> Optional[Any]:
+        """Get the activated repo manager instance."""
+        try:
+            from ..app import activated_repo_manager
+
+            return activated_repo_manager
+        except Exception:
+            return None
+
+    def _parse_datetime(self, dt_str: str) -> Optional[datetime]:
+        """
+        Parse a datetime string to datetime object.
+
+        Args:
+            dt_str: Datetime string
+
+        Returns:
+            Parsed datetime or None
+        """
+        if not dt_str:
+            return None
+
+        # Try various formats
+        formats = [
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+        ]
+
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(dt_str, fmt)
+                # Make timezone-aware if not already
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                continue
+
+        return None
+
+    def get_langfuse_metrics(self) -> Dict[str, Any]:
+        """
+        Get Langfuse sync metrics for dashboard display.
+
+        Returns:
+            Dict with:
+                - metrics: Per-project sync metrics from sync service
+                - health: Overall health status (healthy/degraded/unhealthy/unknown)
+                - folder_stats: User folder statistics (folders, traces, size)
+                - config: Sync configuration (pull_enabled, interval)
+        """
+        try:
+            from ..services.config_service import get_config_service
+
+            # Get langfuse_sync_service from app.state (not module global,
+            # which is stale after lifespan.py refactor)
+            from ..app import app as _app
+
+            langfuse_sync_service = getattr(_app.state, "langfuse_sync_service", None)
+
+            # Get config
+            config_service = get_config_service()
+            config = config_service.get_config()
+            langfuse = config.langfuse_config
+
+            # If pull is disabled, return minimal data
+            if not langfuse or not langfuse.pull_enabled:
+                return {
+                    "metrics": {},
+                    "health": "disabled",
+                    "folder_stats": {
+                        "user_folders": 0,
+                        "total_traces": 0,
+                        "total_size_mb": 0.0,
+                    },
+                    "config": {"pull_enabled": False, "interval": 0},
+                }
+
+            # Get metrics from sync service
+            metrics = (
+                langfuse_sync_service.get_metrics() if langfuse_sync_service else {}
+            )
+
+            # Compute health status
+            health = self._compute_langfuse_health(
+                metrics, langfuse.pull_sync_interval_seconds
+            )
+
+            # Get folder statistics
+            server_dir = config_service.config_manager.server_dir
+            folder_stats = self._get_langfuse_folder_stats(server_dir)
+
+            return {
+                "metrics": metrics,
+                "health": health,
+                "folder_stats": folder_stats,
+                "config": {
+                    "pull_enabled": langfuse.pull_enabled,
+                    "interval": langfuse.pull_sync_interval_seconds,
+                },
+            }
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DASHBOARD-LANGFUSE-001",
+                    f"Failed to get Langfuse metrics: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return {
+                "metrics": {},
+                "health": "error",
+                "folder_stats": {
+                    "user_folders": 0,
+                    "total_traces": 0,
+                    "total_size_mb": 0.0,
+                },
+                "config": {"pull_enabled": False, "interval": 0},
+            }
+
+    def _compute_langfuse_health(self, metrics: dict, interval_seconds: int) -> str:
+        """
+        Compute health status from sync metrics.
+
+        Returns:
+            "healthy" - All projects synced successfully in last interval
+            "degraded" - Some projects have errors but sync is running
+            "unhealthy" - Sync has not run for 2x the configured interval
+            "unknown" - No data yet
+        """
+        if not metrics:
+            return "unknown"
+
+        now = datetime.now(timezone.utc)
+
+        has_errors = any(m.get("errors_count", 0) > 0 for m in metrics.values())
+
+        # Check if sync is stale (2x interval)
+        all_stale = True
+        for m in metrics.values():
+            if m.get("last_sync_time"):
+                last = datetime.fromisoformat(m["last_sync_time"])
+                if (now - last).total_seconds() < interval_seconds * 2:
+                    all_stale = False
+                    break
+
+        if all_stale and metrics:
+            return "unhealthy"  # RED
+        elif has_errors:
+            return "degraded"  # YELLOW
+        else:
+            return "healthy"  # GREEN
+
+    def _get_langfuse_folder_stats(self, server_dir: Path) -> dict:
+        """
+        Calculate Langfuse folder statistics.
+
+        M9: Cached with 60s TTL to avoid expensive filesystem scan on every 30s refresh.
+
+        Args:
+            server_dir: Server data directory
+
+        Returns:
+            dict with:
+                - user_folders: count of langfuse_* directories
+                - total_traces: count of *.json files
+                - total_size_mb: total size in MB
+        """
+        # M9: Check cache (60s TTL)
+        now = datetime.now(timezone.utc)
+        if self._folder_stats_cache and self._folder_stats_cache_time:
+            age = (now - self._folder_stats_cache_time).total_seconds()
+            if age < 60:
+                return self._folder_stats_cache
+
+        # Cache miss or expired - recalculate
+        golden_repos_dir = server_dir / "data" / "golden-repos"
+
+        if not golden_repos_dir.exists():
+            result = {"user_folders": 0, "total_traces": 0, "total_size_mb": 0.0}
+            self._folder_stats_cache = result
+            self._folder_stats_cache_time = now
+            return result
+
+        user_folders = 0
+        total_traces = 0
+        total_size_bytes = 0
+
+        for folder in golden_repos_dir.iterdir():
+            if folder.is_dir() and folder.name.startswith("langfuse_"):
+                user_folders += 1
+
+                # Count JSON files and sizes (exclude CIDX index files)
+                for trace_file in folder.glob("**/*.json"):
+                    if trace_file.is_file() and ".code-indexer" not in trace_file.parts:
+                        total_traces += 1
+                        total_size_bytes += trace_file.stat().st_size
+
+        total_size_mb = total_size_bytes / (1024 * 1024)
+
+        result = {
+            "user_folders": user_folders,
+            "total_traces": total_traces,
+            "total_size_mb": round(total_size_mb, 2),
+        }
+
+        # M9: Update cache
+        self._folder_stats_cache = result
+        self._folder_stats_cache_time = now
+
+        return result
+
+    def get_temporal_index_status(
+        self, username: str, repo_alias: str
+    ) -> Dict[str, Any]:
+        """
+        Get temporal indexing status for repository.
+
+        Detects format (v1/v2/none) and returns status information.
+
+        Args:
+            username: Username for repository lookup ("_global" for global repos)
+            repo_alias: Repository alias
+
+        Returns:
+            Dict with format, file_count, needs_reindex, message
+
+        Raises:
+            FileNotFoundError: If repository not found
+        """
+        # Get index_dir based on whether this is a global repo or activated repo
+        if username == "_global":
+            # Global repos use BackendRegistry via app.state to get index_path
+            from code_indexer.server import app as app_module
+
+            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            if not backend_registry:
+                raise RuntimeError("BackendRegistry not initialized on app.state")
+            repos_dict = backend_registry.global_repos.list_repos()
+            repo_info = repos_dict.get(repo_alias)
+
+            if not repo_info:
+                raise FileNotFoundError(f"Repository not found: {repo_alias}")
+
+            # index_path from registry points to the repo root (e.g., /path/to/repo/v_123)
+            # The actual index is at index_path/.code-indexer/index
+            index_path = repo_info.get("index_path", "")
+            index_dir = Path(index_path) / ".code-indexer" / "index"
+        else:
+            # Activated repos use activated_manager
+            activated_manager = self._get_activated_repo_manager()
+            if not activated_manager:
+                raise FileNotFoundError(f"Repository not found: {repo_alias}")
+
+            repo_info = activated_manager.get_repository(username, repo_alias)
+            if not repo_info:
+                raise FileNotFoundError(f"Repository not found: {repo_alias}")
+
+            # Check if temporal collection exists
+            index_dir = Path(activated_manager.data_dir) / "index"
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
+
+        temporal_collection_path = next(
+            (
+                d
+                for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+                if d.is_dir() and _is_temporal(d.name)
+            ),
+            None,
+        )
+
+        if temporal_collection_path is None or not temporal_collection_path.exists():
+            return {
+                "format": "none",
+                "file_count": 0,
+                "needs_reindex": False,
+                "message": "No temporal index (git history not indexed)",
+            }
+
+        # Detect format using TemporalMetadataStore
+        from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+
+        format_version = TemporalMetadataStore.detect_format(temporal_collection_path)
+
+        # Count vector files in temporal collection
+        from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+        store = FilesystemVectorStore(base_path=index_dir)
+        file_count = store.get_indexed_file_count_fast(temporal_collection_path.name)
+
+        # Return appropriate status based on format
+        if format_version == "v2":
+            return {
+                "format": "v2",
+                "file_count": file_count,
+                "needs_reindex": False,
+                "message": f"Temporal indexing active (v2 format) - {file_count} files indexed",
+            }
+        else:  # v1 format
+            return {
+                "format": "v1",
+                "file_count": file_count,
+                "needs_reindex": True,
+                "message": "Legacy temporal index format (v1) detected - Re-index required: cidx index --index-commits --reconcile",
+            }
+
+
+# Global service instance
+dashboard_service = DashboardService()

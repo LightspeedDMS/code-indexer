@@ -1,0 +1,334 @@
+<h2>System Health</h2>
+
+<div class="health-grid">
+    {% if health %}
+    <!-- Overall Status (Story #727 AC5: Display failure reasons) -->
+    <!-- Story #492 AC8: Show node count when cluster data available -->
+    <article class="health-card overall-status">
+        <header>
+            <h3>Server Status</h3>
+            {% if server_version %}
+            <span class="server-version">v{{ server_version }}</span>
+            {% endif %}
+        </header>
+        <div class="status-content">
+            <span class="status-indicator status-{{ health.status.value }}"></span>
+            <span class="status-text">{{ health.status.value | capitalize }}</span>
+        </div>
+        {% if node_metrics and node_metrics|length > 1 %}
+        <div class="cluster-node-count">
+            <small>{{ node_metrics|length }} nodes reporting</small>
+            {% if scheduler_node_id %}
+            <br><small>Scheduler: {{ scheduler_node_id }}</small>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if health.failure_reasons and health.failure_reasons|length > 0 %}
+        <div class="failure-reasons">
+            <ul class="failure-list">
+                {% for reason in health.failure_reasons %}
+                <li class="failure-item">{{ reason }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% if dependency_rows %}
+        <!-- Story #680: External Dependency Latency Observability -->
+        <div class="dependency-latency-section">
+            {% for dep in dependency_rows %}
+            <div class="dependency-row dependency-status-{{ dep.status }}">
+                <span class="dep-name">{{ dep.name }}</span>
+                <span class="dep-metrics">{{ dep.p50_ms | round(0) }}/{{ dep.p95_ms | round(0) }}/{{ dep.p99_ms | round(0) }}ms</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        <footer>
+            <small>Last checked: {{ health.timestamp.strftime('%Y-%m-%d %H:%M:%S') if health.timestamp else 'N/A' }}</small>
+        </footer>
+    </article>
+
+    <!-- Database Health Honeycomb (Story #712 AC1-AC4) -->
+    <article class="health-card database-health-card">
+        <header>
+            <h3>Database Health</h3>
+        </header>
+        <div class="honeycomb-container">
+            {% if database_health %}
+            <svg class="honeycomb-svg" viewBox="0 0 280 170" preserveAspectRatio="xMidYMid meet">
+                <!-- Honeycomb layout: 2 rows of 4 hexagons -->
+                {% for i, db in enumerate(database_health) %}
+                {% set row = i // 4 %}
+                {% set col = i % 4 %}
+                {% set x = 35 + col * 55 %}
+                {% set y = 40 + row * 65 %}
+                {% set status_class = 'healthy' if db.status.value == 'healthy' else ('warning' if db.status.value == 'warning' else 'error') %}
+                <g class="hexagon-group" transform="translate({{ x }}, {{ y }})">
+                    <polygon class="hexagon hex-{{ status_class }}"
+                             points="25,0 50,15 50,45 25,60 0,45 0,15">
+                        <title>{{ db.get_tooltip() | replace('\n', '&#10;') | safe }}</title>
+                    </polygon>
+                    <text class="hex-label" x="25" y="35" text-anchor="middle">
+                        {{ db.display_name[:6] }}
+                    </text>
+                </g>
+                {% endfor %}
+            </svg>
+            <div class="honeycomb-legend">
+                <span class="legend-item"><span class="legend-dot healthy"></span>Healthy</span>
+                <span class="legend-item"><span class="legend-dot warning"></span>Warning</span>
+                <span class="legend-item"><span class="legend-dot error"></span>Error</span>
+            </div>
+            {% else %}
+            <div class="status-content">
+                <span class="status-indicator status-unhealthy"></span>
+                <span class="status-text">Unable to check databases</span>
+            </div>
+            {% endif %}
+        </div>
+    </article>
+
+    <!-- Story #492: Node Metrics Carousel (AC4-AC8) -->
+    <style>
+    /* Override auto-fit grid to fixed 3-column layout when node metrics present */
+    .health-grid:has(.node-metrics-card) { grid-template-columns: 1fr 1fr 2fr; }
+    /* Two-column layout inside each carousel slide */
+    .nm-slide-content { display: flex; gap: 1rem; }
+    .nm-metrics-col { flex: 1; min-width: 0; }
+    .nm-volumes-col { flex: 1; min-width: 0; }
+    /* Dot navigation indicators */
+    .nm-dots { display: flex; justify-content: center; gap: 6px; padding: 8px 0; }
+    .nm-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; cursor: pointer; transition: background 0.2s; display: inline-block; }
+    .nm-dot.active { background: #4CAF50; }
+    .nm-dot.pinned { box-shadow: 0 0 0 2px #fff; }
+    /* Stale badge */
+    .nm-stale-badge { font-size: 0.7em; background: #c44; color: #fff; border-radius: 3px; padding: 1px 4px; margin-left: 4px; }
+    </style>
+    {% if node_metrics %}
+    <article class="health-card node-metrics-card" id="node-metrics-card">
+        <header>
+            <h3>Node Metrics{% if node_metrics|length > 1 %} <span class="node-metrics-node-label" id="nm-node-label"></span>{% endif %}</h3>
+        </header>
+        <div class="node-metrics-carousel" id="nm-carousel" data-node-count="{{ node_metrics|length }}">
+            {% for nm in node_metrics %}
+            {% set ts_str = nm.timestamp %}
+            <div class="nm-slide" id="nm-slide-{{ loop.index0 }}" data-node-id="{{ nm.node_id }}" data-timestamp="{{ ts_str }}" {% if loop.index0 != 0 %}style="display:none"{% endif %}>
+                <span class="nm-stale-badge" id="nm-stale-{{ loop.index0 }}" style="display:none">stale</span>
+                <div class="nm-slide-content">
+                    <div class="nm-metrics-col">
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">CPU</span>
+                                <span class="metric-value">{{ "%.1f"|format(nm.cpu_usage) }}%</span>
+                                <div class="metric-bar">
+                                    <div class="metric-fill {% if nm.cpu_usage > 80 %}high{% elif nm.cpu_usage > 60 %}medium{% endif %}"
+                                         style="width: {{ nm.cpu_usage }}%"></div>
+                                </div>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Memory</span>
+                                <span class="metric-value">{{ "%.1f"|format(nm.memory_percent) }}%</span>
+                                <div class="metric-bar">
+                                    <div class="metric-fill {% if nm.memory_percent > 80 %}high{% elif nm.memory_percent > 60 %}medium{% endif %}"
+                                         style="width: {{ nm.memory_percent }}%"></div>
+                                </div>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">CIDX RSS</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.process_rss_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Index Mem</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.index_memory_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Swap</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">{{ "%.1f"|format(nm.swap_used_mb) }} / {{ "%.1f"|format(nm.swap_total_mb) }} MB</span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Disk (R/W)</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                                    {{ "%.1f"|format(nm.disk_read_kb_s) }} / {{ "%.1f"|format(nm.disk_write_kb_s) }} KB/s
+                                </span>
+                            </div>
+                            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span class="metric-label" style="flex: 0 0 75px;">Net (Rx/Tx)</span>
+                                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                                    {{ "%.1f"|format(nm.net_rx_kb_s) }} / {{ "%.1f"|format(nm.net_tx_kb_s) }} KB/s
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    {% if nm.volumes %}
+                    {% set volumes = nm.volumes %}
+                    {% if volumes %}
+                    <div class="nm-volumes-col">
+                        <div class="nm-volumes">
+                            <div class="nm-volumes-header">Disk Storage</div>
+                            {% for vol in volumes %}
+                            {% set mp = vol.mount_point | default('') %}
+                            {% set fs = vol.fstype | default('') %}
+                            {% if not (mp.startswith('/run/media/') or mp.startswith('/media/') or fs in ('iso9660', 'udf', 'squashfs')) %}
+                            <div class="volume-entry">
+                                <div class="volume-header">
+                                    <span class="volume-mount" title="{{ vol.device | default('') }}">{{ mp }}</span>
+                                    <span class="volume-fstype">{{ fs }}</span>
+                                </div>
+                                <div class="volume-bar">
+                                    <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
+                                         style="width: {{ vol.used_percent }}%"></div>
+                                </div>
+                                <div class="volume-stats">
+                                    <span class="volume-used">{{ "%.1f"|format(vol.used_gb) }} GB used ({{ "%.0f"|format(vol.used_percent) }}%)</span>
+                                    <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
+                                </div>
+                            </div>
+                            {% endif %}
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% if node_metrics|length > 1 %}
+        <div class="nm-dots" id="nm-dots">
+            {% for nm in node_metrics %}
+            <span class="nm-dot {% if loop.index0 == 0 %}active{% endif %}"
+                  id="nm-dot-{{ loop.index0 }}"
+                  data-index="{{ loop.index0 }}"
+                  title="{{ nm.node_id }}"
+                  onclick="nmPinSlide({{ loop.index0 }})"></span>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </article>
+
+    <script>
+    // Signal the parent page to rebind carousel DOM after this partial is injected.
+    // The parent page owns persistent state (current slide index, pinned flag, auto-cycle
+    // interval) so they survive the 2s DOM replacement of #health-section.
+    if (typeof window.nmRebindCarousel === 'function') {
+        window.nmRebindCarousel();
+    }
+    </script>
+    {% endif %}
+
+    <!-- Storage Status (Story #712: All mounted volumes with scrolling) -->
+    <!-- Hidden when node_metrics available (carousel replaces these cards) -->
+    {% if not node_metrics %}
+    <article class="health-card volumes-card">
+        <header>
+            <h3>Disk Storage</h3>
+        </header>
+        {% if health.system and health.system.volumes %}
+        <div class="volumes-container">
+            {% for vol in health.system.volumes %}
+            {% set mp = vol.mount_point | default('') %}
+            {% set fs = vol.fstype | default('') %}
+            {% if not (mp.startswith('/run/media/') or mp.startswith('/media/') or fs in ('iso9660', 'udf', 'squashfs')) %}
+            <div class="volume-entry">
+                <div class="volume-header">
+                    <span class="volume-mount" title="{{ vol.device }}">{{ mp }}</span>
+                    <span class="volume-fstype">{{ fs }}</span>
+                </div>
+                <div class="volume-bar">
+                    <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
+                         style="width: {{ vol.used_percent }}%"></div>
+                </div>
+                <div class="volume-stats">
+                    <span class="volume-used">{{ "%.1f"|format(vol.used_gb) }} GB used ({{ "%.0f"|format(vol.used_percent) }}%)</span>
+                    <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
+                </div>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="status-content">
+            <span class="status-indicator status-unhealthy"></span>
+            <span class="status-text">No volumes detected</span>
+        </div>
+        {% endif %}
+    </article>
+
+    <!-- System Resources (CPU/RAM) -->
+    <article class="health-card">
+        <header>
+            <h3>System Resources</h3>
+        </header>
+        {% if health.system %}
+        <div class="system-metrics">
+            <div class="metric">
+                <span class="metric-label">CPU</span>
+                <span class="metric-value">{{ "%.1f"|format(health.system.cpu_usage_percent) }}%</span>
+                <div class="metric-bar">
+                    <div class="metric-fill {% if health.system.cpu_usage_percent > 80 %}high{% elif health.system.cpu_usage_percent > 60 %}medium{% endif %}"
+                         style="width: {{ health.system.cpu_usage_percent }}%"></div>
+                </div>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Memory</span>
+                <span class="metric-value">{{ "%.1f"|format(health.system.memory_usage_percent) }}%</span>
+                <div class="metric-bar">
+                    <div class="metric-fill {% if health.system.memory_usage_percent > 80 %}high{% elif health.system.memory_usage_percent > 60 %}medium{% endif %}"
+                         style="width: {{ health.system.memory_usage_percent }}%"></div>
+                </div>
+            </div>
+            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span class="metric-label" style="flex: 0 0 75px;">CIDX RSS</span>
+                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                    {{ "%.1f"|format(health.system.process_rss_mb) }} MB
+                </span>
+            </div>
+            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span class="metric-label" style="flex: 0 0 75px;">Index Mem</span>
+                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                    {{ "%.1f"|format(health.system.index_memory_mb) }} MB
+                </span>
+            </div>
+            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span class="metric-label" style="flex: 0 0 75px;">Swap</span>
+                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                    {{ "%.1f"|format(health.system.swap_used_mb) }} / {{ "%.1f"|format(health.system.swap_total_mb) }} MB
+                </span>
+            </div>
+            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span class="metric-label" style="flex: 0 0 75px;">Disk (R/W)</span>
+                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                    <span class="io-read" title="Read">{{ "%.1f"|format(health.system.disk_read_kb_s) }}</span>
+                    <span class="io-separator">/</span>
+                    <span class="io-write" title="Write">{{ "%.1f"|format(health.system.disk_write_kb_s) }} KB/s</span>
+                </span>
+            </div>
+            <div class="metric io-metric" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span class="metric-label" style="flex: 0 0 75px;">Net (Rx/Tx)</span>
+                <span class="metric-value io-value" style="flex: 1; white-space: nowrap;">
+                    <span class="io-rx" title="Receive (Rx)">{{ "%.1f"|format(health.system.net_rx_kb_s) }}</span>
+                    <span class="io-separator">/</span>
+                    <span class="io-tx" title="Transmit (Tx)">{{ "%.1f"|format(health.system.net_tx_kb_s) }} KB/s</span>
+                </span>
+            </div>
+        </div>
+        {% else %}
+        <div class="status-content">
+            <span class="status-indicator status-unhealthy"></span>
+            <span class="status-text">Unknown</span>
+        </div>
+        {% endif %}
+    </article>
+    {% endif %}
+    {% else %}
+    <article class="health-card">
+        <header>
+            <h3>Status</h3>
+        </header>
+        <div class="status-content">
+            <span class="status-indicator status-unhealthy"></span>
+            <span class="status-text">Unable to fetch health data</span>
+        </div>
+    </article>
+    {% endif %}
+</div>

@@ -1,0 +1,413 @@
+<!-- Search Input -->
+<div class="discovery-search">
+    <input
+        type="text"
+        id="gitlab-search"
+        name="search"
+        placeholder="Search repositories..."
+        value="{{ search_term }}"
+        hx-get="/admin/partials/auto-discovery/gitlab"
+        hx-trigger="input changed delay:300ms"
+        hx-target="#gitlab-repos-section"
+        hx-include="this"
+        oninput="onGitLabSearchChanged()"
+    >
+    {% if search_term %}
+    <button type="button" class="outline small" onclick="clearGitLabSearch()">Clear</button>
+    {% endif %}
+    <label style="margin-left: 1rem; display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.9em; cursor: pointer;">
+        <input type="checkbox" id="gitlab-show-hidden"
+            {% if show_hidden %}checked{% endif %}
+            onchange="toggleShowHidden('gitlab', this.checked)">
+        Show hidden
+    </label>
+</div>
+
+{% if error_type == 'not_configured' %}
+<!-- GitLab Not Configured State -->
+<article class="message-warning">
+    <header>
+        <strong>GitLab Token Not Configured</strong>
+    </header>
+    <p>To discover GitLab repositories, you need to configure a GitLab personal access token.</p>
+    <p>
+        <a href="/admin/config" class="button outline">Configure CI Token</a>
+    </p>
+</article>
+
+{% elif error_type == 'api_error' or error_type == 'auth_error' or error_type == 'timeout' %}
+<!-- API Error State -->
+<article class="message-error">
+    <header>
+        <strong>Failed to Load GitLab Repositories</strong>
+    </header>
+    <p>{{ error_message }}</p>
+    <p>
+        <button class="outline" onclick="retryGitLabDiscovery()">Retry</button>
+    </p>
+</article>
+
+{% else %}
+
+{% if repositories|length == 0 and has_next_page %}
+<!-- All repos on this page already indexed, but more pages exist -->
+<article class="message-info">
+    <p>All repositories on this page are already indexed as golden repos. Click Next to continue.</p>
+</article>
+
+{% elif repositories|length == 0 and not has_next_page %}
+<!-- No more repos to show -->
+<article class="message-info">
+    {% if search_term %}
+    <p>No repositories found matching '{{ search_term }}'.</p>
+    <p><button type="button" class="outline small" onclick="clearGitLabSearch()">Clear search</button></p>
+    {% else %}
+    <p>No new repositories found. All accessible GitLab repositories are already indexed as golden repos.</p>
+    {% endif %}
+</article>
+
+{% else %}
+<!-- Repositories Table -->
+<div class="repos-table-container">
+    <table class="discovery-table" role="grid">
+        <thead>
+            <tr>
+                <th style="width: 40px;">
+                    <input type="checkbox" id="select-all-gitlab" title="Select all" onchange="toggleSelectAll('gitlab', this.checked)">
+                </th>
+                <th style="width: 60px;">Platform</th>
+                <th>Repository Name</th>
+                <th>Description</th>
+                <th style="width: 100px;">Branch</th>
+                <th style="width: 180px;">Last Commit</th>
+                <th style="width: 180px;">Last Activity</th>
+                <th style="width: 80px;">Visibility</th>
+                <th style="width: 120px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for repo in repositories %}
+            <tr>
+                <td>
+                    <input type="checkbox" class="gitlab-repo-checkbox repo-checkbox"
+                           name="selected_repos"
+                           value="{{ repo.clone_url_ssh if repo.is_private else repo.clone_url_https }}"
+                           data-platform="gitlab"
+                           data-name="{{ repo.name }}"
+                           data-branch="{{ repo.default_branch }}"
+                           onchange="updateRepoSelection(this); updateSelectionUI()">
+                </td>
+                <td>
+                    <span class="platform-badge gitlab">GitLab</span>
+                </td>
+                <td class="repo-name" title="{{ repo.name }}">
+                    <strong>{{ repo.name }}</strong>
+                </td>
+                <td class="repo-description" title="{{ repo.description or '' }}">
+                    {{ repo.description or '-' }}
+                </td>
+                <td>
+                    <code>{{ repo.default_branch }}</code>
+                </td>
+                <td class="last-commit-cell">
+                    {% if repo.last_commit_hash %}
+                    <code title="{{ repo.last_commit_author or 'Unknown' }}">{{ repo.last_commit_hash[:7] }}</code>
+                    <span class="commit-author">{{ repo.last_commit_author or 'Unknown' }}</span>
+                    {% if repo.last_commit_date %}
+                    <span class="commit-date">{{ repo.last_commit_date.strftime('%Y-%m-%d %H:%M') }}</span>
+                    {% endif %}
+                    {% else %}
+                    <span class="no-commit-info">N/A</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if repo.last_activity %}
+                    {{ repo.last_activity.strftime('%Y-%m-%d %H:%M') }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if repo.is_private %}
+                    <span class="visibility-badge private">Private</span>
+                    {% else %}
+                    <span class="visibility-badge public">Public</span>
+                    {% endif %}
+                </td>
+                <td class="actions-cell">
+                    <form method="post" action="/admin/golden-repos/add" style="display: inline;">
+                        <input type="hidden" name="alias" value="{{ repo.name | replace('/', '-') }}">
+                        <input type="hidden" name="repo_url" value="{{ repo.clone_url_ssh if repo.is_private else repo.clone_url_https }}">
+                        <input type="hidden" name="default_branch" value="{{ repo.default_branch }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="small" title="Add as golden repository">Add</button>
+                    </form>
+                    {% set repo_id = "gitlab:" ~ (repo.clone_url_ssh if repo.is_private else repo.clone_url_https) %}
+                    {% if show_hidden and repo_id in hidden_identifiers %}
+                    <button type="button" class="small outline"
+                        title="Unhide from discovery"
+                        hx-post="/admin/api/discovery/unhide"
+                        hx-vals='{"repo_identifier": "{{ repo_id }}", "csrf_token": "{{ csrf_token }}"}'
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        style="display:block; margin-top:4px; width:100%;">Unhide</button>
+                    {% else %}
+                    <button type="button" class="small outline secondary"
+                        title="Hide from discovery"
+                        hx-post="/admin/api/discovery/hide"
+                        hx-vals='{"repo_identifier": "{{ repo_id }}", "csrf_token": "{{ csrf_token }}"}'
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        style="display:block; margin-top:4px; width:100%;">Hide</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Pagination Controls (always shown when not in error state) -->
+<div class="pagination-container">
+    <div class="pagination-info">
+        Showing {{ repositories|length }} new repositories
+        {% if source_total %}
+        (source contains ~{{ source_total }} repos total)
+        {% endif %}
+    </div>
+    <div class="pagination-controls">
+        <button id="gitlab-back-btn" class="outline small" disabled
+                onclick="loadGitLabBack({{ page_size }}, '{{ search_term|default('', true)|e }}')">Previous</button>
+        <button id="gitlab-next-btn" class="outline small"
+                {% if not has_next_page %}disabled{% endif %}
+                onclick="loadGitLabNext('{{ next_cursor|default('', true)|e }}', {{ page_size }}, '{{ search_term|default('', true)|e }}')">Next</button>
+    </div>
+</div>
+
+{% endif %}
+
+<style>
+.discovery-search {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.discovery-search input[type="text"] {
+    flex: 1;
+    max-width: 400px;
+}
+
+.discovery-table {
+    width: 100%;
+}
+
+.discovery-table th,
+.discovery-table td {
+    padding: 0.75rem;
+    vertical-align: middle;
+}
+
+.repo-name {
+    word-break: break-word;
+}
+
+.repo-description {
+    color: var(--muted-color);
+    font-size: 0.9rem;
+}
+
+.platform-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.platform-badge.gitlab {
+    background-color: #fc6d26;
+    color: white;
+}
+
+.platform-badge.github {
+    background-color: #24292e;
+    color: white;
+}
+
+.visibility-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.visibility-badge.private {
+    background-color: #ffeeba;
+    color: #856404;
+}
+
+.visibility-badge.public {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+.repo-description {
+    white-space: normal;
+}
+
+.actions-cell {
+    white-space: nowrap;
+}
+
+.pagination-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--muted-border-color);
+}
+
+.pagination-info {
+    color: var(--muted-color);
+    font-size: 0.9rem;
+}
+
+.pagination-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.message-warning {
+    background-color: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.message-warning header {
+    margin-bottom: 0.5rem;
+}
+
+.message-error {
+    background-color: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.message-error header {
+    margin-bottom: 0.5rem;
+}
+
+.message-info {
+    background-color: #d1ecf1;
+    border: 1px solid #bee5eb;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.partial-cap-notice {
+    margin-bottom: 0.75rem;
+}
+
+.repos-table-container {
+    overflow-x: auto;
+}
+
+.last-commit-cell {
+    font-size: 0.85rem;
+}
+
+.last-commit-cell code {
+    background-color: var(--code-background-color, #f4f4f4);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.commit-author {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.commit-date {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.75rem;
+    margin-top: 2px;
+}
+
+.no-commit-info {
+    color: var(--muted-color);
+    font-style: italic;
+}
+
+.gitlab-repo-checkbox {
+    cursor: pointer;
+}
+
+#select-all-gitlab {
+    cursor: pointer;
+}
+</style>
+
+<script>
+// Cursor stack for GitLab: tracks navigation history so Back can return to previous page.
+// Each entry is a cursor string (or null for the first page).
+// Initial state: one null entry = first page, Back is disabled.
+window.gitlabCursorStack = window.gitlabCursorStack || [null];
+
+function updateGitLabBackButtonState() {
+    var backBtn = document.getElementById('gitlab-back-btn');
+    if (backBtn) {
+        backBtn.disabled = (window.gitlabCursorStack.length <= 1);
+    }
+}
+
+function loadGitLabNext(nextCursor, pageSize, search) {
+    window.gitlabCursorStack.push(nextCursor || null);
+    fetchGitLabPage(nextCursor, pageSize, search);
+}
+
+function loadGitLabBack(pageSize, search) {
+    if (window.gitlabCursorStack.length <= 1) { return; }
+    window.gitlabCursorStack.pop();
+    var prevCursor = window.gitlabCursorStack[window.gitlabCursorStack.length - 1];
+    fetchGitLabPage(prevCursor, pageSize, search);
+}
+
+function fetchGitLabPage(cursor, pageSize, search) {
+    var url = '/admin/partials/auto-discovery/gitlab?page_size=' + pageSize;
+    if (cursor) { url += '&cursor=' + encodeURIComponent(cursor); }
+    if (search) { url += '&search=' + encodeURIComponent(search); }
+    htmx.ajax('GET', url, {target: '#gitlab-repos-section', swap: 'innerHTML'});
+}
+
+function onGitLabSearchChanged() {
+    // Reset cursor stack on new search so Back starts fresh
+    window.gitlabCursorStack = [null];
+}
+
+function clearGitLabSearch() {
+    document.getElementById('gitlab-search').value = '';
+    window.gitlabCursorStack = [null];
+    htmx.ajax('GET', '/admin/partials/auto-discovery/gitlab', {target: '#gitlab-repos-section', swap: 'innerHTML'});
+}
+
+function toggleShowHidden(platform, checked) {
+    var searchInput = document.getElementById(platform + '-search');
+    var searchVal = searchInput ? searchInput.value : '';
+    var url = '/admin/partials/auto-discovery/' + platform + '?show_hidden=' + checked + (searchVal ? '&search=' + encodeURIComponent(searchVal) : '');
+    htmx.ajax('GET', url, {target: '#' + platform + '-repos-section', swap: 'innerHTML'});
+}
+
+// Set initial back button state after each partial load
+updateGitLabBackButtonState();
+</script>
