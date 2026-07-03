@@ -103,6 +103,67 @@ def preflight_split_chunk(
     return result
 
 
+def pack_chunks_into_documents(
+    chunks: List[str],
+    count_tokens: Callable[[str], int],
+    *,
+    max_chunks_per_document: int,
+    max_tokens_per_document: int,
+) -> List[List[str]]:
+    """Pack a FLAT ordered chunk list into minimal sequential document groups.
+
+    Complements ``enforce_request_seal`` (which groups whole DOCUMENTS into
+    request-level batches): this packs individual CHUNKS -- already produced
+    by ``preflight_split_chunk`` for one commit's aggregated document -- into
+    document-sized groups, sealing the current group BEFORE the next chunk
+    would push it over either the per-document chunk-count or token-sum cap.
+    This is the same dual-constraint greedy-sealing shape used by the
+    embedding request coalescer (Story #1079), applied at chunk granularity
+    so a single oversized commit can be split into multiple contextualized-
+    embeddings documents/requests while a normal commit still yields exactly
+    ONE document (preserving full intra-document context in the common case).
+
+    Args:
+        chunks: Ordered chunk texts for one commit (already preflight-split
+            per individual chunk).
+        count_tokens: Token-estimation callable.
+        max_chunks_per_document: Max chunk count per packed document.
+        max_tokens_per_document: Max total estimated tokens per packed
+            document.
+
+    Returns:
+        Ordered list of documents (each a list of chunk texts); concatenating
+        all documents in order reproduces `chunks` exactly. A single chunk
+        whose own token count already exceeds the cap is still emitted alone
+        in its own document (best effort, mirrors enforce_request_seal).
+    """
+    if not chunks:
+        return []
+
+    documents: List[List[str]] = []
+    current_doc: List[str] = []
+    current_tokens = 0
+
+    for chunk in chunks:
+        chunk_tokens = count_tokens(chunk)
+        would_exceed = (
+            len(current_doc) + 1 > max_chunks_per_document
+            or current_tokens + chunk_tokens > max_tokens_per_document
+        )
+        if would_exceed and current_doc:
+            documents.append(current_doc)
+            current_doc = []
+            current_tokens = 0
+
+        current_doc.append(chunk)
+        current_tokens += chunk_tokens
+
+    if current_doc:
+        documents.append(current_doc)
+
+    return documents
+
+
 def enforce_request_seal(
     documents: List[List[str]],
     count_tokens: Callable[[str], int],

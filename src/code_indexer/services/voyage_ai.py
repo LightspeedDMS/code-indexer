@@ -230,6 +230,23 @@ class VoyageAIClient(EmbeddingProvider):
             # Fallback for unknown models
             return 120000  # Conservative default
 
+    def _get_model_context_length(self) -> int:
+        """Get the per-TEXT context length for current model (Story #1290 AC23).
+
+        Distinct from ``_get_model_token_limit()`` (a per-BATCH/request token
+        budget, e.g. 120000): ``context_length`` is the maximum tokens a
+        SINGLE input text may contain -- the correct basis for a per-chunk
+        token cap. Read from voyage_models.yaml; unknown models fall back to
+        the conservative 32000 shared by every model currently in the spec.
+        """
+        try:
+            limit = self.model_specs["voyage_models"][self.config.model][
+                "context_length"
+            ]
+            return int(limit)
+        except (KeyError, TypeError):
+            return 32000  # Conservative default
+
     def _health_probe(self) -> bool:
         """Lightweight connectivity probe for recovery detection (Story #619 HIGH-2).
 

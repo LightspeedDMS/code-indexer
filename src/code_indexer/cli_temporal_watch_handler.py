@@ -194,7 +194,7 @@ class TemporalWatchHandler(FileSystemEventHandler):
         This method:
         1. Loads completed commits from temporal_progress.json
         2. Filters new commits (O(1) with in-memory set)
-        3. Calls TemporalIndexer._process_commits_parallel() for new commits
+        3. Calls TemporalIndexer.index_commits_list() for new commits
         4. Updates progress metadata
         5. Invalidates daemon cache if daemon is running
 

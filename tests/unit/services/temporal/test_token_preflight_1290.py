@@ -14,6 +14,7 @@ import pytest
 
 from src.code_indexer.services.temporal.token_preflight import (
     enforce_request_seal,
+    pack_chunks_into_documents,
     preflight_split_chunk,
 )
 
@@ -103,3 +104,74 @@ class TestEnforceRequestSeal:
 
     def test_empty_documents_returns_empty_list(self):
         assert enforce_request_seal([], _char_token_counter) == []
+
+
+class TestPackChunksIntoDocuments:
+    """AC23: packs a FLAT ordered chunk list (one commit's already-preflighted
+    pieces) into minimal sequential document groups, sealing BEFORE a document
+    would exceed either the per-document chunk-count or token-sum cap --
+    mirrors the coalescer's dual-constraint sealing, at chunk granularity
+    rather than document granularity (enforce_request_seal's granularity)."""
+
+    def test_small_chunk_list_returns_single_document_preserving_order(self):
+        chunks = ["a", "b", "c"]
+        documents = pack_chunks_into_documents(
+            chunks,
+            _char_token_counter,
+            max_chunks_per_document=100,
+            max_tokens_per_document=1000,
+        )
+        assert documents == [["a", "b", "c"]]
+
+    def test_splits_when_max_chunks_per_document_exceeded(self):
+        chunks = [f"chunk{i}" for i in range(5)]
+        documents = pack_chunks_into_documents(
+            chunks,
+            _char_token_counter,
+            max_chunks_per_document=2,
+            max_tokens_per_document=1000,
+        )
+        # Order preserved, flattened output equals the original chunk list.
+        assert [c for doc in documents for c in doc] == chunks
+        assert all(len(doc) <= 2 for doc in documents)
+        assert len(documents) == 3  # 2 + 2 + 1
+
+    def test_splits_when_max_tokens_per_document_exceeded(self):
+        # Each chunk ~250 tokens (1000 chars / 4); cap of 400 tokens per
+        # document forces a new document roughly every chunk.
+        chunks = ["x" * 1000 for _ in range(4)]
+        documents = pack_chunks_into_documents(
+            chunks,
+            _char_token_counter,
+            max_chunks_per_document=100,
+            max_tokens_per_document=400,
+        )
+        assert [c for doc in documents for c in doc] == chunks
+        assert len(documents) > 1
+        for doc in documents:
+            assert sum(_char_token_counter(c) for c in doc) <= 400 or len(doc) == 1
+
+    def test_empty_chunks_returns_empty_list(self):
+        assert (
+            pack_chunks_into_documents(
+                [],
+                _char_token_counter,
+                max_chunks_per_document=10,
+                max_tokens_per_document=100,
+            )
+            == []
+        )
+
+    def test_single_oversized_chunk_still_emitted_alone(self):
+        """Best-effort: a single chunk whose own token count already exceeds
+        the cap is still emitted alone in its own document (mirrors
+        enforce_request_seal's documented lone-oversized-unit behavior)."""
+        chunks = ["a", "x" * 10_000, "b"]
+        documents = pack_chunks_into_documents(
+            chunks,
+            _char_token_counter,
+            max_chunks_per_document=100,
+            max_tokens_per_document=50,
+        )
+        assert [c for doc in documents for c in doc] == chunks
+        assert ["x" * 10_000] in documents

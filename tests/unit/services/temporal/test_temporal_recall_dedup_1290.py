@@ -5,6 +5,7 @@ reconstruction), AC12 (canonical chunk_type mapping), AC13 (filters + default
 reverse-chronological order), AC14 (query embedding purpose/lane/cache key).
 """
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -405,6 +406,43 @@ class TestFullMessageReconstruction:
         assert top.temporal_context.get("message_truncated") is True
         assert top.temporal_context["commit_message"] == "Short cap"
 
+    def test_non_head_top_match_flags_degraded_on_git_timeout(self, service):
+        """AC11: a `git show` subprocess.TimeoutExpired must produce the SAME
+        explicitly-flagged degraded result as any other reconstruction
+        failure -- never a silent/unflagged substitution, and never an
+        uncaught exception propagating out of query_temporal."""
+        service.vector_store_client.collection_exists.return_value = True
+        service.vector_store_client.__class__.__name__ = "FilesystemClient"
+        service.vector_store_client.search.return_value = [
+            _mock_hit(
+                _payload("abc123", True, "a.py", ["a.py"], 1704153600, "Short cap"),
+                0.5,
+                "head chunk",
+            ),
+            _mock_hit(
+                _payload("abc123", False, "b.py", ["b.py"], 1704153600),
+                0.95,
+                "diff chunk beats head on score",
+            ),
+        ]
+        service.embedding_provider.get_embedding.return_value = [0.1] * 1024
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd=["git", "show", "-s", "--format=%B", "abc123"], timeout=30
+            )
+            results = service.query_temporal(
+                query="x",
+                time_range=("2024-01-01", "2024-12-31"),
+                limit=10,
+            )
+
+        assert len(results.results) == 1
+        top = results.results[0]
+        # never silently substitutes the capped copy as if it were the full message
+        assert top.temporal_context.get("message_truncated") is True
+        assert top.temporal_context["commit_message"] == "Short cap"
+
     def test_head_top_match_does_not_attempt_reconstruction(self, service):
         service.vector_store_client.collection_exists.return_value = True
         service.vector_store_client.__class__.__name__ = "FilesystemClient"
@@ -466,3 +504,28 @@ class TestContextualQueryEmbedding:
 
         mock_ctx.assert_not_called()
         mock_std.assert_called_once()
+
+    def test_query_embedding_cache_qualifier_resolves_voyage_context_4_tuple(self):
+        """AC14: the query-embedding cache key axis for a voyage-context-4
+        temporal query resolves to the EXACT tuple
+        (provider="voyage-ai", model="voyage-context-4", dimension=1024) --
+        never a different provider/model/dimension that would silently
+        collide with (or diverge from) the regular voyage-code-3 index."""
+        import os
+
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+            client = VoyageAIClient(VoyageAIConfig(model="voyage-context-4"))
+
+        cache = QueryEmbeddingCache(backend=MagicMock())
+        qualifier = cache.qualifier(client)
+
+        assert qualifier == ("voyage-ai", "voyage-context-4", 1024)
+        assert qualifier.provider == "voyage-ai"
+        assert qualifier.model == "voyage-context-4"
+        assert qualifier.dimension == 1024

@@ -143,3 +143,21 @@ class TestGetContextualizedEmbeddings:
             _, kwargs = mocked.call_args
             assert kwargs["input_type"] == "query"
             assert kwargs["output_dimension"] == 1024
+
+
+class TestGetModelContextLength:
+    """AC23 review fix: a realistic PER-CHUNK token cap must be derived from
+    the model's own per-text context length (voyage_models.yaml
+    `context_length`), NOT the request-level `token_limit` (which is a
+    per-BATCH budget, far larger than any single chunk could ever need --
+    using it as the per-chunk cap made preflight_split_chunk a near-no-op)."""
+
+    def test_voyage_context_4_context_length_is_32000(
+        self, voyage_config, mock_api_key
+    ):
+        client = VoyageAIClient(voyage_config)
+        assert client._get_model_context_length() == 32000
+
+    def test_unknown_model_falls_back_to_conservative_default(self, mock_api_key):
+        client = VoyageAIClient(VoyageAIConfig(model="not-a-real-model"))
+        assert client._get_model_context_length() == 32000

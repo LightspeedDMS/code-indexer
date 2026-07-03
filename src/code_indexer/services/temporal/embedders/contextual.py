@@ -16,15 +16,41 @@ one embedding for its point/payload) -- sub-piece embeddings for one
 oversized original chunk are mean-pooled back into a single vector. This
 keeps chunk_index/paths/point_id (computed once, before embedding) valid
 regardless of any preflight split.
+
+Request seal (AC23): after per-chunk preflight, the ordered flat piece list
+for ONE commit is packed into minimal document groups
+(``pack_chunks_into_documents``) and those documents are grouped into
+request-level batches (``enforce_request_seal``) respecting the
+contextualized-embeddings endpoint's per-request caps (max documents / max
+total chunks / max total tokens). A normal commit (comfortably under every
+cap) still yields exactly ONE document in ONE HTTP request, unchanged from
+before; only a pathologically large commit is split across MULTIPLE
+requests. Results are flattened back in original order before mean-pooling,
+so the 1:1 chunk<->vector contract holds regardless of how many HTTP
+requests were needed.
 """
 
 from typing import Any, List
 
 from ....config import VoyageAIConfig
 from ...voyage_ai import VoyageAIClient
-from ..token_preflight import preflight_split_chunk
+from ..token_preflight import (
+    MAX_CHUNKS_PER_REQUEST,
+    MAX_DOCUMENTS_PER_REQUEST,
+    MAX_TOKENS_PER_REQUEST,
+    enforce_request_seal,
+    pack_chunks_into_documents,
+    preflight_split_chunk,
+)
 from .base import TemporalEmbedder
 from .registry import register_embedder
+
+# Safety margin applied to provider-spec token limits before treating them as
+# a hard seal boundary -- mirrors the embedding request coalescer's own
+# margin (Story #1079's `_resolve_token_limit`, 0.9 fallback when the
+# provider spec declares no explicit safety_margin_percentage, which is the
+# case for every Voyage model today).
+_TOKEN_SAFETY_MARGIN = 0.9
 
 
 def _mean_pool(vectors: List[List[float]]) -> List[float]:
@@ -61,11 +87,23 @@ class ContextualTemporalEmbedder(TemporalEmbedder):
         else:
             voyage_config = VoyageAIConfig(model=self.name)
         self._client = VoyageAIClient(voyage_config)
-        # Per-chunk token preflight cap (AC23). Defaults to the model's
-        # request-level token limit -- in practice a 4096-char chunk is
-        # ~1024 tokens, so this only ever fires on pathological token-dense
-        # content. Test-overridable via `embedder._max_tokens_per_chunk`.
-        self._max_tokens_per_chunk = self._client._get_model_token_limit()
+        # Per-chunk token preflight cap (AC23). Derived from the model's own
+        # per-TEXT context length (NOT the per-request token_limit, which is
+        # a ~10-100x larger batch budget and made this cap a near-no-op) --
+        # in practice a 4096-char chunk is ~1024 tokens, so this only ever
+        # fires on pathological token-dense content. Test-overridable via
+        # `embedder._max_tokens_per_chunk`.
+        self._max_tokens_per_chunk = int(
+            self._client._get_model_context_length() * _TOKEN_SAFETY_MARGIN
+        )
+        # Request-level seal caps (AC23): max documents / max total chunks /
+        # max total tokens per contextualized-embeddings HTTP request. All
+        # three are test-overridable (`embedder._max_*_per_request`).
+        self._max_documents_per_request = MAX_DOCUMENTS_PER_REQUEST
+        self._max_chunks_per_request = MAX_CHUNKS_PER_REQUEST
+        self._max_tokens_per_request = int(
+            MAX_TOKENS_PER_REQUEST * _TOKEN_SAFETY_MARGIN
+        )
 
     def _count_tokens(self, text: str) -> int:
         return int(self._client._count_tokens_accurately(text))
@@ -90,13 +128,34 @@ class ContextualTemporalEmbedder(TemporalEmbedder):
             sent_pieces.extend(pieces)
             piece_counts.append(len(pieces))
 
-        result = self._client.get_contextualized_embeddings(
-            [sent_pieces],
-            input_type="document",
-            output_dimension=self.dimensions,
-            model=self.name,
+        # AC23: pack the flat piece list into document groups, then seal
+        # those documents into request-level batches. A commit comfortably
+        # under every cap yields exactly one document in one batch --
+        # BYTE-IDENTICAL to the pre-#1290-review-fix call shape.
+        documents = pack_chunks_into_documents(
+            sent_pieces,
+            self._count_tokens,
+            max_chunks_per_document=self._max_chunks_per_request,
+            max_tokens_per_document=self._max_tokens_per_request,
         )
-        flat_embeddings = result[0]
+        request_batches = enforce_request_seal(
+            documents,
+            self._count_tokens,
+            max_documents=self._max_documents_per_request,
+            max_chunks=self._max_chunks_per_request,
+            max_tokens=self._max_tokens_per_request,
+        )
+
+        flat_embeddings: List[List[float]] = []
+        for batch in request_batches:
+            batch_result = self._client.get_contextualized_embeddings(
+                batch,
+                input_type="document",
+                output_dimension=self.dimensions,
+                model=self.name,
+            )
+            for doc_embeddings in batch_result:
+                flat_embeddings.extend(doc_embeddings)
 
         pooled: List[List[float]] = []
         cursor = 0

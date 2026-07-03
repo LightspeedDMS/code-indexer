@@ -387,6 +387,244 @@ class TestPerCommitPipelineWiring:
         )
 
 
+class TestDeterministicFixtureCounts:
+    """Code-review Finding 2 (Story #1290): dedicated deterministic fixtures
+    for the headline file-count claim, locking EXACT expected values (not
+    the pre-existing tests' looser ">=2" checks) and using the REAL
+    production voyage_context_4 slug (not a fake embedder's fake name) for
+    AC7's shard-naming assertion."""
+
+    def test_twenty_files_produce_exactly_three_vectors_not_twenty(
+        self, tmp_path, fake_embedder
+    ):
+        """AC1: a commit touching 20 files, with a chunk size chosen so
+        ceil((len(message)+headers+diffs)/aggregation_chunk_chars) == 3
+        EXACTLY, indexed through the real path, yields EXACTLY 3 on-disk
+        vectors -- NOT ~3, and emphatically NOT 20 (one per file, which
+        would indicate a per-file-vector regression)."""
+        repo = _init_repo(tmp_path)
+        (repo / "seed.txt").write_text("seed\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "seed"], repo)
+
+        for i in range(20):
+            (repo / f"file{i}.txt").write_text(f"content for file {i}\n" * 3)
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "touch twenty files"], repo)
+
+        from code_indexer.services.temporal.commit_aggregator import (
+            build_aggregated_document,
+            get_file_changes,
+        )
+        from code_indexer.services.temporal.models import CommitInfo
+
+        log_out = _run_git(
+            ["log", "--format=%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e", "--reverse"],
+            repo,
+        )
+        commits = []
+        for record in log_out.strip().split("\x1e"):
+            if not record.strip():
+                continue
+            parts = record.split("\x00")
+            commits.append(
+                CommitInfo(
+                    hash=parts[0].strip(),
+                    timestamp=int(parts[1]),
+                    author_name=parts[2],
+                    author_email=parts[3],
+                    message=parts[4].strip(),
+                    parent_hashes=parts[5].strip(),
+                )
+            )
+        assert len(commits) == 2
+        twenty_files_commit = commits[1]
+        file_changes = get_file_changes(repo, twenty_files_commit, diff_context_lines=5)
+        assert len(file_changes) == 20, "test setup must touch exactly 20 files"
+        doc = build_aggregated_document(twenty_files_commit, file_changes)
+
+        # ceil(N / ceil(N/3)) == 3 for any N > 0 -- picks the EXACT chunk
+        # size that forces exactly 3 chunks (never fewer, never more).
+        chunk_chars = -(-len(doc.text) // 3)
+        expected_chunks = math.ceil(len(doc.text) / chunk_chars)
+        assert expected_chunks == 3, "test fixture must force EXACTLY 3 chunks"
+
+        indexer, vector_store = _make_indexer(
+            repo, tmp_path / "index", aggregation_chunk_chars=chunk_chars
+        )
+        indexer.index_commits()
+
+        shard_dir = _find_shard_dir(vector_store.base_path)
+        import json
+
+        twenty_files_points = [
+            f
+            for f in _vector_files(shard_dir)
+            if json.loads(f.read_text())["payload"]["commit_hash"]
+            == twenty_files_commit.hash
+        ]
+        assert len(twenty_files_points) == 3, (
+            f"expected EXACTLY 3 vectors for the 20-file commit, got "
+            f"{len(twenty_files_points)}"
+        )
+        assert len(twenty_files_points) != 20, (
+            "20 vectors would mean one-per-file -- a per-file-vector regression"
+        )
+
+    def test_total_vectors_across_commits_equals_sum_of_per_commit_ceilings(
+        self, tmp_path, fake_embedder
+    ):
+        """AC2: total on-disk vector count across a multi-commit run equals
+        the EXACT sum of each commit's own ceil(aggregated_doc_chars /
+        aggregation_chunk_chars); on-disk vector_*.json count agrees exactly
+        with the shard's point count."""
+        repo = _init_repo(tmp_path)
+        (repo / "seed.txt").write_text("seed\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "seed"], repo)
+
+        (repo / "a.txt").write_text("a" * 300 + "\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "first change " + ("p" * 100)], repo)
+
+        (repo / "a.txt").write_text("b" * 900 + "\n")
+        (repo / "b.txt").write_text("c" * 200 + "\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "second change " + ("q" * 250)], repo)
+
+        chunk_chars = 120
+        indexer, vector_store = _make_indexer(
+            repo, tmp_path / "index", aggregation_chunk_chars=chunk_chars
+        )
+        indexer.index_commits()
+
+        from code_indexer.services.temporal.commit_aggregator import (
+            build_aggregated_document,
+            get_file_changes,
+        )
+        from code_indexer.services.temporal.models import CommitInfo
+
+        log_out = _run_git(
+            ["log", "--format=%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e", "--reverse"],
+            repo,
+        )
+        commits = []
+        for record in log_out.strip().split("\x1e"):
+            if not record.strip():
+                continue
+            parts = record.split("\x00")
+            commits.append(
+                CommitInfo(
+                    hash=parts[0].strip(),
+                    timestamp=int(parts[1]),
+                    author_name=parts[2],
+                    author_email=parts[3],
+                    message=parts[4].strip(),
+                    parent_hashes=parts[5].strip(),
+                )
+            )
+        assert len(commits) == 3
+
+        expected_total = 0
+        per_commit_expected = {}
+        for commit in commits:
+            file_changes = get_file_changes(repo, commit, diff_context_lines=5)
+            doc = build_aggregated_document(commit, file_changes)
+            ceiling = math.ceil(len(doc.text) / chunk_chars)
+            per_commit_expected[commit.hash] = ceiling
+            expected_total += ceiling
+
+        shard_dir = _find_shard_dir(vector_store.base_path)
+        all_files = _vector_files(shard_dir)
+        assert len(all_files) == expected_total
+
+        assert vector_store.count_points(shard_dir.name) == len(all_files)
+
+        import json
+        from collections import Counter
+
+        counts_by_commit = Counter(
+            json.loads(f.read_text())["payload"]["commit_hash"] for f in all_files
+        )
+        assert dict(counts_by_commit) == per_commit_expected
+
+    def test_shard_dir_uses_real_voyage_context_4_slug_for_2018q2_commit(
+        self, tmp_path
+    ):
+        """AC7: a 2018-Q2 commit indexed through the REAL production
+        ContextualTemporalEmbedder (registered as "voyage-context-4", the
+        genuine production embedder name) creates the exact literal
+        collection dir "code-indexer-temporal-voyage_context_4-2018Q2" --
+        not a fake embedder's fake slug. Only the client's HTTP boundary is
+        stubbed (no network); the model_slug flows through for real."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from code_indexer.config import Config, TemporalConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+
+        repo = _init_repo(tmp_path)
+        (repo / "a.txt").write_text("x\n")
+        _run_git(["add", "."], repo)
+        env_date = "2018-05-15T12:00:00"
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "old commit"],
+            cwd=repo,
+            check=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_DATE": env_date,
+                "GIT_COMMITTER_DATE": env_date,
+            },
+        )
+
+        index_dir = tmp_path / "index"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        vector_store = FilesystemVectorStore(base_path=index_dir, project_root=repo)
+
+        config = Config(codebase_dir=repo)
+        config.embedding_provider = "voyage-ai"
+        config.temporal = TemporalConfig(
+            embedders=["voyage-context-4"],
+            active_embedder="voyage-context-4",
+        )
+        config_manager = MagicMock()
+        config_manager.get_config.return_value = config
+        config_manager.config_path = repo / ".code-indexer" / "config.json"
+
+        indexer = TemporalIndexer(
+            config_manager,
+            vector_store,
+            collection_name="code-indexer-temporal-voyage-ai",
+        )
+
+        def _fake_request(self_client, documents, **kwargs):
+            return {
+                "data": [
+                    {
+                        "index": doc_idx,
+                        "data": [
+                            {"index": ci, "embedding": [0.1] * 1024}
+                            for ci in range(len(doc))
+                        ],
+                    }
+                    for doc_idx, doc in enumerate(documents)
+                ],
+                "model": "voyage-context-4",
+            }
+
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "PLACEHOLDER"}):
+            with patch.object(
+                VoyageAIClient,
+                "_make_sync_contextualized_request",
+                _fake_request,
+            ):
+                indexer.index_commits()
+
+        expected_shard = "code-indexer-temporal-voyage_context_4-2018Q2"
+        assert vector_store.collection_exists(expected_shard)
+
+
 class TestReconcileEndToEnd:
     """AC15/AC16: --reconcile detects missing AND partial commits, shard-aware."""
 

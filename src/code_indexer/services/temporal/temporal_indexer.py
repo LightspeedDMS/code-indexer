@@ -1,9 +1,9 @@
 """TemporalIndexer - Index git history as per-commit aggregated contextual documents.
 
-Story #1290 (Epic #1289) HARD CUT: the legacy per-file-diff pipeline
-(_process_commits_parallel building one vector per changed-file diff, plus a
-standalone _index_commit_message vector) has been REMOVED. Each commit is now
-aggregated into ONE document (message once at the head + each changed file's
+Story #1290 (Epic #1289) HARD CUT: the legacy per-file-diff pipeline (which
+built one vector per changed-file diff, plus a separate standalone
+commit-message vector) has been REMOVED. Each commit is now aggregated into
+ONE document (message once at the head + each changed file's
 diff prefixed "--- <path> ---"), chunked with the active TemporalEmbedder's
 overlap policy (0% for the contextual embedder), and embedded through that
 embedder's contextualized endpoint -- producing a handful of vectors per
@@ -745,8 +745,8 @@ class TemporalIndexer:
     ):
         """Process one shard's commits as per-commit aggregated contextual documents.
 
-        Story #1290: replaces the legacy _process_commits_parallel (per-file-diff
-        chunk batching). Each commit is aggregated into ONE document (message
+        Story #1290: replaces the legacy per-file-diff chunk-batching pipeline.
+        Each commit is aggregated into ONE document (message
         once at the head + each changed file's diff), chunked via the active
         embedder's overlap policy, embedded in ONE contextualized-embeddings
         call, and upserted under the unified point_id scheme. A durable
