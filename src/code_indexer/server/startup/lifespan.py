@@ -3319,12 +3319,21 @@ def make_lifespan(
                 )
             )
 
-        # Story #1172: Background startup migration — monolithic temporal indexes to quarterly shards.
-        # Scan all golden repos for unsharded temporal HNSW collections and submit BGM jobs.
-        # Non-fatal: log WARNING on any failure, never block startup.
+        # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
+        # temporal collections (AC19/AC20) for every golden repo. Replaces the
+        # old Story #1172 background HNSW-extraction migration (deleted along
+        # with temporal_migration_service.py): the hard cut has no migration
+        # path, only blank-out-then-rebuild. This sweep is cheap (directory
+        # enumeration + marker read + conditional rmtree per repo) so it runs
+        # synchronously rather than as a background job. A repo whose legacy
+        # index is blanked here is simply unavailable for temporal search
+        # until its next `cidx index` run rebuilds it in the per-commit
+        # layout (AC28 — deliberate operator re-index, no automatic
+        # coexistence machinery). Non-fatal per repo: log WARNING and
+        # continue, never block startup.
         try:
-            from code_indexer.services.temporal.temporal_migration_service import (
-                submit_temporal_migration_jobs as _submit_temporal_migrations,
+            from code_indexer.services.temporal.temporal_blank_out import (
+                blank_out_legacy_temporal_collections,
             )
 
             _temporal_repos = (
@@ -3332,15 +3341,44 @@ def make_lifespan(
                 if golden_repo_manager is not None
                 else []
             )
-            _submit_temporal_migrations(background_job_manager, _temporal_repos)
+            _blanked_total = 0
+            for _repo in _temporal_repos:
+                _alias = _repo.get("alias", "unknown")
+                _clone_path = _repo.get("clone_path", "")
+                if not _clone_path:
+                    continue
+                _index_path = Path(_clone_path) / ".code-indexer" / "index"
+                try:
+                    _deleted = blank_out_legacy_temporal_collections(_index_path)
+                    _blanked_total += len(_deleted)
+                    if _deleted:
+                        logger.info(
+                            "Story #1290: blanked out %d legacy temporal "
+                            "collection(s) for repo %s: %s",
+                            len(_deleted),
+                            _alias,
+                            _deleted,
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                except Exception as _repo_exc:
+                    logger.warning(
+                        "Story #1290: temporal blank-out failed for repo %s "
+                        "(non-fatal): %s",
+                        _alias,
+                        _repo_exc,
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             logger.info(
-                "Story #1172: temporal index migration scan complete (%d repos checked)",
+                "Story #1290: temporal blank-out startup sweep complete "
+                "(%d repos checked, %d legacy collections removed)",
                 len(_temporal_repos),
+                _blanked_total,
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as _tmig_exc:
             logger.warning(
-                "Story #1172: temporal index migration scan failed (non-fatal): %s",
+                "Story #1290: temporal blank-out startup sweep failed (non-fatal): %s",
                 _tmig_exc,
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},

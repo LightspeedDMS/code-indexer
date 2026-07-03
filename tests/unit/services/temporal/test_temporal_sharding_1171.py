@@ -330,6 +330,9 @@ class TestIndexerShardRouting:
         mock_config.embedding_provider = "voyage-ai"
         mock_config.temporal = Mock()
         mock_config.temporal.diff_context_lines = 3
+        mock_config.temporal.embedders = ["voyage-context-4"]
+        mock_config.temporal.active_embedder = "voyage-context-4"
+        mock_config.temporal.aggregation_chunk_chars = 4096
         mock_config.file_extensions = []
         mock_config.override_config = None
         mock_config.codebase_dir = tmp_path
@@ -368,17 +371,15 @@ class TestIndexerShardRouting:
 
         commits = [q1_commit, q2_commit, q3_commit]
 
-        # Patch _process_commits_parallel to intercept collection_name at call time
+        # Patch _index_shard_commits to intercept collection_name at call time
         collection_names_at_call = []
 
-        def fake_process(
-            self_ref, shard_commits, emb_provider, vec_manager, prog_cb, reconcile
-        ):
+        def fake_process(self_ref, shard_commits, vec_manager, prog_cb, reconcile):
             collection_names_at_call.append(self_ref.collection_name)
             return len(shard_commits), len(shard_commits), len(shard_commits) * 3
 
         with patch.object(
-            indexer, "_process_commits_parallel", fake_process.__get__(indexer)
+            indexer, "_index_shard_commits", fake_process.__get__(indexer)
         ):
             with patch.object(indexer, "_get_commit_history", return_value=commits):
                 with patch.object(indexer, "_get_current_branch", return_value="main"):
@@ -398,10 +399,17 @@ class TestIndexerShardRouting:
                                 )
                                 indexer.index_commits()
 
-        # Verify correct shards were used
-        assert "code-indexer-temporal-voyage_code_3-2024Q1" in collection_names_at_call
-        assert "code-indexer-temporal-voyage_code_3-2024Q2" in collection_names_at_call
-        assert "code-indexer-temporal-voyage_code_3-2024Q3" in collection_names_at_call
+        # Verify correct shards were used (Story #1290: named by the temporal
+        # active_embedder, not the regular semantic-search provider).
+        assert (
+            "code-indexer-temporal-voyage_context_4-2024Q1" in collection_names_at_call
+        )
+        assert (
+            "code-indexer-temporal-voyage_context_4-2024Q2" in collection_names_at_call
+        )
+        assert (
+            "code-indexer-temporal-voyage_context_4-2024Q3" in collection_names_at_call
+        )
         # Verify original collection_name is restored after
         assert indexer.collection_name == base_collection
 
@@ -425,14 +433,12 @@ class TestIndexerShardRouting:
 
         collection_names_at_call = []
 
-        def fake_process(
-            self_ref, shard_commits, emb_provider, vec_manager, prog_cb, reconcile
-        ):
+        def fake_process(self_ref, shard_commits, vec_manager, prog_cb, reconcile):
             collection_names_at_call.append(self_ref.collection_name)
             return len(shard_commits), len(shard_commits), len(shard_commits) * 3
 
         with patch.object(
-            indexer, "_process_commits_parallel", fake_process.__get__(indexer)
+            indexer, "_index_shard_commits", fake_process.__get__(indexer)
         ):
             with patch.object(indexer, "_get_commit_history", return_value=commits):
                 with patch.object(indexer, "_get_current_branch", return_value="main"):
@@ -452,10 +458,12 @@ class TestIndexerShardRouting:
                                 )
                                 indexer.index_commits()
 
-        # Only one shard should have been used
+        # Only one shard should have been used (Story #1290: named by the
+        # temporal active_embedder, not the regular semantic-search provider).
         assert len(collection_names_at_call) == 1
         assert (
-            collection_names_at_call[0] == "code-indexer-temporal-voyage_code_3-2024Q2"
+            collection_names_at_call[0]
+            == "code-indexer-temporal-voyage_context_4-2024Q2"
         )
 
 
@@ -798,6 +806,9 @@ def _make_indexer_mocks(tmp_path: Path, collection_exists: bool = False):
     mock_config.embedding_provider = "voyage-ai"
     mock_config.temporal = Mock()
     mock_config.temporal.diff_context_lines = 3
+    mock_config.temporal.embedders = ["voyage-context-4"]
+    mock_config.temporal.active_embedder = "voyage-context-4"
+    mock_config.temporal.aggregation_chunk_chars = 4096
     mock_config.file_extensions = []
     mock_config.override_config = None
     mock_config.codebase_dir = tmp_path
@@ -891,7 +902,10 @@ class TestShardCollectionCreation:
         mock_vector_store.create_collection.side_effect = _track_create
         mock_vector_store.begin_indexing.side_effect = _track_begin
 
-        shard = "code-indexer-temporal-voyage_code_3-2024Q2"
+        # Story #1290: shard name is derived from the temporal active_embedder
+        # ("voyage-context-4" -> slug "voyage_context_4"), not the regular
+        # semantic-search provider's model.
+        shard = "code-indexer-temporal-voyage_context_4-2024Q2"
         _run_index_commits(indexer, [_make_commit("aaa111", 2024, 5, 15)])
 
         creates = [

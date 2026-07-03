@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 TEMPORAL_COLLECTION_PREFIX = "code-indexer-temporal-"
 LEGACY_TEMPORAL_COLLECTION = "code-indexer-temporal"
 
+# Story #1290: marker filename kept as a local constant (decoupled from the
+# now-deleted temporal_migration_service.py) so has_real_monolith() can still
+# recognize a pre-hard-cut monolith left over on disk from an OLD deployment.
+_MIGRATION_COMPLETE_MARKER = "migration_complete.marker"
+
 _SUPPORTED_PROVIDERS = {"voyage-ai", "cohere"}
 
 
@@ -197,26 +202,23 @@ def has_real_monolith(coll_dir: Path) -> bool:
     - ``hnsw_index.bin`` exists inside the directory (there is actual data to query)
     - ``migration_complete.marker`` does NOT exist (migration has not already run)
 
-    This is the single source-of-truth predicate shared by:
-    - ``get_overlapping_shards()`` (query fan-out — Bug #1207 Fix 2)
-    - ``_needs_temporal_migration()`` in temporal_migration_service (server-startup gate)
-
-    Using a single predicate prevents the two callers from drifting apart (anti-duplication).
+    This is the single source-of-truth predicate used by
+    ``get_overlapping_shards()`` (query fan-out — Bug #1207 Fix 2). Story
+    #1290: the migration/conversion system that used to also depend on this
+    predicate has been removed as part of the per-commit hard cut; a legacy
+    monolith is now handled by blank-out (hard-deleted for lacking a v2
+    marker), not migrated.
 
     Args:
         coll_dir: Path to the collection directory (e.g. index/code-indexer-temporal-X/).
 
     Returns:
-        True if the collection contains a real unmigrated monolithic HNSW.
+        True if the collection contains a real, not-yet-cleaned-up monolithic HNSW.
     """
-    from code_indexer.services.temporal.temporal_migration_service import (
-        MIGRATION_COMPLETE_MARKER,
-    )
-
     coll_dir = Path(coll_dir)
     if not coll_dir.is_dir():
         return False
-    if (coll_dir / MIGRATION_COMPLETE_MARKER).exists():
+    if (coll_dir / _MIGRATION_COMPLETE_MARKER).exists():
         return False
     return (coll_dir / "hnsw_index.bin").exists()
 

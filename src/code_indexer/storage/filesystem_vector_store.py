@@ -1018,7 +1018,7 @@ class FilesystemVectorStore:
                 source_collection_path,
             )
 
-            from code_indexer.services.temporal.temporal_migration_service import (
+            from code_indexer.services.temporal.temporal_projection_matrix import (
                 _ensure_shard_has_projection_matrix,
             )
 
