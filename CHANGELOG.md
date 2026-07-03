@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.18.0] - 2026-07-03
+
+### Added
+
+- **Epic #1289 — Per-Commit Contextualized Temporal Indexing (Pluggable Dual Embedders).** Replaces the per-file-diff temporal layout (which exploded to millions of one-vector-per-file files) with one aggregated document per commit (commit-message head + `--- path ---`-delimited diffs), chunked and embedded into model-slug-keyed quarterly shards. Far fewer vectors: a 20-file commit produces 1 vector instead of ~21.
+  - **Story #1290** — voyage-context-4 contextualized-embeddings adapter (1024-dim, 0% overlap), per-commit aggregation, v2 `temporal_structure.json` marker, hard-cut removal of the legacy per-file-diff path and monolith->shard migration machinery, recall dedup-by-commit with commit message surfaced once.
+  - **Story #1291** — Cohere embed-v4.0 as a pluggable coexisting second embedder (1536-dim native, 15% overlap). Multiple embedders' temporal indexes live side-by-side; adding one never rebuilds another. `temporal_embedder` query override threaded through REST/MCP. Per-embedder reconcile.
+  - **Story #1292** — git-history-only file-count projection script (`scripts/analysis/temporal_vector_projection.py`), absolute recall-quality gate (`scripts/analysis/temporal_recall_gate.py`), real REST+MCP front-door dual-embedder e2e (`tests/e2e/server/test_18_temporal_dual_embedder_1292.py`), and documentation.
+
+### Fixed
+
+- **voyage-context-4 temporal search returned HTTP 400 in server/cluster mode.** `VoyageAIClient.get_embeddings_batch()` (the server coalescer's embedding entry point) bypassed the contextualized-query special case; it now routes contextualized queries correctly (non-contextual/document/CLI/voyage-code-3 paths unchanged).
+- **Contextual embedder document packing** capped each packed document at the ~108k-token request budget instead of the ~28.8k-token context window, causing HTTP 400s; now caps at the context window.
+
 ## [11.17.0] - 2026-07-02
 
 ### Fixed
