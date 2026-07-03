@@ -132,11 +132,19 @@ class ContextualTemporalEmbedder(TemporalEmbedder):
         # those documents into request-level batches. A commit comfortably
         # under every cap yields exactly one document in one batch --
         # BYTE-IDENTICAL to the pre-#1290-review-fix call shape.
+        # Bug (Story #1292): a packed DOCUMENT is ONE "example" sent to the
+        # contextualized-embeddings endpoint, and Voyage rejects any single
+        # example whose combined tokens exceed the model's per-TEXT context
+        # window (self._max_tokens_per_chunk, ~28800) -- NOT the much larger
+        # per-REQUEST token budget (self._max_tokens_per_request, ~108000).
+        # Packing up to the request-level cap here previously produced
+        # oversized documents that failed with a real HTTP 400 on any commit
+        # whose chunks summed past the context window.
         documents = pack_chunks_into_documents(
             sent_pieces,
             self._count_tokens,
             max_chunks_per_document=self._max_chunks_per_request,
-            max_tokens_per_document=self._max_tokens_per_request,
+            max_tokens_per_document=self._max_tokens_per_chunk,
         )
         request_batches = enforce_request_seal(
             documents,

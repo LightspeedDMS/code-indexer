@@ -77,6 +77,10 @@ voyage_models:
     dimensions: [1024]
     default_dimension: 1024
     description: "Contextualized embeddings for per-commit temporal indexing"
+    # Story #1292 (AC1): documented Voyage default rate, read by
+    # scripts/analysis/temporal_vector_projection.py instead of a bare
+    # hard-coded literal. Source: https://docs.voyageai.com/docs/pricing (2026).
+    pricing_usd_per_million_tokens: 0.12
 
 # API Constraints
 api_constraints:

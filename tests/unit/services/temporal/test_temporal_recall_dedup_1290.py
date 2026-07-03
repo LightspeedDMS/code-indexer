@@ -529,3 +529,58 @@ class TestContextualQueryEmbedding:
         assert qualifier.provider == "voyage-ai"
         assert qualifier.model == "voyage-context-4"
         assert qualifier.dimension == 1024
+
+    def test_get_embeddings_batch_query_purpose_uses_contextualized_endpoint(self):
+        """Bug (Story #1292, found via real server front-door e2e testing):
+        the server's EmbeddingCoalescer calls get_embeddings_batch() directly
+        (NOT get_embedding()) for every query -- including single-query
+        "batches" of size 1 -- so AC14's contextual-endpoint special-casing,
+        which previously lived ONLY in get_embedding(), never fired for
+        server-mode temporal queries against voyage-context-4. This produced
+        a real HTTP 400 from the plain /v1/embeddings endpoint (which
+        rejects voyage-context-4), breaking temporal search server-side
+        while CLI/solo mode (which calls get_embedding() directly) worked
+        fine. get_embeddings_batch() must ALSO route
+        embedding_purpose="query" + a contextual model through
+        get_contextualized_embeddings.
+        """
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+
+        client = VoyageAIClient(VoyageAIConfig(model="voyage-context-4"))
+        with patch.object(
+            client, "get_contextualized_embeddings"
+        ) as mock_contextualized:
+            mock_contextualized.return_value = [
+                [[0.1] * 1024],
+                [[0.2] * 1024],
+            ]
+            vectors = client.get_embeddings_batch(
+                ["query one", "query two"], embedding_purpose="query"
+            )
+
+        assert vectors == [[0.1] * 1024, [0.2] * 1024]
+        mock_contextualized.assert_called_once()
+        args, kwargs = mock_contextualized.call_args
+        assert args[0] == [["query one"], ["query two"]]
+        assert kwargs.get("input_type") == "query"
+
+    def test_get_embeddings_batch_document_purpose_unaffected(self):
+        """Regression guard: indexing-purpose batches (the common case, ALL
+        non-contextual models, and any caller not passing
+        embedding_purpose="query") are BYTE-IDENTICAL to pre-fix behavior --
+        the plain batch endpoint, never the contextualized one."""
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+
+        client = VoyageAIClient(VoyageAIConfig(model="voyage-code-3"))
+        with patch.object(client, "get_contextualized_embeddings") as mock_ctx:
+            with patch.object(client, "_make_sync_request") as mock_std:
+                mock_std.return_value = {
+                    "data": [{"embedding": [0.3] * 1024}],
+                    "usage": {"total_tokens": 5},
+                }
+                client.get_embeddings_batch(["some text"], embedding_purpose="document")
+
+        mock_ctx.assert_not_called()
+        mock_std.assert_called_once()

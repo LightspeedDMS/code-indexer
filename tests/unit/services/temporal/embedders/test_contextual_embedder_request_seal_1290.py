@@ -115,10 +115,16 @@ class TestRequestSealSplitsOnTokenCount:
         # Deterministic 1-token-per-char counter (same technique used by the
         # existing per-chunk preflight tests) so the token split is exact.
         embedder._count_tokens = lambda text: len(text)  # type: ignore[assignment]
-        embedder._max_tokens_per_chunk = 1_000_000  # never binds here
+        # Story #1292 bug fix: document packing is now bounded by
+        # _max_tokens_per_chunk (the per-document context-window cap), not
+        # _max_tokens_per_request. Set it to 15 so each 10-token chunk packs
+        # into its OWN document (2 chunks would total 20 > 15) -- isolating
+        # this test's intent (REQUEST-level splitting across documents) from
+        # document-packing splitting.
+        embedder._max_tokens_per_chunk = 15
         embedder._max_chunks_per_request = 1000  # never binds here
         embedder._max_documents_per_request = 1000
-        embedder._max_tokens_per_request = 25  # 4 chunks of 10 chars -> 2/request
+        embedder._max_tokens_per_request = 25  # pairs of 10-token docs -> 2/request
 
         chunks = ["x" * 10, "y" * 10, "z" * 10, "w" * 10]  # 10 tokens each
 
@@ -143,3 +149,56 @@ class TestRequestSealSplitsOnTokenCount:
         assert len(result) == 4
         for i, chunk in enumerate(chunks):
             assert result[i] == pytest.approx([float(len(chunk))] * 1024)
+
+
+class TestDocumentPackingRespectsPerDocumentContextWindow:
+    """Bug (found running real indexing, Story #1292): pack_chunks_into_documents
+    was called with max_tokens_per_document=self._max_tokens_per_request (the
+    120000-token REQUEST-level cap), not self._max_tokens_per_chunk (the
+    ~32000-token model CONTEXT-WINDOW cap). Voyage's contextualized-embeddings
+    API rejects a single "example" (one packed document) whose combined chunk
+    tokens exceed the model's context window, even when comfortably under the
+    request-level cap -- confirmed via a real HTTP 400: "The example at index 0
+    in your batch has too many tokens and does not fit into the model's
+    context window of 32000 tokens." A commit with many small chunks (each
+    individually well under the per-chunk preflight cap) previously got
+    packed into ONE oversized document and crashed indexing.
+    """
+
+    def test_document_never_exceeds_the_per_chunk_context_window_cap(
+        self, mock_api_key
+    ):
+        embedder = ContextualTemporalEmbedder(Config())
+        embedder._count_tokens = lambda text: len(text)  # type: ignore[assignment]
+        # Per-document/context-window cap is SMALL; request-level cap is HUGE
+        # -- proves packing is bounded by the SMALLER (context-window) cap,
+        # not the request-level cap.
+        embedder._max_tokens_per_chunk = 25
+        embedder._max_chunks_per_request = 1000
+        embedder._max_documents_per_request = 1000
+        embedder._max_tokens_per_request = 1_000_000
+
+        # 8 chunks of 10 tokens each == 80 tokens total: comfortably under the
+        # request cap (1_000_000) but 4x over the per-document cap (25) if
+        # packed into a single document.
+        chunks = [f"chunk{i:02d}xx" for i in range(8)]  # 10 chars == 10 tokens each
+
+        def _side_effect(documents, **kwargs):
+            return _response_for(documents)
+
+        with patch.object(
+            embedder._client,
+            "_make_sync_contextualized_request",
+            side_effect=_side_effect,
+        ) as mocked:
+            result = embedder.embed_commit_chunks(chunks)
+
+        for call in mocked.call_args_list:
+            for document in call.args[0]:
+                doc_tokens = sum(len(chunk) for chunk in document)
+                assert doc_tokens <= 25, (
+                    f"document {document!r} totals {doc_tokens} tokens, "
+                    f"exceeding the per-document context-window cap of 25"
+                )
+
+        assert len(result) == 8

@@ -67,23 +67,36 @@ class TestContextualEmbedderTokenPreflight:
         embedder._count_tokens = lambda text: len(text)  # type: ignore[assignment]
         embedder._max_tokens_per_chunk = 12
 
-        mock_response = {
-            "data": [
-                {
-                    "index": 0,
-                    "data": [
-                        {"index": 0, "embedding": [1.0] * 1024},  # "ok"
-                        {"index": 1, "embedding": [2.0] * 1024},  # split piece 1
-                        {"index": 2, "embedding": [4.0] * 1024},  # split piece 2
-                    ],
-                }
-            ],
-            "model": "voyage-context-4",
-        }
+        # Flattened-piece-order embedding values: "ok" -> 1.0, split piece 1
+        # -> 2.0, split piece 2 -> 4.0. Story #1292 bug fix: document packing
+        # is now bounded by the per-document context-window cap, so the 3
+        # pieces may legitimately land in 1, 2, or 3 documents -- build the
+        # response dynamically from whatever documents are actually sent,
+        # rather than assuming a fixed single-document shape.
+        _piece_values = {"ok": 1.0, "this is ove": 2.0, "r 12 chars": 4.0}
+
+        def _side_effect(documents, **kwargs):
+            return {
+                "data": [
+                    {
+                        "index": doc_idx,
+                        "data": [
+                            {
+                                "index": piece_idx,
+                                "embedding": [_piece_values[piece]] * 1024,
+                            }
+                            for piece_idx, piece in enumerate(doc)
+                        ],
+                    }
+                    for doc_idx, doc in enumerate(documents)
+                ],
+                "model": "voyage-context-4",
+            }
+
         with patch.object(
             embedder._client,
             "_make_sync_contextualized_request",
-            return_value=mock_response,
+            side_effect=_side_effect,
         ) as mocked:
             result = embedder.embed_commit_chunks(["ok", "this is over 12 chars"])
 
@@ -93,5 +106,12 @@ class TestContextualEmbedderTokenPreflight:
         # Mean of [2.0]*1024 and [4.0]*1024 == [3.0]*1024
         assert result[1] == pytest.approx([3.0] * 1024)
 
+        # Story #1292 bug fix: document packing is now bounded by the SAME
+        # per-document context-window cap used for per-chunk preflight
+        # (_max_tokens_per_chunk=12 here), so boundary-adjacent pieces may
+        # legitimately land in separate documents. Assert the TOTAL piece
+        # count across all sent documents (flattened, order-preserved)
+        # rather than assuming a single document.
         sent_documents = mocked.call_args[0][0]
-        assert len(sent_documents[0]) == 3  # 1 unsplit + 2 split pieces
+        all_pieces = [piece for doc in sent_documents for piece in doc]
+        assert len(all_pieces) == 3  # 1 unsplit + 2 split pieces

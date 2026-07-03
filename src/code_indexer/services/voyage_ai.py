@@ -759,6 +759,32 @@ class VoyageAIClient(EmbeddingProvider):
         if not texts:
             return []
 
+        # Bug (Story #1292, found via real server front-door e2e testing):
+        # the server-side EmbeddingCoalescer calls get_embeddings_batch()
+        # directly for EVERY query (never get_embedding()), so AC14's
+        # contextual-endpoint special-case -- previously present only in
+        # get_embedding() -- never fired for server-mode temporal queries
+        # against voyage-context-4, producing a real HTTP 400 from the plain
+        # /v1/embeddings endpoint (which rejects voyage-context-4). Mirror
+        # the same special-case here for query-purpose batches.
+        model_to_use_for_contextual_check = model or self.config.model
+        if (
+            embedding_purpose == "query"
+            and model_to_use_for_contextual_check in _CONTEXTUAL_QUERY_MODELS
+        ):
+            output_dimension = _VOYAGE_MODEL_DIMENSIONS.get(
+                model_to_use_for_contextual_check, 1024
+            )
+            documents = [[text] for text in texts]
+            contextualized_results = self.get_contextualized_embeddings(
+                documents,
+                input_type="query",
+                output_dimension=output_dimension,
+                model=model_to_use_for_contextual_check,
+                retry=retry,
+            )
+            return [doc_embeddings[0] for doc_embeddings in contextualized_results]
+
         # Get model-specific token limit with 90% safety margin
         model_token_limit = self._get_model_token_limit()
         safety_limit = int(model_token_limit * 0.9)  # 90% safety margin as requested
