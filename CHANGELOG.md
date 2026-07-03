@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.18.1] - 2026-07-03
+
+### Fixed
+
+- **Temporal search dropped the most-relevant commits (#1299, epic #1289).** Found by a real REST/MCP front-door E2E on clean code. Two root causes: (1) `TemporalSearchService.query_temporal` sorted deduped results by commit date and then truncated to `limit`, keeping the newest matches instead of the most relevant; fixed to select the top-`limit` by relevance first, then order that subset reverse-chronologically for display. (2) Fusion across disjoint quarterly shards used reciprocal-rank fusion (RRF by within-shard rank), discarding true cosine magnitude; replaced with a score-preserving `merge_shards_by_score` for disjoint shards (RRF retained unchanged for the overlapping path). Verified via the live front door: both ground-truth commits recall at rank 0 across all tested limits for both embedders. Embedding, projection, HNSW, and the regular voyage-code-3 path were proven correct and left untouched.
+
 ## [11.18.0] - 2026-07-03
 
 ### Added
