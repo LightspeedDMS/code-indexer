@@ -443,6 +443,8 @@ class SemanticQueryManager:
         # When True the cache lookup is skipped for this request; the live embedding
         # is computed and the cache write still fires (shadow/miss path).
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
         # MUST remain the LAST parameter to preserve positional-arg compatibility.
@@ -616,6 +618,8 @@ class SemanticQueryManager:
                 precomputed_query_vector=precomputed_query_vector,
                 # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -829,6 +833,8 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -969,6 +975,8 @@ class SemanticQueryManager:
                     precomputed_query_vector=precomputed_query_vector,
                     # Story #1108 (S4): per-request cache bypass
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
                     # AC7 (Bug #1202): collect resolved routing decision
                     _effective_strategy_out=_strat_out,
                 )
@@ -1091,6 +1099,8 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
         # AC7 (Bug #1202): out-param for routing decision — caller passes a
         # single-element list; resolved query_strategy is written into [0].
         # Per-request, no shared state.
@@ -1653,6 +1663,8 @@ class SemanticQueryManager:
                     chunk_type=chunk_type,
                     # Story #1108 (S4): forward per-request cache bypass flag
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -2182,6 +2194,8 @@ class SemanticQueryManager:
         chunk_type: Optional[str] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2280,6 +2294,8 @@ class SemanticQueryManager:
                 chunk_type=chunk_type,
                 # Story #1108 (S4): forward per-request cache bypass flag
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully

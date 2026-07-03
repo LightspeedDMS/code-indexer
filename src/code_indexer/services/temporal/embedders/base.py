@@ -51,3 +51,19 @@ class TemporalEmbedder(ABC):
     def embed_query(self, text: str) -> List[float]:
         """Embed a query string for temporal recall (embedding_purpose='query')."""
         raise NotImplementedError
+
+    def is_available(self) -> bool:
+        """Return True iff this embedder can actually embed right now.
+
+        Story #1291 (AC4): checked by the indexer BEFORE scheduling work for
+        an embedder. A NON-ACTIVE embedder returning False is skipped with a
+        WARNING (the other configured embedders still index normally); the
+        ACTIVE embedder returning False FAILS the job (never reports green).
+
+        Concrete adapters override this to do a cheap, non-network
+        credential-presence check (e.g. "is an API key configured?") --
+        never a live network probe. Default True preserves prior adapters
+        (e.g. ContextualTemporalEmbedder) that assume availability once
+        construction has already succeeded.
+        """
+        return True

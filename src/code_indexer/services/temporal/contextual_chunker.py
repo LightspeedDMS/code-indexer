@@ -64,21 +64,39 @@ def _paths_and_primary(
 
 
 def chunk_aggregated_document(
-    doc: AggregatedCommitDocument, chunk_chars: int
+    doc: AggregatedCommitDocument,
+    chunk_chars: int,
+    overlap_percentage: float = 0.0,
 ) -> List[AggregatedChunk]:
-    """Chunk `doc.text` into fixed-size, 0%-overlap pieces.
+    """Chunk `doc.text` into fixed-size pieces with a per-adapter overlap.
+
+    Story #1291 (AC2): overlap_percentage is per-EMBEDDER-ADAPTER, not a
+    global config knob -- the contextual (voyage-context-4) embedder passes
+    0.0 (its default), while the standard (Cohere embed-v4.0) embedder
+    passes 0.15, so the IDENTICAL aggregated document yields DIFFERENT chunk
+    boundaries per adapter. overlap_percentage=0.0 (the default) is
+    BYTE-IDENTICAL to the pre-#1291 zero-overlap-only behavior.
 
     Args:
         doc: Aggregated per-commit document with its provenance map.
         chunk_chars: Chunk size in characters (TemporalConfig.aggregation_chunk_chars).
+        overlap_percentage: Fractional overlap in [0.0, 1.0) applied between
+            consecutive chunks. next_start = previous_end - overlap_chars,
+            where overlap_chars = int(chunk_chars * overlap_percentage).
 
     Returns:
-        Ordered list of AggregatedChunk covering doc.text with zero overlap
-        and zero gaps; empty list for an empty document.
+        Ordered list of AggregatedChunk covering doc.text with the requested
+        overlap and zero gaps; empty list for an empty document.
     """
     text = doc.text
     if not text:
         return []
+
+    overlap_chars = int(chunk_chars * overlap_percentage)
+    # Guarantee forward progress every iteration (Anti-Unbounded-Loop, Messi
+    # #14): the step (chunk_chars - overlap_chars) must stay >= 1 regardless
+    # of how overlap_percentage is configured.
+    step = max(1, chunk_chars - overlap_chars)
 
     chunks: List[AggregatedChunk] = []
     pos = 0
@@ -98,7 +116,9 @@ def chunk_aggregated_document(
                 primary_path=primary_path,
             )
         )
-        pos = end  # 0% overlap
+        if end >= n:
+            break
+        pos += step
         idx += 1
 
     return chunks

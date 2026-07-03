@@ -356,6 +356,8 @@ def register_query_routes(
                             chunk_type=request.chunk_type,
                             # Story #1108 (S4): per-request cache bypass
                             no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                            # Story #1291 AC7/AC8: explicit embedder override
+                            temporal_embedder=request.temporal_embedder,
                         )
                         semantic_results_list = [
                             QueryResultItem(**result)
@@ -483,6 +485,8 @@ def register_query_routes(
                 chunk_type=request.chunk_type,
                 # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: explicit embedder override
+                temporal_embedder=request.temporal_embedder,
             )
 
             # Apply access filtering based on user's group membership (Story #707)

@@ -2858,6 +2858,14 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     help="Reconcile disk files with database and index missing files + timestamp-based changes",
 )
 @click.option(
+    "--reconcile-embedder",
+    "reconcile_embedder",
+    multiple=True,
+    help="Scope --reconcile to specific temporal embedder(s) (e.g. --reconcile-embedder "
+    "embed-v4.0). Requires --reconcile --index-commits. Can be specified multiple "
+    "times. Omit to reconcile EVERY embedder configured in temporal.embedders.",
+)
+@click.option(
     "--batch-size", "-b", default=50, help="Batch size for processing (default: 50)"
 )
 @click.option(
@@ -2934,6 +2942,7 @@ def index(
     ctx,
     clear: bool,
     reconcile: bool,
+    reconcile_embedder: tuple,
     batch_size: int,
     files_count_to_process: Optional[int],
     detect_deletions: bool,
@@ -3470,6 +3479,9 @@ def index(
                         progress_callback, 0, _num_temporal_providers
                     ),
                     reconcile=reconcile,
+                    embedder_scope=list(reconcile_embedder)
+                    if reconcile_embedder
+                    else None,
                 )
 
                 # Stop Rich Live display before showing results
@@ -3503,83 +3515,18 @@ def index(
 
                 temporal_indexer.close()
 
-                # Story #1290: additional-temporal-embedder loop. Iterates
-                # config.temporal.embedders (the per-commit embedder ADAPTER
-                # registry -- e.g. "voyage-context-4"), NOT
-                # EmbeddingProviderFactory.get_configured_providers (the
-                # REGULAR semantic-search provider list). The pre-#1290
-                # "Story #640" version iterated the latter, which always
-                # crashes on a default config: it tries to build a temporal
-                # shard for Cohere's regular-search model (e.g. "embed-v4.0")
-                # even though no TemporalEmbedder adapter is registered for
-                # it, no COHERE_API_KEY is configured, and the collection name
-                # it resolved was unrelated to the temporal embedder registry.
-                # Today config.temporal.embedders validates that
-                # active_embedder is always a member, and only one adapter
-                # ("voyage-context-4") is registered, so this loop is
-                # currently always empty -- wired and ready for a future
-                # second real temporal embedder adapter (Messi #12).
-                from .services.temporal.temporal_collection_naming import (
-                    resolve_temporal_collection_name as _resolve_temporal_embedder_coll,
-                )
-
-                _active_embedder = getattr(config.temporal, "active_embedder", None)
-                _all_temporal_embedders = list(
-                    getattr(config.temporal, "embedders", []) or []
-                )
-                _extra_temporal_providers = [
-                    e for e in _all_temporal_embedders if e != _active_embedder
-                ]
-                for _extra_idx, _extra_provider in enumerate(_extra_temporal_providers):
-                    console.print(
-                        f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
-                        style="cyan",
-                    )
-                    _orig_active_embedder = config.temporal.active_embedder
-                    _extra_temporal_indexer = None
-                    _extra_indexing_result = None
-                    try:
-                        config.temporal.active_embedder = _extra_provider  # type: ignore[assignment]
-                        config_manager._config = config
-                        _extra_coll_name = _resolve_temporal_embedder_coll(
-                            _extra_provider
-                        )
-                        _extra_temporal_indexer = TemporalIndexer(
-                            config_manager,
-                            vector_store,
-                            collection_name=_extra_coll_name,
-                        )
-                        # Bug #1205: start a fresh display for this provider so
-                        # progress renders during index_commits (Option B fix).
-                        rich_live_manager.start_bottom_display()
-                        _extra_indexing_result = _extra_temporal_indexer.index_commits(
-                            all_branches=all_branches,
-                            max_commits=max_commits,
-                            since_date=since_date,
-                            progress_callback=_make_offset_callback(
-                                progress_callback,
-                                0,
-                                1,
-                            ),
-                            reconcile=reconcile,
-                        )
-                    finally:
-                        # Bug #1205: stop the display before printing the completion
-                        # line so a bare console.print does not interleave with an
-                        # active Rich Live display.  Placed in finally so the display
-                        # is always torn down even if index_commits raises.
-                        rich_live_manager.stop_display()
-                        if _extra_temporal_indexer is not None:
-                            _extra_temporal_indexer.close()
-                        config.temporal.active_embedder = _orig_active_embedder  # type: ignore[assignment]
-                        config_manager._config = config
-                        if _extra_indexing_result is not None:
-                            console.print(
-                                f"✅ {_extra_provider}: "
-                                f"{_extra_indexing_result.total_commits} commits",
-                                style="green",
-                            )
-
+                # Story #1291: TemporalIndexer.index_commits() (above) already
+                # builds shard sets for EVERY embedder configured in
+                # config.temporal.embedders in this ONE call -- see
+                # index_commits()'s per-embedder loop (AC1/AC4/AC5/AC10). A
+                # leftover "additional-temporal-embedder loop" used to run
+                # here (Story #1290) and call index_commits() a SECOND time
+                # per extra embedder; that double-run promoted the next
+                # configured embedder to ACTIVE and crashed AC4's
+                # WARN-and-continue-GREEN contract whenever that embedder was
+                # unavailable (code review finding on Story #1291). Do NOT
+                # reintroduce a per-embedder CLI loop -- the single call above
+                # is the complete, correct behavior.
                 sys.exit(0)
 
             except Exception as e:
@@ -4962,6 +4909,15 @@ def _annotate_staleness(
     help="Filter by chunk type: commit_message (commit descriptions) or commit_diff (code changes). Requires --time-range or --time-range-all.",
 )
 @click.option(
+    "--temporal-embedder",
+    type=str,
+    default=None,
+    help="Explicit temporal embedder override (e.g. 'embed-v4.0'). Omit to use "
+    "temporal.active_embedder. An override naming an embedder with no indexed "
+    "collections returns an empty/typed result -- it never silently falls "
+    "back to active_embedder (requires --time-range or --time-range-all).",
+)
+@click.option(
     "--repo",
     type=str,
     help="Query a global repository by alias (e.g., 'my-repo-global'). Allows querying registered global repos from any directory.",
@@ -5035,6 +4991,7 @@ def query(
     diff_types: tuple,
     author: Optional[str],
     chunk_type: Optional[str],
+    temporal_embedder: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
     rerank_query: Optional[str],
@@ -5507,6 +5464,7 @@ def query(
                 diff_types=list(diff_types) if diff_types else None,
                 author=author,
                 chunk_type=chunk_type,
+                temporal_embedder=temporal_embedder,
             )
 
             # Story #905: Apply unified rerank funnel to temporal results.

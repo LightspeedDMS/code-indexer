@@ -382,6 +382,7 @@ class TestProgressiveMetadataErrorHandling:
         # directly (bypassing index_commits()) requires setting it up here.
         class _FakeEmbedder:
             dimensions = 1024
+            overlap_percentage = 0.0
 
             def embed_commit_chunks(self, chunks):
                 return [[0.1] * 1024 for _ in chunks]

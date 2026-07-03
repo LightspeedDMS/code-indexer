@@ -72,6 +72,9 @@ ALL_PARAMETERS = {
     # Reranker parameters (Bug #1209: added to REST for CLI+REST+MCP parity)
     "rerank_query",
     "rerank_instruction",
+    # Temporal embedder override (Story #1291 AC7/AC8: added to REST/MCP for
+    # CLI+REST+MCP parity -- code-review Finding 2)
+    "temporal_embedder",
 }
 
 # CLI-specific: subset of parameters (some temporal params are API-only)
@@ -177,23 +180,23 @@ class TestQueryParameterParity:
 
     def test_total_parameter_count(self):
         """Verify total number of expected query parameters."""
-        # Should have exactly 28 query parameters (excluding repository_alias, async_query)
-        # Updated from 26 to 28 after Bug #1209 added rerank_query and rerank_instruction
-        # to REST for full CLI+REST+MCP parity
-        assert len(ALL_PARAMETERS) == 28, (
-            f"Expected 28 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
+        # Should have exactly 29 query parameters (excluding repository_alias, async_query)
+        # Updated from 28 to 29 after Story #1291 wired temporal_embedder
+        # through REST/MCP for full CLI+REST+MCP parity (code-review Finding 2)
+        assert len(ALL_PARAMETERS) == 29, (
+            f"Expected 29 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
         )
 
-        # CLI should have 22 parameters (subset of all parameters)
-        # Updated from 20 to 22: rerank_query and rerank_instruction now in CLI+REST+MCP (Bug #1209)
-        assert len(CLI_EXPECTED_PARAMETERS) == 22, (
-            f"Expected 22 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        # CLI should have 23 parameters (subset of all parameters)
+        # Updated from 22 to 23: temporal_embedder now in CLI+REST+MCP (Story #1291)
+        assert len(CLI_EXPECTED_PARAMETERS) == 23, (
+            f"Expected 23 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
         )
 
-        # REST/MCP should have all 28 parameters
-        # Updated from 26 to 28 after Bug #1209 added rerank_query and rerank_instruction
-        assert len(API_EXPECTED_PARAMETERS) == 28, (
-            f"Expected 28 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
+        # REST/MCP should have all 29 parameters
+        # Updated from 28 to 29 after Story #1291 added temporal_embedder
+        assert len(API_EXPECTED_PARAMETERS) == 29, (
+            f"Expected 29 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
         )
 
     def test_cli_has_all_parameters(self):
@@ -260,6 +263,8 @@ class TestQueryParameterParity:
         normalized_expected.add(
             "rerank_instruction"
         )  # Story #653: reranker instruction
+        # temporal_embedder is in ALL_PARAMETERS (CLI+REST+MCP, Story #1291) --
+        # no CLI-specific exception needed.
 
         extra = cli_params - normalized_expected
 

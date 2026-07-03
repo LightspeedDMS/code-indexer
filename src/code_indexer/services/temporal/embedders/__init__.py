@@ -7,3 +7,4 @@ call ``create_embedder(name, config)`` for any first-class adapter name.
 """
 
 from . import contextual  # noqa: F401  (import triggers self-registration)
+from . import standard  # noqa: F401  (import triggers self-registration)

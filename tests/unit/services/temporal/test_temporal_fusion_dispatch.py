@@ -11,6 +11,8 @@ Covers:
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
     TEMPORAL_QUERY_TIMEOUT_SECONDS,
@@ -258,19 +260,21 @@ def test_single_provider_attribution_populated(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# test_multi_provider_dispatches_to_all
+# Story #1291 AC9: cross-embedder fusion is FORBIDDEN. This test replaces the
+# pre-#1291 test_multi_provider_dispatches_to_all /
+# test_multi_provider_fusion_applied, which asserted the now-forbidden
+# behavior (querying + RRF-fusing two DIFFERENT embedders' collections in
+# one ranked result set). Discovery now resolves to at most one embedder;
+# if that invariant is ever violated upstream, execute_temporal_query_with_fusion
+# fails loud rather than silently mixing providers.
 # ---------------------------------------------------------------------------
 
 
-def test_multi_provider_dispatches_to_all(tmp_path):
-    """Two provider groups → both are queried (TemporalSearchService called twice)."""
+def test_more_than_one_provider_group_raises_instead_of_fusing(tmp_path):
+    """AC9: two provider groups (simulating an invariant violation upstream)
+    must raise RuntimeError -- NEVER be queried/fused together."""
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
-
-    result_a = _make_result("a.py", score=0.9)
-    result_b = _make_result("b.py", score=0.8)
-
-    call_count = []  # type: ignore[var-annotated]
 
     two_providers = [
         (
@@ -282,15 +286,6 @@ def test_multi_provider_dispatches_to_all(tmp_path):
             ["code-indexer-temporal-embed_v4_0"],
         ),
     ]
-
-    def make_service(*args, **kwargs):
-        instance = MagicMock()
-        if len(call_count) == 0:
-            instance.query_temporal.return_value = _make_results_with([result_a])
-        else:
-            instance.query_temporal.return_value = _make_results_with([result_b])
-        call_count.append(1)
-        return instance
 
     with (
         patch(
@@ -304,91 +299,15 @@ def test_multi_provider_dispatches_to_all(tmp_path):
         patch(
             "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
         ),
-        patch(
-            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
-            side_effect=make_service,
-        ),
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as MockFactory,
     ):
-        MockFactory.create.return_value = MagicMock()
-
-        execute_temporal_query_with_fusion(
-            config=config,
-            index_path=tmp_path,
-            vector_store=vector_store,
-            query_text="query",
-            limit=5,
-        )
-
-    assert len(call_count) == 2
-
-
-# ---------------------------------------------------------------------------
-# test_multi_provider_fusion_applied
-# ---------------------------------------------------------------------------
-
-
-def test_multi_provider_fusion_applied(tmp_path):
-    """Two providers → fuse_rrf_multi called and results are fused."""
-    config = _make_mock_config()
-    vector_store = _make_mock_vector_store(tmp_path)
-
-    result_a = _make_result("a.py", score=0.9)
-    result_b = _make_result("b.py", score=0.8)
-
-    two_providers = [
-        (
-            "code-indexer-temporal-voyage_code_3",
-            ["code-indexer-temporal-voyage_code_3"],
-        ),
-        (
-            "code-indexer-temporal-embed_v4_0",
-            ["code-indexer-temporal-embed_v4_0"],
-        ),
-    ]
-
-    def make_service(*args, **kwargs):
-        instance = MagicMock()
-        instance.query_temporal.return_value = _make_results_with([result_a, result_b])
-        return instance
-
-    with (
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
-            return_value=two_providers,
-        ),
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
-            side_effect=lambda cols: (cols, []),
-        ),
-        patch(
-            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
-        ),
-        patch(
-            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
-            side_effect=make_service,
-        ),
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as MockFactory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.fuse_rrf_multi"
-        ) as mock_fuse,
-    ):
-        MockFactory.create.return_value = MagicMock()
-        mock_fuse.return_value = [result_a, result_b]
-
-        execute_temporal_query_with_fusion(
-            config=config,
-            index_path=tmp_path,
-            vector_store=vector_store,
-            query_text="query",
-            limit=5,
-        )
-
-    mock_fuse.assert_called_once()
+        with pytest.raises(RuntimeError, match="[Cc]ross-embedder|invariant"):
+            execute_temporal_query_with_fusion(
+                config=config,
+                index_path=tmp_path,
+                vector_store=vector_store,
+                query_text="query",
+                limit=5,
+            )
 
 
 # ---------------------------------------------------------------------------

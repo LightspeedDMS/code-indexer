@@ -176,7 +176,34 @@ def _run_indexer_and_capture_thread_count(
     tmp_path,
 ) -> int:
     """Run TemporalIndexer.index_commits() and return the thread count passed to VCM."""
+    from code_indexer.services.temporal.embedders.base import TemporalEmbedder
+    from code_indexer.services.temporal.embedders.registry import (
+        register_embedder,
+        unregister_embedder_for_tests,
+    )
     from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
+
+    # Story #1291: index_commits() now availability-gates the ACTIVE embedder
+    # (fail-loud if unresolvable) -- register a lightweight deterministic
+    # fake so this thread-count test (an orthogonal concern) isn't affected.
+    fake_embedder_name = f"fake-story640-{collection_suffix}"
+
+    class _FakeEmbedder(TemporalEmbedder):
+        name = fake_embedder_name
+        model_slug = collection_suffix
+        dimensions = 4
+        overlap_percentage = 0.0
+
+        def __init__(self, config=None):
+            pass
+
+        def embed_commit_chunks(self, chunks):
+            return [[0.0] * self.dimensions for _ in chunks]
+
+        def embed_query(self, text):
+            return [0.0] * self.dimensions
+
+    register_embedder(fake_embedder_name, lambda config: _FakeEmbedder(config))
 
     mock_config = MagicMock()
     mock_config.embedding_provider = provider
@@ -188,6 +215,8 @@ def _run_indexer_and_capture_thread_count(
     mock_config.voyage_ai.model = "voyage-code-3"
     mock_config.cohere.model = "embed-v4.0"
     mock_config.temporal.diff_context_lines = 3
+    mock_config.temporal.active_embedder = fake_embedder_name
+    mock_config.temporal.embedders = [fake_embedder_name]
     mock_config.file_extensions = []
     mock_config.override_config = None
 
@@ -216,21 +245,24 @@ def _run_indexer_and_capture_thread_count(
         ctx.__exit__ = MagicMock(return_value=False)
         return ctx
 
-    with (
-        patch(
-            "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager",
-            side_effect=fake_vcm,
-        ),
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_indexer.subprocess.run",
-            side_effect=_fake_subprocess_run_one_commit,
-        ),
-    ):
-        mock_factory.create.return_value = MagicMock()
-        indexer.index_commits()
+    try:
+        with (
+            patch(
+                "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager",
+                side_effect=fake_vcm,
+            ),
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ) as mock_factory,
+            patch(
+                "code_indexer.services.temporal.temporal_indexer.subprocess.run",
+                side_effect=_fake_subprocess_run_one_commit,
+            ),
+        ):
+            mock_factory.create.return_value = MagicMock()
+            indexer.index_commits()
+    finally:
+        unregister_embedder_for_tests(fake_embedder_name)
 
     return captured[0] if captured else -1
 

@@ -275,6 +275,7 @@ def _build_multi_search_request(
         exclude_path=params.get("exclude_path"),
         accuracy=params.get("accuracy", "balanced"),
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 
@@ -926,6 +927,8 @@ def _build_search_kwargs(
         # Story #1108 (S4): per-request cache bypass; web UI search never sets
         # this — it has no such control, so False is correct for that path.
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        # Story #1291 AC7/AC8: explicit temporal embedder override
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 

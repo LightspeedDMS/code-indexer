@@ -565,6 +565,8 @@ class MultiSearchService:
                 file_path_filter=request.path_filter,
                 # Story #1108 (S4): forward per-request cache bypass flag
                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=request.temporal_embedder,
             )
 
             # If no temporal index found, raise to match original behavior

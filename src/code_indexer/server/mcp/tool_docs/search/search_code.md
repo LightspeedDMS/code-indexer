@@ -143,6 +143,11 @@ inputSchema:
       - commit_message
       - commit_diff
       description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
+    temporal_embedder:
+      type: string
+      description: 'Explicit temporal embedder override (e.g. ''embed-v4.0''). Omit to use temporal.active_embedder. An override
+        naming an embedder with no indexed collections returns an empty/typed result -- it never silently falls back to
+        active_embedder. Requires a temporal query (time_range, time_range_all, or at_commit).'
     query_strategy:
       type: string
       enum:

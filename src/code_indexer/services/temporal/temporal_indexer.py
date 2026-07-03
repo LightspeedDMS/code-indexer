@@ -324,8 +324,23 @@ class TemporalIndexer:
         since_date: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
         reconcile: bool = False,
+        embedder_scope: Optional[List[str]] = None,
     ) -> IndexingResult:
         """Index git commit history as per-commit aggregated contextual documents.
+
+        Story #1291: builds a shard set for EVERY embedder configured in
+        `config.temporal.embedders`, not only the active one. Missing-commit
+        discovery for EACH embedder always runs through the disk-scan-based
+        `reconcile_temporal_index` (shard-aware, AC15/AC16) -- this is what
+        makes "add a second embedder after the fact" (AC5) actually schedule
+        ZERO work for an embedder that has nothing new to do, and generalizes
+        cleanly to per-embedder reconcile scoping (AC10).
+
+        Availability policy (AC4): an embedder whose construction raises or
+        whose is_available() returns False is, if it is the ACTIVE embedder,
+        a FAIL-LOUD error for the whole job; if it is any OTHER configured
+        embedder, a WARNING-and-skip (the remaining embedders still index
+        normally).
 
         Args:
             all_branches: If True, index all branches; if False, current branch only
@@ -333,6 +348,9 @@ class TemporalIndexer:
             since_date: Index commits since this date (YYYY-MM-DD)
             progress_callback: Progress callback function
             reconcile: If True, reconcile disk state with git history (crash recovery)
+            embedder_scope: AC10 -- explicit embedder name(s) to reconcile.
+                Only honored when reconcile=True. None/empty (the default)
+                reconciles EVERY embedder configured in temporal.embedders.
 
         Returns:
             IndexingResult with statistics
@@ -340,92 +358,69 @@ class TemporalIndexer:
         # Story #1290 AC19/AC20: blank-out runs BEFORE any read/reconcile/write.
         self._blank_out_legacy_collections()
 
-        # Step 1: Get commit history
+        # Step 1: Get commit history (full repository history -- blank-out
+        # above unconditionally clears the base bookkeeping directory that
+        # would otherwise hold the last-indexed-commit cursor, so this is
+        # always a full fetch in practice; per-embedder skip logic is
+        # entirely reconcile_temporal_index's job, below).
         commits_from_git = self._get_commit_history(
             all_branches, max_commits, since_date
         )
-        if not commits_from_git:
-            return IndexingResult(
-                total_commits=0,
-                files_processed=0,
-                approximate_vectors_created=0,
-                skip_ratio=1.0,  # All commits skipped (none to process)
-                branches_indexed=[],
-                commits_per_branch={},
-            )
 
         # Resolve the active temporal embedder NAME (a plain string, no live
-        # client construction) up front -- used for shard placement.  Falls
-        # back to the base collection_name when unresolvable (e.g. an
-        # unconfigured/Mock config in a test), mirroring the pre-#1290
-        # provider-model-name fallback.
-        _raw_embedder_name = getattr(self.config, "temporal", None)
-        _raw_embedder_name = getattr(_raw_embedder_name, "active_embedder", None)
-        _active_embedder_name: str = (
-            _raw_embedder_name
-            if isinstance(_raw_embedder_name, str) and _raw_embedder_name
+        # client construction) up front -- used for shard placement and the
+        # availability policy. Falls back to the base collection_name when
+        # unresolvable (e.g. an unconfigured/Mock config in a test),
+        # mirroring the pre-#1290 provider-model-name fallback.
+        _raw_temporal_cfg = getattr(self.config, "temporal", None)
+        _raw_active_name = getattr(_raw_temporal_cfg, "active_embedder", None)
+        active_embedder_name: str = (
+            _raw_active_name
+            if isinstance(_raw_active_name, str) and _raw_active_name
             else self.collection_name
         )
-        self._active_embedder_name = _active_embedder_name
+        self._active_embedder_name = active_embedder_name
 
-        # Step 1.5: Reconciliation (if requested) - discover indexed/partial
-        # commits from disk, shard-aware (AC15/AC16).
-        if reconcile:
-            from .temporal_reconciliation import reconcile_temporal_index
+        _raw_embedders_list = getattr(_raw_temporal_cfg, "embedders", None)
+        if isinstance(_raw_embedders_list, list) and _raw_embedders_list:
+            configured_embedders: List[str] = list(dict.fromkeys(_raw_embedders_list))
+        else:
+            configured_embedders = [active_embedder_name]
+        if active_embedder_name not in configured_embedders:
+            configured_embedders = [active_embedder_name] + configured_embedders
 
-            logger.info("Reconciling disk state with git history...")
-            missing_commits = reconcile_temporal_index(
-                self.vector_store,
-                commits_from_git,
-                _active_embedder_name,
-            )
-
-            indexed_count = len(commits_from_git) - len(missing_commits)
-            logger.info(
-                f"Reconciliation complete: {indexed_count} indexed, "
-                f"{len(missing_commits)} missing ({indexed_count * 100 // (len(commits_from_git) or 1)}% complete)"
-            )
-
-            commits_from_git = missing_commits
-
-            if not commits_from_git:
-                logger.info("All commits already indexed, rebuilding indexes only...")
-                # Story #1290 (E2E-discovered bug): under the per-commit
-                # sharded architecture, self.collection_name is a base
-                # bookkeeping identity that is NEVER the real collection
-                # written to (only quarterly shards are, each already
-                # end_indexing()'d inside the main sharding loop on the run
-                # that created them). It carries no v2 marker, so AC19/20
-                # blank-out (which runs unconditionally at the top of this
-                # method, before this branch) hard-deletes it on the very
-                # next run -- an unconditional end_indexing() call here would
-                # then always raise "Collection does not exist". Guard with
-                # collection_exists() so a rerun with nothing missing is a
-                # true no-op (nothing needs rebuilding: shards are immutable
-                # until new commits arrive).
-                if self.vector_store.collection_exists(self.collection_name):
-                    self.vector_store.end_indexing(collection_name=self.collection_name)
-                return IndexingResult(
-                    total_commits=0,
-                    files_processed=0,
-                    approximate_vectors_created=0,
-                    skip_ratio=1.0,  # All commits already done
-                    branches_indexed=[],
-                    commits_per_branch={},
+        # AC10: an explicit embedder_scope only narrows WHICH configured
+        # embedders are processed this run when reconcile=True. A normal
+        # (non-reconcile) run always processes every configured embedder.
+        if reconcile and embedder_scope:
+            unknown = [e for e in embedder_scope if e not in configured_embedders]
+            if unknown:
+                raise ValueError(
+                    f"embedder_scope contains embedder(s) not configured in "
+                    f"temporal.embedders: {unknown} (configured: "
+                    f"{configured_embedders})"
                 )
+            scope = list(embedder_scope)
+        else:
+            scope = configured_embedders
 
-        # Track total commits before filtering for skip_ratio calculation
+        # Track total commits (whole-repo, pre-per-embedder-filtering) for
+        # skip_ratio reporting.
         total_commits_before_filter = len(commits_from_git)
 
-        current_branch = self._get_current_branch()
-
-        # Step 2: Process commits with parallel workers
         total_blobs_processed = 0
         total_vectors_created = 0
         commits_processed = 0
 
+        # Track shards processed so close() can call end_indexing per shard.
+        self._processed_shards: list = []
+
         # Select thread count based on the active embedding provider (legacy
-        # config knob, reused unchanged for commit-level parallelism).
+        # config knob, reused unchanged for commit-level parallelism). This
+        # VectorCalculationManager is constructed purely for its
+        # cancellation_event lifecycle (cooperative worker shutdown) -- each
+        # per-commit embedder makes its OWN HTTP call directly and does NOT
+        # submit batch tasks through it.
         _provider = getattr(self.config, "embedding_provider", None)
         if _provider == "cohere" and hasattr(self.config, "cohere"):
             vector_thread_count = self.config.cohere.parallel_requests
@@ -434,53 +429,170 @@ class TemporalIndexer:
         else:
             vector_thread_count = 4
 
-        # Story #1290: a VectorCalculationManager is still constructed purely
-        # for its cancellation_event lifecycle (cooperative worker shutdown) --
-        # the contextual embedder makes its OWN HTTP call directly and does
-        # NOT submit batch tasks through it.
         from ...services.embedding_factory import EmbeddingProviderFactory
+        from .temporal_reconciliation import reconcile_temporal_index
 
         embedding_provider = EmbeddingProviderFactory.create(config=self.config)
 
-        # Resolve the active embedder instance ONCE (used for shard vector
-        # dimensions AND per-commit embedding).  Failure here is non-fatal at
-        # this stage -- it degrades to a 1024-dim default for shard creation
-        # and a later fail-loud error inside the worker IF a commit actually
-        # needs embedding (Messi #2/#13: never silently skip real work, but
-        # never crash bookkeeping-only callers either).
-        try:
-            self._active_embedder = create_embedder(_active_embedder_name, self.config)
-            _shard_vector_size = self._active_embedder.dimensions
-        except Exception as exc:
-            logger.warning(
-                "Could not construct temporal embedder '%s' (%s); shard creation "
-                "will default to 1024 dims. Embedding will fail loud if a commit "
-                "actually needs to be processed.",
-                _active_embedder_name,
-                exc,
-            )
-            self._active_embedder = None
-            _shard_vector_size = 1024
+        any_embedder_processed = False
 
-        model_slug = (
-            sanitize_model_name(_active_embedder_name)
-            if isinstance(_active_embedder_name, str) and _active_embedder_name
-            else sanitize_model_name(self.collection_name)
+        with VectorCalculationManager(
+            embedding_provider,
+            vector_thread_count,
+            config_dir=self.config_manager.config_path.parent,
+        ) as vector_manager:
+            for embedder_name in configured_embedders:
+                if embedder_name not in scope:
+                    continue
+
+                # --- Availability policy (AC4) ---
+                construction_error: Optional[BaseException] = None
+                embedder_instance = None
+                available = False
+                try:
+                    embedder_instance = create_embedder(embedder_name, self.config)
+                    available = embedder_instance.is_available()
+                except Exception as exc:  # noqa: BLE001
+                    construction_error = exc
+                    available = False
+
+                if not available:
+                    reason = construction_error or "is_available() returned False"
+                    if embedder_name == active_embedder_name:
+                        raise RuntimeError(
+                            f"Active temporal embedder '{embedder_name}' is "
+                            f"unavailable ({reason}) -- cannot index. Configure "
+                            f"its credentials or choose a different "
+                            f"active_embedder."
+                        )
+                    logger.warning(
+                        "Temporal embedder '%s' is unavailable (%s) -- "
+                        "skipping (non-active embedders are best-effort).",
+                        embedder_name,
+                        reason,
+                    )
+                    continue
+
+                # Defensive invariant (Messi #15): available=True is only
+                # reachable when construction succeeded, so embedder_instance
+                # must be non-None here -- narrows the type for mypy.
+                assert embedder_instance is not None
+
+                # --- Missing-commit discovery (shard-aware, AC15/16, AC5) ---
+                embedder_commits = reconcile_temporal_index(
+                    self.vector_store, commits_from_git, embedder_name
+                )
+
+                if not embedder_commits:
+                    # AC5: zero work scheduled -- no begin_indexing/
+                    # end_indexing call, no on-disk touch whatsoever.
+                    continue
+
+                any_embedder_processed = True
+                self._active_embedder = embedder_instance
+                self._active_embedder_name = embedder_name
+
+                _c, _b, _v = self._index_one_embedder(
+                    embedder_name,
+                    embedder_instance,
+                    embedder_commits,
+                    vector_manager,
+                    progress_callback,
+                )
+                commits_processed += _c
+                total_blobs_processed += _b
+                total_vectors_created += _v
+
+        if not any_embedder_processed:
+            return IndexingResult(
+                total_commits=0,
+                files_processed=0,
+                approximate_vectors_created=0,
+                skip_ratio=1.0,  # Nothing to do for any configured embedder.
+                branches_indexed=[],
+                commits_per_branch={},
+            )
+
+        # TODO: Get branches from git instead of database
+        branches_indexed = [self._get_current_branch()]  # Temporary fix - no SQLite
+
+        # Only advance the persisted last-indexed-commit bookkeeping when the
+        # whole-repo fetch was non-empty (mirrors the pre-#1291 contract; in
+        # practice this fetch is always the full history, so this is simply
+        # "there is at least one commit in the repo").
+        if commits_from_git:
+            self._save_temporal_metadata(
+                last_commit=commits_from_git[-1].hash,
+                total_commits=len(commits_from_git),
+                files_processed=total_blobs_processed,
+                approximate_vectors_created=total_vectors_created,
+                branch_stats={"branches": branches_indexed, "per_branch_counts": {}},
+                indexing_mode="all-branches" if all_branches else "single-branch",
+                max_commits=max_commits,
+                since_date=since_date,
+            )
+
+        # Bug #1207 BLOCKER 1: mark successful completion so close() knows the
+        # shard loop completed without exception.
+        self._indexing_complete = True
+
+        # Skip ratio: commits skipped (across ALL configured embedders' own
+        # discovery) relative to the whole-repo commit count.
+        if total_commits_before_filter > 0:
+            skip_ratio = max(
+                0.0,
+                (total_commits_before_filter - commits_processed)
+                / total_commits_before_filter,
+            )
+        elif commits_processed > 0:
+            skip_ratio = 0.0
+        else:
+            skip_ratio = 1.0
+
+        return IndexingResult(
+            total_commits=commits_processed,
+            files_processed=total_blobs_processed,
+            approximate_vectors_created=total_vectors_created,
+            skip_ratio=skip_ratio,
+            branches_indexed=branches_indexed,
+            commits_per_branch={},
         )
 
-        # Story #1171: Group commits by quarterly shard to bound peak RAM.
-        # Each shard is processed sequentially so only one shard is in RAM at a time.
+    def _index_one_embedder(
+        self,
+        embedder_name: str,
+        embedder_instance: TemporalEmbedder,
+        commits: List[CommitInfo],
+        vector_manager: VectorCalculationManager,
+        progress_callback: Optional[Callable],
+    ) -> tuple:
+        """Build/extend ONE embedder's quarterly shard set for `commits`.
+
+        Story #1291: extracted from the single-embedder Story #1290 sharding
+        loop so it can be invoked once per configured embedder. Assumes the
+        caller has ALREADY set self._active_embedder / self._active_embedder_name
+        to (embedder_instance, embedder_name) and that `commits` is the
+        FINAL, already-reconciled list of commits this embedder needs (no
+        further filtering happens here).
+
+        Returns:
+            (commits_processed, blobs_processed, vectors_created) for this
+            embedder's run.
+        """
         from collections import defaultdict
         from .temporal_collection_naming import (
             get_shard_collection_name,
             base_collection_name,
         )
 
+        model_slug = sanitize_model_name(embedder_name)
+        shard_vector_size = embedder_instance.dimensions
+
         try:
             shard_commit_map: dict = defaultdict(list)
-            for _commit in commits_from_git:
+            for _commit in commits:
                 _shard = get_shard_collection_name(
-                    _active_embedder_name,
+                    embedder_name,
                     datetime.fromtimestamp(_commit.timestamp, tz=_tz.utc),
                 )
                 shard_commit_map[_shard].append(_commit)
@@ -491,149 +603,97 @@ class TemporalIndexer:
             logger.warning(
                 "Could not determine shard collection name for temporal embedder "
                 "'%s' (%s); falling back to base collection '%s'.",
-                _active_embedder_name,
+                embedder_name,
                 e,
                 self.collection_name,
             )
             shard_commit_map = defaultdict(list)
-            shard_commit_map[self.collection_name].extend(commits_from_git)
+            shard_commit_map[self.collection_name].extend(commits)
 
         sorted_shards = sorted(
             shard_commit_map.keys()
         )  # Chronological (lex = chron for YYYYQN)
 
-        # Track shards processed so close() can call end_indexing per shard
-        self._processed_shards: list = []
+        commits_processed = 0
+        blobs_processed = 0
+        vectors_created = 0
 
         _original_collection_name = self.collection_name
         try:
-            with VectorCalculationManager(
-                embedding_provider,
-                vector_thread_count,
-                config_dir=self.config_manager.config_path.parent,
-            ) as vector_manager:
-                for _shard_name in sorted_shards:
-                    self.collection_name = _shard_name
-                    if not self.vector_store.collection_exists(_shard_name):
-                        logger.info(
-                            "Creating temporal shard collection '%s' with dimension=%d",
-                            _shard_name,
-                            _shard_vector_size,
-                        )
-                        self.vector_store.create_collection(
-                            _shard_name, _shard_vector_size
-                        )
-                        # AC27: v2 marker persisted at CREATE, before the first
-                        # embed/flush -- a crash mid-index cannot leave this
-                        # collection looking legacy.
-                        _shard_path = self.vector_store._get_collection_path(
-                            _shard_name
-                        )
-                        if isinstance(_shard_path, Path):
-                            write_structure_marker(_shard_path, model_slug)
-                    else:
-                        # Bug #1242: Collection exists but may be missing
-                        # projection_matrix.npy (deployed broken shards).
-                        # Self-heal by copying from the base collection or
-                        # regenerating so the first upsert_points() does not
-                        # raise FileNotFoundError.
-                        _shard_path = self.vector_store._get_collection_path(
-                            _shard_name
-                        )
-                        if isinstance(_shard_path, Path):
-                            if not (_shard_path / "projection_matrix.npy").exists():
-                                _base_name = base_collection_name(_shard_name)
-                                _base_path = self.vector_store._get_collection_path(
-                                    _base_name
-                                )
-                                logger.info(
-                                    "Bug #1242: self-healing missing projection_matrix.npy"
-                                    " for shard '%s'",
-                                    _shard_name,
-                                )
-                                _ensure_shard_has_projection_matrix(
-                                    _shard_path,
-                                    _base_path
-                                    if (
-                                        isinstance(_base_path, Path)
-                                        and _base_path.exists()
-                                    )
-                                    else None,
-                                    _shard_vector_size,
-                                )
-                            # Defensive belt-and-suspenders (AC27): an existing
-                            # shard reached here without a v2 marker only if
-                            # blank-out somehow missed it -- write it now so a
-                            # later blank-out pass never mid-run deletes a
-                            # shard this very run is writing into.
-                            if not is_v2_structure(_shard_path):
-                                write_structure_marker(_shard_path, model_slug)
-
-                    # Initialize incremental HNSW tracking for this shard
-                    self.vector_store.begin_indexing(_shard_name)
-
-                    _shard_commits = shard_commit_map[_shard_name]
-                    _c, _b, _v = self._index_shard_commits(
-                        _shard_commits,
-                        vector_manager,
-                        progress_callback,
-                        reconcile,
+            for _shard_name in sorted_shards:
+                self.collection_name = _shard_name
+                if not self.vector_store.collection_exists(_shard_name):
+                    logger.info(
+                        "Creating temporal shard collection '%s' with dimension=%d",
+                        _shard_name,
+                        shard_vector_size,
                     )
-                    commits_processed += _c
-                    total_blobs_processed += _b
-                    total_vectors_created += _v
+                    self.vector_store.create_collection(_shard_name, shard_vector_size)
+                    # AC27: v2 marker persisted at CREATE, before the first
+                    # embed/flush -- a crash mid-index cannot leave this
+                    # collection looking legacy.
+                    _shard_path = self.vector_store._get_collection_path(_shard_name)
+                    if isinstance(_shard_path, Path):
+                        write_structure_marker(_shard_path, model_slug)
+                else:
+                    # Bug #1242: Collection exists but may be missing
+                    # projection_matrix.npy (deployed broken shards).
+                    # Self-heal by copying from the base collection or
+                    # regenerating so the first upsert_points() does not
+                    # raise FileNotFoundError.
+                    _shard_path = self.vector_store._get_collection_path(_shard_name)
+                    if isinstance(_shard_path, Path):
+                        if not (_shard_path / "projection_matrix.npy").exists():
+                            _base_name = base_collection_name(_shard_name)
+                            _base_path = self.vector_store._get_collection_path(
+                                _base_name
+                            )
+                            logger.info(
+                                "Bug #1242: self-healing missing projection_matrix.npy"
+                                " for shard '%s'",
+                                _shard_name,
+                            )
+                            _ensure_shard_has_projection_matrix(
+                                _shard_path,
+                                _base_path
+                                if (
+                                    isinstance(_base_path, Path) and _base_path.exists()
+                                )
+                                else None,
+                                shard_vector_size,
+                            )
+                        # Defensive belt-and-suspenders (AC27): an existing
+                        # shard reached here without a v2 marker only if
+                        # blank-out somehow missed it -- write it now so a
+                        # later blank-out pass never mid-run deletes a
+                        # shard this very run is writing into.
+                        if not is_v2_structure(_shard_path):
+                            write_structure_marker(_shard_path, model_slug)
 
-                    # Rebuild HNSW for this shard after processing completes
-                    self.vector_store.end_indexing(collection_name=_shard_name)
-                    self._processed_shards.append(_shard_name)
+                # Initialize incremental HNSW tracking for this shard
+                self.vector_store.begin_indexing(_shard_name)
+
+                _shard_commits = shard_commit_map[_shard_name]
+                # reconcile=True: `commits` was already computed by the
+                # caller via reconcile_temporal_index -- skip the (per-shard
+                # base-tracker) redundant re-filter inside _index_shard_commits.
+                _c, _b, _v = self._index_shard_commits(
+                    _shard_commits,
+                    vector_manager,
+                    progress_callback,
+                    True,
+                )
+                commits_processed += _c
+                blobs_processed += _b
+                vectors_created += _v
+
+                # Rebuild HNSW for this shard after processing completes
+                self.vector_store.end_indexing(collection_name=_shard_name)
+                self._processed_shards.append(_shard_name)
         finally:
             self.collection_name = _original_collection_name
 
-        # Early return if no commits were processed (all filtered out)
-        if total_blobs_processed == 0 and total_vectors_created == 0:
-            return IndexingResult(
-                total_commits=0,
-                files_processed=0,
-                approximate_vectors_created=0,
-                skip_ratio=1.0,  # All commits skipped (already processed)
-                branches_indexed=[],
-                commits_per_branch={},
-            )
-
-        # Step 4: Calculate skip ratio (commits skipped due to already being processed)
-        commits_skipped = total_commits_before_filter - commits_processed
-        skip_ratio = (
-            commits_skipped / total_commits_before_filter
-            if total_commits_before_filter > 0
-            else 1.0
-        )
-
-        # TODO: Get branches from git instead of database
-        branches_indexed = [current_branch]  # Temporary fix - no SQLite
-
-        self._save_temporal_metadata(
-            last_commit=commits_from_git[-1].hash,
-            total_commits=len(commits_from_git),
-            files_processed=total_blobs_processed,
-            approximate_vectors_created=total_vectors_created,
-            branch_stats={"branches": branches_indexed, "per_branch_counts": {}},
-            indexing_mode="all-branches" if all_branches else "single-branch",
-            max_commits=max_commits,
-            since_date=since_date,
-        )
-
-        # Bug #1207 BLOCKER 1: mark successful completion so close() knows the
-        # shard loop completed without exception.
-        self._indexing_complete = True
-
-        return IndexingResult(
-            total_commits=commits_processed,
-            files_processed=total_blobs_processed,
-            approximate_vectors_created=total_vectors_created,
-            skip_ratio=skip_ratio,
-            branches_indexed=branches_indexed,
-            commits_per_branch={},
-        )
+        return commits_processed, blobs_processed, vectors_created
 
     def _load_last_indexed_commit(self) -> Optional[str]:
         """Load last indexed commit from temporal_meta.json.
@@ -840,7 +900,17 @@ class TemporalIndexer:
                         self.codebase_dir, commit, diff_context_lines
                     )
                     doc = build_aggregated_document(commit, file_changes)
-                    chunks = chunk_aggregated_document(doc, chunk_chars)
+                    if self._active_embedder is None:
+                        raise RuntimeError(
+                            f"Temporal embedder '{self._active_embedder_name}' "
+                            f"is not available -- cannot index commit "
+                            f"{commit.hash[:8]}."
+                        )
+                    chunks = chunk_aggregated_document(
+                        doc,
+                        chunk_chars,
+                        overlap_percentage=self._active_embedder.overlap_percentage,
+                    )
 
                     doc_size = len(doc.text)
                     with progress_lock:
