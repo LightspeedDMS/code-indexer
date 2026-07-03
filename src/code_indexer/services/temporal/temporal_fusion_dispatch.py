@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .temporal_fusion import (
     TEMPORAL_OVERFETCH_MULTIPLIER,
-    fuse_rrf_multi,
     make_temporal_dedup_key,
+    merge_shards_by_score,
 )
 from .temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
@@ -189,9 +189,13 @@ def execute_temporal_query_with_fusion(
             warning=warning_msg,
         )
 
-    # Exactly one provider: query its (own) shards sequentially, RRF-merge
+    # Exactly one provider: query its (own) shards sequentially, then merge
     # ACROSS THAT EMBEDDER'S OWN quarterly shards only (never another
-    # embedder's).
+    # embedder's). Quarterly shards are a DISJOINT partition (a commit
+    # lives in exactly one shard) -- RRF's reciprocal-rank scheme is the
+    # wrong operator for disjoint partitions (Bug #1299): it ranks by each
+    # shard's own LOCAL rank position, not true cross-shard relevance.
+    # merge_shards_by_score preserves the TRUE cosine score across shards.
     base_name, shards = provider_groups[0]
     results_by_shard = _query_shards_raw(
         config,
@@ -216,17 +220,28 @@ def execute_temporal_query_with_fusion(
             filter_type="time_range" if time_range else "none",
             filter_value=time_range,
         )
-    fused = fuse_rrf_multi(
+    merged = merge_shards_by_score(
         results_by_provider=results_by_shard,
         dedup_key=make_temporal_dedup_key,
         limit=limit,
     )
+    # Bug #1299 (multi-shard half): the top-`limit` subset was just selected
+    # by TRUE relevance (score) above. Re-sort ONLY that selected subset
+    # reverse-chronologically for display (newest to oldest, like git log)
+    # -- mirrors the identical Phase 3 pattern in
+    # TemporalSearchService.query_temporal so display order is consistent
+    # whether a query resolves to one shard or several.
+    merged = sorted(
+        merged,
+        key=lambda r: r.temporal_context.get("commit_timestamp", 0),
+        reverse=True,
+    )
     return TemporalSearchResults(
-        results=fused,
+        results=merged,
         query=query_text,
         filter_type="time_range" if time_range else "none",
         filter_value=time_range,
-        total_found=len(fused),
+        total_found=len(merged),
     )
 
 

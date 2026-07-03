@@ -630,20 +630,34 @@ class TemporalSearchService:
                 ) or result.metadata.get("commit_message", "")
                 result.temporal_context["message_truncated"] = True
 
-        # Phase 3: Sort reverse chronologically (newest to oldest, like git
-        # log) -- AC13: this is the default order when no rerank is applied.
-        deduped_results = sorted(
+        # Phase 3 (Bug #1299): truncate by RELEVANCE (score) first, then
+        # re-sort ONLY the selected top-`limit` subset reverse
+        # chronologically for display (newest to oldest, like git log --
+        # AC13: this is the default order when no rerank is applied).
+        #
+        # Previously this sorted the ENTIRE deduped candidate set by
+        # commit_timestamp and truncated to `limit` afterward, which made
+        # truncation recency-based instead of relevance-based: a
+        # highly-relevant OLDER commit could be dropped in favor of several
+        # weakly-relevant NEWER commits, purely because they were newer.
+        total_found = len(deduped_results)
+        top_results = sorted(
             deduped_results,
+            key=lambda r: r.score,
+            reverse=True,  # Highest relevance first
+        )[:limit]
+        top_results = sorted(
+            top_results,
             key=lambda r: r.temporal_context.get("commit_timestamp", 0),
-            reverse=True,  # Newest first
+            reverse=True,  # Newest first (display order)
         )
 
         return TemporalSearchResults(
-            results=deduped_results[:limit],
+            results=top_results,
             query=query,
             filter_type="time_range",
             filter_value=time_range,
-            total_found=len(deduped_results),
+            total_found=total_found,
             performance={
                 "semantic_search_ms": semantic_time * 1000,
                 "temporal_filter_ms": filter_time * 1000,

@@ -109,6 +109,64 @@ def fuse_rrf_multi(
     return output[:limit]
 
 
+def merge_shards_by_score(
+    results_by_provider: Dict[str, list],
+    dedup_key: Callable,
+    limit: int,
+) -> list:
+    """Merge candidate results from DISJOINT temporal quarterly shards,
+    preserving TRUE cosine relevance ordering (Bug #1299 fusion fix).
+
+    Quarterly shards are a DISJOINT partition of a single embedder's
+    collection -- a given commit lives in exactly one shard. RRF's
+    reciprocal-rank scheme (`fuse_rrf_multi`) is the wrong operator here:
+    "rank" is each shard's own LOCAL rank, which has no relationship to
+    true cross-shard relevance. A commit that is merely rank-0 (best-in-
+    shard) in a SPARSE shard can out-rank a much higher-cosine commit that
+    happens to be rank-1 in a BUSY shard, purely because RRF rewards
+    "being first" within whichever list it appears in.
+
+    This function instead: (1) for any dedup_key collision across shards
+    (e.g. a legacy monolithic collection queried alongside new shards),
+    keeps the max-scoring instance; (2) sorts the merged candidate pool by
+    the result's OWN true score descending; (3) truncates to `limit`.
+    `fusion_score` is set to the true score (not an RRF sum) so downstream
+    consumers reading `fusion_score` see the real relevance value.
+
+    Args:
+        results_by_provider: Dict mapping shard_display_name -> list of
+            TemporalSearchResult (each shard's own candidates, any order).
+        dedup_key: Function that extracts a dedup key from a result.
+        limit: Maximum results to return.
+
+    Returns:
+        Merged list of TemporalSearchResult sorted by descending true score.
+    """
+    if not results_by_provider:
+        return []
+
+    merged: Dict[str, dict] = {}
+    for provider_name, results in results_by_provider.items():
+        for result in results:
+            key = dedup_key(result)
+            existing = merged.get(key)
+            if existing is None or result.score > existing["result"].score:
+                merged[key] = {"result": result, "provider": provider_name}
+
+    output: List = []
+    for key, entry in merged.items():
+        result = entry["result"]
+        result.fusion_score = result.score
+        result.source_provider = entry["provider"]
+        result.contributing_providers = [entry["provider"]]
+        result.temporal_chunk_id = key
+        output.append(result)
+
+    output.sort(key=lambda r: r.fusion_score or 0.0, reverse=True)
+
+    return output[:limit]
+
+
 def _commit_hash_of(result: Any) -> str:
     """Return the commit_hash for a TemporalSearchResult (empty string if absent)."""
     metadata = getattr(result, "metadata", None) or {}

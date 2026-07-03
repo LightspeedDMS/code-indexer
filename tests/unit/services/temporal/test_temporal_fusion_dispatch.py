@@ -403,3 +403,97 @@ def test_file_path_filter_none_passes_none_to_query_temporal(tmp_path):
     assert path_filter is None, (
         f"path_filter must be None when file_path_filter is None, got {path_filter!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1299 (multi-shard fusion half): quarterly shards are DISJOINT
+# partitions of the same embedder's collection (a commit lives in exactly
+# one shard) -- fusing them via RRF's reciprocal-rank scheme is the wrong
+# operator, because "rank" there is each shard's OWN local rank, which has
+# no relationship to true cross-shard relevance. A commit that is merely
+# rank-0 in a SPARSE shard (few candidates) can out-rank a much
+# higher-cosine commit that happens to be rank-1 in a BUSY shard (many
+# candidates), purely because RRF rewards "being first" within whatever
+# list it appears in.
+# ---------------------------------------------------------------------------
+
+
+def test_disjoint_shard_fusion_preserves_true_score_ordering_bug_1299(tmp_path):
+    """A higher-cosine commit from a busy shard must SURVIVE truncation over
+    a within-shard-rank-1 (i.e. best-in-shard) lower-cosine commit from a
+    sparse shard, when only enough slots remain for one of the two.
+
+    Busy shard "Q2" contributes two candidates: rank0=0.95 ("busyA"),
+    rank1=0.85 ("busyB"). Sparse shard "Q1" contributes exactly one
+    candidate (therefore rank0 / best-in-shard): score=0.60 ("sparseA").
+
+    Under RRF (k=60): busyA (rank0) -> 1/(60+0+1) = 1/61 ~= 0.016393;
+    busyB (rank1) -> 1/(60+1+1) = 1/62 ~= 0.016129; sparseA (rank0) ->
+    1/(60+0+1) = 1/61 ~= 0.016393 (TIES with busyA, stable-sort keeps
+    insertion order ahead of busyB). With limit=2 that selects
+    [busyA, sparseA] and DROPS busyB entirely -- backwards, since busyB's
+    true cosine (0.85) is far higher than sparseA's (0.60). The fix must
+    preserve true cosine score across disjoint shards so busyB survives
+    and sparseA is dropped instead.
+
+    NOTE: the final returned list is intentionally re-sorted
+    reverse-chronologically for display (AC13, matching the primary Bug
+    #1299 fix in TemporalSearchService.query_temporal) -- so this test
+    checks SURVIVAL (set membership) under truncation, not raw list order,
+    which is a separate and already-correct concern.
+    """
+    config = _make_mock_config()
+    vector_store = _make_mock_vector_store(tmp_path)
+
+    busy_a = _make_result("busyA.py", score=0.95)
+    busy_a.temporal_context = {"commit_hash": "busyA", "commit_timestamp": 100}
+    busy_b = _make_result("busyB.py", score=0.85)
+    busy_b.temporal_context = {"commit_hash": "busyB", "commit_timestamp": 200}
+    sparse_a = _make_result("sparseA.py", score=0.60)
+    sparse_a.temporal_context = {"commit_hash": "sparseA", "commit_timestamp": 300}
+
+    results_by_shard = {
+        "Q2": [busy_a, busy_b],
+        "Q1": [sparse_a],
+    }
+
+    one_provider = [
+        (
+            "code-indexer-temporal-voyage_code_3",
+            [
+                "code-indexer-temporal-voyage_code_3-2024Q1",
+                "code-indexer-temporal-voyage_code_3-2024Q2",
+            ],
+        )
+    ]
+
+    with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=one_provider,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._query_shards_raw",
+            return_value=results_by_shard,
+        ),
+    ):
+        result = execute_temporal_query_with_fusion(
+            config=config,
+            index_path=tmp_path,
+            vector_store=vector_store,
+            query_text="query",
+            limit=2,
+        )
+
+    commit_hashes = {r.temporal_context["commit_hash"] for r in result.results}
+    assert commit_hashes == {"busyA", "busyB"}, (
+        f"busyB (cosine 0.85) must survive over sparseA (cosine 0.60) "
+        f"across disjoint shards at limit=2; got {commit_hashes}"
+    )
