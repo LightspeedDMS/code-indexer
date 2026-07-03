@@ -23,7 +23,6 @@ from .temporal_fusion import (
 from .temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
-    get_model_name_for_provider,
 )
 from .temporal_health import (
     filter_healthy_temporal_providers,
@@ -282,18 +281,27 @@ def _discover_provider_shards_with_pruning(
     time_range: Optional[Tuple[str, str]],
     provider_filter: Optional[str] = None,
 ) -> List[Tuple[str, List[str]]]:
-    """Discover per-provider overlapping shards, pruned to the query's time_range.
+    """Discover per-embedder overlapping shards, pruned to the query's time_range.
 
-    For each configured embedding provider, calls get_overlapping_shards() to
-    find only shard directories whose date range overlaps [time_range start, time_range end].
+    Story #1290: iterates `config.temporal.embedders` (the per-commit
+    TemporalEmbedder adapter registry -- e.g. "voyage-context-4"), NOT the
+    REGULAR semantic-search provider/model resolved via
+    EmbeddingProviderFactory.get_configured_providers()/get_model_name_for_provider().
+    Those read config.voyage_ai.model / config.cohere.model, which is an
+    UNRELATED model (the ordinary code-search embedder) -- the per-commit
+    temporal indexer places shards under config.temporal.active_embedder, so
+    discovery MUST use the same source of truth or it silently finds zero
+    shards whenever the two configs diverge (the common case).
+
+    Calls get_overlapping_shards() per embedder to find only shard
+    directories whose date range overlaps [time_range start, time_range end].
     Legacy monolithic collections are included when they exist on disk (AC4).
 
     Returns:
-        List of (provider_base_name, [shard_names_in_ascending_chrono_order]).
-        Providers with no overlapping shards are excluded.
+        List of (embedder_base_name, [shard_names_in_ascending_chrono_order]).
+        Embedders with no overlapping shards are excluded.
     """
     from datetime import datetime, timezone
-    from ..embedding_factory import EmbeddingProviderFactory
     from .temporal_collection_naming import (
         get_overlapping_shards,
         sanitize_model_name as _sanitize,
@@ -320,31 +328,26 @@ def _discover_provider_shards_with_pruning(
             else datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         )
 
-    configured = EmbeddingProviderFactory.get_configured_providers(config)
+    embedders = list(getattr(config.temporal, "embedders", []) or [])
     result: List[Tuple[str, List[str]]] = []
 
-    for provider_name in configured:
-        if provider_filter and provider_filter not in provider_name:
-            continue
-        try:
-            model_name = get_model_name_for_provider(provider_name, config)
-        except ValueError:
-            logger.debug("Skipping provider %s (unknown model)", provider_name)
+    for embedder_name in embedders:
+        if provider_filter and provider_filter not in embedder_name:
             continue
 
-        shards = get_overlapping_shards(model_name, index_path, dt_start, dt_end)
+        shards = get_overlapping_shards(embedder_name, index_path, dt_start, dt_end)
         if shards:
-            base_name = f"{TEMPORAL_COLLECTION_PREFIX}{_sanitize(model_name)}"
+            base_name = f"{TEMPORAL_COLLECTION_PREFIX}{_sanitize(embedder_name)}"
             # Log each shard at DEBUG, distinguishing sharded vs legacy (C2 call site)
             for shard in shards:
                 if is_sharded_temporal_collection(shard):
                     logger.debug(
-                        "Provider %s: including shard %s", provider_name, shard
+                        "Embedder %s: including shard %s", embedder_name, shard
                     )
                 else:
                     logger.debug(
-                        "Provider %s: including legacy collection %s",
-                        provider_name,
+                        "Embedder %s: including legacy collection %s",
+                        embedder_name,
                         shard,
                     )
             result.append((base_name, shards))
@@ -528,50 +531,86 @@ def _query_single_provider(
     return results
 
 
+def _build_query_provider_for_embedder(config: Any, embedder_name: str) -> Any:
+    """Construct a QUERY-capable embedding provider pinned to `embedder_name`.
+
+    Mirrors ContextualTemporalEmbedder.__init__'s model_copy pattern (the
+    INDEXING side) so the QUERY side embeds against the SAME model. Returns a
+    VoyageAIClient (an EmbeddingProvider) rather than a TemporalEmbedder so
+    it remains a drop-in for the existing FilesystemVectorStore.search() /
+    coalesced_query_embedding() plumbing (governor, cache, lane) -- only
+    voyage_ai.py's get_embedding() routes voyage-context-4 through the
+    contextualized endpoint internally (AC14).
+
+    Only Voyage-family embedder names are supported today (the only
+    registered TemporalEmbedder adapter is voyage-context-4).
+    """
+    if not embedder_name.startswith("cohere"):
+        from ...config import VoyageAIConfig
+        from ...services.voyage_ai import VoyageAIClient
+
+        base_voyage_config = getattr(config, "voyage_ai", None)
+        if base_voyage_config is not None:
+            voyage_config = base_voyage_config.model_copy(
+                update={"model": embedder_name}
+            )
+        else:
+            voyage_config = VoyageAIConfig(model=embedder_name)
+        return VoyageAIClient(voyage_config)
+
+    raise ValueError(
+        f"Unsupported temporal embedder '{embedder_name}' -- no query-side "
+        f"provider constructor registered for this embedder family."
+    )
+
+
 def _create_embedding_provider_for_collection(config: Any, collection_name: str) -> Any:
     """Create the correct embedding provider for a temporal collection.
 
-    Reverse-maps the collection name to the provider name by matching the
-    model slug against each configured provider. Falls back to the primary
-    provider for legacy collections or unknown slugs.
+    Story #1290: reverse-maps the collection slug against
+    `config.temporal.embedders` (the per-commit embedder adapter registry),
+    NOT the regular semantic-search provider/model. Falls back to
+    `config.temporal.active_embedder` for legacy collections or unknown
+    slugs.
 
     Args:
         config: CIDX Config object
-        collection_name: Temporal collection name, e.g. 'code-indexer-temporal-voyage_code_3'
+        collection_name: Temporal collection name, e.g.
+            'code-indexer-temporal-voyage_context_4'
 
     Returns:
-        Configured EmbeddingProvider instance for the matching provider
+        Configured EmbeddingProvider instance pinned to the matching
+        temporal embedder's model.
     """
-    from ..embedding_factory import EmbeddingProviderFactory
-
     import re as _re
 
     slug = ""
     if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
         slug = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
-        # Strip quarterly shard suffix -YYYYQN before matching provider slug
+        # Strip quarterly shard suffix -YYYYQN before matching embedder slug
         slug = _re.sub(r"-\d{4}Q[1-4]$", "", slug)
 
-    configured = EmbeddingProviderFactory.get_configured_providers(config)
-    for provider_name in configured:
-        try:
-            model_name = get_model_name_for_provider(provider_name, config)
-            model_slug = sanitize_model_name(model_name)
-            if model_slug == slug:
-                return EmbeddingProviderFactory.create(
-                    config, provider_name=provider_name
-                )
-        except (KeyError, ValueError) as e:
-            logger.debug(
-                "Skipping provider %s while resolving collection: %s", provider_name, e
-            )
-            continue
+    embedders = list(getattr(config.temporal, "embedders", []) or [])
+    for embedder_name in embedders:
+        if sanitize_model_name(embedder_name) == slug:
+            return _build_query_provider_for_embedder(config, embedder_name)
 
+    fallback_embedder = getattr(config.temporal, "active_embedder", None)
     logger.warning(
-        "Could not determine provider for collection '%s', using primary provider",
+        "Could not match collection '%s' to a configured temporal embedder "
+        "(%s); falling back to active_embedder '%s'",
         collection_name,
+        embedders,
+        fallback_embedder,
     )
-    return EmbeddingProviderFactory.create(config)
+    if fallback_embedder:
+        return _build_query_provider_for_embedder(config, fallback_embedder)
+
+    raise ValueError(
+        f"Could not resolve an embedding provider for temporal collection "
+        f"'{collection_name}': no matching entry in config.temporal.embedders "
+        f"and no active_embedder configured."
+    )
 
 
 def _make_config_manager(config: Any) -> Any:

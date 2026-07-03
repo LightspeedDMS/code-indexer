@@ -3,10 +3,18 @@
 Implements Reciprocal Rank Fusion (RRF) for temporal search, using
 temporal_chunk_id as the dedup key to correctly merge results from
 different providers for the same commit+file+chunk.
+
+Story #1290 (AC10) adds ``dedup_by_commit``: the per-commit coalesce/dedup
+primitive used by the per-commit recall pipeline (retrieve -> coalesce ->
+dedup-by-commit -> limit). Distinct from the RRF fusion above, which merges
+per-shard/per-provider candidate lists — dedup_by_commit collapses ALL
+chunk-level hits for the SAME commit_hash into a single representative
+result (the max-scoring chunk), unioning `paths[]` from every retained
+chunk of that commit so provenance is never lost by picking just one chunk.
 """
 
 import logging
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -99,3 +107,74 @@ def fuse_rrf_multi(
     output.sort(key=lambda r: r.fusion_score or 0.0, reverse=True)
 
     return output[:limit]
+
+
+def _commit_hash_of(result: Any) -> str:
+    """Return the commit_hash for a TemporalSearchResult (empty string if absent)."""
+    metadata = getattr(result, "metadata", None) or {}
+    commit_hash = metadata.get("commit_hash")
+    if not commit_hash:
+        temporal_context = getattr(result, "temporal_context", None) or {}
+        commit_hash = temporal_context.get("commit_hash")
+    return str(commit_hash or "")
+
+
+def dedup_by_commit(results: List[Any]) -> List[Any]:
+    """Coalesce ALL chunk-level hits for the same commit into one result (AC10).
+
+    For each commit_hash group, the max-scoring chunk becomes the group's
+    representative ("top_chunk"). The representative's `metadata["paths"]`
+    is replaced with the ORDER-PRESERVING UNION of `paths` across every
+    chunk retained in that commit's group — so provenance from non-winning
+    chunks is never silently dropped.
+
+    This is deliberately called on the FULL (over-fetched, not yet
+    limit-truncated) candidate list so a commit whose only matching chunk
+    ranks low in the raw retrieval order still survives into the deduped
+    output (coalesce-before-truncate).
+
+    Args:
+        results: Chunk-level TemporalSearchResult hits (any order).
+
+    Returns:
+        One representative TemporalSearchResult per distinct commit_hash,
+        in no particular order (callers apply their own final sort).
+    """
+    if not results:
+        return []
+
+    groups: Dict[str, List[Any]] = {}
+    for result in results:
+        key = _commit_hash_of(result)
+        groups.setdefault(key, []).append(result)
+
+    representatives: List[Any] = []
+    for _commit_hash, group in groups.items():
+        best = max(group, key=lambda r: r.score)
+
+        union_paths: List[str] = []
+        seen = set()
+        head_commit_message = ""
+        for member in group:
+            member_metadata = getattr(member, "metadata", None) or {}
+            member_paths = member_metadata.get("paths") or []
+            for path in member_paths:
+                if path not in seen:
+                    seen.add(path)
+                    union_paths.append(path)
+            if member_metadata.get("is_head"):
+                head_commit_message = member_metadata.get("commit_message", "") or ""
+
+        if best.metadata is not None:
+            best.metadata["paths"] = union_paths
+            # AC11: when the winning chunk is itself non-head, its OWN
+            # commit_message field is "" (AC5) -- stash the group's
+            # head-chunk short-capped message so query_temporal's degraded
+            # fallback (git reconstruction failure) has something real to
+            # surface instead of an empty string.
+            if not best.metadata.get("is_head"):
+                best.metadata["_head_commit_message"] = head_commit_message
+
+        representatives.append(best)
+
+    return representatives

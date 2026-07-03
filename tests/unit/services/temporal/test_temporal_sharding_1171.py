@@ -521,36 +521,32 @@ class TestQueryShardOrder:
         assert result[-1] == base
 
     def test_provider_slug_fix_in_embedding_provider_lookup(self, tmp_path):
-        """_create_embedding_provider_for_collection correctly identifies provider for sharded name."""
+        """_create_embedding_provider_for_collection correctly identifies the
+        embedder for a sharded collection name.
+
+        Story #1290: resolution now goes through config.temporal.embedders
+        (matching the sharded name's slug, ignoring the quarter suffix) and
+        constructs a VoyageAIClient pinned to that embedder's model -- no
+        EmbeddingProviderFactory involvement.
+        """
+        from code_indexer.config import VoyageAIConfig
         from code_indexer.services.temporal.temporal_fusion_dispatch import (
             _create_embedding_provider_for_collection,
         )
 
-        # Build a minimal config mock
         config = Mock()
-        config.voyage_ai = Mock()
-        config.voyage_ai.model = "voyage-code-3"
-        config.cohere = Mock()
-        config.cohere.model = "embed-v4.0"
+        config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
         config.embedding_provider = "voyage-ai"
+        config.temporal = Mock()
+        config.temporal.embedders = ["voyage-code-3"]
+        config.temporal.active_embedder = "voyage-code-3"
 
         sharded_name = "code-indexer-temporal-voyage_code_3-2024Q3"
 
-        with patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory:
-            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
-            mock_factory.create.return_value = Mock()
+        provider = _create_embedding_provider_for_collection(config, sharded_name)
 
-            _create_embedding_provider_for_collection(config, sharded_name)
-
-            # Should have called create with voyage-ai provider (not fallen back)
-            mock_factory.create.assert_called_once()
-            call_kwargs = mock_factory.create.call_args
-            # Called with provider_name="voyage-ai"
-            assert call_kwargs[1].get("provider_name") == "voyage-ai" or (
-                len(call_kwargs[0]) > 1 and call_kwargs[0][1] == "voyage-ai"
-            )
+        assert provider.get_provider_name() == "voyage-ai"
+        assert provider.get_current_model() == "voyage-code-3"
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +649,9 @@ class TestShardPruningLiveQueryPath:
         config.cohere = MagicMock()
         config.cohere.model = "embed-v4.0"
         config.embedding_provider = "voyage-ai"
+        # Story #1290: discovery now iterates config.temporal.embedders.
+        config.temporal.embedders = ["voyage-code-3"]
+        config.temporal.active_embedder = "voyage-code-3"
 
         vector_store = MagicMock()
         vector_store.project_root = str(tmp_path)
@@ -729,6 +728,9 @@ class TestShardPruningLiveQueryPath:
         config.cohere = MagicMock()
         config.cohere.model = "embed-v4.0"
         config.embedding_provider = "voyage-ai"
+        # Story #1290: discovery now iterates config.temporal.embedders.
+        config.temporal.embedders = ["voyage-code-3"]
+        config.temporal.active_embedder = "voyage-code-3"
 
         vector_store = MagicMock()
         vector_store.project_root = str(tmp_path)

@@ -10,6 +10,7 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
+from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
@@ -36,16 +37,24 @@ from code_indexer.services.provider_health_monitor import (
 def _make_voyage_config():
     config = MagicMock()
     config.embedding_provider = "voyage-ai"
-    config.voyage_ai.model = "voyage-code-3"
+    # Real VoyageAIConfig (not a bare MagicMock) so model_copy() actually
+    # pins the constructed client's model (Story #1290 provider construction).
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
     config.cohere.model = "embed-v4.0"
+    # Story #1290: temporal recall discovery/provider-construction now keys
+    # off config.temporal.embedders, NOT config.voyage_ai.model/config.cohere.model.
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 
 def _make_cohere_config():
     config = MagicMock()
     config.embedding_provider = "cohere"
-    config.voyage_ai.model = "voyage-code-3"
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
     config.cohere.model = "embed-v4.0"
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 
@@ -248,78 +257,42 @@ def test_sanitize_model_name_public_function():
 
 
 def test_create_embedding_provider_for_collection_voyage():
-    """Voyage collection name must resolve to the VoyageAI embedding provider."""
-    config = _make_voyage_config()
+    """Story #1290: a collection slug matching a config.temporal.embedders entry
+    must resolve to a VoyageAIClient pinned to that embedder's model name --
+    no EmbeddingProviderFactory involvement."""
+    config = _make_voyage_config()  # temporal.embedders = ["voyage-code-3"]
     collection_name = (
         f"{TEMPORAL_COLLECTION_PREFIX}{sanitize_model_name('voyage-code-3')}"
     )
-    mock_voyage_provider = MagicMock(name="VoyageProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai", "cohere"]
-        mock_get_model.side_effect = lambda p, cfg: (
-            "voyage-code-3" if p == "voyage-ai" else "embed-v4.0"
-        )
-        mock_factory.create.return_value = mock_voyage_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config, provider_name="voyage-ai")
-    assert provider is mock_voyage_provider
+    assert provider.get_provider_name() == "voyage-ai"
+    assert provider.get_current_model() == "voyage-code-3"
 
 
-def test_create_embedding_provider_for_collection_cohere():
-    """Cohere collection name must resolve to the Cohere embedding provider."""
-    config = _make_cohere_config()
+def test_create_embedding_provider_for_collection_unmatched_slug_uses_active_embedder():
+    """A collection slug that matches NO configured embedder must fall back to
+    config.temporal.active_embedder (Story #1290: cohere temporal embedders are
+    not yet implemented, so an unmatched cohere-style slug exercises this
+    fallback path rather than a dedicated cohere adapter)."""
+    config = _make_cohere_config()  # temporal.embedders = ["voyage-code-3"]
     collection_name = f"{TEMPORAL_COLLECTION_PREFIX}{sanitize_model_name('embed-v4.0')}"
-    mock_cohere_provider = MagicMock(name="CohereProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai", "cohere"]
-        mock_get_model.side_effect = lambda p, cfg: (
-            "voyage-code-3" if p == "voyage-ai" else "embed-v4.0"
-        )
-        mock_factory.create.return_value = mock_cohere_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config, provider_name="cohere")
-    assert provider is mock_cohere_provider
+    assert provider.get_current_model() == config.temporal.active_embedder
 
 
 def test_create_embedding_provider_for_collection_legacy_fallback():
-    """Legacy collection name ('code-indexer-temporal') must fall back to primary provider."""
+    """Legacy collection name ('code-indexer-temporal') must fall back to
+    config.temporal.active_embedder."""
     config = _make_voyage_config()
     collection_name = "code-indexer-temporal"  # legacy: no model slug
-    mock_provider = MagicMock(name="FallbackProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
-        mock_get_model.return_value = "voyage-code-3"
-        mock_factory.create.return_value = mock_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config)
-    assert provider is mock_provider
+    assert provider.get_current_model() == config.temporal.active_embedder
 
 
 # ---------------------------------------------------------------------------

@@ -45,12 +45,13 @@ def test_chunk_type_filter_logic_in_filter_by_time_range():
         {
             "score": 0.85,
             "payload": {
-                "type": "commit_message",  # THIS IS THE KEY FIELD
+                "type": "commit_chunk",  # Story #1290: constant post-hard-cut
+                "is_head": True,  # THIS IS THE KEY FIELD (chunk_type=commit_message maps here)
                 "commit_hash": "abc123",
                 "commit_timestamp": 1704088800,  # 2024-01-01
                 "commit_date": "2024-01-01",
                 "author_name": "Test Author",
-                "path": "dummy",
+                "primary_path": "dummy",
             },
             "chunk_text": "Fix temporal query bug",  # Content at root level
         },

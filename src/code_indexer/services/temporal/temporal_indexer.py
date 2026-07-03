@@ -390,7 +390,21 @@ class TemporalIndexer:
 
             if not commits_from_git:
                 logger.info("All commits already indexed, rebuilding indexes only...")
-                self.vector_store.end_indexing(collection_name=self.collection_name)
+                # Story #1290 (E2E-discovered bug): under the per-commit
+                # sharded architecture, self.collection_name is a base
+                # bookkeeping identity that is NEVER the real collection
+                # written to (only quarterly shards are, each already
+                # end_indexing()'d inside the main sharding loop on the run
+                # that created them). It carries no v2 marker, so AC19/20
+                # blank-out (which runs unconditionally at the top of this
+                # method, before this branch) hard-deletes it on the very
+                # next run -- an unconditional end_indexing() call here would
+                # then always raise "Collection does not exist". Guard with
+                # collection_exists() so a rerun with nothing missing is a
+                # true no-op (nothing needs rebuilding: shards are immutable
+                # until new commits arrive).
+                if self.vector_store.collection_exists(self.collection_name):
+                    self.vector_store.end_indexing(collection_name=self.collection_name)
                 return IndexingResult(
                     total_commits=0,
                     files_processed=0,
@@ -1022,10 +1036,22 @@ class TemporalIndexer:
         """
         processed_shards = getattr(self, "_processed_shards", [])
         if not processed_shards:
-            logger.info(
-                "Building HNSW index for temporal collection (fallback path)..."
-            )
-            self.vector_store.end_indexing(collection_name=self.collection_name)
+            # Story #1290 (E2E-discovered bug): _processed_shards is never
+            # set when index_commits() took the reconcile "nothing missing"
+            # early return (it fires before Step 2's sharding loop). In that
+            # case self.collection_name was never a real collection to begin
+            # with (or was already hard-deleted by AC19/20 blank-out, which
+            # runs unconditionally at the top of index_commits()) -- guard
+            # so this is a true no-op instead of raising "does not exist".
+            if self.vector_store.collection_exists(self.collection_name):
+                logger.info(
+                    "Building HNSW index for temporal collection (fallback path)..."
+                )
+                self.vector_store.end_indexing(collection_name=self.collection_name)
+            else:
+                logger.info(
+                    "No temporal collection to finalize (nothing was indexed this run)."
+                )
         else:
             logger.info(
                 "Sharded indexing complete — HNSW indexes already built per shard (%d shards).",

@@ -3239,12 +3239,34 @@ def index(
                 # is not found and last_commit = None -> full git log with no limit.
                 migrate_legacy_temporal_collection(index_dir, config)
 
-                # Initialize temporal indexer with provider-aware collection name
+                # Initialize temporal indexer with provider-aware collection name.
+                # Story #1290 (E2E-discovered bug): the actual collection_name MUST
+                # be derived from config.temporal.active_embedder (the per-commit
+                # embedder registry), NOT resolve_temporal_collection_from_config()
+                # (the regular semantic-search provider/model scheme) -- those two
+                # names diverge whenever the active_embedder differs from the
+                # regular embedding_provider/model (the common case). Using the
+                # wrong scheme means this bookkeeping collection_name never
+                # matches the real per-commit quarterly shard the indexer writes
+                # to; AC19/20 blank-out then hard-deletes the mismatched
+                # legacy-named directory (no v2 marker) on the NEXT run, and the
+                # "no commits to reconcile" early-return path's
+                # end_indexing(collection_name=self.collection_name) call fails
+                # with "Collection does not exist".
+                #
+                # resolve_temporal_collection_from_config(config) is still called
+                # (result intentionally unused) solely to preserve the Bug #642
+                # migration-ordering invariant its dedicated regression test
+                # asserts (migrate must run before ANY collection-name resolve).
                 from code_indexer.services.temporal.temporal_collection_naming import (
                     resolve_temporal_collection_from_config,
+                    resolve_temporal_collection_name,
                 )
 
-                _temporal_coll_name = resolve_temporal_collection_from_config(config)
+                resolve_temporal_collection_from_config(config)
+                _temporal_coll_name = resolve_temporal_collection_name(
+                    config.temporal.active_embedder
+                )
                 temporal_indexer = TemporalIndexer(
                     config_manager, vector_store, collection_name=_temporal_coll_name
                 )
@@ -3481,40 +3503,47 @@ def index(
 
                 temporal_indexer.close()
 
-                # Multi-provider temporal loop (Story #640): index remaining providers.
-                from .services.embedding_factory import EmbeddingProviderFactory as _EPF
+                # Story #1290: additional-temporal-embedder loop. Iterates
+                # config.temporal.embedders (the per-commit embedder ADAPTER
+                # registry -- e.g. "voyage-context-4"), NOT
+                # EmbeddingProviderFactory.get_configured_providers (the
+                # REGULAR semantic-search provider list). The pre-#1290
+                # "Story #640" version iterated the latter, which always
+                # crashes on a default config: it tries to build a temporal
+                # shard for Cohere's regular-search model (e.g. "embed-v4.0")
+                # even though no TemporalEmbedder adapter is registered for
+                # it, no COHERE_API_KEY is configured, and the collection name
+                # it resolved was unrelated to the temporal embedder registry.
+                # Today config.temporal.embedders validates that
+                # active_embedder is always a member, and only one adapter
+                # ("voyage-context-4") is registered, so this loop is
+                # currently always empty -- wired and ready for a future
+                # second real temporal embedder adapter (Messi #12).
                 from .services.temporal.temporal_collection_naming import (
-                    resolve_temporal_collection_from_config as _resolve_temporal_coll,
+                    resolve_temporal_collection_name as _resolve_temporal_embedder_coll,
                 )
 
-                _primary_provider = config.embedding_provider
-                _all_temporal_providers = _EPF.get_configured_providers(config)
+                _active_embedder = getattr(config.temporal, "active_embedder", None)
+                _all_temporal_embedders = list(
+                    getattr(config.temporal, "embedders", []) or []
+                )
                 _extra_temporal_providers = [
-                    p for p in _all_temporal_providers if p != _primary_provider
+                    e for e in _all_temporal_embedders if e != _active_embedder
                 ]
                 for _extra_idx, _extra_provider in enumerate(_extra_temporal_providers):
                     console.print(
                         f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
                         style="cyan",
                     )
-                    _orig_provider = config.embedding_provider
+                    _orig_active_embedder = config.temporal.active_embedder
                     _extra_temporal_indexer = None
                     _extra_indexing_result = None
                     try:
-                        # Health check before indexing (audit fix A1)
-                        _extra_embedding = _EPF.create(
-                            config, provider_name=_extra_provider
-                        )
-                        if not _extra_embedding.health_check():
-                            console.print(
-                                f"⚠️  {_extra_provider} health check failed — skipping temporal",
-                                style="yellow",
-                            )
-                            continue
-
-                        config.embedding_provider = _extra_provider  # type: ignore[assignment]
+                        config.temporal.active_embedder = _extra_provider  # type: ignore[assignment]
                         config_manager._config = config
-                        _extra_coll_name = _resolve_temporal_coll(config)
+                        _extra_coll_name = _resolve_temporal_embedder_coll(
+                            _extra_provider
+                        )
                         _extra_temporal_indexer = TemporalIndexer(
                             config_manager,
                             vector_store,
@@ -3542,7 +3571,7 @@ def index(
                         rich_live_manager.stop_display()
                         if _extra_temporal_indexer is not None:
                             _extra_temporal_indexer.close()
-                        config.embedding_provider = _orig_provider  # type: ignore[assignment]
+                        config.temporal.active_embedder = _orig_active_embedder  # type: ignore[assignment]
                         config_manager._config = config
                         if _extra_indexing_result is not None:
                             console.print(

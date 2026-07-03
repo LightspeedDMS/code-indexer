@@ -11,6 +11,7 @@ Covers:
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
     TEMPORAL_QUERY_TIMEOUT_SECONDS,
     _make_config_manager,
@@ -51,6 +52,12 @@ def _make_results_with(results, query: str = "test") -> TemporalSearchResults:
 def _make_mock_config():
     config = MagicMock()
     config.embedding_provider = "voyage-ai"
+    # Story #1290: _create_embedding_provider_for_collection (invoked inside
+    # _query_single_provider) reads config.voyage_ai/config.temporal directly
+    # -- no more EmbeddingProviderFactory involvement, so these must be real.
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 

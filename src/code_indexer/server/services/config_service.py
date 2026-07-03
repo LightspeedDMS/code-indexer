@@ -714,6 +714,22 @@ class ConfigService:
                     if config.indexing_config is not None
                     else None
                 ),
+                # Story #1290: per-commit temporal embedder config display wiring
+                "temporal_embedders": (
+                    config.indexing_config.temporal_embedders
+                    if config.indexing_config is not None
+                    else ["voyage-context-4"]
+                ),
+                "temporal_active_embedder": (
+                    config.indexing_config.temporal_active_embedder
+                    if config.indexing_config is not None
+                    else "voyage-context-4"
+                ),
+                "temporal_aggregation_chunk_chars": (
+                    config.indexing_config.temporal_aggregation_chunk_chars
+                    if config.indexing_config is not None
+                    else 4096
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -2191,6 +2207,64 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_parallel_requests to %s",
                 indexing.temporal_parallel_requests,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1290: per-commit temporal embedder registry (Web UI Config
+        # Screen exposure of TemporalConfig.embedders/active_embedder/
+        # aggregation_chunk_chars -- seeded into repo config.json by
+        # config_seeding.py, no environment variables).
+        if key == "temporal_embedders":
+            if isinstance(value, list):
+                embedders = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                embedders = [v.strip() for v in str(value).split(",") if v.strip()]
+            if not embedders:
+                raise ValueError("temporal_embedders must not be empty")
+            indexing.temporal_embedders = embedders
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_embedders to %s",
+                indexing.temporal_embedders,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_active_embedder":
+            active = str(value).strip()
+            if not active:
+                raise ValueError("temporal_active_embedder must not be empty")
+            if active not in indexing.temporal_embedders:
+                raise ValueError(
+                    f"temporal_active_embedder {active!r} must be a member of "
+                    f"temporal_embedders {indexing.temporal_embedders!r}"
+                )
+            indexing.temporal_active_embedder = active
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_active_embedder to %s",
+                indexing.temporal_active_embedder,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_aggregation_chunk_chars":
+            try:
+                chars = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a valid integer"
+                )
+            if chars <= 0:
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a positive integer"
+                )
+            indexing.temporal_aggregation_chunk_chars = chars
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_aggregation_chunk_chars to %d",
+                indexing.temporal_aggregation_chunk_chars,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

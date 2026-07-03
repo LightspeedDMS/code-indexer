@@ -56,7 +56,17 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
     "voyage-2": 1024,
     "voyage-code-2": 1536,
     "voyage-law-2": 1024,
+    "voyage-context-4": 1024,
 }
+
+# Story #1290 (AC14): models that MUST embed queries via the contextualized
+# endpoint (POST /v1/contextualizedembeddings, input_type="query") instead of
+# the ordinary /v1/embeddings endpoint. get_embedding() branches on this set
+# so any provider instance pinned to one of these models (e.g. the temporal
+# per-commit voyage-context-4 recall path) transparently reuses the existing
+# governor/cache/lane plumbing (get_provider_name/get_current_model are
+# unaffected — only the outbound HTTP call changes).
+_CONTEXTUAL_QUERY_MODELS = frozenset({"voyage-context-4"})
 
 # Story #1290: contextualized embeddings endpoint used by the per-commit
 # contextual temporal embedder (voyage-context-4). Distinct from
@@ -683,7 +693,25 @@ class VoyageAIClient(EmbeddingProvider):
         Uses retry=False so that exactly one HTTP attempt is made per
         governor slot acquisition. The execute_with_backoff wrapper in the
         caller handles 429 retries OUTSIDE the governor slot.
+
+        Story #1290 (AC14): when the effective model is a contextual model
+        (voyage-context-4), the query is embedded via the contextualized
+        endpoint with input_type="query" instead of the standard
+        /v1/embeddings endpoint -- required for correct recall against
+        per-commit contextual temporal shards.
         """
+        model_to_use = model or self.config.model
+        if model_to_use in _CONTEXTUAL_QUERY_MODELS:
+            output_dimension = _VOYAGE_MODEL_DIMENSIONS.get(model_to_use, 1024)
+            result = self.get_contextualized_embeddings(
+                [[text]],
+                input_type="query",
+                output_dimension=output_dimension,
+                model=model_to_use,
+                retry=False,
+            )
+            return result[0][0]
+
         # Use get_embeddings_batch internally with single-item array and retry=False
         # so no time.sleep() runs while the governor slot is held (Bug #1078 C2).
         batch_result = self.get_embeddings_batch([text], model, retry=False)

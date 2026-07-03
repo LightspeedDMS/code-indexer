@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
     execute_temporal_query_with_fusion,
 )
@@ -50,6 +51,11 @@ def _make_results_with(results, query: str = "test") -> TemporalSearchResults:
 def _make_mock_config():
     config = MagicMock()
     config.embedding_provider = "voyage-ai"
+    # Story #1290: _create_embedding_provider_for_collection (invoked inside
+    # _query_single_provider) reads config.voyage_ai/config.temporal directly.
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 
@@ -200,8 +206,11 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
 
     fast_coll_name = "code-indexer-temporal-voyage_code_3"
     fast_result = _make_result("fast.py", score=0.95)
-    sleep_duration = 0.5  # slow providers sleep well past timeout
-    forced_timeout = 0.3  # fast provider (~0s) beats timeout; slow ones sleep 0.5s
+    # Story #1290: real (though mocked-at-the-boundary) provider-resolution
+    # logic adds measurable per-call overhead versus the old fully-mocked
+    # EmbeddingProviderFactory path, so the margin is widened to stay robust.
+    sleep_duration = 4.0  # slow providers sleep well past timeout
+    forced_timeout = 1.5  # fast provider (~0s) beats timeout; slow ones sleep 4.0s
 
     def make_service_instance(*args, **kwargs):
         coll_name = kwargs.get("collection_name", "")
@@ -240,15 +249,14 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
             side_effect=make_service_instance,
         ),
         patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as MockFactory,
+            "code_indexer.services.temporal.temporal_fusion_dispatch."
+            "_create_embedding_provider_for_collection",
+            return_value=MagicMock(),
+        ),
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch.record_temporal_failure"
         ) as mock_record_failure,
     ):
-        MockFactory.create.return_value = MagicMock()
-        MockFactory.get_configured_providers.return_value = []
-
         t0 = time.time()
         result = execute_temporal_query_with_fusion(
             config=config,

@@ -506,6 +506,43 @@ class TestFailLoudOnMismatch:
             indexer.index_commits()
 
 
+class TestReconcileNothingMissingRerun:
+    """E2E-discovered bug (Story #1290): a --reconcile rerun with nothing
+    missing must NOT crash trying to end_indexing() the base bookkeeping
+    collection_name, which AC19/20 blank-out hard-deletes on this very rerun
+    (it never carries a v2 marker -- only the real quarterly shard does)."""
+
+    def test_reconcile_rerun_with_nothing_missing_does_not_raise(
+        self, tmp_path, fake_embedder
+    ):
+        repo = _init_repo(tmp_path)
+        (repo / "a.txt").write_text("hello world\n")
+        _run_git(["add", "."], repo)
+        _run_git(["commit", "-q", "-m", "Initial commit"], repo)
+
+        index_dir = tmp_path / "index"
+        indexer, vector_store = _make_indexer(repo, index_dir)
+        first_result = indexer.index_commits()
+        assert first_result.total_commits == 1
+        indexer.close()
+
+        # Second TemporalIndexer instance (fresh __init__, exactly mirroring a
+        # real second `cidx index --index-commits --reconcile` CLI process).
+        indexer2 = TemporalIndexer(
+            _make_config_manager(repo),
+            vector_store,
+            collection_name="code-indexer-temporal-fake",
+        )
+        # Must NOT raise "Collection '...' does not exist".
+        second_result = indexer2.index_commits(reconcile=True)
+        assert second_result.total_commits == 0
+        assert second_result.skip_ratio == 1.0
+
+        # close()'s fallback path (_processed_shards never set when the
+        # reconcile early-return fires before Step 2) must ALSO not crash.
+        indexer2.close()
+
+
 class TestLegacyInternalsDeleted:
     """AC17: legacy per-file-diff / commit-message internals no longer exist."""
 

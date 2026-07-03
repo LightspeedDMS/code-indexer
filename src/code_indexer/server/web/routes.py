@@ -6658,6 +6658,38 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     return "Temporal Parallel Requests must be a valid number"
 
+        # Story #1290: per-commit temporal embedder registry.
+        _submitted_embedders: Optional[List[str]] = None
+        if "temporal_embedders" in data:
+            raw_embedders = data["temporal_embedders"]
+            _submitted_embedders = [
+                v.strip() for v in str(raw_embedders).split(",") if v.strip()
+            ]
+            if not _submitted_embedders:
+                return "Temporal Embedders must not be empty"
+
+        if "temporal_active_embedder" in data:
+            active_raw = str(data["temporal_active_embedder"]).strip()
+            if not active_raw:
+                return "Temporal Active Embedder must not be empty"
+            if (
+                _submitted_embedders is not None
+                and active_raw not in _submitted_embedders
+            ):
+                return (
+                    "Temporal Active Embedder must be one of the Temporal "
+                    "Embedders submitted"
+                )
+
+        if "temporal_aggregation_chunk_chars" in data:
+            chunk_raw = data["temporal_aggregation_chunk_chars"]
+            try:
+                chunk_int = int(chunk_raw)
+                if chunk_int <= 0:
+                    return "Temporal Aggregation Chunk Size must be a positive number"
+            except (ValueError, TypeError):
+                return "Temporal Aggregation Chunk Size must be a valid number"
+
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:
             value = data.get(field)
