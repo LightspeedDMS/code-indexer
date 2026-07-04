@@ -59,9 +59,6 @@ ALL_PARAMETERS = {
     "time_range",
     "time_range_all",
     "at_commit",
-    "include_removed",
-    "show_evolution",
-    "evolution_limit",
     # Temporal filtering parameters (Phase 3)
     "diff_type",
     "author",
@@ -80,9 +77,6 @@ ALL_PARAMETERS = {
 # CLI-specific: subset of parameters (some temporal params are API-only)
 CLI_EXPECTED_PARAMETERS = ALL_PARAMETERS - {
     "at_commit",  # API-only: not exposed in CLI
-    "include_removed",  # API-only: not exposed in CLI
-    "show_evolution",  # API-only: not exposed in CLI
-    "evolution_limit",  # API-only: not exposed in CLI
     "aggregation_mode",  # API-only: omni-search aggregation mode
     "exclude_patterns",  # API-only: omni-search repository exclusion
 }
@@ -180,23 +174,24 @@ class TestQueryParameterParity:
 
     def test_total_parameter_count(self):
         """Verify total number of expected query parameters."""
-        # Should have exactly 29 query parameters (excluding repository_alias, async_query)
-        # Updated from 28 to 29 after Story #1291 wired temporal_embedder
-        # through REST/MCP for full CLI+REST+MCP parity (code-review Finding 2)
-        assert len(ALL_PARAMETERS) == 29, (
-            f"Expected 29 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
+        # Should have exactly 26 query parameters (excluding repository_alias, async_query)
+        # Updated from 29 to 26 after Bug #1301 retired include_removed,
+        # show_evolution, and evolution_limit (permanent no-ops on the
+        # per-commit temporal index -- removed entirely, not implemented).
+        assert len(ALL_PARAMETERS) == 26, (
+            f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
         )
 
         # CLI should have 23 parameters (subset of all parameters)
-        # Updated from 22 to 23: temporal_embedder now in CLI+REST+MCP (Story #1291)
+        # Unaffected by Bug #1301 -- the 3 retired params were already CLI-excluded.
         assert len(CLI_EXPECTED_PARAMETERS) == 23, (
             f"Expected 23 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
         )
 
-        # REST/MCP should have all 29 parameters
-        # Updated from 28 to 29 after Story #1291 added temporal_embedder
-        assert len(API_EXPECTED_PARAMETERS) == 29, (
-            f"Expected 29 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
+        # REST/MCP should have all 26 parameters
+        # Updated from 29 to 26 after Bug #1301 retirement.
+        assert len(API_EXPECTED_PARAMETERS) == 26, (
+            f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
         )
 
     def test_cli_has_all_parameters(self):
@@ -433,9 +428,6 @@ class TestQueryParameterParity:
         all_temporal_params = {
             "time_range",
             "at_commit",
-            "include_removed",
-            "show_evolution",
-            "evolution_limit",
         }
 
         # CLI only has time_range (others are API-only)

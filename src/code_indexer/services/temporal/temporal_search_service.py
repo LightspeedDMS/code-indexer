@@ -68,6 +68,81 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
     return start_date, end_date
 
 
+def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
+    """Resolve a git ref/commit hash to its commit's UNIX timestamp (Bug #1301).
+
+    Implements `at_commit` point-in-time scoping: the caller uses the
+    returned timestamp as an upper bound on `commit_timestamp`, the exact
+    same mechanism `time_range`'s upper bound already uses (see
+    `query_temporal`'s `at_commit_ts` parameter). This function performs
+    the VALIDATION half of the fix -- a ref/hash that cannot be resolved
+    to a real commit in this repository raises ValueError instead of being
+    silently accepted (Bug #1301: previously a bogus `at_commit` returned
+    HTTP 200 with the full unfiltered result set).
+
+    Args:
+        project_root: Repository working directory (subprocess cwd)
+        ref: Commit hash (full or abbreviated) or git ref/branch name
+
+    Returns:
+        The resolved commit's UNIX timestamp (seconds), as reported by
+        `git show -s --format=%ct`.
+
+    Raises:
+        ValueError: If `ref` cannot be resolved to a commit in this
+            repository (non-existent hash/ref, git failure, timeout).
+    """
+    try:
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(f"at_commit '{ref}' could not be resolved: {exc}") from exc
+
+    resolved_hash = rev_parse.stdout.strip()
+    if rev_parse.returncode != 0 or not resolved_hash:
+        raise ValueError(
+            f"at_commit '{ref}' does not resolve to a commit in this repository"
+        )
+
+    try:
+        show_ts = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", resolved_hash],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but its commit "
+            f"timestamp could not be read: {exc}"
+        ) from exc
+
+    ts_text = show_ts.stdout.strip()
+    if show_ts.returncode != 0 or not ts_text:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but its commit "
+            f"timestamp could not be read"
+        )
+
+    try:
+        return int(ts_text)
+    except ValueError as exc:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but returned a "
+            f"non-numeric commit timestamp {ts_text!r}"
+        ) from exc
+
+
 @dataclass
 class TemporalSearchResult:
     """Single temporal search result with temporal context."""
@@ -329,6 +404,7 @@ class TemporalSearchService:
         exclude_path: Optional[List[str]] = None,
         chunk_type: Optional[str] = None,
         no_embedding_cache_shortcut: bool = False,
+        at_commit_ts: Optional[int] = None,
     ) -> TemporalSearchResults:
         """Execute temporal semantic search with time-range filtering.
 
@@ -342,6 +418,13 @@ class TemporalSearchService:
             exclude_language: Exclude language(s) (e.g., ["markdown"])
             path_filter: Filter by path pattern(s) (e.g., ["src/*"])
             exclude_path: Exclude path pattern(s) (e.g., ["*/tests/*"])
+            at_commit_ts: (Bug #1301) Optional pre-resolved UNIX timestamp of
+                the `at_commit` ref (resolved via `resolve_commit_timestamp`
+                by the caller, which also validates the ref). Tightens the
+                commit_timestamp upper bound to
+                min(time_range end, at_commit_ts) -- i.e. scopes results to
+                commits AT or BEFORE the given commit. Never widens the
+                time_range bound.
 
         Returns:
             TemporalSearchResults with filtered results
@@ -410,6 +493,10 @@ class TemporalSearchService:
             .replace(hour=23, minute=59, second=59)
             .timestamp()
         )
+        # Bug #1301: at_commit_ts tightens (never widens) the upper bound --
+        # scopes results to commits AT or BEFORE the resolved at_commit ref.
+        if at_commit_ts is not None:
+            end_ts = min(end_ts, at_commit_ts)
         filter_conditions.setdefault("must", []).append(
             {"key": "commit_timestamp", "range": {"gte": start_ts, "lte": end_ts}}
         )
@@ -588,6 +675,7 @@ class TemporalSearchService:
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
+            at_commit_ts=at_commit_ts,
         )
         filter_time = time.time() - filter_start
 
@@ -749,6 +837,7 @@ class TemporalSearchService:
         diff_types: Optional[List[str]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        at_commit_ts: Optional[int] = None,
     ) -> Tuple[List[TemporalSearchResult], float]:
         """Transform semantic results to TemporalSearchResult objects.
 
@@ -767,6 +856,9 @@ class TemporalSearchService:
             min_score: Minimum similarity score filter
             diff_types: Filter by diff type(s) (post-filter safety layer)
             author: Filter by author name (post-filter safety layer)
+            at_commit_ts: (Bug #1301) Optional pre-resolved at_commit UNIX
+                timestamp; tightens the post-filter upper bound the same way
+                query_temporal() tightens the vector-store filter_conditions.
 
         Returns:
             Tuple of (filtered results, blob_fetch_time_ms)
@@ -853,6 +945,11 @@ class TemporalSearchService:
                     .replace(hour=23, minute=59, second=59)
                     .timestamp()
                 )
+                # Bug #1301: at_commit_ts tightens (never widens) the upper
+                # bound -- mirrors the identical min() applied in
+                # query_temporal()'s vector-store filter_conditions.
+                if at_commit_ts is not None:
+                    end_ts = min(end_ts, at_commit_ts)
 
                 if commit_timestamp < start_ts or commit_timestamp > end_ts:
                     continue

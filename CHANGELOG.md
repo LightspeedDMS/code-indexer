@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Temporal query params `at_commit`, `show_evolution`, `evolution_limit` were silent no-ops on the per-commit temporal index (#1301, epic #1289).** `at_commit` was advertised on REST/MCP but never applied and never validated -- a bogus commit hash was silently accepted and returned the full unfiltered result set. Now implemented as point-in-time scoping: the ref/hash is resolved via git to a commit + UNIX timestamp (`resolve_commit_timestamp`), which becomes an upper bound on `commit_timestamp` -- the same mechanism `time_range`'s upper bound already uses. An unresolvable ref/hash now returns a typed HTTP 400 error instead of silently succeeding.
+
+### Removed
+
+- **`show_evolution`, `evolution_limit`, and `include_removed` retired from the REST/MCP query surface (#1301).** These parameters were advertised as working but were permanent no-ops on the per-commit temporal index (Epic #1289) -- neither filtering/augmenting results nor returning a warning/error. Per-file diff timelines belong to the existing git tools (`git_file_history`, `git_log`, `git_blame`, `git_diff`), not the semantic temporal search path. Removed end-to-end: `SemanticQueryRequest` (REST model), the MCP `search_code` tool schema/docs, the Web UI query page's "Include removed files" checkbox, and all internal plumbing (`execute_temporal_query_with_fusion`, `SemanticQueryManager` query chain). A client that still sends these fields simply has them ignored by the request parser (they no longer exist) rather than silently accepted and dropped deeper in the stack.
+
 ## [11.18.1] - 2026-07-03
 
 ### Fixed

@@ -913,7 +913,6 @@ def _is_temporal_query(params: Dict[str, Any]) -> bool:
         "time_range",
         "time_range_all",
         "at_commit",
-        "include_removed",
         "chunk_type",
         "diff_type",
         "author",

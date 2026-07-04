@@ -152,9 +152,6 @@ class TestFTSParameterWiring:
                 accuracy=None,
                 time_range=None,
                 at_commit=None,
-                include_removed=False,
-                show_evolution=False,
-                evolution_limit=None,
                 # FTS parameters
                 case_sensitive=True,
                 fuzzy=True,

@@ -107,66 +107,12 @@ class TestTemporalParameterAcceptance:
             assert "at_commit" in call_kwargs
             assert call_kwargs["at_commit"] == "abc123"
 
-    def test_accepts_include_removed_parameter(
-        self, semantic_query_manager, activated_repo_manager_mock
-    ):
-        """Verify include_removed parameter is accepted."""
-        with patch.object(
-            semantic_query_manager, "_search_single_repository"
-        ) as mock_search:
-            mock_search.return_value = []
-
-            result = semantic_query_manager.query_user_repositories(
-                username="testuser",
-                query_text="deprecated",
-                include_removed=True,
-            )
-
-            assert result is not None
-            call_kwargs = mock_search.call_args[1]
-            assert "include_removed" in call_kwargs
-            assert call_kwargs["include_removed"] is True
-
-    def test_accepts_show_evolution_parameter(
-        self, semantic_query_manager, activated_repo_manager_mock
-    ):
-        """Verify show_evolution parameter is accepted."""
-        with patch.object(
-            semantic_query_manager, "_search_single_repository"
-        ) as mock_search:
-            mock_search.return_value = []
-
-            result = semantic_query_manager.query_user_repositories(
-                username="testuser",
-                query_text="user authentication",
-                show_evolution=True,
-            )
-
-            assert result is not None
-            call_kwargs = mock_search.call_args[1]
-            assert "show_evolution" in call_kwargs
-            assert call_kwargs["show_evolution"] is True
-
-    def test_accepts_evolution_limit_parameter(
-        self, semantic_query_manager, activated_repo_manager_mock
-    ):
-        """Verify evolution_limit parameter is accepted (user-controlled)."""
-        with patch.object(
-            semantic_query_manager, "_search_single_repository"
-        ) as mock_search:
-            mock_search.return_value = []
-
-            result = semantic_query_manager.query_user_repositories(
-                username="testuser",
-                query_text="database query",
-                show_evolution=True,
-                evolution_limit=5,
-            )
-
-            assert result is not None
-            call_kwargs = mock_search.call_args[1]
-            assert "evolution_limit" in call_kwargs
-            assert call_kwargs["evolution_limit"] == 5
+    # Bug #1301: test_accepts_include_removed_parameter, test_accepts_show_evolution_parameter,
+    # and test_accepts_evolution_limit_parameter were REMOVED. Those params were
+    # retired (never implemented, permanent silent no-ops on the per-commit temporal
+    # index) and no longer exist anywhere in the query call chain. Per-file diff
+    # timelines belong to the existing git tools (git_file_history, git_log,
+    # git_blame, git_diff) instead.
 
 
 @pytest.mark.e2e

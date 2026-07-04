@@ -102,19 +102,20 @@ class SemanticQueryRequest(BaseModel):
     )
     at_commit: Optional[str] = Field(
         None,
-        description="Query code at specific commit hash or ref. Requires temporal index.",
+        description=(
+            "Query code at a specific commit hash or ref (point-in-time scoping "
+            "-- resolves the ref via git and restricts results to commits AT or "
+            "BEFORE it). Requires temporal index. An unresolvable ref/hash "
+            "returns HTTP 400."
+        ),
     )
-    include_removed: bool = Field(
-        False,
-        description="Include files removed from current HEAD. Requires temporal index.",
-    )
-    show_evolution: bool = Field(
-        False,
-        description="Show code evolution timeline with diffs. Requires temporal index.",
-    )
-    evolution_limit: Optional[int] = Field(
-        None, ge=1, description="Limit number of evolution entries. User-controlled."
-    )
+    # Bug #1301: show_evolution, evolution_limit, and include_removed were
+    # REMOVED (retired, not implemented). They were advertised end-to-end but
+    # were permanent silent no-ops on the per-commit temporal index (Epic
+    # #1289) -- neither filtering/augmenting results nor returning a
+    # warning/error. Per-file diff timelines belong to the existing git
+    # tools (git_file_history, git_log, git_blame, git_diff), not the
+    # semantic temporal path (anti-duplication). Do NOT re-add these fields.
 
     # Temporal filtering parameters (Story #503 Phase 3)
     diff_type: Optional[Union[str, List[str]]] = Field(

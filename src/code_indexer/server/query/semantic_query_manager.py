@@ -421,9 +421,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -468,10 +465,8 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries (format: YYYY-MM-DD..YYYY-MM-DD)
             time_range_all: Query across all git history without time range limit
-            at_commit: Query code at specific commit hash or ref
-            include_removed: Include files removed from current HEAD
-            show_evolution: Include code evolution timeline with diffs
-            evolution_limit: Limit evolution entries (user-controlled)
+            at_commit: Query code at specific commit hash or ref (point-in-time
+                scoping; unresolvable ref raises ValueError)
             case_sensitive: Enable case-sensitive FTS matching (FTS-only)
             fuzzy: Enable fuzzy matching with edit distance 1 (FTS-only, incompatible with regex)
             edit_distance: Fuzzy match tolerance level 0-3 (FTS-only)
@@ -596,9 +591,6 @@ class SemanticQueryManager:
                 time_range=time_range,
                 time_range_all=time_range_all,
                 at_commit=at_commit,
-                include_removed=include_removed,
-                show_evolution=show_evolution,
-                evolution_limit=evolution_limit,
                 # FTS-specific parameters (Story #503 Phase 2)
                 case_sensitive=case_sensitive,
                 fuzzy=fuzzy,
@@ -676,7 +668,6 @@ class SemanticQueryManager:
                 time_range,
                 time_range_all,
                 at_commit,
-                show_evolution,
                 chunk_type,
                 diff_type,
                 author,
@@ -811,9 +802,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -864,10 +852,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -953,9 +938,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     # FTS-specific parameters (Story #503 Phase 2)
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
@@ -1077,9 +1059,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -1114,7 +1093,7 @@ class SemanticQueryManager:
         - 'fts': Full-text search using Tantivy index
         - 'hybrid': Combined FTS + semantic search with result fusion
 
-        For temporal queries (when time_range, at_commit, or show_evolution provided),
+        For temporal queries (when time_range or at_commit provided),
         uses TemporalSearchService; returns empty list with error if temporal
         index not available.
 
@@ -1140,10 +1119,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -1195,7 +1171,6 @@ class SemanticQueryManager:
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
@@ -1634,7 +1609,6 @@ class SemanticQueryManager:
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
@@ -1651,9 +1625,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     language=language,
                     exclude_language=exclude_language,
                     path_filter=path_filter,
@@ -2182,9 +2153,6 @@ class SemanticQueryManager:
         time_range: Optional[str],
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         language: Optional[str] = None,
         exclude_language: Optional[str] = None,
         path_filter: Optional[str] = None,
@@ -2212,9 +2180,6 @@ class SemanticQueryManager:
             min_score: Minimum similarity score
             time_range: Time range filter (YYYY-MM-DD..YYYY-MM-DD)
             at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Show evolution timeline
-            evolution_limit: Limit evolution entries
             language: Filter by language
             exclude_language: Exclude language
             path_filter: Path filter pattern
@@ -2282,12 +2247,9 @@ class SemanticQueryManager:
                 limit=limit,
                 time_range=time_range_tuple,
                 file_path_filter=path_filter,
-                show_evolution=show_evolution,
                 at_commit=at_commit,
-                include_removed=include_removed,
                 language=language,
                 exclude_language=exclude_language,
-                evolution_limit=evolution_limit,
                 exclude_path=exclude_path,
                 diff_types=diff_types_list,
                 author=author,
@@ -2338,21 +2300,6 @@ class SemanticQueryManager:
                     ),
                     "diff_type": temporal_result.temporal_context.get("diff_type"),
                 }
-
-                # Add is_removed flag if applicable
-                if (
-                    include_removed
-                    and temporal_result.metadata.get("diff_type") == "deleted"
-                ):
-                    temporal_context["is_removed"] = True
-
-                # Add evolution data if requested (Acceptance Criterion 5 & 6)
-                if show_evolution and "evolution" in temporal_result.temporal_context:
-                    evolution_data = temporal_result.temporal_context["evolution"]
-                    # Apply user-controlled evolution_limit (NO arbitrary max)
-                    if evolution_limit and len(evolution_data) > evolution_limit:
-                        evolution_data = evolution_data[:evolution_limit]
-                    temporal_context["evolution"] = evolution_data
 
                 # Create QueryResult with both metadata and temporal_context
                 # (Story #503 - MCP/REST API parity with CLI)

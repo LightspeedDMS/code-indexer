@@ -75,14 +75,11 @@ def execute_temporal_query_with_fusion(
     limit: int,
     time_range: Optional[Tuple[str, str]] = None,
     file_path_filter: Optional[str] = None,
-    show_evolution: bool = False,
     provider_filter: Optional[str] = None,
     # Server params (Story #640, audit fix B2)
     at_commit: Optional[str] = None,
-    include_removed: Optional[bool] = None,
     language: Optional[str] = None,
     exclude_language: Optional[str] = None,
-    evolution_limit: Optional[int] = None,
     exclude_path: Optional[str] = None,
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
@@ -112,13 +109,13 @@ def execute_temporal_query_with_fusion(
         limit: Max results to return
         time_range: Optional time range filter as (start_date, end_date) tuple
         file_path_filter: Optional file path filter
-        show_evolution: Whether to show file evolution timeline
         provider_filter: Optional specific provider to query (bypasses fusion)
-        at_commit: Query at specific commit (server param, resolved by caller)
-        include_removed: Include removed files (server param, converted to diff_types by caller)
+        at_commit: Query at specific commit hash or ref (Bug #1301: resolved +
+            VALIDATED here via resolve_commit_timestamp -- an unresolvable
+            ref raises ValueError; the resolved timestamp scopes results to
+            commits AT or BEFORE it)
         language: Filter by language (server param)
         exclude_language: Exclude language (server param)
-        evolution_limit: Limit evolution entries (server param, applied by caller)
         exclude_path: Exclude path pattern (server param)
         chunk_type: Filter by chunk type (e.g. 'function', 'class', 'commit_diff')
         temporal_embedder: Optional explicit embedder name override (AC7/AC8).
@@ -127,12 +124,25 @@ def execute_temporal_query_with_fusion(
         TemporalSearchResults for the resolved embedder's collections (RRF
         fused ONLY across that embedder's own quarterly shards).
     """
-    from .temporal_search_service import TemporalSearchResults
+    from .temporal_search_service import (
+        TemporalSearchResults,
+        resolve_commit_timestamp,
+    )
 
     # Auto-migrate legacy collection if present (Story #629, wired by audit fix F2)
     from .temporal_migration import migrate_legacy_temporal_collection
 
     migrate_legacy_temporal_collection(index_path, config)
+
+    # Bug #1301: resolve + VALIDATE at_commit ONCE, up front, before any shard
+    # is queried. This must happen here (not inside TemporalSearchService,
+    # which is invoked per-shard inside _query_shards_raw's try/except) so an
+    # unresolvable ref/hash raises ValueError immediately instead of being
+    # swallowed as a per-shard warning (which would silently return empty
+    # results with no error -- the exact silent no-op this bug fixes).
+    at_commit_ts: Optional[int] = None
+    if at_commit:
+        at_commit_ts = resolve_commit_timestamp(vector_store.project_root, at_commit)
 
     # C1/C2 fix (Story #1171): use shard-pruning discovery that calls get_overlapping_shards
     # so only shards overlapping time_range are queried. Story #1291: discovery
@@ -212,6 +222,7 @@ def execute_temporal_query_with_fusion(
         author=author,
         chunk_type=chunk_type,
         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        at_commit_ts=at_commit_ts,
     )
     if not results_by_shard:
         return TemporalSearchResults(
@@ -344,6 +355,7 @@ def _query_shards_raw(
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
     no_embedding_cache_shortcut: bool = False,
+    at_commit_ts: Optional[int] = None,
 ) -> Dict[str, list]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
@@ -382,6 +394,7 @@ def _query_shards_raw(
                 author=author,
                 chunk_type=chunk_type,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                at_commit_ts=at_commit_ts,
             )
             if result.results:
                 results_by_shard[collection_display_name(shard_name)] = result.results
@@ -452,6 +465,9 @@ def _query_single_provider(
     chunk_type: Optional[str] = None,
     # Story #1108: per-request cache bypass flag
     no_embedding_cache_shortcut: bool = False,
+    # Bug #1301: pre-resolved at_commit UNIX timestamp (resolved once by the
+    # caller via resolve_commit_timestamp -- never re-resolved per shard).
+    at_commit_ts: Optional[int] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -488,6 +504,7 @@ def _query_single_provider(
             author=author,
             chunk_type=chunk_type,
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            at_commit_ts=at_commit_ts,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:

@@ -347,9 +347,6 @@ def register_query_routes(
                             time_range=request.time_range,
                             time_range_all=request.time_range_all,
                             at_commit=request.at_commit,
-                            include_removed=request.include_removed,
-                            show_evolution=request.show_evolution,
-                            evolution_limit=request.evolution_limit,
                             # Phase 3 temporal filtering parameters (Story #503)
                             diff_type=request.diff_type,
                             author=request.author,
@@ -476,9 +473,6 @@ def register_query_routes(
                 time_range=request.time_range,
                 time_range_all=request.time_range_all,
                 at_commit=request.at_commit,
-                include_removed=request.include_removed,
-                show_evolution=request.show_evolution,
-                evolution_limit=request.evolution_limit,
                 # Phase 3 temporal filtering parameters (Story #503)
                 diff_type=request.diff_type,
                 author=request.author,

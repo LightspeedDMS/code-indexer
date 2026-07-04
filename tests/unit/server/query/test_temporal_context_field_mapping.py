@@ -124,9 +124,6 @@ def _execute_query_with_mock(semantic_query_manager, repo_path, temporal_results
             min_score=None,
             time_range="2024-01-01..2024-12-31",
             at_commit=None,
-            include_removed=False,
-            show_evolution=False,
-            evolution_limit=None,
         )
 
 

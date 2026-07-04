@@ -889,7 +889,6 @@ def _build_search_kwargs(
     The ~30 parameters are required by the _perform_search API and cannot
     be reduced without changing the SemanticQueryManager interface.
     """
-    evolution_limit_raw = params.get("evolution_limit")
     return dict(
         username=user.username,
         user_repos=user_repos,
@@ -906,13 +905,6 @@ def _build_search_kwargs(
         time_range=params.get("time_range"),
         time_range_all=params.get("time_range_all", False),
         at_commit=params.get("at_commit"),
-        include_removed=params.get("include_removed", False),
-        show_evolution=params.get("show_evolution", False),
-        evolution_limit=(
-            _coerce_int(evolution_limit_raw, _DEFAULT_EDIT_DISTANCE)
-            if evolution_limit_raw is not None
-            else None
-        ),
         case_sensitive=params.get("case_sensitive", False),
         fuzzy=params.get("fuzzy", False),
         edit_distance=_coerce_int(params.get("edit_distance"), _DEFAULT_EDIT_DISTANCE),
