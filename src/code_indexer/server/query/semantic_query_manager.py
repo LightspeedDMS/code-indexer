@@ -568,6 +568,11 @@ class SemanticQueryManager:
         # Perform the search
         start_time = time.time()
         effective_strategy: str = query_strategy or "primary_only"
+        # Bug #1298: per-request out-param capturing the embedder-specific
+        # temporal "no indexed collections" warning, so it survives the
+        # _perform_search -> _search_single_repository -> _execute_temporal_query
+        # call chain instead of being re-derived generically below.
+        _temporal_warning_out: List[str] = []
         try:
             # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
             # Routing decision is per-request; no singleton state.
@@ -612,6 +617,8 @@ class SemanticQueryManager:
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 # Story #1291 AC7/AC8: forward explicit embedder override
                 temporal_embedder=temporal_embedder,
+                # Bug #1298: collect the embedder-specific warning, if any
+                _temporal_warning_out=_temporal_warning_out,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -675,11 +682,24 @@ class SemanticQueryManager:
         )
         warning_message = None
         if has_temporal_params and len(results) == 0:
-            warning_message = (
-                "Temporal index not available for this repository. "
-                "No results returned. "
-                "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
-            )
+            if temporal_embedder and _temporal_warning_out:
+                # Bug #1298: an explicit temporal_embedder override with no
+                # indexed collections produces a typed, embedder-specific
+                # warning at the fusion-dispatch layer (e.g. "Temporal
+                # embedder 'X' has no indexed collections"). Surface it
+                # as-is instead of masking it with the generic message below
+                # -- the anti-fallback behavior (0 results, no redirect to
+                # the active embedder) is unchanged; only the message text
+                # is more specific. Scoped to the explicit-override case only
+                # -- the plain "no temporal index at all" case (no override
+                # requested) keeps its existing generic wording below.
+                warning_message = _temporal_warning_out[0]
+            else:
+                warning_message = (
+                    "Temporal index not available for this repository. "
+                    "No results returned. "
+                    "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
+                )
 
         # Build response with temporal context in results
         response_results = []
@@ -823,6 +843,9 @@ class SemanticQueryManager:
         no_embedding_cache_shortcut: bool = False,
         # Story #1291 AC7/AC8: explicit embedder override for recall selection.
         temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -961,6 +984,8 @@ class SemanticQueryManager:
                     temporal_embedder=temporal_embedder,
                     # AC7 (Bug #1202): collect resolved routing decision
                     _effective_strategy_out=_strat_out,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
@@ -1084,6 +1109,9 @@ class SemanticQueryManager:
         # single-element list; resolved query_strategy is written into [0].
         # Per-request, no shared state.
         _effective_strategy_out: Optional[List[str]] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1636,6 +1664,8 @@ class SemanticQueryManager:
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     # Story #1291 AC7/AC8: forward explicit embedder override
                     temporal_embedder=temporal_embedder,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -2164,6 +2194,12 @@ class SemanticQueryManager:
         no_embedding_cache_shortcut: bool = False,
         # Story #1291 AC7/AC8: explicit embedder override for recall selection.
         temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific "no indexed
+        # collections" warning produced by the fusion dispatch layer.
+        # Caller passes a single-element list; populated in place so the
+        # specific message survives instead of being re-derived generically
+        # by the caller. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2270,6 +2306,12 @@ class SemanticQueryManager:
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-009"),
                 )
+                # Bug #1298: preserve the embedder-specific warning (e.g.
+                # "Temporal embedder 'X' has no indexed collections") for the
+                # caller instead of letting it die here -- the caller would
+                # otherwise re-derive a generic message with no embedder name.
+                if _temporal_warning_out is not None:
+                    _temporal_warning_out.append(temporal_results.warning)
                 return []
 
             # Convert temporal results to QueryResult objects
