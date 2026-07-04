@@ -405,6 +405,7 @@ class TemporalSearchService:
         chunk_type: Optional[str] = None,
         no_embedding_cache_shortcut: bool = False,
         at_commit_ts: Optional[int] = None,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> TemporalSearchResults:
         """Execute temporal semantic search with time-range filtering.
 
@@ -425,6 +426,13 @@ class TemporalSearchService:
                 min(time_range end, at_commit_ts) -- i.e. scopes results to
                 commits AT or BEFORE the given commit. Never widens the
                 time_range bound.
+            precomputed_query_vector: (Story #1293 S1b A5) Optional
+                pre-computed embedding vector, supplied by
+                execute_temporal_query_with_fusion's compute-once reuse seam
+                when querying multiple sequential shards of the SAME
+                embedder. When set, embedding is skipped entirely (FSV and
+                non-FSV paths alike) -- mirrors the omni fan-out's
+                precomputed_query_vector reuse.
 
         Returns:
             TemporalSearchResults with filtered results
@@ -585,7 +593,10 @@ class TemporalSearchService:
 
         if isinstance(self.vector_store_client, FilesystemVectorStore):
             # Parallel execution: embedding generation + index loading happen concurrently
-            # Always request timing for consistent return type handling
+            # Always request timing for consistent return type handling.
+            # Story #1293 S1b [A5]: when precomputed_query_vector is supplied
+            # (compute-once reuse seam across sequential shards), FSV skips
+            # generate_embedding() entirely and uses the supplied vector.
             search_result = self.vector_store_client.search(
                 query=query,  # Pass query text for parallel embedding
                 embedding_provider=self.embedding_provider,  # Provider for parallel execution
@@ -595,9 +606,20 @@ class TemporalSearchService:
                 return_timing=True,
                 lazy_load=True,  # Enable lazy loading with early exit optimization
                 prefetch_limit=search_limit,  # Use calculated over-fetch limit
+                precomputed_query_vector=precomputed_query_vector,
             )
             # Type: Tuple[List[Dict[str, Any]], Dict[str, Any]] when return_timing=True
             raw_results, _timing_info = search_result  # type: ignore
+        elif precomputed_query_vector is not None:
+            # Story #1293 S1b [A5]: non-FSV backend reuse -- the caller already
+            # computed (and emitted an event for) this vector once; skip the
+            # embedding call and ctx write entirely for this shard.
+            raw_results = self.vector_store_client.search(
+                query_vector=precomputed_query_vector,
+                filter_conditions=filter_conditions,
+                limit=search_limit,
+                collection_name=self.collection_name,
+            )
         else:
             # FilesystemVectorStore: pre-compute embedding (no parallel support yet).
             # Bug #1078: gate through concurrency governor to cap concurrent provider calls.

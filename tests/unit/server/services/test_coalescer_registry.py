@@ -38,6 +38,11 @@ class _FakeVoyageProvider:
     def _get_model_token_limit(self) -> int:
         return self._token_limit
 
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient implements this; the coalescer's _dispatch()
+        reads it to attribute emitted events (Story #1293)."""
+        return "voyage-ai"
+
     def get_embeddings_batch(
         self,
         texts: List[str],
@@ -56,6 +61,9 @@ class _FakeCohereProvider(_FakeVoyageProvider):
 
     def _get_texts_per_request(self) -> int:
         return 96
+
+    def get_provider_name(self) -> str:
+        return "cohere"
 
 
 @pytest.fixture(autouse=True)

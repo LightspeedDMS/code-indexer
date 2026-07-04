@@ -94,6 +94,12 @@ class FakeVoyageProvider:
     def _get_model_token_limit(self) -> int:
         return self._token_limit
 
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient/CohereEmbeddingProvider both implement this;
+        the coalescer's _dispatch() reads it to attribute emitted events
+        (Story #1293 S1b [A3])."""
+        return "voyage-ai"
+
     def get_embeddings_batch(
         self,
         texts: List[str],
@@ -130,6 +136,9 @@ class FakeCohereProvider(FakeVoyageProvider):
 
     def _get_texts_per_request(self) -> int:
         return self._texts_per_request
+
+    def get_provider_name(self) -> str:
+        return "cohere"
 
     # Voyage-only counter absent so the resolver picks _count_tokens.
     _count_tokens_accurately = None  # type: ignore[assignment]

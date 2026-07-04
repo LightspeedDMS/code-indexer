@@ -27,6 +27,25 @@ from .temporal_health import (
 )
 from ..path_pattern_matcher import parse_exclude_patterns
 
+# Story #1293 (Epic #1288) S1b [A5]: guarded module-level imports (same
+# lazy-import-safe pattern as storage/filesystem_vector_store.py) so the CLI
+# startup import budget is unaffected in stripped/CLI-only environments while
+# still being real, patchable module attributes for the up-front compute-once
+# reuse-seam embed call in execute_temporal_query_with_fusion.
+try:
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+except ImportError:  # pragma: no cover
+    coalesced_query_embedding = None  # type: ignore[assignment]
+
+try:
+    from code_indexer.server.services.search_embed_event_emit import (
+        emit_embed_event,
+    )
+except ImportError:  # pragma: no cover
+    emit_embed_event = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -207,6 +226,37 @@ def execute_temporal_query_with_fusion(
     # shard's own LOCAL rank position, not true cross-shard relevance.
     # merge_shards_by_score preserves the TRUE cosine score across shards.
     base_name, shards = provider_groups[0]
+
+    # Story #1293 S1b [A5]: compute-once reuse seam. Without this, each
+    # sequential shard query below re-embeds the SAME query text through the
+    # SAME embedder (base_name is resolved to at most one embedder) -- 1 miss
+    # + (N-1) phantom warm hits within a single request. Compute the
+    # embedding ONCE here (mirrors omni's _compute_shared_query_vector),
+    # emit exactly one search_embed_event row, then pass the vector down so
+    # every shard skips embedding entirely. Fail-open: an up-front embed
+    # failure falls back EXPLICITLY to per-shard embedding (never a silent
+    # drop of the query -- Messi #2 anti-fallback / #13 anti-silent-failure).
+    precomputed_query_vector: Optional[List[float]] = None
+    if coalesced_query_embedding is not None:
+        try:
+            _reuse_provider = _build_query_provider_for_embedder(config, base_name)
+            precomputed_query_vector, _temporal_embed_meta = coalesced_query_embedding(
+                _reuse_provider,
+                query_text,
+                embedding_purpose="query",
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            )
+            if emit_embed_event is not None:
+                emit_embed_event(_temporal_embed_meta)
+        except Exception as _reuse_exc:  # noqa: BLE001
+            logger.warning(
+                "temporal reuse seam: up-front embed failed for embedder "
+                "'%s' (%s) -- falling back to per-shard embedding",
+                base_name,
+                _reuse_exc,
+            )
+            precomputed_query_vector = None
+
     results_by_shard = _query_shards_raw(
         config,
         vector_store,
@@ -223,6 +273,7 @@ def execute_temporal_query_with_fusion(
         chunk_type=chunk_type,
         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         at_commit_ts=at_commit_ts,
+        precomputed_query_vector=precomputed_query_vector,
     )
     if not results_by_shard:
         return TemporalSearchResults(
@@ -356,6 +407,7 @@ def _query_shards_raw(
     chunk_type: Optional[str] = None,
     no_embedding_cache_shortcut: bool = False,
     at_commit_ts: Optional[int] = None,
+    precomputed_query_vector: Optional[List[float]] = None,
 ) -> Dict[str, list]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
@@ -395,6 +447,7 @@ def _query_shards_raw(
                 chunk_type=chunk_type,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 at_commit_ts=at_commit_ts,
+                precomputed_query_vector=precomputed_query_vector,
             )
             if result.results:
                 results_by_shard[collection_display_name(shard_name)] = result.results
@@ -468,6 +521,10 @@ def _query_single_provider(
     # Bug #1301: pre-resolved at_commit UNIX timestamp (resolved once by the
     # caller via resolve_commit_timestamp -- never re-resolved per shard).
     at_commit_ts: Optional[int] = None,
+    # Story #1293 S1b [A5]: pre-computed query embedding (compute-once reuse
+    # seam across sequential shards of the SAME embedder). Forwarded verbatim
+    # to TemporalSearchService.query_temporal.
+    precomputed_query_vector: Optional[List[float]] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -505,6 +562,7 @@ def _query_single_provider(
             chunk_type=chunk_type,
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             at_commit_ts=at_commit_ts,
+            precomputed_query_vector=precomputed_query_vector,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:

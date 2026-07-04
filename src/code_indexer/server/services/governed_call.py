@@ -32,6 +32,9 @@ from code_indexer.server.services.coalescer_registry import (
     get_coalescer_registry,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.embed_event_decision_table import (
+    decide_role_and_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -453,13 +456,16 @@ def _serve_with_cache(
                             "_serve_with_cache: audit_ctx population failed (on-mode): %s",
                             exc,
                         )
+                _outcome, _role = decide_role_and_outcome(
+                    cache_hit=True, cache_mode=mode
+                )
                 return decoded_vec, EmbeddingCacheMetadata(
                     key_found=True,
                     cache_mode=mode,
                     provider=provider_name,
                     embed_key=cache_key,
-                    outcome="hit",
-                    role="warm_hit",
+                    outcome=_outcome,
+                    role=_role,
                 )
 
         # MISS (or corrupt blob treated as MISS)
@@ -473,14 +479,15 @@ def _serve_with_cache(
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
+        _outcome, _role = decide_role_and_outcome(cache_hit=False, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
             key_found=False,
             cache_mode=mode,
             provider_latency_ms=_latency_ms,
             provider=provider_name,
             embed_key=cache_key,
-            outcome="miss",
-            role="direct",
+            outcome=_outcome,
+            role=_role,
         )
 
     # shadow (or any unrecognised mode treated as shadow per cache.mode_for default)
@@ -520,14 +527,15 @@ def _serve_with_cache(
                     "_serve_with_cache: audit_ctx population failed (shadow-mode): %s",
                     exc,
                 )
+        _outcome, _role = decide_role_and_outcome(cache_hit=True, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
             key_found=True,
             cache_mode=mode,
             provider_latency_ms=_shadow_latency_ms,
             provider=provider_name,
             embed_key=cache_key,
-            outcome="shadow_hit",
-            role="warm_hit",
+            outcome=_outcome,
+            role=_role,
         )
     else:
         logger.debug(
@@ -537,14 +545,15 @@ def _serve_with_cache(
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
+        _outcome, _role = decide_role_and_outcome(cache_hit=False, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
             key_found=False,
             cache_mode=mode,
             provider_latency_ms=_shadow_latency_ms,
             provider=provider_name,
             embed_key=cache_key,
-            outcome="shadow_miss",
-            role="direct",
+            outcome=_outcome,
+            role=_role,
         )
 
 
@@ -705,11 +714,12 @@ def coalesced_query_embedding(
         logger.debug(
             "coalesced_query_embedding: no coalescer, no cache -> direct governed call"
         )
+        _outcome, _role = decide_role_and_outcome(cache_hit=None, cache_mode=None)
         return _direct_live(), EmbeddingCacheMetadata(
             provider=provider.get_provider_name(),
             config_digest=_digest_for_provider(provider),
-            outcome="miss",
-            role="direct",
+            outcome=_outcome,
+            role=_role,
         )
 
     # Cache active, no coalescer: _serve_with_cache with governed_query_embedding
@@ -721,12 +731,15 @@ def coalesced_query_embedding(
         live_vec: List[float] = _direct_live()
         # cache, cache_key_opt, qualifier are always set here (cache is not None)
         cache.record_miss_or_shadow(cache_key_opt, cache.qualifier(provider), live_vec)  # type: ignore[arg-type]
+        _outcome, _role = decide_role_and_outcome(
+            cache_hit=None, cache_mode=None, bypass=True
+        )
         return live_vec, EmbeddingCacheMetadata(
             key_found=False,
             provider=provider.get_provider_name(),
             embed_key=cache_key_opt,
-            outcome="bypass",
-            role="direct",
+            outcome=_outcome,
+            role=_role,
         )
 
     logger.debug(

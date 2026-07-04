@@ -91,6 +91,12 @@ class _FakeVoyageProvider:
     def _get_model_token_limit(self) -> int:
         return self._token_limit
 
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient/CohereEmbeddingProvider both implement this;
+        the coalescer's _dispatch() reads it to attribute emitted events
+        (Story #1293 S1b [A3])."""
+        return "voyage-ai"
+
     def get_embeddings_batch(
         self,
         texts: List[str],

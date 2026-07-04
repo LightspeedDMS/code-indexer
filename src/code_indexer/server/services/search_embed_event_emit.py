@@ -23,6 +23,9 @@ import time
 import uuid
 from typing import Any, Optional
 
+from code_indexer.server.services.embed_event_decision_table import (
+    decide_role_and_outcome,
+)
 from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 from code_indexer.server.services.search_embed_event_writer import (
     SearchEmbedEventRecord,
@@ -145,3 +148,26 @@ def emit_embed_event(
         shadow_cosine=meta.shadow_cosine,
     )
     writer.enqueue(record)
+
+
+def emit_embed_error_event(provider_name: str) -> None:
+    """Emit an outcome=error/role=direct event for a failed LIVE embedding call.
+
+    Story #1293 S1b [A6]: used at a failover primary-provider call site right
+    before falling over to a secondary provider, so the failed attempt is
+    recorded as a durable event (never silently dropped). Routes through
+    decide_role_and_outcome (the single decision-table source of truth, M1)
+    rather than hardcoding the error row.
+
+    Never raises: telemetry emission must not mask the real exception the
+    caller is about to re-raise / fail over from (Messi #13).
+    """
+    try:
+        outcome, role = decide_role_and_outcome(
+            cache_hit=None, cache_mode=None, error=True
+        )
+        emit_embed_event(
+            EmbeddingCacheMetadata(provider=provider_name, outcome=outcome, role=role)
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never mask a real error
+        logger.warning("emit_embed_error_event: emission failed: %s", exc)

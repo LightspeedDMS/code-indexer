@@ -39,9 +39,11 @@ The ONLY time bound is the governor ``acquire_timeout`` (Messi #14). No
 import logging
 import random
 import threading
+import uuid
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from code_indexer.server.services.embed_event_decision_table import DECISION_TABLE
 from code_indexer.server.services.provider_concurrency_governor import (
     ProviderConcurrencyGovernor,
 )
@@ -53,33 +55,94 @@ from code_indexer.services.provider_backoff import execute_with_backoff
 # this module transitively via query_embedding_cache.  The import is safe
 # inside functions and the submit() / _dispatch() hot path.
 def _make_empty_meta() -> "Any":
-    """Return an EmbeddingCacheMetadata() with all-None fields (import deferred)."""
+    """Return an EmbeddingCacheMetadata() with all-None fields (import deferred).
+
+    Used only where a resolution is not (yet) driven by this coalescer's own
+    owner/joiner/warm_hit classification (Story #1293 S1b [A3] removed the
+    only production call site of this helper; kept for any future no-op
+    branch and existing test coverage).
+    """
     from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 
     return EmbeddingCacheMetadata()
 
 
-def _make_hit_meta(cache_mode: str, provider_latency_ms: Optional[int] = None) -> "Any":
-    """Return EmbeddingCacheMetadata for a cache HIT."""
+def _make_hit_meta(
+    cache_mode: str,
+    provider_latency_ms: Optional[int] = None,
+    *,
+    role: str = "warm_hit",
+    outcome: str = "hit",
+    live_batch_id: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> "Any":
+    """Return EmbeddingCacheMetadata for a cache HIT.
+
+    Story #1293 S1b [A3]: role/outcome/live_batch_id default to the
+    "warm_hit" decision-table row (a genuine cache hit, no coalesced-batch
+    HTTP call) -- callers override them for the "shadow_hit" and
+    "coalescer_joiner"-adjacent (dispatched-batch shadow hit) rows.
+    """
     from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 
     return EmbeddingCacheMetadata(
         key_found=True,
         cache_mode=cache_mode,
         provider_latency_ms=provider_latency_ms,
+        role=role,
+        outcome=outcome,
+        live_batch_id=live_batch_id,
+        provider=provider,
     )
 
 
 def _make_miss_meta(
-    cache_mode: Optional[str], provider_latency_ms: Optional[int]
+    cache_mode: Optional[str],
+    provider_latency_ms: Optional[int],
+    *,
+    role: str = "owner",
+    outcome: str = "miss",
+    live_batch_id: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> "Any":
-    """Return EmbeddingCacheMetadata for a cache MISS."""
+    """Return EmbeddingCacheMetadata for a cache MISS.
+
+    Story #1293 S1b [A3]: role/outcome/live_batch_id default to the
+    "coalescer_owner_cold" decision-table row (a dispatched-batch LIVE
+    member) -- callers override outcome to "shadow_miss" for shadow-mode
+    dispatched members.
+    """
     from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 
     return EmbeddingCacheMetadata(
         key_found=False,
         cache_mode=cache_mode,
         provider_latency_ms=provider_latency_ms,
+        role=role,
+        outcome=outcome,
+        live_batch_id=live_batch_id,
+        provider=provider,
+    )
+
+
+def _make_joiner_meta(
+    live_batch_id: Optional[str], provider: Optional[str] = None
+) -> "Any":
+    """Return EmbeddingCacheMetadata for an ``_inflight_keys`` single-flight
+    JOINER (Story #1293 S1b [A3], Algorithm 1): a joiner always resolves as
+    outcome=hit/role=joiner, sharing the OWNER's live_batch_id verbatim
+    (None when the owner resolved via an on-mode cache HIT -- warm, zero
+    provider calls; a real batch id when the owner resolved LIVE).
+    """
+    from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
+
+    outcome, role, _kind = DECISION_TABLE["coalescer_joiner"]
+    return EmbeddingCacheMetadata(
+        key_found=True,
+        outcome=outcome,
+        role=role,
+        live_batch_id=live_batch_id,
+        provider=provider,
     )
 
 
@@ -463,19 +526,28 @@ class EmbeddingCoalescer:
                         #   - Joiner wait OUTSIDE both locks.
                         # Defect #1148 fix (DEFECT 2 — joiner audit semantics):
                         # _inflight_keys now stores (Future, resolution_container)
-                        # where resolution_container is a 1-element list [None].
-                        # The HIT-owner fills it with the cached_blob upon a
-                        # successful on-mode cache HIT, leaving it as [None] when
-                        # the resolution is LIVE (MISS or shadow).  The joiner
-                        # reads resolution_container[0] after the Future resolves:
+                        # where resolution_container is a 2-element list
+                        # [cached_blob, live_batch_id]. The HIT-owner fills index 0
+                        # with the cached_blob upon a successful on-mode cache HIT,
+                        # leaving it as None when the resolution is LIVE (MISS or
+                        # shadow).  The joiner reads resolution_container[0] after
+                        # the Future resolves:
                         #   - not None -> owner served a CACHED vector -> populate
                         #     audit_ctx with mode="on" + cached_blob (correct).
                         #   - None     -> owner served a LIVE vector -> leave
                         #     audit_ctx untouched (no cached blob to compare;
                         #     a "live vs live" audit is meaningless, Messi #2).
+                        # Story #1293 S1b [A3]: index 1 is live_batch_id -- the
+                        # OWNER assigns it BEFORE completing its Future (None on
+                        # a warm cache HIT; a real batch id on a LIVE dispatch).
+                        # The joiner reads resolution_container[1] and shares it
+                        # verbatim (Algorithm 1).
                         _join_fut: "Optional[Future[Tuple[List[float], Any]]]" = None
                         _join_resolution_container: "Optional[list]" = None
-                        _resolution_container: "list" = [None]  # owner fills on HIT
+                        _resolution_container: "list" = [
+                            None,
+                            None,
+                        ]  # [cached_blob, live_batch_id] -- owner fills both
                         with self._inflight_lock:
                             _existing = self._inflight_keys.get(cache_key_opt)
                             if _existing is not None:
@@ -531,7 +603,22 @@ class EmbeddingCoalescer:
                                             _ae,
                                         )
                                 # Live-resolution joiner: leave audit_ctx untouched.
-                            return (result_vec, _make_empty_meta())
+                            # Story #1293 S1b [A3]: read the owner's assigned
+                            # live_batch_id (None if the owner resolved via a
+                            # warm on-mode cache HIT; a real batch id if the
+                            # owner resolved LIVE) -- ALWAYS classified as
+                            # outcome=hit/role=joiner (Algorithm 1), never a
+                            # no-op empty meta.
+                            _owner_live_batch_id = (
+                                _join_resolution_container[1]
+                                if _join_resolution_container is not None
+                                and len(_join_resolution_container) > 1
+                                else None
+                            )
+                            return (
+                                result_vec,
+                                _make_joiner_meta(_owner_live_batch_id, provider_name),
+                            )
 
                         # --- Step 2: OWNER — LOCK-FREE cache lookup (outside _inflight_lock). ---
                         # on-mode: genuine pre-existing HITs complete the owned Future with
@@ -656,7 +743,12 @@ class EmbeddingCoalescer:
                                     # can unpack it; _cache_mode is always set here
                                     # (we are in the on-mode HIT block).
                                     _owned_future.set_result(
-                                        (_hit_vec, _make_hit_meta(_cache_mode))
+                                        (
+                                            _hit_vec,
+                                            _make_hit_meta(
+                                                _cache_mode, provider=provider_name
+                                            ),
+                                        )
                                     )
                                 with self._inflight_lock:
                                     # _inflight_key is always non-None here:
@@ -673,7 +765,10 @@ class EmbeddingCoalescer:
                         if _hit_vec is not None:
                             # Issue #1159: return (vec, meta) tuple; _cache_mode is
                             # set here (on-mode HIT block).
-                            return (_hit_vec, _make_hit_meta(_cache_mode))
+                            return (
+                                _hit_vec,
+                                _make_hit_meta(_cache_mode, provider=provider_name),
+                            )
 
         # --- No cache / MISS (owner) / shadow (owner) / bypass / off / disabled ---
         entry = _Entry(
@@ -700,6 +795,13 @@ class EmbeddingCoalescer:
                     # entry.fut now holds (vec, meta) tuple (Issue #1159).
                     result_vec, result_meta = entry.fut.result()
                     if not _owned_future.done():
+                        # Story #1293 S1b [A3]: fill the resolution container's
+                        # live_batch_id slot BEFORE completing the Future so any
+                        # joiner that unblocks immediately after sees the
+                        # correct value (Algorithm 1: assign-before-complete).
+                        _resolution_container[1] = getattr(
+                            result_meta, "live_batch_id", None
+                        )
                         _owned_future.set_result((result_vec, result_meta))
                 except BaseException as _ex:  # noqa: BLE001
                     if not _owned_future.done():
@@ -736,7 +838,13 @@ class EmbeddingCoalescer:
                         if exc is not None:
                             _owned_future.set_exception(exc)
                         else:
-                            _owned_future.set_result(entry.fut.result())
+                            _dispatcher_result = entry.fut.result()
+                            # Story #1293 S1b [A3]: assign-before-complete (see
+                            # the non-dispatcher branch above for rationale).
+                            _resolution_container[1] = getattr(
+                                _dispatcher_result[1], "live_batch_id", None
+                            )
+                            _owned_future.set_result(_dispatcher_result)
                 except Exception as _set_ex:  # noqa: BLE001
                     logger.debug(
                         "coalescer: owner future completion failed (lane=%s): %s",
@@ -852,6 +960,10 @@ class EmbeddingCoalescer:
         purpose: Optional[str] = None
         # Wall-clock latency for the provider HTTP call (set by do_call).
         _dispatch_latency_ms: Optional[int] = None
+        # Story #1293 S1b [A3]: ONE live_batch_id per dispatched batch (one
+        # sealed batch == one provider HTTP call), assigned at the seal point
+        # BEFORE the HTTP call -- every entry in this batch shares it.
+        _live_batch_id: Optional[str] = None
 
         def do_call() -> List[List[float]]:
             nonlocal \
@@ -860,10 +972,12 @@ class EmbeddingCoalescer:
                 key_to_first_idx, \
                 entry_keys, \
                 purpose, \
-                _dispatch_latency_ms
+                _dispatch_latency_ms, \
+                _live_batch_id
             with self._lock:
                 if not sealed:
                     sealed = True
+                    _live_batch_id = str(uuid.uuid4())
                     if self._open_batch is my_batch:
                         self._open_batch = None
                         self._open_tokens = 0
@@ -951,6 +1065,7 @@ class EmbeddingCoalescer:
                         )
                         _shadow_blobs[ukey] = None
 
+            _dispatch_provider_name = self._provider.get_provider_name()
             for e, k in zip(my_batch, entry_keys):
                 idx = key_to_first_idx[k]
                 vec = unique_vectors[idx]
@@ -967,16 +1082,47 @@ class EmbeddingCoalescer:
                     and not k.startswith(_NONE_KEY_PREFIX)
                     and _shadow_blobs.get(k) is not None
                 )
-                e.fut.set_result(
-                    (
-                        vec,
-                        # _is_shadow_hit is only True when cache_mode == "shadow",
-                        # so "shadow" literal satisfies _make_hit_meta's str param.
-                        _make_hit_meta("shadow", _dispatch_latency_ms)
-                        if _is_shadow_hit
-                        else _make_miss_meta(cache_mode, _dispatch_latency_ms),
+                # Story #1293 S1b [A3]: every dispatched-batch member shares
+                # this batch's ONE live_batch_id (one sealed batch == one HTTP
+                # call) EXCEPT a shadow_hit, which is classified warm_hit/NULL
+                # (matches the Path-B _serve_with_cache shadow-hit row exactly
+                # -- decision-table rule, not re-decided here).
+                if _is_shadow_hit:
+                    e.fut.set_result(
+                        (
+                            vec,
+                            _make_hit_meta(
+                                "shadow",
+                                _dispatch_latency_ms,
+                                provider=_dispatch_provider_name,
+                            ),
+                        )
                     )
-                )
+                elif cache_mode == "shadow":
+                    e.fut.set_result(
+                        (
+                            vec,
+                            _make_miss_meta(
+                                cache_mode,
+                                _dispatch_latency_ms,
+                                outcome="shadow_miss",
+                                live_batch_id=_live_batch_id,
+                                provider=_dispatch_provider_name,
+                            ),
+                        )
+                    )
+                else:
+                    e.fut.set_result(
+                        (
+                            vec,
+                            _make_miss_meta(
+                                cache_mode,
+                                _dispatch_latency_ms,
+                                live_batch_id=_live_batch_id,
+                                provider=_dispatch_provider_name,
+                            ),
+                        )
+                    )
 
                 # Per-requestor audit_ctx for shadow HITs (own random draw per entry).
                 if (
