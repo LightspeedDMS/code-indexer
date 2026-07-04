@@ -9,7 +9,16 @@ to avoid behavioral changes during extraction.  Refactoring is tracked
 separately.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+# Story #1293: WIRED correlation_id reader. The previous import
+# (code_indexer.server.middleware.correlation.get_correlation_id) reads a
+# ContextVar whose CorrelationContextMiddleware is NEVER registered in
+# startup/app_wiring.py -- only telemetry.correlation_bridge's
+# CorrelationBridgeMiddleware is -- so that reader always returned None in
+# production and every search_event_log / search_embed_event row emitted
+# from this module silently carried correlation_id=None.
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import asyncio
 import logging
@@ -33,6 +42,7 @@ from code_indexer.server.services.search_event_context import (
     _search_event_ctx,
 )
 from code_indexer.server.services.search_event_log_writer import SearchEventRecord
+from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.mcp.memory_retrieval_pipeline import (
     MemoryRetrievalPipeline,
@@ -639,6 +649,10 @@ def _compute_memory_query_vector(
             _event_ctx.voyage_cache_hit = _embed_meta.key_found
             _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
             _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
         return cast(List[float], vec)
     except Exception as exc:
         logger.warning(
@@ -705,6 +719,10 @@ def _compute_shared_query_vector(
             _event_ctx.voyage_cache_hit = _embed_meta.key_found
             _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
             _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
         return (cast(List[float], vec), digest)
     except Exception as exc:
         logger.warning(

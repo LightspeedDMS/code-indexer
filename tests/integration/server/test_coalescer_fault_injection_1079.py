@@ -62,6 +62,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import threading
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -1214,3 +1216,106 @@ def test_dedup_same_key_k_requests_produce_one_embed_call_1146() -> None:
     assert coalescer.provider_embed_calls == 1, (
         f"provider_embed_calls={coalescer.provider_embed_calls}, expected 1"
     )
+
+
+# ===========================================================================
+# Story #1293 — Direct-path invariant gate: provider_embed_calls (from
+# search_embed_event rows) == transport HTTP-call count.
+# ===========================================================================
+
+
+def test_direct_path_provider_embed_calls_matches_transport_call_count_1293() -> None:
+    """Story #1293 S1a fault-injection gate: for the DIRECT (no-coalescer) path,
+    the search_embed_event invariant
+
+        provider_embed_calls = COUNT(DISTINCT live_batch_id)
+                              + COUNT(*) WHERE role='direct'
+                                           AND outcome IN ('miss', 'shadow_miss')
+
+    must equal the REAL transport HTTP-call count. No coalescer registry is
+    installed (registry=None, the CLI/solo-equivalent state), so
+    coalesced_query_embedding() takes Path B (direct governed call) for every
+    text — each of N distinct queries makes exactly ONE HTTP call, driving
+    the REAL governed_query_embedding -> execute_with_backoff -> governor ->
+    scripted-transport pipeline (nothing mocked below the wire).
+
+    Each call's returned EmbeddingCacheMetadata is fed through the REAL
+    emit_embed_event() shared helper into a REAL SQLite-backed
+    SearchEmbedEventWriter, then the writer is flushed and the backend's
+    count_provider_embed_calls() aggregate is asserted against
+    transport.call_count -- proving the durable-event invariant holds for
+    every needed embed on the direct path, with zero phantom hits.
+    """
+    import uuid
+
+    from code_indexer.server.services.coalescer_registry import (
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        clear_query_embedding_cache,
+        coalesced_query_embedding,
+        get_query_embedding_cache,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
+    )
+
+    # Preconditions: no coalescer, no cache -> guarantees Path B for every call.
+    clear_coalescer_registry()
+    clear_query_embedding_cache()
+    assert get_coalescer_registry() is None
+    assert get_query_embedding_cache() is None
+
+    N = 4
+    transport = _ScriptedTransport([_voyage_embed_200()])
+    provider = _voyage_provider(_ScriptedClientFactory(transport))
+
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1293_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+
+    set_search_embed_event_writer(writer)
+    try:
+        for i in range(N):
+            vec, meta = coalesced_query_embedding(
+                provider, f"direct path probe {i}-{uuid.uuid4().hex[:6]}"
+            )
+            assert isinstance(vec, list) and len(vec) == 1024
+            # Mirrors the production call-site pattern (search_service.py /
+            # mcp/handlers/search.py): emit right after the call returns.
+            emit_embed_event(meta)
+
+        writer.flush()
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        assert transport.call_count == N, (
+            f"expected {N} real HTTP calls at the wire (one per distinct "
+            f"direct query), got {transport.call_count}"
+        )
+        assert provider_embed_calls == transport.call_count, (
+            f"search_embed_event invariant broken: provider_embed_calls="
+            f"{provider_embed_calls} != transport.call_count="
+            f"{transport.call_count} (direct path must record exactly one "
+            f"role='direct' outcome='miss' row per real HTTP call, no "
+            f"phantom hits)"
+        )
+
+        # Zero phantom hits: N events total, all outcome='miss' role='direct'.
+        events, total = backend.query()
+        assert total == N
+        assert all(e["outcome"] == "miss" and e["role"] == "direct" for e in events)
+        assert all(e["correlation_id"] for e in events), (
+            "every event must carry a non-null/non-empty correlation_id"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        shutil.rmtree(tmp_dir, ignore_errors=True)

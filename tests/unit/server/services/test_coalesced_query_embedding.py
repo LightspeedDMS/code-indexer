@@ -52,6 +52,12 @@ COALESCED_VEC = [9.0, 9.0]
 class _FakeVoyageProvider:
     """Not a Cohere instance -> maps to voyage:embed."""
 
+    def get_provider_name(self) -> str:
+        """Story #1293: real providers always implement this — governed_call.py's
+        no-coalescer/no-cache Path B now reads it to populate
+        EmbeddingCacheMetadata.provider."""
+        return "voyage-ai"
+
 
 class _FakeCohereProvider:
     """Stand-in registered as the cohere isinstance target via patching."""

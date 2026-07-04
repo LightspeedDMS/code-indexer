@@ -57,6 +57,29 @@ class EmbeddingCacheMetadata:
     cache_mode: Optional[str] = None
     provider_latency_ms: Optional[int] = None
 
+    # Story #1293 (Epic #1288): enriched fields driving the shared
+    # emit_embed_event() helper (Algorithm 3). All default to None.
+    # provider/model/config_digest: identify which provider config served
+    #   this call.
+    # outcome/role/live_batch_id: the Story #1293 (path x outcome) ->
+    #   (role, live_batch_id) decision table result (see
+    #   embed_event_decision_table.py). Populated deterministically by
+    #   governed_call.py's own Path B (no-coalescer) constructions in S1a;
+    #   Path A (coalescer.submit()) constructions stay None until Story
+    #   #1293 S1b wires the owner/joiner distinction (embedding_coalescer.py).
+    # embed_key/long_key: the cache key used for this call (and whether it
+    #   exceeded the 256-char normalized-query cap).
+    # shadow_cosine: populated by shadow-mode audit comparisons (future).
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    config_digest: Optional[str] = None
+    outcome: Optional[str] = None
+    role: Optional[str] = None
+    live_batch_id: Optional[str] = None
+    embed_key: Optional[str] = None
+    long_key: Optional[bool] = None
+    shadow_cosine: Optional[float] = None
+
 
 # Seconds to wait for a governor slot — shared across all 4 embedding sites.
 # 30 s is well within the 60 s caller timeout and absorbs momentary bursts.
@@ -431,7 +454,12 @@ def _serve_with_cache(
                             exc,
                         )
                 return decoded_vec, EmbeddingCacheMetadata(
-                    key_found=True, cache_mode=mode
+                    key_found=True,
+                    cache_mode=mode,
+                    provider=provider_name,
+                    embed_key=cache_key,
+                    outcome="hit",
+                    role="warm_hit",
                 )
 
         # MISS (or corrupt blob treated as MISS)
@@ -446,7 +474,13 @@ def _serve_with_cache(
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
         return live_vec, EmbeddingCacheMetadata(
-            key_found=False, cache_mode=mode, provider_latency_ms=_latency_ms
+            key_found=False,
+            cache_mode=mode,
+            provider_latency_ms=_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome="miss",
+            role="direct",
         )
 
     # shadow (or any unrecognised mode treated as shadow per cache.mode_for default)
@@ -487,7 +521,13 @@ def _serve_with_cache(
                     exc,
                 )
         return live_vec, EmbeddingCacheMetadata(
-            key_found=True, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+            key_found=True,
+            cache_mode=mode,
+            provider_latency_ms=_shadow_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome="shadow_hit",
+            role="warm_hit",
         )
     else:
         logger.debug(
@@ -498,7 +538,13 @@ def _serve_with_cache(
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
         return live_vec, EmbeddingCacheMetadata(
-            key_found=False, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+            key_found=False,
+            cache_mode=mode,
+            provider_latency_ms=_shadow_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome="shadow_miss",
+            role="direct",
         )
 
 
@@ -659,7 +705,12 @@ def coalesced_query_embedding(
         logger.debug(
             "coalesced_query_embedding: no coalescer, no cache -> direct governed call"
         )
-        return _direct_live(), EmbeddingCacheMetadata()
+        return _direct_live(), EmbeddingCacheMetadata(
+            provider=provider.get_provider_name(),
+            config_digest=_digest_for_provider(provider),
+            outcome="miss",
+            role="direct",
+        )
 
     # Cache active, no coalescer: _serve_with_cache with governed_query_embedding
     # as the live_fn (bypass handled before the _serve_with_cache call).
@@ -670,7 +721,13 @@ def coalesced_query_embedding(
         live_vec: List[float] = _direct_live()
         # cache, cache_key_opt, qualifier are always set here (cache is not None)
         cache.record_miss_or_shadow(cache_key_opt, cache.qualifier(provider), live_vec)  # type: ignore[arg-type]
-        return live_vec, EmbeddingCacheMetadata(key_found=False)
+        return live_vec, EmbeddingCacheMetadata(
+            key_found=False,
+            provider=provider.get_provider_name(),
+            embed_key=cache_key_opt,
+            outcome="bypass",
+            role="direct",
+        )
 
     logger.debug(
         "coalesced_query_embedding: no coalescer, cache active -> _serve_with_cache (Path B)"

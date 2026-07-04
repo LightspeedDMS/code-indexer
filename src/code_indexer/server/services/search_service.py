@@ -21,6 +21,7 @@ from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 
 logger = logging.getLogger(__name__)
 
@@ -525,6 +526,11 @@ class SemanticSearchService:
                         _event_ctx.voyage_cache_hit = _embed_meta.key_found
                         _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
                         _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+                # Story #1293: emit the durable search_embed_event row for this
+                # inline (non-FSV) direct call. No-op when meta isn't yet
+                # classified (Path A coalescer path — Story #1293 S1b) or when
+                # no writer is installed (CLI/solo/pre-lifespan).
+                emit_embed_event(_embed_meta)
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,

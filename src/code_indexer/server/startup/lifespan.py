@@ -552,6 +552,42 @@ def make_lifespan(
             )
             app.state.search_event_log_writer = None
 
+        # Story #1293: Initialize SearchEmbedEventWriter (durable, phantom-free
+        # query-embedding decision events). Mirrors SearchEventLogWriter's
+        # pattern exactly: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_embed_event_writer import (
+                SearchEmbedEventSqliteBackend,
+                SearchEmbedEventWriter,
+            )
+            from code_indexer.server.services.search_embed_event_emit import (
+                set_search_embed_event_writer,
+            )
+
+            if backend_registry is not None:
+                _see_backend = backend_registry.search_embed_event
+            else:
+                see_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _see_backend = SearchEmbedEventSqliteBackend(str(see_db_path))
+
+            app.state.search_embed_event_writer = SearchEmbedEventWriter(_see_backend)
+            app.state.search_embed_event_writer.start()
+            set_search_embed_event_writer(app.state.search_embed_event_writer)
+
+            logger.info(
+                "SearchEmbedEventWriter started (Story #1293)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _see_exc:
+            logger.error(
+                "Failed to initialize SearchEmbedEventWriter: %s",
+                _see_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_embed_event_writer = None
+
         # Issue #1160: Initialize QueryAnalyticsExportService (export to Excel).
         # Mirrors SearchEventLogWriter pattern: select backend from registry or fall back
         # to SQLite. Service is stateless (no threads to start/stop).
@@ -3437,6 +3473,23 @@ def make_lifespan(
             logger.warning(
                 "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
                 _sel_stop_exc,
+            )
+
+        # Story #1293: drain the search-embed-event writer on shutdown and
+        # clear the process-level accessor.
+        try:
+            from code_indexer.server.services.search_embed_event_emit import (
+                clear_search_embed_event_writer,
+            )
+
+            _see_writer = getattr(app.state, "search_embed_event_writer", None)
+            if _see_writer is not None:
+                _see_writer.stop()
+            clear_search_embed_event_writer()
+        except Exception as _see_stop_exc:
+            logger.warning(
+                "Story #1293: failed to drain search-embed-event writer during shutdown: %s",
+                _see_stop_exc,
             )
 
         # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
