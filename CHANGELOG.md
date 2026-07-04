@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.18.3] - 2026-07-04
+
+### Fixed
+
+- **Daemon-mode temporal queries were 100% broken (#1302, epic #1289).** Standalone/server temporal queries worked, but the daemon's `exposed_query_temporal` resolved the collection via the regular embedding_provider/model scheme (`resolve_temporal_collection_from_config`, yielding `code-indexer-temporal-voyage_code_3`) while per-commit temporal data lives under the active-embedder scheme (`code-indexer-temporal-voyage_context_4`), and the daemon's mmap `CacheEntry` was shard-blind (real HNSW data lives in per-quarter shard subdirectories, e.g. `...-2026Q3`). Both defects fixed by delegating `exposed_query_temporal` to `execute_temporal_query_with_fusion` -- the same shard-aware, active-embedder-named dispatch already used by the CLI, server, and multi-search paths (its docstring already claimed daemon support; the wiring had simply never been done). A `--temporal-embedder` query override is now threaded end-to-end through the daemon path. Verified with a real daemon E2E for both embedders (daemon results byte-for-byte match standalone: voyage-context-4 and Cohere embed-v4.0).
+
+### Removed
+
+- **Dead mmap temporal-cache code in the daemon (#1302).** The fusion-delegation fix left `CacheEntry.load_temporal_indexes` / `invalidate_temporal` / `is_temporal_stale_after_rebuild` (plus the `temporal_hnsw_index` / `temporal_id_mapping` / `temporal_index_version` fields and their `get_stats` keys) unreachable from any production caller. Removed (87 lines) along with the test file that only exercised them, for anti-orphan compliance. The regular non-temporal daemon cache path is unchanged.
+
 ## [11.18.2] - 2026-07-03
 
 ### Fixed
