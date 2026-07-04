@@ -368,22 +368,51 @@ class CIDXDaemonService(Service):
         accuracy: str = "balanced",
         chunk_type: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        temporal_embedder: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Query temporal collection via daemon with mmap cache.
+        """Query temporal collection via daemon.
+
+        Bug #1302: routes through execute_temporal_query_with_fusion() --
+        the SAME shard-aware, correctly-named machinery the standalone CLI
+        (cli.py), server (semantic_query_manager.py), and multi_search_service
+        already use. The daemon previously (a) resolved the collection name
+        via resolve_temporal_collection_from_config() -- the REGULAR
+        semantic-search embedding_provider/model scheme -- instead of
+        config.temporal.active_embedder (the per-commit embedder registry
+        that actually names temporal collections on disk), and (b) mmap-loaded
+        a single bare `hnsw_index.bin` directly under the collection dir, but
+        real per-commit temporal data lives ONLY inside quarterly shard
+        subdirectories (Story #1242/#1290 sharding) -- the bare dir holds
+        only `temporal_meta.json` bookkeeping. Both defects made every
+        daemon-mode temporal query fail 100% of the time even though the
+        standalone CLI path (already shard-aware) worked. Delegating to the
+        proven fusion-dispatch entry point fixes both without duplicating
+        shard-enumeration/merge logic in the mmap cache layer.
 
         Args:
             project_path: Path to project root
             query: Semantic search query text
             time_range: Time range filter (e.g., "2024-01-01..2024-12-31", "last-30-days")
             limit: Maximum number of results
-            languages: Language filters (include) - list of language names
-            exclude_languages: Language filters (exclude) - list of language names
+            languages: Language filters (include) - list of language names.
+                Only the first entry is forwarded (execute_temporal_query_with_fusion
+                accepts a single `language` string, matching the standalone
+                CLI temporal path's existing capability).
+            exclude_languages: Language filters (exclude) - list of language names.
+                Only the first entry is forwarded (see `languages` above).
             path_filter: Path pattern filters (include) - list of path patterns
             exclude_path: Path pattern filters (exclude) - list of path patterns
-            min_score: Minimum similarity score
-            accuracy: Accuracy mode (fast/balanced/high)
+            min_score: Minimum similarity score (currently NOT applied to
+                temporal queries -- execute_temporal_query_with_fusion has no
+                min_score parameter; this pre-existing gap is shared with the
+                standalone CLI temporal path and is out of scope for Bug #1302)
+            accuracy: Accuracy mode (fast/balanced/high) (currently unused by
+                the temporal fusion-dispatch path)
             chunk_type: Filter by chunk type ("commit_message" or "commit_diff")
             correlation_id: Correlation ID for progress tracking
+            temporal_embedder: Optional explicit temporal embedder override
+                (e.g. "cohere-embed-v4"); defaults to
+                config.temporal.active_embedder when omitted.
 
         Returns:
             Dict with results, query metadata, and performance stats
@@ -405,73 +434,14 @@ class CIDXDaemonService(Service):
 
             assert self.cache_entry is not None  # Guaranteed by _ensure_cache_loaded
 
-            # Load temporal cache if not loaded
-            from code_indexer.services.temporal.temporal_collection_naming import (
-                resolve_temporal_collection_from_config as _resolve_temporal,
-            )
             from code_indexer.config import ConfigManager
 
-            # Bug #1300: lazy-init config_manager BEFORE first use below. This
-            # block used to live after the assert/get_config() call (see the
-            # vector_store/embedding_provider lazy-init further down), so
-            # self.config_manager (None since __init__) was never populated
-            # in time and every daemon temporal query crashed unconditionally.
+            # Bug #1300: lazy-init config_manager BEFORE first use below.
             if not hasattr(self, "config_manager") or self.config_manager is None:
                 self.config_manager = ConfigManager.create_with_backtrack(project_root)
 
             assert self.config_manager is not None
-            _temporal_coll = _resolve_temporal(self.config_manager.get_config())
-            temporal_collection_path = (
-                project_root / ".code-indexer" / "index" / _temporal_coll
-            )
-
-            if not temporal_collection_path.exists():
-                logger.warning(f"Temporal index not found: {temporal_collection_path}")
-                return {
-                    "error": "Temporal index not found. Run 'cidx index --index-commits' first.",
-                    "results": [],
-                }
-
-            if self.cache_entry.temporal_hnsw_index is None:
-                logger.info("Loading temporal HNSW index into daemon cache")
-                self.cache_entry.load_temporal_indexes(temporal_collection_path)
-
-            # Check if cache stale (rebuild detected)
-            if self.cache_entry.is_temporal_stale_after_rebuild(
-                temporal_collection_path
-            ):
-                logger.info("Temporal cache stale after rebuild, reloading")
-                self.cache_entry.invalidate_temporal()
-                self.cache_entry.load_temporal_indexes(temporal_collection_path)
-
-            # Initialize TemporalSearchService with cached index
-            from code_indexer.services.temporal.temporal_search_service import (
-                TemporalSearchService,
-            )
-            from code_indexer.backends.backend_factory import BackendFactory
-            from code_indexer.services.embedding_factory import EmbeddingProviderFactory
-
-            # Get vector_store/embedding_provider services (reuse from cache if
-            # available). config_manager is already lazily initialized above.
-            if not hasattr(self, "vector_store") or self.vector_store is None:
-                config = self.config_manager.get_config()
-                backend = BackendFactory.create(config, project_root)
-                self.vector_store = backend.get_vector_store_client()
-
-            if (
-                not hasattr(self, "embedding_provider")
-                or self.embedding_provider is None
-            ):
-                config = self.config_manager.get_config()
-                self.embedding_provider = EmbeddingProviderFactory.create(config=config)
-
-            temporal_search_service = TemporalSearchService(
-                config_manager=self.config_manager,
-                project_root=project_root,
-                vector_store_client=self.vector_store,
-                embedding_provider=self.embedding_provider,
-                collection_name=_resolve_temporal(self.config_manager.get_config()),
-            )
+            config = self.config_manager.get_config()
 
             # Convert time_range string to tuple (same logic as cli.py:4819-4840)
             if time_range == "all":
@@ -486,9 +456,13 @@ class CIDXDaemonService(Service):
                     }
                 time_range_tuple = (parts[0].strip(), parts[1].strip())
 
-                # Validate date format using temporal_search_service
+                # Validate date format
+                from code_indexer.services.temporal.temporal_search_service import (
+                    parse_date_range,
+                )
+
                 try:
-                    temporal_search_service._validate_date_range(time_range)
+                    parse_date_range(time_range)
                 except ValueError as e:
                     return {
                         "error": f"Invalid date format: {e}",
@@ -519,21 +493,48 @@ class CIDXDaemonService(Service):
                     "results": [],
                 }
 
-            # Query using cached temporal index
-            results = temporal_search_service.query_temporal(
-                query=query,
-                time_range=time_range_tuple,
-                limit=limit,
-                language=languages,  # Parameter name is 'language' not 'languages'
-                exclude_language=exclude_languages,  # Parameter name is 'exclude_language' not 'exclude_languages'
-                path_filter=path_filter,
-                exclude_path=exclude_path,
-                min_score=min_score,
-                chunk_type=chunk_type,
+            # Get vector_store service (reuse from cache if available).
+            if not hasattr(self, "vector_store") or self.vector_store is None:
+                from code_indexer.backends.backend_factory import BackendFactory
+
+                backend = BackendFactory.create(config, project_root)
+                self.vector_store = backend.get_vector_store_client()
+
+            from code_indexer.services.temporal.temporal_fusion_dispatch import (
+                execute_temporal_query_with_fusion,
             )
+
+            index_dir = project_root / ".code-indexer" / "index"
+
+            try:
+                results = execute_temporal_query_with_fusion(
+                    config=config,
+                    index_path=index_dir,
+                    vector_store=self.vector_store,
+                    query_text=query,
+                    limit=limit,
+                    time_range=time_range_tuple,
+                    file_path_filter=",".join(path_filter) if path_filter else None,
+                    exclude_path=",".join(exclude_path) if exclude_path else None,
+                    language=languages[0] if languages else None,
+                    exclude_language=(
+                        exclude_languages[0] if exclude_languages else None
+                    ),
+                    chunk_type=chunk_type,
+                    temporal_embedder=temporal_embedder,
+                )
+            except ValueError as e:
+                return {"error": str(e), "results": []}
 
             # Update cache access tracking
             self.cache_entry.update_access()
+
+            # execute_temporal_query_with_fusion() returns an empty result set
+            # with a typed `warning` when no temporal collections exist for
+            # the resolved embedder -- surface it as `error` for backward
+            # compatibility with the CLI's `if "error" in result:` contract.
+            if not results.results and results.warning:
+                return {"error": results.warning, "results": []}
 
             # Format results for daemon response
             return self._format_temporal_results(results)

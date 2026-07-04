@@ -1306,6 +1306,7 @@ def _query_temporal_via_daemon(
     accuracy: str = "balanced",
     chunk_type: Optional[str] = None,
     quiet: bool = False,
+    temporal_embedder: Optional[str] = None,
 ) -> int:
     """Delegate temporal query to daemon with crash recovery.
 
@@ -1326,6 +1327,9 @@ def _query_temporal_via_daemon(
         accuracy: Accuracy mode (fast/balanced/high)
         chunk_type: Filter by chunk type ("commit_message" or "commit_diff")
         quiet: Suppress non-essential output
+        temporal_embedder: Optional explicit temporal embedder override
+            (Bug #1302); defaults to config.temporal.active_embedder on the
+            daemon side when omitted.
 
     Returns:
         Exit code (0 = success)
@@ -1359,6 +1363,7 @@ def _query_temporal_via_daemon(
                 min_score=min_score or 0.0,
                 accuracy=accuracy,
                 chunk_type=chunk_type,
+                temporal_embedder=temporal_embedder,
             )
 
             # Check for errors

@@ -5301,6 +5301,7 @@ def query(
                             accuracy=accuracy,
                             chunk_type=chunk_type,
                             quiet=quiet,
+                            temporal_embedder=temporal_embedder,
                         )
                         sys.exit(exit_code)
                     else:
