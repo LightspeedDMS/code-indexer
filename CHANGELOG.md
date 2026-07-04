@@ -5,9 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [11.18.2] - 2026-07-03
 
 ### Fixed
+
+- **Daemon-mode temporal query crashed with a 100% `AssertionError` (#1300, epic #1289).** `TemporalDaemonService.exposed_query_temporal` asserted `config_manager is not None` before the lazy-init that creates it had run, so every daemon-mode temporal query failed. The lazy-init (`ConfigManager.create_with_backtrack`) is now hoisted above the first use and the assert.
 
 - **Temporal query params `at_commit`, `show_evolution`, `evolution_limit` were silent no-ops on the per-commit temporal index (#1301, epic #1289).** `at_commit` was advertised on REST/MCP but never applied and never validated -- a bogus commit hash was silently accepted and returned the full unfiltered result set. Now implemented as point-in-time scoping: the ref/hash is resolved via git to a commit + UNIX timestamp (`resolve_commit_timestamp`), which becomes an upper bound on `commit_timestamp` -- the same mechanism `time_range`'s upper bound already uses. An unresolvable ref/hash now returns a typed HTTP 400 error instead of silently succeeding.
 
