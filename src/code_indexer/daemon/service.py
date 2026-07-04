@@ -409,6 +409,15 @@ class CIDXDaemonService(Service):
             from code_indexer.services.temporal.temporal_collection_naming import (
                 resolve_temporal_collection_from_config as _resolve_temporal,
             )
+            from code_indexer.config import ConfigManager
+
+            # Bug #1300: lazy-init config_manager BEFORE first use below. This
+            # block used to live after the assert/get_config() call (see the
+            # vector_store/embedding_provider lazy-init further down), so
+            # self.config_manager (None since __init__) was never populated
+            # in time and every daemon temporal query crashed unconditionally.
+            if not hasattr(self, "config_manager") or self.config_manager is None:
+                self.config_manager = ConfigManager.create_with_backtrack(project_root)
 
             assert self.config_manager is not None
             _temporal_coll = _resolve_temporal(self.config_manager.get_config())
@@ -439,14 +448,11 @@ class CIDXDaemonService(Service):
             from code_indexer.services.temporal.temporal_search_service import (
                 TemporalSearchService,
             )
-            from code_indexer.config import ConfigManager
             from code_indexer.backends.backend_factory import BackendFactory
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
 
-            # Get config and services (reuse from cache if available)
-            if not hasattr(self, "config_manager") or self.config_manager is None:
-                self.config_manager = ConfigManager.create_with_backtrack(project_root)
-
+            # Get vector_store/embedding_provider services (reuse from cache if
+            # available). config_manager is already lazily initialized above.
             if not hasattr(self, "vector_store") or self.vector_store is None:
                 config = self.config_manager.get_config()
                 backend = BackendFactory.create(config, project_root)

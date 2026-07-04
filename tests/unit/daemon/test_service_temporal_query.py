@@ -31,9 +31,16 @@ class TestExposedQueryTemporal(TestCase):
         self.project_path = Path(self.temp_dir) / "test_project"
         self.project_path.mkdir(parents=True, exist_ok=True)
 
-        # Create temporal collection structure
+        # Create temporal collection structure. Provider-aware name matching
+        # the mock_config (embedding_provider="voyage-ai", voyage_ai.model=
+        # "voyage-code-3") used by every test in this file — the real
+        # resolve_temporal_collection_from_config() never resolves to the
+        # bare legacy "code-indexer-temporal" name.
         self.temporal_collection_path = (
-            self.project_path / ".code-indexer" / "index" / "code-indexer-temporal"
+            self.project_path
+            / ".code-indexer"
+            / "index"
+            / "code-indexer-temporal-voyage_code_3"
         )
         self.temporal_collection_path.mkdir(parents=True, exist_ok=True)
 
@@ -78,6 +85,9 @@ class TestExposedQueryTemporal(TestCase):
 
         # Mock ConfigManager
         mock_config = MagicMock()
+        mock_config.embedding_provider = "voyage-ai"
+        mock_config.voyage_ai.model = "voyage-code-3"
+        mock_config.get_config.return_value = mock_config
         mock_config_manager.create_with_backtrack.return_value = mock_config
 
         # Mock backend factory
@@ -145,6 +155,9 @@ class TestExposedQueryTemporal(TestCase):
 
         # Mock ConfigManager
         mock_config = MagicMock()
+        mock_config.embedding_provider = "voyage-ai"
+        mock_config.voyage_ai.model = "voyage-code-3"
+        mock_config.get_config.return_value = mock_config
         mock_config_manager.create_with_backtrack.return_value = mock_config
 
         # Mock backend factory
@@ -201,6 +214,9 @@ class TestExposedQueryTemporal(TestCase):
 
         # Mock ConfigManager
         mock_config = MagicMock()
+        mock_config.embedding_provider = "voyage-ai"
+        mock_config.voyage_ai.model = "voyage-code-3"
+        mock_config.get_config.return_value = mock_config
         mock_config_manager.create_with_backtrack.return_value = mock_config
 
         # Mock backend factory
@@ -286,6 +302,9 @@ class TestExposedQueryTemporal(TestCase):
 
         # Mock ConfigManager
         mock_config = MagicMock()
+        mock_config.embedding_provider = "voyage-ai"
+        mock_config.voyage_ai.model = "voyage-code-3"
+        mock_config.get_config.return_value = mock_config
         mock_config_manager.create_with_backtrack.return_value = mock_config
 
         # Mock backend factory
@@ -335,3 +354,86 @@ class TestExposedQueryTemporal(TestCase):
             # Verify invalidate_temporal and load_temporal_indexes were called
             mock_cache_entry.invalidate_temporal.assert_called_once()
             mock_cache_entry.load_temporal_indexes.assert_called()
+
+    @patch(
+        "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+    )
+    @patch("code_indexer.config.ConfigManager")
+    @patch("code_indexer.backends.backend_factory.BackendFactory")
+    @patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory")
+    def test_exposed_query_temporal_lazily_initializes_config_manager_before_first_use(
+        self,
+        mock_embedding_factory,
+        mock_backend_factory,
+        mock_config_manager,
+        mock_temporal_search,
+    ):
+        """Bug #1300: exposed_query_temporal() must lazily init config_manager
+        BEFORE it is first used (assert + get_config()), not after.
+
+        Reproduces the real post-__init__ state where self.config_manager is
+        None (set in CIDXDaemonService.__init__ line 88) and no other exposed
+        method has run yet to populate it. Before the fix, this call raised
+        AssertionError at service.py:413 unconditionally.
+        """
+        service = CIDXDaemonService()
+
+        # Real post-__init__ state: config_manager has never been set.
+        assert service.config_manager is None
+
+        # Create collection metadata so the temporal path proceeds
+        metadata = {"hnsw_index": {"index_rebuild_uuid": "uuid-123"}}
+        metadata_file = self.temporal_collection_path / "collection_meta.json"
+        metadata_file.write_text(json.dumps(metadata))
+
+        # Mock ConfigManager.create_with_backtrack — the lazy-init call
+        mock_config = MagicMock()
+        mock_config.embedding_provider = "voyage-ai"
+        mock_config.voyage_ai.model = "voyage-code-3"
+        mock_config.get_config.return_value = mock_config
+        mock_config_manager.create_with_backtrack.return_value = mock_config
+
+        # Mock backend factory
+        mock_vector_store = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.get_vector_store_client.return_value = mock_vector_store
+        mock_backend_factory.create.return_value = mock_backend
+
+        # Mock embedding provider
+        mock_embedding_provider = MagicMock()
+        mock_embedding_factory.create.return_value = mock_embedding_provider
+
+        # Mock TemporalSearchService
+        mock_search_service = MagicMock()
+        mock_search_result = MagicMock()
+        mock_search_result.results = []
+        mock_search_result.query = "test"
+        mock_search_result.filter_type = None
+        mock_search_result.filter_value = None
+        mock_search_result.total_found = 0
+        mock_search_result.performance = {}
+        mock_search_result.warning = None
+        mock_search_service.query_temporal.return_value = mock_search_result
+        mock_temporal_search.return_value = mock_search_service
+
+        mock_cache_entry = MagicMock()
+        mock_cache_entry.project_path = self.project_path
+        mock_cache_entry.temporal_hnsw_index = None
+        mock_cache_entry.is_temporal_stale_after_rebuild.return_value = False
+
+        with patch.object(service, "_ensure_cache_loaded"):
+            service.cache_entry = mock_cache_entry
+
+            # Must NOT raise AssertionError (or AttributeError) — the whole
+            # point of Bug #1300 is that config_manager is None here.
+            result = service.exposed_query_temporal(
+                project_path=str(self.project_path),
+                query="test query",
+                time_range="last-7-days",
+                limit=10,
+            )
+
+        # Lazy init must have run BEFORE first use, populating config_manager
+        mock_config_manager.create_with_backtrack.assert_called_once()
+        assert service.config_manager is mock_config
+        assert "error" not in result
