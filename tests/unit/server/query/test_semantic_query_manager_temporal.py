@@ -16,6 +16,10 @@ import pytest
 from src.code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
 )
+from code_indexer.services.temporal.temporal_search_service import (
+    TemporalSearchResult,
+    TemporalSearchResults,
+)
 
 
 @pytest.fixture
@@ -122,7 +126,29 @@ class TestTemporalServiceIntegration:
     def test_uses_temporal_service_when_temporal_params_present(
         self, semantic_query_manager, activated_repo_manager_mock
     ):
-        """Acceptance Criterion 8: Uses internal service calls to TemporalSearchService."""
+        """Acceptance Criterion 8: Uses internal service calls (NOT subprocess).
+
+        Bug #1304: production now routes temporal queries through
+        execute_temporal_query_with_fusion() (temporal_fusion_dispatch.py,
+        Story #634/#1291's fusion-dispatch layer) instead of
+        semantic_query_manager.py directly instantiating TemporalSearchService.
+        Patching TemporalSearchService is therefore a dead no-op -- the real
+        (unmocked) fusion-dispatch call scans the empty temp temporal/ marker
+        dir, finds zero shards, and returns an empty "no temporal indexes"
+        warning result. This fix patches the actual current call site,
+        preserving the test's original intent: verify an internal service
+        call is used, not a subprocess.
+
+        The patch target uses the "src."-prefixed module path (matching this
+        file's own "from src.code_indexer...SemanticQueryManager" import)
+        because semantic_query_manager.py's internal relative import
+        (`from ...services.temporal.temporal_fusion_dispatch import ...`)
+        resolves relative to however ITS module was loaded -- under "src."
+        here -- landing on a distinct sys.modules entry from the bare
+        "code_indexer.services.temporal.temporal_fusion_dispatch". Patching
+        the bare path was proven to have zero effect (the real, unmocked
+        "src."-prefixed function still logged its own warning).
+        """
         # Create temporary repo with temporal index marker
         repo_path = Path(
             activated_repo_manager_mock.get_activated_repo_path("testuser", "my-repo")
@@ -138,25 +164,23 @@ class TestTemporalServiceIntegration:
             ),
             patch("src.code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+                ".execute_temporal_query_with_fusion"
+            ) as mock_execute_fusion,
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
                 ".get_configured_providers",
                 return_value=["voyage-ai"],
             ),
         ):
-            # Mock temporal service
-            mock_temporal_service = Mock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service.query_temporal.return_value = Mock(
+            mock_execute_fusion.return_value = TemporalSearchResults(
                 results=[],
                 query="authentication",
                 filter_type="time_range",
                 filter_value="2023-01-01..2024-01-01",
                 total_found=0,
+                warning=None,
             )
-            MockTemporalService.return_value = mock_temporal_service
 
             semantic_query_manager.query_user_repositories(
                 username="testuser",
@@ -164,9 +188,8 @@ class TestTemporalServiceIntegration:
                 time_range="2023-01-01..2024-01-01",
             )
 
-            # Verify TemporalSearchService was used (NOT subprocess)
-            MockTemporalService.assert_called()
-            mock_temporal_service.query_temporal.assert_called()
+            # Verify the internal fusion-dispatch service call was used (NOT subprocess)
+            mock_execute_fusion.assert_called()
 
     def test_graceful_fallback_when_temporal_index_missing(
         self, semantic_query_manager, activated_repo_manager_mock
@@ -204,7 +227,26 @@ class TestTemporalMetadata:
     def test_temporal_context_in_results(
         self, semantic_query_manager, activated_repo_manager_mock
     ):
-        """Acceptance Criterion 7: Response includes temporal metadata."""
+        """Acceptance Criterion 7: Response includes temporal metadata.
+
+        Bug #1304: two fixes bundled --
+        1. Patch target corrected to the "src."-prefixed
+           execute_temporal_query_with_fusion (see
+           test_uses_temporal_service_when_temporal_params_present above for
+           the full explanation of why the bare-path / TemporalSearchService
+           patch is a dead no-op).
+        2. temporal_context shape updated to match CURRENT production output.
+           semantic_query_manager.py's _execute_temporal_query (lines
+           2333-2344) builds temporal_context from commit_hash, commit_date,
+           commit_message, author_name, commit_timestamp, and diff_type --
+           NOT the old first_seen/last_seen/commit_count/commits "evolution
+           timeline" shape this test previously asserted. That shape was
+           retired by Bug #1301 (those fields/params were never implemented
+           production behavior and are permanent no-ops on the per-commit
+           temporal index; QueryResult's docstring is stale on this point
+           too, a separate pre-existing doc-drift issue out of this bug's
+           scope).
+        """
         repo_path = Path(
             activated_repo_manager_mock.get_activated_repo_path("testuser", "my-repo")
         )
@@ -219,49 +261,49 @@ class TestTemporalMetadata:
             ),
             patch("src.code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+                ".execute_temporal_query_with_fusion"
+            ) as mock_execute_fusion,
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
                 ".get_configured_providers",
                 return_value=["voyage-ai"],
             ),
         ):
-            # Mock temporal result with full context
-            mock_temporal_result = Mock(
+            # Real temporal result with the CURRENT per-commit diff-based
+            # metadata/temporal_context shape (real dataclass, not a Mock,
+            # per project mocking-hierarchy preference).
+            temporal_result = TemporalSearchResult(
                 file_path="auth.py",
                 chunk_index=0,
                 content="def authenticate():\n    pass",
                 score=0.9,
                 metadata={
-                    "language": "python",
                     "commit_hash": "abc123",
+                    "commit_date": "2023-06-15",
+                    "author_name": "dev",
+                    "author_email": "dev@example.com",
+                    "commit_message": "Add authentication",
+                    "diff_type": "add",
                 },
                 temporal_context={
-                    "first_seen": "2023-06-15",
-                    "last_seen": "2023-12-20",
-                    "commit_count": 5,
-                    "commits": [
-                        {
-                            "hash": "abc123",
-                            "date": "2023-06-15",
-                            "author": "dev@example.com",
-                            "message": "Add authentication",
-                        }
-                    ],
+                    "commit_hash": "abc123",
+                    "commit_date": "2023-06-15",
+                    "commit_message": "Add authentication",
+                    "author_name": "dev",
+                    "commit_timestamp": 1686787200,
+                    "diff_type": "add",
                 },
             )
 
-            mock_temporal_service = Mock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service.query_temporal.return_value = Mock(
-                results=[mock_temporal_result],
+            mock_execute_fusion.return_value = TemporalSearchResults(
+                results=[temporal_result],
                 query="authentication",
                 filter_type="time_range",
                 filter_value="2023-01-01..2024-01-01",
                 total_found=1,
+                warning=None,
             )
-            MockTemporalService.return_value = mock_temporal_service
 
             result = semantic_query_manager.query_user_repositories(
                 username="testuser",
@@ -269,14 +311,18 @@ class TestTemporalMetadata:
                 time_range="2023-01-01..2024-01-01",
             )
 
-            # Verify temporal context present
+            # Verify temporal context present with the current per-commit
+            # diff-based shape
             assert len(result["results"]) > 0
             result_item = result["results"][0]
             assert "temporal_context" in result_item
-            assert "first_seen" in result_item["temporal_context"]
-            assert "last_seen" in result_item["temporal_context"]
-            assert "commit_count" in result_item["temporal_context"]
-            assert "commits" in result_item["temporal_context"]
+            assert result_item["temporal_context"]["commit_hash"] == "abc123"
+            assert result_item["temporal_context"]["commit_date"] == "2023-06-15"
+            assert (
+                result_item["temporal_context"]["commit_message"]
+                == "Add authentication"
+            )
+            assert result_item["temporal_context"]["author_name"] == "dev"
 
 
 @pytest.mark.e2e
