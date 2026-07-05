@@ -7,13 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.19.0] - 2026-07-05
+
+### Added
+
+- **Durable query-embedding decision event log `search_embed_event` (#1293, epic #1288).** One row per NEEDED embed on every live path (direct, coalesced owner/joiner sharing one `live_batch_id`, temporal), on SQLite (solo) and PostgreSQL (cluster). Replaces the restart-volatile in-memory counter that overcounted under coalescing.
+- **Windowed, cluster-aggregated cache-metrics dashboard (#1294, epic #1288).** Every cache card is re-sourced from `search_embed_event` via a fail-open `WindowedCacheMetrics` aggregation with a time-window selector, so the dashboard reconciles with the analytics export instead of a per-node counter that reset on restart.
+- **`count_transport_calls()` — real transport HTTP-call count (#1305).** Additive alongside the unchanged `provider_embed_calls` (successful NEEDED embeds); it additionally counts shadow-validation, failover-attempt, and bypass wire calls. Documented residual: an all-shadow-hit coalesced batch is not additively countable.
+
 ### Changed
 
+- **Removed the `config.json` transition copies of `workers`/`log_level`/`host`/`port` (#1196, epic #1194).** These launch settings now resolve solely from shared DB / `launch.json` / `applied_launch.json`; DEPLOY preserves the live systemd ExecStart and never applies a saved-but-unconfirmed launch change.
 - **BREAKING: `cidx.cache.embedding.*` OTEL instruments re-sourced from an in-memory tracker to durable, cluster-aggregated ObservableGauge callbacks (#1295, epic #1288 final).** `cidx.cache.embedding.hits` and `.misses` were monotonic Counters (incremented once per operation, restart-volatile, per-node only); they are now windowed `ObservableGauge` instruments re-computed from the durable `search_embed_event` table (Story #1293/#1294) on every OTEL export tick. Any downstream OTEL consumer that took a `rate()`/`increase()` derivative over the old Counters must instead read the Gauge value directly. `cidx.cache.embedding.shadow_cosine` similarly moved from a push Histogram to windowed percentile/histogram Gauges (`shadow_cosine_p50`/`_p05`/`_min`/`_histogram`). `cidx.cache.embedding.total_entries` is UNCHANGED (still a cheap cache-state COUNT, not event-sourced).
+
+### Fixed
+
+- **Temporal watch mode called an undefined `TemporalIndexer.index_commits_list` (`AttributeError`) — rewired both call sites to the real per-commit `index_commits()` entry point (#1296).**
+- **Fixed pre-existing daemon/diagnostics test debt hidden from the CI gate by `@pytest.mark.slow`/marker filters, and in the process restored a production prompt-template resource (`diagnostic_troubleshooting.txt`) that an earlier "dead code removal" wrongly deleted while its live consumer remained (#1304).**
+- **id-index rebuild no longer logs benign missing-`id` WARNINGs for the temporal sidecar files (`temporal_structure.json`/`temporal_progress.json`/`temporal_meta.json`); a genuinely malformed vector file still warns (#1297).**
 
 ### Removed
 
 - **The in-memory `QueryEmbeddingCacheMetrics` tracker and `CoalescerRegistry.metrics()` deleted entirely (#1295, epic #1288 final).** Both were restart-volatile, per-node-only tallies now fully superseded by the durable `WindowedCacheMetrics` aggregation. The `GET /api/admin/coalescer-metrics` REST route was removed (redundant with the windowed dashboard, which already exposes cluster-aggregated `texts_coalesced`/`batches_dispatched`/`dedup_savings`/`provider_embed_calls`). `cidx.cache.embedding.audit_top1_match` was removed (no `search_embed_event` schema column for top1-match). The deep-fidelity audit path (`embedding_cache_audit.py`) now stamps `audit_sampled`/`audit_cosine` directly onto the durable event row via the Story #1293 keyed `update_audit_by_key` UPDATE, wiring a previously-orphaned code path.
+- **Deleted the orphaned diagnostics "actionable feedback" feature (`DiagnosticsService.get_actionable_feedback()`, `_load_prompt_template()`, `_execute_claude_prompt()`, and the `server/feedback/` package) — it had zero callers and was never wired to any route/UI (#1307).**
 
 ## [11.18.3] - 2026-07-04
 
