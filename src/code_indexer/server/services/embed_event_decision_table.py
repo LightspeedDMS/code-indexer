@@ -24,6 +24,43 @@ Two things live here:
       coalescer-owner/joiner rows are wired in S1b directly on the returned
       EmbeddingCacheMetadata's role/outcome fields, bypassing this classifier
       entirely).
+
+Bug #1305 (semantics reconciliation, no table/classifier change here): Epic
+#1288's original phrasing "provider_embed_calls == real transport HTTP-call
+count" only holds when every row is a genuine miss/hit -- it diverges for two
+rows in this very table (both Path-B, decide_role_and_outcome()-classified):
+
+  - ``shadow_hit`` (outcome=shadow_hit, role=warm_hit, live_batch_id=None):
+    shadow cache mode ALWAYS embeds live for comparison before ever checking
+    the cache (governed_call._serve_with_cache), so this row's real HTTP call
+    happened even though it is excluded from the "needed embed" count.
+  - ``failover_primary_fail`` (outcome=error, role=direct, live_batch_id=
+    None): the failed attempt hit the wire before raising.
+
+``count_provider_embed_calls()`` (search_embed_event_writer.py) is therefore
+the count of successful NEEDED embeds -- UNCHANGED by Bug #1305, since the
+#1294 windowed dashboard depends on this exact definition. The separate,
+additive ``count_transport_calls()`` on the same module is the real
+transport HTTP-call count in all modes EXCEPT one residual case (also adds
+the ``bypass`` row, which likewise always calls the provider live on
+Path B).
+
+**Residual NOT covered by this table's ``shadow_hit`` row (Path A only):**
+a coalesced dispatch-batch member that resolves as a shadow HIT is NEVER
+classified via THIS module -- embedding_coalescer.py's dispatch loop calls
+``_make_hit_meta("shadow", ...)`` with no outcome/role override, so it is
+stored at that helper's DEFAULTS: outcome='hit' (NOT 'shadow_hit'),
+role='warm_hit', cache_mode='shadow', live_batch_id=None. It is
+indistinguishable from a genuine on-mode warm hit except by cache_mode, and
+a per-row count on cache_mode='shadow' would OVERCOUNT a batch with more
+than one shadow-hit member (the whole batch made only ONE real HTTP call).
+This is REACHABLE IN NORMAL WARM-SHADOW SERVER OPERATION (coalescer-on +
+shadow-default + warm cache is the steady state), not a rare edge case, and
+is an explicitly out-of-scope, documented limitation of Bug #1305 -- see
+search_embed_event_writer.count_transport_calls()'s docstring and
+embedding_coalescer.py's dispatch-loop comment (~:1115-1131) for the full
+rationale. Neither counter requires any change to DECISION_TABLE's role/
+outcome/live_batch_id classification.
 """
 
 from typing import Dict, Optional, Tuple

@@ -211,6 +211,18 @@ class SearchEmbedEventSqliteBackend:
             COUNT(DISTINCT live_batch_id)
             + COUNT(*) WHERE role='direct' AND outcome IN ('miss','shadow_miss')
 
+        Bug #1305: this is the count of successful NEEDED embeds (one row per
+        cache-miss embedding that was actually required) -- NOT the raw
+        transport HTTP-call count. It UNDERCOUNTS real wire calls in shadow
+        cache mode (a shadow_hit still embeds live for comparison but is
+        excluded here) and on a failed failover primary attempt (outcome=
+        'error' hit the wire but is excluded here). That is intentional and
+        UNCHANGED by Bug #1305 -- the #1294 windowed dashboard and this
+        "needed embed" metric depend on this exact definition. Use
+        count_transport_calls() for the true real-transport-call count in
+        (almost) all modes -- see that method's docstring for the one
+        documented residual it does NOT close.
+
         Fail-open: returns 0 on any error.
         """
         try:
@@ -232,6 +244,93 @@ class SearchEmbedEventSqliteBackend:
         except Exception as exc:
             logger.warning(
                 "SearchEmbedEventSqliteBackend: count_provider_embed_calls failed: %s",
+                exc,
+            )
+            return 0
+
+    def count_transport_calls(self) -> int:
+        """Bug #1305: the REAL transport HTTP-call count, in all modes
+        EXCEPT coalesced all-shadow-hit dispatch batches (documented residual
+        below -- NOT a full "all modes, no exceptions" guarantee).
+
+        Additive to (and derived from) count_provider_embed_calls():
+
+            count_provider_embed_calls()
+            + COUNT(*) WHERE role='direct' AND outcome IN ('error', 'bypass')
+            + COUNT(*) WHERE role='warm_hit' AND outcome='shadow_hit'
+
+        The two extra terms cover the decision-table rows that DO make a real
+        outbound provider HTTP call but are excluded from
+        count_provider_embed_calls() because they are not "needed embed"
+        successes:
+
+          - outcome='shadow_hit' (role='warm_hit'): the Path-B (no
+            coalescer) _serve_with_cache shadow branch ALWAYS embeds live for
+            comparison BEFORE checking the cache, even on a genuine cache
+            hit, and is classified via embed_event_decision_table's
+            DECISION_TABLE["shadow_hit"] row -- this term catches exactly
+            that row.
+          - outcome='error' (role='direct'): a failed failover primary
+            attempt (emit_embed_error_event) hit the wire before raising.
+          - outcome='bypass' (role='direct'): Path B's
+            no_embedding_cache_shortcut=True skips the cache READ but still
+            calls the provider live every time.
+
+        Does NOT reclassify any decision-table row's role/outcome/
+        live_batch_id -- purely additive SQL over the existing columns.
+
+        DOCUMENTED RESIDUAL (Path A / coalesced batches ONLY, explicitly out
+        of scope for Bug #1305 -- NOT closable additively): a coalesced
+        dispatch batch whose members are ALL shadow-hit is stored by
+        embedding_coalescer.py's dispatch loop via ``_make_hit_meta("shadow",
+        ...)`` with NO outcome/role override, so every such row lands at
+        that helper's DEFAULTS -- outcome='hit' (NOT 'shadow_hit'),
+        role='warm_hit', cache_mode='shadow', live_batch_id=None. This is
+        NOT the same row the "shadow_hit" term above catches (that row is
+        Path-B-only, outcome='shadow_hit'). A coalesced shadow-hit row is
+        indistinguishable from a genuine on-mode warm hit by (role, outcome)
+        alone -- only cache_mode='shadow' differs -- and even keying on
+        cache_mode would OVERCOUNT: a batch with N shadow-hit members made
+        exactly ONE real HTTP call, not N. So this batch's one real call is
+        invisible to BOTH count_provider_embed_calls() and
+        count_transport_calls(). This is REACHABLE IN NORMAL WARM-SHADOW
+        SERVER OPERATION (coalescer-on + shadow-default + warm cache is the
+        server's steady state) -- NOT a rare edge case. Closing it would
+        require attaching a live_batch_id to these rows, which would perturb
+        count_provider_embed_calls()'s DISTINCT-count semantics (the #1294
+        dashboard depends on that definition staying fixed), so it is left
+        as a documented, assert-by-design limitation rather than an
+        additive SQL fix. See
+        tests/unit/server/storage/test_search_embed_event_backends_1293.py::
+        TestCountTransportCalls::
+        test_count_transport_calls_known_gap_coalesced_all_shadow_hit_batch_not_counted
+        for the pinning test.
+
+        Fail-open: returns 0 on any error.
+        """
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT
+                        (SELECT COUNT(DISTINCT live_batch_id) FROM search_embed_event
+                            WHERE live_batch_id IS NOT NULL)
+                        +
+                        (SELECT COUNT(*) FROM search_embed_event
+                            WHERE role = 'direct'
+                                AND outcome IN ('miss', 'shadow_miss', 'error', 'bypass'))
+                        +
+                        (SELECT COUNT(*) FROM search_embed_event
+                            WHERE role = 'warm_hit' AND outcome = 'shadow_hit')
+                    """
+                ).fetchone()
+                return int(row[0] or 0)
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "SearchEmbedEventSqliteBackend: count_transport_calls failed: %s",
                 exc,
             )
             return 0
@@ -445,6 +544,10 @@ class SearchEmbedEventPostgresBackend:
             return [], 0
 
     def count_provider_embed_calls(self) -> int:
+        """See SearchEmbedEventSqliteBackend.count_provider_embed_calls docstring
+        for the full Bug #1305 semantics note (this is the "needed embed"
+        count, NOT the raw transport-call count; use count_transport_calls()
+        for that)."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
@@ -461,6 +564,38 @@ class SearchEmbedEventPostgresBackend:
         except Exception as exc:
             logger.warning(
                 "SearchEmbedEventPostgresBackend: count_provider_embed_calls failed: %s",
+                exc,
+            )
+            return 0
+
+    def count_transport_calls(self) -> int:
+        """See SearchEmbedEventSqliteBackend.count_transport_calls docstring
+        for the full Bug #1305 formula and rationale (real transport
+        HTTP-call count in all modes EXCEPT coalesced all-shadow-hit
+        dispatch batches -- a documented, out-of-scope residual reachable
+        in normal warm-shadow server steady state, NOT a rare edge case;
+        see that docstring for why it cannot be closed additively).
+        Fail-open: returns 0 on any error."""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        (SELECT COUNT(DISTINCT live_batch_id) FROM search_embed_event
+                            WHERE live_batch_id IS NOT NULL)
+                        +
+                        (SELECT COUNT(*) FROM search_embed_event
+                            WHERE role = 'direct'
+                                AND outcome IN ('miss', 'shadow_miss', 'error', 'bypass'))
+                        +
+                        (SELECT COUNT(*) FROM search_embed_event
+                            WHERE role = 'warm_hit' AND outcome = 'shadow_hit')
+                    """
+                ).fetchone()
+                return int(row[0] or 0)
+        except Exception as exc:
+            logger.warning(
+                "SearchEmbedEventPostgresBackend: count_transport_calls failed: %s",
                 exc,
             )
             return 0

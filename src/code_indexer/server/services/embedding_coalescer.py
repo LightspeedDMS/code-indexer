@@ -81,8 +81,23 @@ def _make_hit_meta(
 
     Story #1293 S1b [A3]: role/outcome/live_batch_id default to the
     "warm_hit" decision-table row (a genuine cache hit, no coalesced-batch
-    HTTP call) -- callers override them for the "shadow_hit" and
-    "coalescer_joiner"-adjacent (dispatched-batch shadow hit) rows.
+    HTTP call) -- callers override live_batch_id for the
+    "coalescer_joiner"-adjacent case.
+
+    Bug #1305 correction: the dispatched-batch shadow-hit caller (embedding
+    dispatch loop, ~:1120-1131) does NOT override outcome/role here -- it
+    calls this function with ONLY cache_mode="shadow" and no outcome= /
+    role= kwargs, so a coalesced (Path A) shadow-hit member is stored as
+    outcome='hit' (the DEFAULT, NOT 'shadow_hit'), role='warm_hit',
+    cache_mode='shadow', live_batch_id=None. This is distinguishable from a
+    genuine on-mode warm hit ONLY by cache_mode='shadow' -- it is NOT the
+    DECISION_TABLE "shadow_hit" row (outcome='shadow_hit'), which is
+    produced exclusively by the Path-B decide_role_and_outcome() classifier
+    in embed_event_decision_table.py. See that module's Bug #1305 note and
+    search_embed_event_writer.count_transport_calls()'s docstring for why
+    this residual real-HTTP-call case is NOT additively countable (a
+    per-row count on cache_mode='shadow' would overcount a multi-member
+    all-shadow-hit batch, since the whole batch made only ONE real call).
 
     Story #1295 (Epic #1288 final): ``embed_key`` -- the resolved cache key
     for this request -- was previously never threaded onto the returned
@@ -1114,9 +1129,26 @@ class EmbeddingCoalescer:
                 _embed_key_for_entry = None if k.startswith(_NONE_KEY_PREFIX) else k
                 # Story #1293 S1b [A3]: every dispatched-batch member shares
                 # this batch's ONE live_batch_id (one sealed batch == one HTTP
-                # call) EXCEPT a shadow_hit, which is classified warm_hit/NULL
-                # (matches the Path-B _serve_with_cache shadow-hit row exactly
-                # -- decision-table rule, not re-decided here).
+                # call) EXCEPT a shadow-hit member, which _make_hit_meta
+                # stores at its DEFAULTS: outcome='hit' (NOT 'shadow_hit'),
+                # role='warm_hit', live_batch_id=None, cache_mode='shadow'.
+                #
+                # Bug #1305 correction: this is NOT the same row as the Path-B
+                # _serve_with_cache shadow-hit classification (outcome=
+                # 'shadow_hit', via embed_event_decision_table.decide_role_
+                # and_outcome) -- a prior comment here wrongly claimed they
+                # "match exactly". They do not: this coalesced-member row is
+                # indistinguishable from a genuine on-mode warm hit except by
+                # cache_mode='shadow'. Consequently a coalesced batch whose
+                # members are ALL shadow-hit makes ONE real provider HTTP call
+                # that is invisible to BOTH count_provider_embed_calls() and
+                # count_transport_calls() (search_embed_event_writer.py) --
+                # this is REACHABLE IN NORMAL WARM-SHADOW SERVER OPERATION
+                # (coalescer-on + shadow-default + warm cache = steady state),
+                # not a rare edge case, and is a documented, out-of-scope
+                # residual of Bug #1305 (closing it would require attaching a
+                # live_batch_id here, which would perturb
+                # count_provider_embed_calls()'s DISTINCT-count semantics).
                 if _is_shadow_hit:
                     e.fut.set_result(
                         (
