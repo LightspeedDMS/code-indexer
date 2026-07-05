@@ -5,11 +5,13 @@ for non-blocking background rebuilds with atomic swaps.
 """
 
 import json
+import logging
 import struct
 import threading
 import time
 from pathlib import Path
 
+import pytest
 
 from code_indexer.storage.id_index_manager import IDIndexManager
 
@@ -198,3 +200,67 @@ class TestIDIndexBackgroundRebuild:
             # Verify structure
             assert id_str.startswith("vec_")
             assert path_str.endswith(".json")
+
+
+class TestIDIndexRebuildTemporalSidecarSkip:
+    """Bug #1297: rebuild_from_vectors must not warn on temporal bookkeeping files.
+
+    Story #1290 introduced per-commit temporal marker/bookkeeping JSON files
+    (temporal_structure.json, temporal_progress.json) that live alongside
+    vector JSON files in a collection dir. These files legitimately lack an
+    'id' field and are correctly skipped by rebuild_from_vectors -- but they
+    were emitting a benign WARNING on every rebuild. A genuinely malformed
+    vector-named file missing its 'id' field must still warn.
+    """
+
+    def test_rebuild_skips_temporal_bookkeeping_files_without_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """Temporal sidecar files are silently skipped; malformed vectors still warn."""
+        # Real vector files (should be indexed, no warning)
+        for i in range(3):
+            vector_file = tmp_path / f"vector_{i}.json"
+            with open(vector_file, "w") as f:
+                json.dump({"id": f"vec_{i}", "vector": [0.1, 0.2]}, f)
+
+        # Temporal bookkeeping/marker sidecar files (Story #1290) -- no 'id'
+        # field by design, must NOT trigger a WARNING.
+        temporal_structure_file = tmp_path / "temporal_structure.json"
+        with open(temporal_structure_file, "w") as f:
+            json.dump({"structure_version": 2, "layout": "per_commit"}, f)
+
+        temporal_progress_file = tmp_path / "temporal_progress.json"
+        with open(temporal_progress_file, "w") as f:
+            json.dump({"completed_commits": ["abc123"]}, f)
+
+        # A genuinely malformed vector file (vector-named, missing 'id') --
+        # this is a REAL error and must still warn (anti-silent-failure).
+        malformed_vector_file = tmp_path / "vector_bad.json"
+        with open(malformed_vector_file, "w") as f:
+            json.dump({"vector": [0.1, 0.2]}, f)  # no 'id' field
+
+        manager = IDIndexManager()
+        with caplog.at_level(logging.WARNING):
+            id_index = manager.rebuild_from_vectors(tmp_path)
+
+        # Only the 3 real vectors get indexed; temporal sidecars and the
+        # malformed vector are excluded from the index.
+        assert len(id_index) == 3
+        assert all(f"vec_{i}" in id_index for i in range(3))
+
+        warning_messages = [
+            record.message
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+        ]
+        combined = "\n".join(warning_messages)
+
+        # Temporal sidecar files must NOT appear in any WARNING.
+        assert "temporal_structure.json" not in combined
+        assert "temporal_progress.json" not in combined
+
+        # The malformed vector-named file MUST still be warned about.
+        assert any(
+            "vector_bad.json" in msg and "missing 'id' field" in msg
+            for msg in warning_messages
+        )
