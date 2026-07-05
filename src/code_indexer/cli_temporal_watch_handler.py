@@ -194,7 +194,8 @@ class TemporalWatchHandler(FileSystemEventHandler):
         This method:
         1. Loads completed commits from temporal_progress.json
         2. Filters new commits (O(1) with in-memory set)
-        3. Calls TemporalIndexer.index_commits_list() for new commits
+        3. Calls TemporalIndexer.index_commits() (real per-commit entry
+           point, Bug #1296) which performs its own incremental discovery
         4. Updates progress metadata
         5. Invalidates daemon cache if daemon is running
 
@@ -234,13 +235,26 @@ class TemporalWatchHandler(FileSystemEventHandler):
             try:
                 # Create progress callback
                 def progress_callback(
-                    current: int, total: int, file_path: Path, info: str = ""
+                    current: int,
+                    total: int,
+                    file_path: Path,
+                    info: str = "",
+                    concurrent_files=None,
+                    slot_tracker=None,
+                    item_type: str = "commits",
                 ):
                     progress_manager.update_display(info)
 
-                # Index new commits using TemporalIndexer
-                result = self.temporal_indexer.index_commits_list(
-                    commit_hashes=new_commits,
+                # Bug #1296: TemporalIndexer has no index_commits_list()
+                # method. index_commits() is the real post-#1290 per-commit
+                # entry point -- it performs its OWN incremental commit
+                # discovery (via temporal_meta.json's last-indexed-commit
+                # range plus the shard-aware reconcile_temporal_index), so it
+                # takes no explicit commit_hashes argument. Calling it here
+                # guarantees watch mode uses the identical adapter-driven
+                # per-commit pipeline as a normal `cidx index --temporal` run
+                # (new_commits above is used only to gate/log this call).
+                result = self.temporal_indexer.index_commits(
                     progress_callback=progress_callback,
                 )
 
@@ -402,16 +416,28 @@ class TemporalWatchHandler(FileSystemEventHandler):
         try:
             # Create progress callback
             def progress_callback(
-                current: int, total: int, file_path: Path, info: str = ""
+                current: int,
+                total: int,
+                file_path: Path,
+                info: str = "",
+                concurrent_files=None,
+                slot_tracker=None,
+                item_type: str = "commits",
             ):
                 progress_manager.update_display(info)
 
-            # Index commits using TemporalIndexer
-            # Note: This assumes TemporalIndexer has an index_commits_list method
-            # that accepts commit_hashes and progress_callback
+            # Bug #1296: index_commits_list() does not exist on
+            # TemporalIndexer. index_commits() is the real per-commit entry
+            # point and performs its own incremental discovery, so the
+            # commit_hashes computed by the caller are used only for gating
+            # (whether to bother running at all) and logging here, not
+            # passed into the call.
+            logger.debug(
+                f"Incremental catch-up flagged {len(commit_hashes)} commit(s) "
+                f"for the real TemporalIndexer.index_commits() discovery pass"
+            )
             if self.temporal_indexer:
-                result = self.temporal_indexer.index_commits_list(
-                    commit_hashes=commit_hashes,
+                result = self.temporal_indexer.index_commits(
                     progress_callback=progress_callback,
                 )
 
