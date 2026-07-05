@@ -164,8 +164,13 @@ class TestSaveConfigCluster:
         with open(config_path) as f:
             saved = json.load(f)
         # Bootstrap keys should be in file
-        assert "host" in saved
-        assert "port" in saved
+        assert "server_dir" in saved
+        assert "storage_mode" in saved
+        # Story #1196: host/port are runtime-only now -- the Story #1197 AC6
+        # transition write-path inclusion has been removed, so they must NOT
+        # be written to config.json anymore.
+        assert "host" not in saved
+        assert "port" not in saved
 
 
 class TestSeedRuntimeToPg:
@@ -344,20 +349,22 @@ class TestInitializeRuntimeDb:
         assert "service_display_name" in runtime_dict
         assert runtime_dict["service_display_name"] == original_display_name
 
-        # Assert: config.json stripped to bootstrap + transition-preserved keys.
-        # Story #1197: TRANSITION_PRESERVE_KEYS (workers/log_level/host/port) are
-        # no longer in BOOTSTRAP_KEYS but must survive the strip for one transition
-        # release so old nodes in a rolling upgrade can still read them.
-        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
-
+        # Assert: config.json stripped to bootstrap-only keys.
+        # Story #1196: the Story #1197 TRANSITION_PRESERVE_KEYS allow-list has
+        # been removed (next-release cleanup) -- workers/log_level/host/port
+        # are runtime-only now and no longer survive the strip.
         config_path = os.path.join(tmp_server_dir, "config.json")
         with open(config_path) as f:
             saved = json.load(f)
-        allowed_keys = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
         for key in saved:
-            assert key in allowed_keys, (
+            assert key in BOOTSTRAP_KEYS, (
                 f"Unexpected key '{key}' in config.json after migration "
-                f"(must be in BOOTSTRAP_KEYS or TRANSITION_PRESERVE_KEYS)"
+                f"(must be in BOOTSTRAP_KEYS)"
+            )
+        for launch_key in ("workers", "log_level", "host", "port"):
+            assert launch_key not in saved, (
+                f"Story #1196: '{launch_key}' must NOT survive the strip -- the "
+                "transition allow-list was removed"
             )
 
         # Assert: backup created

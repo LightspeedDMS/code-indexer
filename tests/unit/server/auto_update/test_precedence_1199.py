@@ -1,8 +1,10 @@
 """
 TDD tests for Story #1199 AC4: source precedence chain and ServerConfig defaults.
 
-APPLY:  launch.json → config.json → ServerConfig defaults.
-DEPLOY: applied_launch.json → config.json → defaults (NEVER launch.json).
+Story #1196 (next-release cleanup) removed the config.json rung from BOTH modes:
+APPLY:  launch.json → ServerConfig defaults (no config.json).
+DEPLOY: applied_launch.json → parse/preserve the live ExecStart → defaults
+        (NEVER launch.json).
 
 Behavioral: real temp files, patched subprocess only.  DB-free: no ServerConfigManager.
 """
@@ -116,10 +118,11 @@ class TestAC4Precedence:
         )
         assert result is not None and result.get("port") == 9001
 
-    def test_apply_falls_back_to_config_json_when_launch_absent(
+    def test_apply_falls_through_to_serverconfig_defaults_when_launch_absent(
         self, executor: Any, unit_dir: Path, tmp_path: Path
     ) -> None:
-        """AC4: APPLY uses config.json values when launch.json absent."""
+        """Story #1196: APPLY uses ServerConfig defaults when launch.json absent
+        -- the config.json rung has been removed (next-release cleanup)."""
         (unit_dir / "cidx-server.service").write_text(_MAIN_PY_UNIT)
         launch = tmp_path / "launch.json"  # not created
         applied = tmp_path / "applied_launch.json"  # not created
@@ -138,10 +141,14 @@ class TestAC4Precedence:
         )
 
         assert written is not None
-        assert "--port 7777" in written, (
-            f"config.json port must be used; got: {written!r}"
+        assert "--port 8000" in written, (
+            f"Story #1196: config.json rung removed -- ServerConfig default port "
+            f"8000 must be used, NOT config.json's 7777; got: {written!r}"
         )
-        assert result is not None and result.get("workers") == 3
+        assert result is not None and result.get("workers") == 1, (
+            f"ServerConfig default workers=1 must be used, not config.json's 3. "
+            f"Got: {result}"
+        )
 
     def test_apply_uses_serverconfig_defaults_when_both_absent(
         self, executor: Any, unit_dir: Path, tmp_path: Path

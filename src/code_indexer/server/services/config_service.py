@@ -75,9 +75,13 @@ class ElevationManagerProtocol(Protocol):
 #
 # Story #1197: host, port, workers, log_level are moved to runtime config so
 # they can be shared cluster-wide via the runtime DB row.  They are removed
-# from BOOTSTRAP_KEYS here.  TRANSITION_PRESERVE_KEYS (below) ensures they
-# survive both the first-boot strip and every subsequent save_config() call
-# during the one-release transition window (Story 6 removes both guards).
+# from BOOTSTRAP_KEYS here.  Story #1197 also kept a one-release transition
+# allow-list (TRANSITION_PRESERVE_KEYS) so the four keys survived the
+# first-boot strip and every subsequent save_config() call, giving old nodes
+# in a rolling upgrade a config.json fallback.  Story #1196 (next-release
+# cleanup) has removed that allow-list entirely -- the operator confirmed all
+# cluster nodes are on the new release, so the runtime DB / launch.json /
+# applied_launch.json are now the sole source for these four settings.
 BOOTSTRAP_KEYS = frozenset(
     {
         "server_dir",
@@ -104,24 +108,6 @@ BOOTSTRAP_KEYS = frozenset(
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
-# Story #1197 AC3 / AC6: Transition allow-list for the one-release window.
-#
-# Although host/port/workers/log_level are now runtime keys (removed from
-# BOOTSTRAP_KEYS), old nodes in a rolling-upgrade cluster still read them
-# from config.json.  Two mechanisms keep the copies in config.json this
-# release:
-#   AC3  — _strip_config_file_to_bootstrap() preserves TRANSITION_PRESERVE_KEYS
-#           so the first-boot strip does not delete them.
-#   AC6  — save_config() explicitly writes the four values into config.json
-#           on every save so a normal settings-save does not drop them either.
-#
-# Story 6 (next release) REMOVES both guards: the allow-list is deleted and
-# save_config() stops including the four keys — the file copies disappear once
-# all nodes have been upgraded and the runtime row is the sole source of truth.
-TRANSITION_PRESERVE_KEYS: frozenset = frozenset(
-    {"workers", "log_level", "host", "port"}
-)
-
 CONFIG_KEY_RUNTIME = "runtime"
 UPDATER_WEB_UI = "web-ui"
 UPDATER_SEED = "config-seed"
@@ -2920,23 +2906,20 @@ class ConfigService:
     def _strip_config_file_to_bootstrap(self) -> None:
         """Strip config.json to bootstrap-only keys, backing up original.
 
-        Story #1197 AC3: the effective strip set is
-            (all keys) − BOOTSTRAP_KEYS − TRANSITION_PRESERVE_KEYS
-        so the four launch keys (host/port/workers/log_level) survive in
-        config.json for one transition release even though they are no longer
-        in BOOTSTRAP_KEYS.  Story 6 removes TRANSITION_PRESERVE_KEYS.
+        Story #1196 (next-release cleanup): the Story #1197 AC3 transition
+        allow-list (TRANSITION_PRESERVE_KEYS) has been removed, so the strip
+        set is once again simply (all keys) − BOOTSTRAP_KEYS.  The four launch
+        keys (host/port/workers/log_level) no longer survive this strip -- the
+        runtime DB / launch.json / applied_launch.json are the sole source now
+        that all cluster nodes are confirmed on the new release.
         """
         import shutil
 
         config = self.get_config()
         full_dict = asdict(config)
 
-        # Keys to keep in config.json: bootstrap keys + transition-preserved keys.
-        # AC3: TRANSITION_PRESERVE_KEYS narrows the strip (does not disable it).
-        keys_to_keep = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
-
-        # Check if already stripped (nothing left to strip beyond the keep set)
-        non_kept = [k for k in full_dict if k not in keys_to_keep]
+        # Check if already stripped (nothing left to strip beyond bootstrap keys)
+        non_kept = [k for k in full_dict if k not in BOOTSTRAP_KEYS]
         if not non_kept:
             return
 
@@ -2948,15 +2931,12 @@ class ConfigService:
             shutil.copy2(self.config_manager.config_file_path, str(backup_file))
             logger.info("ConfigService: backed up config.json to %s", backup_file)
 
-        # Write bootstrap keys + transition-preserved keys.
-        kept_dict = {k: v for k, v in full_dict.items() if k in keys_to_keep}
+        # Write bootstrap keys only.
+        kept_dict = {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
         self.config_manager.save_config_dict(kept_dict)
         logger.info(
-            "ConfigService: stripped config.json to %d keys "
-            "(%d bootstrap + %d transition-preserved)",
+            "ConfigService: stripped config.json to %d bootstrap keys",
             len(kept_dict),
-            len(BOOTSTRAP_KEYS & set(kept_dict)),
-            len(TRANSITION_PRESERVE_KEYS & set(kept_dict)),
         )
 
     def _save_runtime_to_sqlite(self, runtime_dict: dict) -> None:
@@ -3065,36 +3045,16 @@ class ConfigService:
         new_config = self.config_manager._dict_to_server_config(full_dict)
         self._config = new_config  # Atomic reference swap
 
-    @staticmethod
-    def _extract_bootstrap_dict_with_transition(config: "ServerConfig") -> dict:
-        """Extract bootstrap dict PLUS TRANSITION_PRESERVE_KEYS for config.json writes.
-
-        Story #1197 AC6 (MAJOR-5): _extract_bootstrap_dict() only includes
-        BOOTSTRAP_KEYS.  Once the four launch keys are removed from BOOTSTRAP_KEYS
-        a plain _extract_bootstrap_dict() write would silently drop them from
-        config.json on every settings-save, breaking old-node fallback reads
-        during rolling upgrades.
-
-        This method adds TRANSITION_PRESERVE_KEYS values so both the PG and
-        SQLite save paths write all four keys into config.json on every save.
-
-        Story 6 (next release) removes this method and reverts both callers to
-        plain _extract_bootstrap_dict() once all nodes are upgraded.
-        """
-        full_dict = asdict(config)
-        keys_to_write = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
-        return {k: v for k, v in full_dict.items() if k in keys_to_write}
-
     def save_config(self, config: ServerConfig) -> None:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.
 
         Priority: PG pool > SQLite > full file (legacy).
 
-        Story #1197 AC6 (MAJOR-5): config.json writes use
-        _extract_bootstrap_dict_with_transition() so the four launch keys
-        (host/port/workers/log_level) are retained in config.json for one
-        transition release even though they are now runtime keys.
-        Story 6 reverts to plain _extract_bootstrap_dict().
+        Story #1196 (next-release cleanup): the Story #1197 AC6 transition
+        write-path inclusion (_extract_bootstrap_dict_with_transition) has been
+        removed -- config.json writes use plain _extract_bootstrap_dict() again,
+        so the four launch keys (host/port/workers/log_level) are no longer
+        written to config.json on a settings-save.
         """
         runtime_dict = self._extract_runtime_dict(config)
 
@@ -3106,11 +3066,11 @@ class ConfigService:
 
         if self._pool is not None:
             self._save_runtime_to_pg(config)
-            file_dict = self._extract_bootstrap_dict_with_transition(config)
+            file_dict = self._extract_bootstrap_dict(config)
             self.config_manager.save_config_dict(file_dict)
         elif self._sqlite_db_path is not None:
             self._save_runtime_to_sqlite(runtime_dict)
-            file_dict = self._extract_bootstrap_dict_with_transition(config)
+            file_dict = self._extract_bootstrap_dict(config)
             self.config_manager.save_config_dict(file_dict)
         else:
             self.config_manager.save_config(config)
