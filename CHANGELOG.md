@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: `cidx.cache.embedding.*` OTEL instruments re-sourced from an in-memory tracker to durable, cluster-aggregated ObservableGauge callbacks (#1295, epic #1288 final).** `cidx.cache.embedding.hits` and `.misses` were monotonic Counters (incremented once per operation, restart-volatile, per-node only); they are now windowed `ObservableGauge` instruments re-computed from the durable `search_embed_event` table (Story #1293/#1294) on every OTEL export tick. Any downstream OTEL consumer that took a `rate()`/`increase()` derivative over the old Counters must instead read the Gauge value directly. `cidx.cache.embedding.shadow_cosine` similarly moved from a push Histogram to windowed percentile/histogram Gauges (`shadow_cosine_p50`/`_p05`/`_min`/`_histogram`). `cidx.cache.embedding.total_entries` is UNCHANGED (still a cheap cache-state COUNT, not event-sourced).
+
+### Removed
+
+- **The in-memory `QueryEmbeddingCacheMetrics` tracker and `CoalescerRegistry.metrics()` deleted entirely (#1295, epic #1288 final).** Both were restart-volatile, per-node-only tallies now fully superseded by the durable `WindowedCacheMetrics` aggregation. The `GET /api/admin/coalescer-metrics` REST route was removed (redundant with the windowed dashboard, which already exposes cluster-aggregated `texts_coalesced`/`batches_dispatched`/`dedup_savings`/`provider_embed_calls`). `cidx.cache.embedding.audit_top1_match` was removed (no `search_embed_event` schema column for top1-match). The deep-fidelity audit path (`embedding_cache_audit.py`) now stamps `audit_sampled`/`audit_cosine` directly onto the durable event row via the Story #1293 keyed `update_audit_by_key` UPDATE, wiring a previously-orphaned code path.
+
 ## [11.18.3] - 2026-07-04
 
 ### Fixed

@@ -362,52 +362,14 @@ class TestScenario3OverCapBehavior:
         # Verify backend stays empty
         assert backend.total_entries() == 0
 
-    def test_over_cap_increments_long_key_counter_in_metrics(
-        self, tmp_path: Path
-    ) -> None:
-        """Over-cap resolution increments the long_key counter in cache metrics."""
-        from code_indexer.server.services.query_embedding_cache_metrics import (
-            QueryEmbeddingCacheMetrics,
-        )
-
-        meter = MagicMock()
-        meter.create_counter.return_value = MagicMock()
-        meter.create_observable_gauge.return_value = MagicMock()
-        meter.create_histogram.return_value = MagicMock()
-
-        metrics = QueryEmbeddingCacheMetrics(meter, total_entries_fn=lambda: 0)
-
-        # Before: long_key == 0
-        snap = metrics.snapshot()
-        assert snap.get("long_key", 0) == 0
-
-        # Record a long_key event
-        metrics.record_long_key(provider="voyage-ai")
-
-        # After: long_key == 1
-        snap = metrics.snapshot()
-        assert snap.get("long_key", 0) == 1
-
-    def test_over_cap_counted_as_miss_in_metrics(self, tmp_path: Path) -> None:
-        """Over-cap queries increment the miss counter (not a separate counter)."""
-        from code_indexer.server.services.query_embedding_cache_metrics import (
-            QueryEmbeddingCacheMetrics,
-        )
-
-        meter = MagicMock()
-        meter.create_counter.return_value = MagicMock()
-        meter.create_observable_gauge.return_value = MagicMock()
-        meter.create_histogram.return_value = MagicMock()
-
-        metrics = QueryEmbeddingCacheMetrics(meter, total_entries_fn=lambda: 0)
-        metrics.record_miss(mode="on", provider="voyage-ai")
-        metrics.record_long_key(provider="voyage-ai")
-
-        snap = metrics.snapshot()
-        # Miss should have been recorded
-        assert snap["on"]["misses"] == 1
-        # Long key counter also incremented
-        assert snap.get("long_key", 0) == 1
+    # Story #1295 (Epic #1288 final): test_over_cap_increments_long_key_counter_in_metrics
+    # and test_over_cap_counted_as_miss_in_metrics were deleted -- both were
+    # pure white-box tests of the retired QueryEmbeddingCacheMetrics class's
+    # record_long_key/record_miss/snapshot() methods, constructed directly
+    # (no coalesced_query_embedding call, no production over-cap path
+    # exercised). The over-cap key-building behavior itself remains covered
+    # by test_over_cap_query_returns_none and test_over_cap_normalized_form_never_truncated
+    # below.
 
     def test_over_cap_normalized_form_never_truncated(self) -> None:
         """Over-cap returns None, never a truncated key."""
@@ -451,24 +413,25 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
         """When build_key returns None (over-cap), coalesced_query_embedding must:
         - skip the backend lookup (no rows read)
         - skip the backend write (no rows written)
-        - record a MISS in the metrics
-        - increment the long_key counter
         - return the live embedding vector
 
-        This directly exercises the None-guard at the call boundary in governed_call.py.
+        This directly exercises the None-guard at the call boundary in
+        governed_call.py. Story #1295 (Epic #1288 final) migration note: the
+        metrics-recording assertions (MISS + long_key counter) that used to
+        live here were deleted along with QueryEmbeddingCacheMetrics -- that
+        branch of governed_call.py records NO metric of any kind post-deletion
+        (the retired push call was the only observer of this specific
+        fallback branch). Fabricating a passing assertion against a signal
+        that no longer exists would be dishonest; the backend/result
+        assertions below (the real behavior) survive unchanged.
         """
         from code_indexer.server.services.governed_call import (
             coalesced_query_embedding,
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
         from code_indexer.server.services.query_embedding_cache import (
             QueryEmbeddingCache,
-        )
-        from code_indexer.server.services.query_embedding_cache_metrics import (
-            QueryEmbeddingCacheMetrics,
         )
 
         # Isolate from live config service: ensure enabled_for() falls back to
@@ -496,14 +459,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
         backend = _make_sqlite_backend(tmp_path)
         cache = QueryEmbeddingCache(backend=backend, enabled=True, voyage_mode="on")
 
-        meter = MagicMock()
-        meter.create_counter.return_value = MagicMock()
-        meter.create_observable_gauge.return_value = MagicMock()
-        meter.create_histogram.return_value = MagicMock()
-        metrics = QueryEmbeddingCacheMetrics(meter, total_entries_fn=lambda: 0)
-
         set_query_embedding_cache(cache)
-        set_query_embedding_cache_metrics(metrics)
 
         try:
             # Over-cap text: normalized form > 256 chars -> build_key returns None
@@ -528,24 +484,8 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
             assert backend.total_entries() == 0, (
                 "No cache row must be written when build_key returns None"
             )
-
-            # MISS recorded in metrics (mode may be "on" or "shadow" depending on live config)
-            snap = metrics.snapshot()
-            on_misses = snap.get("on", {}).get("misses", 0)
-            shadow_misses = snap.get("shadow", {}).get("misses", 0)
-            total_misses = on_misses + shadow_misses
-            assert total_misses >= 1, (
-                f"Expected at least 1 MISS recorded across on/shadow modes; "
-                f"got on.misses={on_misses}, shadow.misses={shadow_misses}"
-            )
-
-            # long_key counter incremented
-            assert snap.get("long_key", 0) >= 1, (
-                "long_key counter must be incremented when build_key returns None"
-            )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
 
     def test_backend_never_receives_none_key_via_governed_call(
         self, tmp_path: Path
@@ -1033,27 +973,7 @@ class TestIntegrationNewKeyRoundTrip:
         assert result is not None
         assert result.startswith("s:testdigest:")
 
-    def test_metrics_long_key_counter_surfaced_in_snapshot(self) -> None:
-        """long_key counter is surfaced in metrics snapshot."""
-        from code_indexer.server.services.query_embedding_cache_metrics import (
-            QueryEmbeddingCacheMetrics,
-        )
-
-        meter = MagicMock()
-        meter.create_counter.return_value = MagicMock()
-        meter.create_observable_gauge.return_value = MagicMock()
-        meter.create_histogram.return_value = MagicMock()
-
-        metrics = QueryEmbeddingCacheMetrics(meter, total_entries_fn=lambda: 0)
-
-        # Initial snapshot must include long_key
-        snap = metrics.snapshot()
-        assert "long_key" in snap, "snapshot() must include 'long_key' counter"
-        assert snap["long_key"] == 0
-
-        # After recording
-        metrics.record_long_key(provider="voyage-ai")
-        metrics.record_long_key(provider="cohere")
-
-        snap2 = metrics.snapshot()
-        assert snap2["long_key"] == 2
+    # Story #1295 (Epic #1288 final): test_metrics_long_key_counter_surfaced_in_snapshot
+    # was deleted -- a pure white-box test of the retired
+    # QueryEmbeddingCacheMetrics.record_long_key()/.snapshot(), constructed
+    # directly with no production call path exercised.

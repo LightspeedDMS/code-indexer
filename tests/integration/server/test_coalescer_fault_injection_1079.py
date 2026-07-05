@@ -1217,16 +1217,13 @@ def test_dedup_same_key_k_requests_produce_one_embed_call_1146() -> None:
             f"the same vector to all same-key requestors"
         )
 
-    # --- Counter assertion: dedup_savings == K - 1 ---
-    assert coalescer.dedup_savings == K - 1, (
-        f"dedup_savings={coalescer.dedup_savings}, expected {K - 1} "
-        f"(K={K} requestors - 1 unique provider text)"
-    )
-
-    # --- provider_embed_calls == 1 (one HTTP call per dispatched batch) ---
-    assert coalescer.provider_embed_calls == 1, (
-        f"provider_embed_calls={coalescer.provider_embed_calls}, expected 1"
-    )
+    # Story #1295 (Epic #1288 final): the trailing dedup_savings/
+    # provider_embed_calls counter assertions that used to live here were
+    # removed -- both attributes are deleted (restart-volatile per-node
+    # tallies; durable equivalent is WindowedCacheMetrics.overall.{dedup,
+    # provider_embed_calls}). The wire-level assertions above
+    # (transport.call_count == 1, len(sent_texts) == 1) already conclusively
+    # prove the same K-1 dedup-savings fact against the REAL HTTP wire.
 
 
 # ===========================================================================

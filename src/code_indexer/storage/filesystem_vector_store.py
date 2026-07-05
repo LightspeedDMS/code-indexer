@@ -2929,6 +2929,7 @@ class FilesystemVectorStore:
                     primary_candidate_ids=candidate_ids,
                     embedding_provider=embedding_provider,
                     query=query,
+                    embed_key=_embed_meta.embed_key,
                 )
             except Exception:  # noqa: BLE001
                 pass  # fail-open: audit never breaks primary search

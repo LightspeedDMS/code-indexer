@@ -92,7 +92,6 @@ class TestGovernedCallRoutesThroughDecisionTable:
             {
                 "code_indexer.server.services.governed_call.get_coalescer_registry": None,
                 "code_indexer.server.services.governed_call.get_query_embedding_cache": mock_cache,
-                "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics": None,
                 "code_indexer.server.services.governed_call._digest_for_provider": "d"
                 * 10,
                 "code_indexer.server.services.governed_call.governed_query_embedding": [
@@ -128,7 +127,6 @@ class TestGovernedCallRoutesThroughDecisionTable:
             {
                 "code_indexer.server.services.governed_call.get_coalescer_registry": None,
                 "code_indexer.server.services.governed_call.get_query_embedding_cache": mock_cache,
-                "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics": None,
                 "code_indexer.server.services.governed_call._digest_for_provider": "digest-hit",
             },
             provider,
@@ -154,7 +152,6 @@ class TestGovernedCallRoutesThroughDecisionTable:
             {
                 "code_indexer.server.services.governed_call.get_coalescer_registry": None,
                 "code_indexer.server.services.governed_call.get_query_embedding_cache": mock_cache,
-                "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics": None,
                 "code_indexer.server.services.governed_call._digest_for_provider": "digest-miss",
                 "code_indexer.server.services.governed_call.governed_query_embedding": [
                     9.0,

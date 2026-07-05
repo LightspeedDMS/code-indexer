@@ -113,20 +113,16 @@ class TestPathBPopulatesOutcomeAndRole:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="d" * 10,
                 ):
                     with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="d" * 10,
+                        "code_indexer.server.services.governed_call.governed_query_embedding",
+                        return_value=[10.0, 11.0],
                     ):
-                        with patch(
-                            "code_indexer.server.services.governed_call.governed_query_embedding",
-                            return_value=[10.0, 11.0],
-                        ):
-                            _vec, meta = self._call(
-                                provider, no_embedding_cache_shortcut=True
-                            )
+                        _vec, meta = self._call(
+                            provider, no_embedding_cache_shortcut=True
+                        )
 
         assert meta.outcome == "bypass"
         assert meta.role == "direct"
@@ -158,14 +154,10 @@ class TestPathBPopulatesOutcomeAndRole:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="digest-hit",
                 ):
-                    with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="digest-hit",
-                    ):
-                        _vec, meta = self._call(provider)
+                    _vec, meta = self._call(provider)
 
         assert meta.outcome == "hit"
         assert meta.role == "warm_hit"
@@ -192,18 +184,14 @@ class TestPathBPopulatesOutcomeAndRole:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="digest-miss",
                 ):
                     with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="digest-miss",
+                        "code_indexer.server.services.governed_call.governed_query_embedding",
+                        return_value=[9.0, 9.0, 9.0],
                     ):
-                        with patch(
-                            "code_indexer.server.services.governed_call.governed_query_embedding",
-                            return_value=[9.0, 9.0, 9.0],
-                        ):
-                            _vec, meta = self._call(provider)
+                        _vec, meta = self._call(provider)
 
         assert meta.outcome == "miss"
         assert meta.role == "direct"

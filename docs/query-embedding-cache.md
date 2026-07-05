@@ -252,31 +252,45 @@ gates fire first, so the bypass cannot re-enable a disabled cache. The bypass is
 for freshness-critical searches where a cached embedding might not reflect the
 current query intent.
 
-### 2.5 Metrics and dashboard (S5)
+### 2.5 Metrics and dashboard (S5, re-sourced by Story #1295)
 
-`QueryEmbeddingCacheMetrics` (`server/services/query_embedding_cache_metrics.py`)
-is built in lifespan ONLY when BOTH the cache and the telemetry manager are
-present; otherwise the metrics accessor stays None and all recording is a no-op
-(CLI / telemetry-disabled). Instruments registered on the `cidx.cache` meter:
+Story #1295 (Epic #1288 final) deleted the in-process `QueryEmbeddingCacheMetrics`
+tracker entirely (per-node RAM tallies that disagreed across cluster nodes and
+reset on restart). `EmbeddingCacheOtelMetrics`
+(`server/services/embedding_cache_otel_metrics.py`) replaces it: every
+`cidx.cache.embedding.*` instrument is now a DB-backed `ObservableGauge` whose
+callback queries `WindowedCacheMetrics` (the pure aggregation layer over the
+durable `search_embed_event` table, Story #1293/#1294) for `[now - window,
+now)` on every OTEL export tick. There is no push path and no per-node tally
+left — one source of truth, durable and cluster-aggregated by construction.
 
-- `cidx.cache.embedding.hits` (Counter) tagged `{mode, provider}`
-- `cidx.cache.embedding.misses` (Counter) tagged `{mode, provider}`
-- `cidx.cache.embedding.total_entries` (ObservableGauge)
-- `cidx.cache.embedding.shadow_cosine` (Histogram)
+Instruments registered on the `cidx.cache` meter:
 
-The total-entries gauge callback uses a cheap in-process memo
-(`cached_total_entries()`), NOT a live `COUNT(*)` on the exporter thread. The
-memo is incremented on every successful upsert and CLAMPED to the resolved cap
-via `min(cached_total + 1, resolved_max_entries)`, so it pins at the cap (matching
-post-prune reality) rather than drifting upward.
+- `cidx.cache.embedding.hit_rate` (ObservableGauge) — windowed `hits/(hits+misses)`
+- `cidx.cache.embedding.provider_calls` (ObservableGauge) — windowed provider embed HTTP calls
+- `cidx.cache.embedding.hits` (ObservableGauge) — windowed hit count
+- `cidx.cache.embedding.misses` (ObservableGauge) — windowed miss count
+- `cidx.cache.embedding.long_key` (ObservableGauge) — windowed over-256-char-key bypass count
+- `cidx.cache.embedding.audit_top10_overlap` (ObservableGauge) — windowed average audit overlap
+- `cidx.cache.embedding.shadow_cosine_p50` / `_p05` / `_min` (ObservableGauge) — windowed shadow-mode cosine percentiles
+- `cidx.cache.embedding.shadow_cosine_histogram` (ObservableGauge, one Observation per bucket) — windowed shadow-mode cosine histogram
+- `cidx.cache.embedding.total_entries` (ObservableGauge) — **UNCHANGED**: still a
+  cheap in-process memo (`cached_total_entries()`), NOT event-sourced (it is
+  live cache STATE, not a decision event)
 
-`shadow_cosine` is recorded ONLY in shadow mode on a hit where a prior cached
-blob exists: it is `cos(cached, live)` between the cached blob and the
-already-computed live vector. In addition to OTEL, the metrics object keeps
-thread-safe in-process tallies per mode and a bounded ring buffer of shadow
-cosines for a p50; `snapshot()` returns these so the dashboard can derive
-hit-ratios without an OTEL exporter. Hit-ratio is labelled per mode and never
-blended: shadow is a "would-serve rate", on is a "serving rate".
+**BREAKING CHANGE**: `hits` and `misses` were monotonic Counters before Story
+#1295; they are now windowed Gauges. Any downstream OTEL consumer that took a
+`rate()`/`increase()` derivative over the old Counters must instead read the
+Gauge value directly (it is already a rate over the window). `shadow_cosine`
+similarly moved from a push Histogram to the percentile/histogram Gauges
+above. `cidx.cache.embedding.audit_top1_match` (a Counter before Story #1295)
+was explicitly REMOVED — the `search_embed_event` schema has no top1-match
+column, so there is no DB source for it.
+
+Hit-ratio is labelled per mode and never blended: shadow is a "would-serve
+rate", on is a "serving rate" (the dashboard's On-Mode Hit Rate card is
+additionally REQUEST-denominated via `search_event_log`, not operation-
+denominated — see Story #1257).
 
 ### 2.6 Deep-fidelity audit (S6)
 
@@ -306,13 +320,23 @@ The on-mode sampled-re-embed behaviour is the key asymmetry:
 
 After both searches the audit computes `top10_overlap` (size of the intersection
 of the two top-10 chunk-id sets divided by the larger of the two truncated set
-sizes, so identical results score 1.0 even on an index with fewer than 10 chunks)
-and `top1_match` (first chunk-id equal), and records them via
-`metrics.record_audit()` into
-`cidx.cache.embedding.audit_top10_overlap` (Histogram) and
-`cidx.cache.embedding.audit_top1_match` (Counter, only on a top-1 match). The
-audit is fail-open: any exception is caught and logged at WARNING and never
-affects the served result.
+sizes, so identical results score 1.0 even on an index with fewer than 10 chunks).
+
+**Re-sourced by Story #1295**: the result is no longer pushed into an
+in-memory metrics object. `_record_audit_metrics()` persists `top10_overlap`
+directly onto the durable `search_embed_event` row via the Story #1293 keyed
+UPDATE path — `SearchEmbedEventWriter.backend.update_audit_by_key(
+correlation_id, embed_key, audit_sampled=True, audit_cosine=top10_overlap)`
+— keyed by the SAME `(correlation_id, embed_key)` the original decision event
+was inserted under. This wires the previously-orphaned `update_audit_by_key`
+(it existed since Story #1293 but had no caller) so `audit_sampled`/
+`audit_cosine` actually populate on the row. `top1_match` is no longer
+computed or persisted anywhere: the `search_embed_event` schema has no
+top1-match column, so `cidx.cache.embedding.audit_top1_match` was explicitly
+REMOVED rather than kept as an orphaned instrument (see section 2.5). The
+audit is fail-open throughout: any exception (including embed_key/
+correlation_id/writer being absent) is caught and logged at WARNING/DEBUG and
+never affects the served result.
 
 ---
 

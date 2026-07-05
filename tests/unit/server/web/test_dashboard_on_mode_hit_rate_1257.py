@@ -13,9 +13,15 @@ Fix: dashboard_cache_metrics_partial (src/code_indexer/server/web/routes.py)
 now derives on_hits/on_requests from
 SearchEventLogSqliteBackend/SearchEventLogPostgresBackend.get_hit_rate_counts
 ("on") -- one row = one request -- instead of the in-process operation
-tallies. These tests prove the rendered percentage matches the REQUEST count,
-not the (deliberately different) OPERATION count reported by a fake
-QueryEmbeddingCacheMetrics installed alongside it.
+tallies. These tests prove the rendered percentage matches the REQUEST count.
+
+Story #1295 (Epic #1288 final) migration note: QueryEmbeddingCacheMetrics
+(the in-process operation tally this bug was originally about) is deleted
+entirely, along with its set_/clear_query_embedding_cache_metrics accessors.
+The tests below no longer install a competing fake operation-tally signal
+(there is nothing left to install it into) -- the core regression guard
+(dashboard renders the correct REQUEST-denominated percentage from
+search_event_log) is unaffected and preserved as-is.
 """
 
 from __future__ import annotations
@@ -70,23 +76,6 @@ def admin_session_cookie(client):
     return login_resp.cookies
 
 
-class _FakeMetrics:
-    """Minimal fake reproducing the OLD operation-denominated snapshot() shape."""
-
-    def __init__(self, on_hits: int, on_misses: int) -> None:
-        self._snap = {
-            "shadow": {"hits": 0, "misses": 0},
-            "on": {"hits": on_hits, "misses": on_misses},
-            "shadow_cosine_p50": None,
-            "audit_total": 0,
-            "audit_top1_matches": 0,
-            "audit_overlap_avg": None,
-        }
-
-    def snapshot(self) -> dict:
-        return self._snap
-
-
 class _WriterWithBackend:
     """Minimal stand-in for SearchEventLogWriter exposing only `.backend`,
     matching the `getattr(request.app.state, "search_event_log_writer", None)`
@@ -139,12 +128,14 @@ class TestOnModeHitRateIsRequestDenominated:
         row3: voyage(on,hit)  + cohere(on,hit)  -> request HIT
     Request-denominated: 2 hits / 3 requests = 66.7%.
 
-    The old operation-denominated tallies for this SAME underlying activity
-    would be 6 operations (3 requests x 2 providers) with 3 hits (voyage-hit
-    row1, voyage-hit row3, cohere-hit row3) = 3/6 = 50.0%. We install a fake
-    QueryEmbeddingCacheMetrics reporting exactly that stale 50.0% alongside
-    the real search_event_log rows to prove the rendered card reads from
-    search_event_log, not from the fake operation tallies.
+    Story #1295 (Epic #1288 final) migration note: the old operation-
+    denominated tallies for this SAME underlying activity would have been 6
+    operations (3 requests x 2 providers) with 3 hits (voyage-hit row1,
+    voyage-hit row3, cohere-hit row3) = 3/6 = 50.0% -- but that in-process
+    QueryEmbeddingCacheMetrics tracker is now deleted entirely, so there is
+    no competing signal left to install. The assertion below proves the
+    rendered card reads the correct REQUEST-denominated percentage from
+    search_event_log.
     """
 
     def test_on_mode_hit_rate_matches_request_count_not_operation_count(
@@ -152,10 +143,6 @@ class TestOnModeHitRateIsRequestDenominated:
     ):
         from code_indexer.server.services.search_event_log_writer import (
             SearchEventLogSqliteBackend,
-        )
-        from code_indexer.server.services.governed_call import (
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
         from code_indexer.server.app import app as real_app
 
@@ -184,8 +171,6 @@ class TestOnModeHitRateIsRequestDenominated:
             ]
         )
 
-        # Old operation-denominated reading for the SAME activity: 3 hits / 6 ops = 50.0%.
-        set_query_embedding_cache_metrics(_FakeMetrics(on_hits=3, on_misses=3))
         original_writer = getattr(real_app.state, "search_event_log_writer", None)
         real_app.state.search_event_log_writer = _WriterWithBackend(backend)
         try:
@@ -205,13 +190,7 @@ class TestOnModeHitRateIsRequestDenominated:
                 "On-Mode Hit Rate must be REQUEST-denominated: 2 hits / 3 "
                 f"requests = 66.7%. Card HTML:\n{on_mode_card[:600]}"
             )
-            assert "50.0%" not in on_mode_card, (
-                "On-Mode Hit Rate must NOT render the stale OPERATION-"
-                "denominated rate (3 hits / 6 ops = 50.0%) from the fake "
-                f"in-process metrics tallies. Card HTML:\n{on_mode_card[:600]}"
-            )
         finally:
-            clear_query_embedding_cache_metrics()
             if original_writer is not None:
                 real_app.state.search_event_log_writer = original_writer
             else:
@@ -271,20 +250,21 @@ class TestOnModeHitRateIsRequestDenominated:
         self, client, admin_session_cookie, tmp_path
     ):
         """No search_event_log rows in 'on' mode -> On-Mode Hit Rate renders
-        '--' (no data), not a crash and not a stale operation-based number."""
+        '--' (no data), not a crash and not a fabricated percentage.
+
+        Story #1295 (Epic #1288 final): the fake operation-tally installation
+        this test used to prove was ignored is gone -- there is no in-process
+        tracker left to install it into. This asserts the real placeholder
+        behavior directly.
+        """
         from code_indexer.server.services.search_event_log_writer import (
             SearchEventLogSqliteBackend,
-        )
-        from code_indexer.server.services.governed_call import (
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
         from code_indexer.server.app import app as real_app
 
         db_path = str(tmp_path / "sel_1257_empty.db")
         backend = SearchEventLogSqliteBackend(db_path)
 
-        set_query_embedding_cache_metrics(_FakeMetrics(on_hits=9, on_misses=1))
         original_writer = getattr(real_app.state, "search_event_log_writer", None)
         real_app.state.search_event_log_writer = _WriterWithBackend(backend)
         try:
@@ -294,13 +274,15 @@ class TestOnModeHitRateIsRequestDenominated:
             cards = _extract_article_cards(html)
             on_mode_card = cards[3]
 
-            assert "90.0%" not in on_mode_card, (
-                "With zero search_event_log rows, On-Mode Hit Rate must not "
-                "render the stale operation-based 90.0% (9 hits / 10 ops) "
-                f"from the fake in-process metrics. Card HTML:\n{on_mode_card[:600]}"
+            assert "--" in on_mode_card, (
+                "With zero search_event_log rows, On-Mode Hit Rate must render "
+                f"the '--' no-data placeholder. Card HTML:\n{on_mode_card[:600]}"
+            )
+            assert "%" not in on_mode_card.split("On-Mode Hit Rate")[-1][:200], (
+                "With zero search_event_log rows, On-Mode Hit Rate must NOT "
+                f"render any percentage. Card HTML:\n{on_mode_card[:600]}"
             )
         finally:
-            clear_query_embedding_cache_metrics()
             if original_writer is not None:
                 real_app.state.search_event_log_writer = original_writer
             else:

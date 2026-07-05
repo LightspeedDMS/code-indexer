@@ -3303,53 +3303,70 @@ def make_lifespan(
                 )
             )
 
-        # Story #1109 (S5): build QueryEmbeddingCacheMetrics when BOTH the cache
-        # AND telemetry are available.  If telemetry is disabled or the cache was
-        # not built, the accessor stays None (CLI / no-backend paths are no-ops).
-        # Non-fatal: a failure must never abort startup.
+        # Story #1295 (Epic #1288 final): build EmbeddingCacheOtelMetrics --
+        # the DB-backed OTEL re-source that replaces the Story #1109 (S5)
+        # in-memory QueryEmbeddingCacheMetrics tracker. Every windowed
+        # instrument (hit_rate, provider_calls, hits, misses, long_key,
+        # audit_top10_overlap, shadow_cosine_*) is sourced from
+        # WindowedCacheMetrics via the search_embed_event_writer installed
+        # above (Story #1293/#1294) -- NOT from an in-memory tally, so there
+        # is exactly one source of truth regardless of node/restart.
+        # total_entries stays UNCHANGED: a cheap query_embedding_cache COUNT,
+        # not event-sourced. Built unconditionally (meter=None when telemetry
+        # is disabled -- the class is a documented no-op in that case; the
+        # windowed values themselves are read live by the dashboard
+        # independent of OTEL/telemetry state). Non-fatal: a failure must
+        # never abort startup.
         try:
+            from code_indexer.server.services.embedding_cache_otel_metrics import (
+                EmbeddingCacheOtelMetrics,
+            )
             from code_indexer.server.services.governed_call import (
-                set_query_embedding_cache_metrics,
                 get_query_embedding_cache,
             )
-            from code_indexer.server.services.query_embedding_cache_metrics import (
-                QueryEmbeddingCacheMetrics,
+            from code_indexer.server.services.search_embed_event_emit import (
+                get_search_embed_event_writer,
             )
 
             _wired_cache = get_query_embedding_cache()
-            if _wired_cache is not None:
-                # Pass a real OTEL meter when telemetry is enabled; None otherwise.
-                # The in-process tallies (snapshot()) work regardless — only the OTEL
-                # export instruments require a meter.  This ensures the dashboard
-                # cache-metrics cards show real data even when telemetry is disabled
-                # (the production/staging default).
-                _cache_meter = (
-                    telemetry_manager.get_meter("cidx.cache")
-                    if telemetry_manager is not None
-                    else None
-                )
-                _cache_metrics = QueryEmbeddingCacheMetrics(
-                    _cache_meter,
-                    total_entries_fn=_wired_cache.cached_total_entries,
-                )
-                set_query_embedding_cache_metrics(_cache_metrics)
-                logger.info(
-                    "QueryEmbeddingCacheMetrics built and wired "
-                    "(telemetry=%s) (Story #1109 S5 / Bug fix)",
-                    telemetry_manager is not None,
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "QueryEmbeddingCacheMetrics: skipped (cache not wired) — accessor stays None",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            _total_entries_fn = (
+                _wired_cache.cached_total_entries
+                if _wired_cache is not None
+                else (lambda: 0)
+            )
+
+            def _windowed_metrics_fn(from_ts: float, to_ts: float) -> Any:
+                _see_writer = get_search_embed_event_writer()
+                if _see_writer is None:
+                    from code_indexer.server.services.windowed_cache_metrics import (
+                        empty_windowed_result,
+                    )
+
+                    return empty_windowed_result()
+                return _see_writer.backend.get_windowed_metrics(from_ts, to_ts)
+
+            _cache_otel_meter = (
+                telemetry_manager.get_meter("cidx.cache")
+                if telemetry_manager is not None
+                else None
+            )
+            EmbeddingCacheOtelMetrics(
+                _cache_otel_meter,
+                total_entries_fn=_total_entries_fn,
+                windowed_metrics_fn=_windowed_metrics_fn,
+            )
+            logger.info(
+                "EmbeddingCacheOtelMetrics built and wired "
+                "(telemetry=%s) (Story #1295 DB-backed OTEL re-source)",
+                telemetry_manager is not None,
+                extra={"correlation_id": get_correlation_id()},
+            )
         except Exception as e:
             logger.warning(
                 format_error_log(
-                    "APP-GENERAL-1109",
-                    f"Failed to build QueryEmbeddingCacheMetrics "
-                    f"(cache metrics will be disabled): {e}",
+                    "APP-GENERAL-1295",
+                    f"Failed to build EmbeddingCacheOtelMetrics "
+                    f"(cache OTEL metrics will be disabled): {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
@@ -3619,20 +3636,14 @@ def make_lifespan(
                 exc_info=True,
             )
 
-        # Story #1109 (S5): clear the process-level cache metrics so a subsequent
-        # lifespan cycle does not inherit a stale metrics instance.
-        # Non-fatal — never abort the remaining shutdown chain.
-        try:
-            from code_indexer.server.services.governed_call import (
-                clear_query_embedding_cache_metrics,
-            )
-
-            clear_query_embedding_cache_metrics()
-        except Exception:
-            logger.debug(
-                "Query embedding cache metrics clear failed (expected during shutdown)",
-                exc_info=True,
-            )
+        # Story #1295 (Epic #1288 final): the Story #1109 (S5) cache-metrics
+        # accessor teardown was deleted along with the in-memory
+        # QueryEmbeddingCacheMetrics tracker it cleared.
+        # EmbeddingCacheOtelMetrics needs no equivalent teardown: its
+        # ObservableGauge instruments are registered on the OTEL SDK's
+        # MeterProvider (torn down independently by the telemetry manager),
+        # not on a process-level accessor that could leak stale state across
+        # lifespan cycles.
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in
