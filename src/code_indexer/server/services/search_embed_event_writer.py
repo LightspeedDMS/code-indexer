@@ -278,6 +278,39 @@ class SearchEmbedEventSqliteBackend:
             )
         return affected
 
+    def get_windowed_metrics(self, from_ts: float, to_ts: float) -> Any:
+        """Story #1294: WindowedCacheMetrics aggregation for [from_ts, to_ts).
+
+        Fetches the columns the aggregation algorithm needs for the window,
+        then delegates to the pure `build_windowed_result()` formula in
+        windowed_cache_metrics.py. Fail-open: any error returns
+        `empty_windowed_result()` (dashboard must never break).
+        """
+        from code_indexer.server.services.windowed_cache_metrics import (
+            build_windowed_result,
+            empty_windowed_result,
+        )
+
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT cache_mode, provider, outcome, role, live_batch_id, "
+                    "embed_key, shadow_cosine, long_key, audit_sampled, audit_cosine "
+                    "FROM search_embed_event WHERE timestamp >= ? AND timestamp < ?",
+                    (from_ts, to_ts),
+                ).fetchall()
+                row_dicts = [dict(r) for r in rows]
+            finally:
+                conn.close()
+            return build_windowed_result(row_dicts)
+        except Exception as exc:
+            logger.warning(
+                "SearchEmbedEventSqliteBackend: get_windowed_metrics failed: %s", exc
+            )
+            return empty_windowed_result()
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL backend
@@ -465,6 +498,47 @@ class SearchEmbedEventPostgresBackend:
                 embed_key,
             )
         return int(affected)
+
+    def get_windowed_metrics(self, from_ts: float, to_ts: float) -> Any:
+        """Story #1294: WindowedCacheMetrics aggregation for [from_ts, to_ts).
+
+        Fetches the columns the aggregation algorithm needs for the window,
+        then delegates to the pure `build_windowed_result()` formula in
+        windowed_cache_metrics.py. Fail-open: any error returns
+        `empty_windowed_result()` (dashboard must never break).
+        """
+        from code_indexer.server.services.windowed_cache_metrics import (
+            build_windowed_result,
+            empty_windowed_result,
+        )
+
+        columns = (
+            "cache_mode",
+            "provider",
+            "outcome",
+            "role",
+            "live_batch_id",
+            "embed_key",
+            "shadow_cosine",
+            "long_key",
+            "audit_sampled",
+            "audit_cosine",
+        )
+        try:
+            with self._pool.connection() as conn:
+                rows = conn.execute(
+                    "SELECT cache_mode, provider, outcome, role, live_batch_id, "
+                    "embed_key, shadow_cosine, long_key, audit_sampled, audit_cosine "
+                    "FROM search_embed_event WHERE timestamp >= %s AND timestamp < %s",
+                    (from_ts, to_ts),
+                ).fetchall()
+                row_dicts = [dict(zip(columns, row)) for row in rows]
+            return build_windowed_result(row_dicts)
+        except Exception as exc:
+            logger.warning(
+                "SearchEmbedEventPostgresBackend: get_windowed_metrics failed: %s", exc
+            )
+            return empty_windowed_result()
 
 
 # ---------------------------------------------------------------------------

@@ -276,19 +276,25 @@ class TestDashboardReadsRealSnapshot:
         assert snap["shadow_cosine_p50"] is None
 
     def test_dashboard_handler_uses_snapshot_not_hardcoded_zeros(self):
-        """The dashboard handler source must not hardcode zeros for hits."""
+        """The dashboard handler source must not hardcode zeros for hits.
+
+        Story #1294: shadow_hits/shadow_misses are now derived from
+        get_windowed_metrics() (search_embed_event), not
+        QueryEmbeddingCacheMetrics.snapshot() — this assertion was updated to
+        match the new real data source instead of the retired one.
+        """
         import inspect
         from code_indexer.server.web import routes as routes_module
 
         source = inspect.getsource(routes_module.dashboard_cache_metrics_partial)
         assert "shadow_hits=0," not in source, (
-            "dashboard handler must not hardcode shadow_hits=0 — use snapshot()"
+            "dashboard handler must not hardcode shadow_hits=0 — use get_windowed_metrics()"
         )
         assert "on_hits=0," not in source, (
-            "dashboard handler must not hardcode on_hits=0 — use snapshot()"
+            "dashboard handler must not hardcode on_hits=0 — use get_hit_rate_counts()"
         )
-        assert "get_query_embedding_cache_metrics" in source or "snapshot" in source, (
-            "dashboard handler must use get_query_embedding_cache_metrics() or snapshot()"
+        assert "get_windowed_metrics" in source, (
+            "dashboard handler must use get_windowed_metrics() (Story #1294)"
         )
 
 
