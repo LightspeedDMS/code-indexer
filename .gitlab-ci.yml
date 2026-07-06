@@ -43,7 +43,10 @@ Build and Push cidx Image:
     name: tools
     action: prepare
   rules:
-    - if: '$CI_COMMIT_BRANCH == "master"'
+    # Manual build on any branch. Master additionally moves the -tools-latest tag
+    # (guarded in the script); non-master branches push only their versioned tag,
+    # so validating a branch never poisons the live -tools-latest image.
+    - if: '$CI_COMMIT_BRANCH'
       when: manual
   before_script:
     - apk upgrade --no-cache libexpat
@@ -74,20 +77,25 @@ Build and Push cidx Image:
       docker push "$FULL_IMAGE_TAG"
       echo "Pushed ${FULL_IMAGE_TAG}"
 
-      # Move the ${IMAGE_PREFIX}-tools-latest tag to this build via manifest copy (no re-pull).
-      MANIFEST=$(aws ecr batch-get-image \
-        --repository-name "$ECR_REPOSITORY_NAME" \
-        --image-ids imageTag="$IMAGE_TAG" \
-        --region "$ECR_REGION" \
-        --query 'images[0].imageManifest' --output text)
-      aws ecr batch-delete-image \
-        --repository-name "$ECR_REPOSITORY_NAME" \
-        --image-ids imageTag="$LATEST_TAG" \
-        --region "$ECR_REGION" || true
-      aws ecr put-image \
-        --repository-name "$ECR_REPOSITORY_NAME" \
-        --image-tag "$LATEST_TAG" \
-        --image-manifest "$MANIFEST" \
-        --region "$ECR_REGION"
-
-      echo "Done: ${ECR_REPOSITORY}:${LATEST_TAG}"
+      # Only master moves the ${IMAGE_PREFIX}-tools-latest tag (the tag the live
+      # deployment pulls) via manifest copy. Branch builds push their versioned
+      # tag only, so validating a branch never poisons the live image.
+      if [ "$CI_COMMIT_BRANCH" = "master" ]; then
+        MANIFEST=$(aws ecr batch-get-image \
+          --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$IMAGE_TAG" \
+          --region "$ECR_REGION" \
+          --query 'images[0].imageManifest' --output text)
+        aws ecr batch-delete-image \
+          --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$LATEST_TAG" \
+          --region "$ECR_REGION" || true
+        aws ecr put-image \
+          --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-tag "$LATEST_TAG" \
+          --image-manifest "$MANIFEST" \
+          --region "$ECR_REGION"
+        echo "Done: ${ECR_REPOSITORY}:${LATEST_TAG}"
+      else
+        echo "Branch build: pushed ${FULL_IMAGE_TAG} only (left ${LATEST_TAG} untouched)"
+      fi
