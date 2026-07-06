@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 import psycopg  # noqa: F401  (imported for type annotations in callers)
+from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool as _PsycopgPool
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,19 @@ class ConnectionPool:
                     elapsed,
                     _SLOW_ACQUISITION_THRESHOLD,
                 )
-            yield conn
+            try:
+                yield conn
+            finally:
+                # Restore the default row_factory before the connection returns to
+                # the pool. Several backends set `conn.row_factory = dict_row` on a
+                # borrowed connection and never reset it, so without this the NEXT
+                # borrower silently gets dict rows — which broke
+                # NodeHeartbeatService.get_active_nodes() (`row[0]` -> KeyError: 0)
+                # and made JobReconciliationService error every ~10s in cluster mode.
+                try:
+                    conn.row_factory = tuple_row
+                except Exception:
+                    pass
 
     def close(self) -> None:
         """Close the pool and all underlying connections."""
