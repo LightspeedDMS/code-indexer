@@ -2032,13 +2032,23 @@ def make_lifespan(
                         _sqm = getattr(app.state, "semantic_query_manager", None)
                         if _sqm is not None:
                             _sqm.set_shard_ownership(_shard_ownership)
+                        # http_client_factory is set later in startup
+                        # (_apply_fault_injection_state), after this cluster block,
+                        # so app.state may not have it yet -- construct a dedicated
+                        # one for internal pod-to-pod routing (fault injection is
+                        # not relevant to internal forwards).
+                        from code_indexer.server.fault_injection.http_client_factory import (
+                            HttpClientFactory,
+                        )
+
+                        _http_factory = getattr(
+                            app.state, "http_client_factory", None
+                        ) or HttpClientFactory(fault_injection_service=None)
                         app.state.shard_router = ShardRouter(
                             node_id=_node_id,
                             shard_ownership=_shard_ownership,
                             node_addresses_provider=_heartbeat.get_node_addresses,
-                            http_client_factory=getattr(
-                                app.state, "http_client_factory", None
-                            ),
+                            http_client_factory=_http_factory,
                         )
                         logging.getLogger(__name__).info(
                             "C6: shard ownership + router wired (node_id=%s, replicas=2)",
