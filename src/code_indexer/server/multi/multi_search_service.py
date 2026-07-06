@@ -18,7 +18,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
@@ -74,6 +74,21 @@ class MultiSearchService:
         self.config = config
         self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self._shutdown = False
+
+        # C6 Phase 3: shard ownership (cluster mode). When set, per-repo searches
+        # populate this pod's index cache only for repos it OWNS -- so a sharded
+        # multi-repo search warms the owner's cache (bounded to its shard) instead
+        # of load-and-discarding. None in solo mode -> cache bypassed (Bug #881).
+        self._shard_ownership: Optional[Any] = None
+
+    def set_shard_ownership(self, shard_ownership: Any) -> None:
+        """Inject shard ownership so owned-repo searches warm the cache (C6)."""
+        self._shard_ownership = shard_ownership
+
+    def _owns_for_cache(self, repo_id: str) -> bool:
+        """True if this node should cache ``repo_id`` (owned; sharding active)."""
+        shard_ownership = self._shard_ownership
+        return shard_ownership is not None and shard_ownership.owns(repo_id)
 
     def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
@@ -283,11 +298,16 @@ class MultiSearchService:
         # Use self._get_repository_path() for consistent path resolution
         try:
             repo_path = self._get_repository_path(repo_id)
-            # Bug #881 Phase 3: pass hnsw_cache=None to prevent fan-out searches
-            # from populating the global HNSW index cache and causing unbounded
-            # memory growth when many repositories are searched concurrently.
+            # C6 Phase 3: cache the index for repos this node OWNS (bounded to its
+            # shard), so a sharded multi-repo search warms the owner's cache. For
+            # non-owned repos and solo mode, keep hnsw_cache=None -- Bug #881: this
+            # prevents fan-out from populating the cache with repos this pod would
+            # not normally serve, avoiding unbounded memory growth.
+            _cache_kwargs = (
+                {} if self._owns_for_cache(repo_id) else {"hnsw_cache": None}
+            )
             response = search_service.search_repository_path(
-                repo_path, single_repo_request, hnsw_cache=None
+                repo_path, single_repo_request, **_cache_kwargs
             )
 
             # Convert response to dict format

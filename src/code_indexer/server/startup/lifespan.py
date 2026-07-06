@@ -2032,6 +2032,10 @@ def make_lifespan(
                         _sqm = getattr(app.state, "semantic_query_manager", None)
                         if _sqm is not None:
                             _sqm.set_shard_ownership(_shard_ownership)
+                        # Expose ownership on app.state so the multi-repo endpoint
+                        # can warm the multi-search service's cache for owned repos
+                        # (C6 Phase 3).
+                        app.state.shard_ownership = _shard_ownership
                         # http_client_factory is set later in startup
                         # (_apply_fault_injection_state), after this cluster block,
                         # so app.state may not have it yet -- construct a dedicated
