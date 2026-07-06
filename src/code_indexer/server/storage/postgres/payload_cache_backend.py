@@ -151,17 +151,18 @@ class PayloadCachePostgresBackend:
         Returns:
             Number of rows deleted.
         """
-        now = datetime.now(timezone.utc).isoformat()
         try:
             with self._pool.connection() as conn:
+                # NOTE: the query uses NOW() directly and has no placeholders, so it
+                # takes NO parameters. Passing one raised "query has 0 placeholders
+                # but 1 parameters were passed" on every cleanup cycle.
                 result = conn.execute(
                     """
                     DELETE FROM payload_cache
                     WHERE (
                         EXTRACT(EPOCH FROM (NOW() - created_at::timestamptz))
                     ) > ttl_seconds
-                    """,
-                    (now,),
+                    """
                 )
                 deleted = int(result.rowcount) if result.rowcount else 0
                 conn.commit()

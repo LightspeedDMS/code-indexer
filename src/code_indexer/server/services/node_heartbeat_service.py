@@ -31,6 +31,8 @@ import logging
 import threading
 from typing import Any, List, Optional
 
+from psycopg.rows import tuple_row
+
 logger = logging.getLogger(__name__)
 
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
@@ -150,7 +152,10 @@ class NodeHeartbeatService:
             and ``status = 'online'``.
         """
         with self._pool.connection() as conn:
-            with conn.cursor() as cur:
+            # Explicit tuple_row cursor: don't rely on the borrowed connection's
+            # row_factory (a prior borrower may have left it as dict_row), so
+            # positional row[0] access below is always correct.
+            with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
                     """
                     SELECT node_id
