@@ -180,3 +180,40 @@ def test_group_by_owner_groups_multiple_repos_per_owner():
     local, groups = r.group_by_owner(["b", "c", "d"])
     assert local == []
     assert groups == {"1.1.1.1:8090": ["b", "c"], "2.2.2.2:8090": ["d"]}
+
+
+def test_forward_increments_counters():
+    r = _router(
+        FakeOwnership(False, ["peer"]), {"peer": "2.2.2.2:8090"}, FakeResponse({})
+    )
+    r.forward("2.2.2.2:8090", {}, None)
+    assert r._forwards == 1
+    assert r._forward_failures == 0
+    r2 = _router(
+        FakeOwnership(False, ["peer"]),
+        {"peer": "2.2.2.2:8090"},
+        FakeResponse({}, raise_exc=RuntimeError("boom")),
+    )
+    with pytest.raises(RuntimeError):
+        r2.forward("2.2.2.2:8090", {}, None)
+    assert r2._forwards == 1
+    assert r2._forward_failures == 1
+
+
+def test_stats_reports_identity_ring_and_counters():
+    from code_indexer.server.services.shard_ownership import ShardOwnership
+
+    so = ShardOwnership("me", lambda: ["me", "peer"], replicas=2)
+    r = ShardRouter(
+        "me",
+        so,
+        lambda: {"me": "1.1.1.1:8090", "peer": "2.2.2.2:8090"},
+        FakeHttpFactory(None, {}),
+    )
+    s = r.stats()
+    assert s["node_id"] == "me"
+    assert s["replicas"] == 2
+    assert set(s["active_nodes"]) == {"me", "peer"}
+    assert s["node_addresses"] == {"me": "1.1.1.1:8090", "peer": "2.2.2.2:8090"}
+    assert s["forwards"] == 0
+    assert s["forward_failures"] == 0
