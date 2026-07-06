@@ -2074,6 +2074,51 @@ def make_lifespan(
                             "C6: shard ownership + router wired (node_id=%s, replicas=2)",
                             _node_id,
                         )
+
+                        # C6 rebalance pre-warming: proactively load this pod's
+                        # owned repos into the cache so the first query after a
+                        # membership change is not a cold load. Best-effort and
+                        # fully fail-safe (a warm failure just leaves the repo cold
+                        # until its first query -- today's behaviour).
+                        try:
+                            from code_indexer.server.services.shard_prewarm_service import (
+                                ShardPrewarmService,
+                            )
+                            from code_indexer.server.services.search_service import (
+                                SemanticSearchService,
+                            )
+                            from code_indexer.server.models.api_models import (
+                                SemanticSearchRequest,
+                            )
+
+                            _global_repos = backend_registry.global_repos
+
+                            def _list_shardable_repos() -> list:
+                                return list(_global_repos.list_repos().keys())
+
+                            def _warm_repo(alias: str) -> None:
+                                data = _global_repos.list_repos().get(alias)
+                                repo_path = data.get("index_path") if data else None
+                                if not repo_path:
+                                    return
+                                # A minimal search loads the repo's HNSW index into
+                                # this pod's cache (Phase 0 caches it since owned).
+                                SemanticSearchService().search_repository_path(
+                                    repo_path,
+                                    SemanticSearchRequest(query="warm", limit=1),
+                                )
+
+                            _prewarm = ShardPrewarmService(
+                                _shard_ownership,
+                                _list_shardable_repos,
+                                _warm_repo,
+                            )
+                            _prewarm.start()
+                            _cluster_services.append(("shard_prewarm", _prewarm))
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "C6: could not start shard prewarm service"
+                            )
                     except Exception:
                         logging.getLogger(__name__).exception(
                             "C6: failed to wire sharding; falling back to "
