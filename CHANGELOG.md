@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.21.0] - 2026-07-06
+
+### Fixed
+
+- **Cluster installer now provisions the auto-updater.** `scripts/install-cidx-server.sh` previously created only `cidx-server.service`, so freshly-built cluster nodes had no `cidx-auto-update.service`/`.timer` and never self-updated (the server logged `launch_restart_generation target > applied ... check cidx-auto-update service status` indefinitely). The installer now renders and enables both units from the shipped template. The `cidx-auto-update.service` template and the `cidx server install-auto-update` CLI command gained a `--branch` parameter (default `master`) threaded through `CIDX_AUTO_UPDATE_BRANCH`, so staging nodes track `staging` instead of falling back to `master`.
+- **Auto-update deploys survive transient systemd/sudo starvation.** On a fresh node the first deploy compiles hnswlib and installs the Rust toolchain, briefly starving systemd/sudo (compounded when a `hard` NFS mount points at a down node); the deploy executor's hard 30s `sudo`/`systemctl` timeouts then fired and silently skipped config steps (MALLOC_ARENA_MAX injection, sudoers self-restart rule). Renamed `SYSTEMCTL_TIMEOUT_SECONDS` (30) to `SYSTEMD_OP_TIMEOUT_SECONDS` (120) and added a bounded, `TimeoutExpired`-only retry (3 attempts, 5s backoff) around the systemd control-plane operations (daemon-reload, sudoers verify/create, unit-file writes, memory-overcommit, swap-file). Fail-soft behavior preserved; the indexing / golden-repo / SCIP path (Bug #1218) is untouched.
+
 ## [11.20.0] - 2026-07-06
 
 ### Fixed
