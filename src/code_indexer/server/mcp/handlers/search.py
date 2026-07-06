@@ -290,8 +290,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Story #36: Uses MultiSearchService for parallel execution.
     Story #51: Synchronous for FastAPI thread pool execution.
     """
-    from ...multi.multi_search_config import MultiSearchConfig
-    from ...multi.multi_search_service import MultiSearchService
+    from ...routes.multi_query_routes import get_multi_search_service
 
     repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
     if isinstance(repo_aliases, CapBreach):
@@ -330,8 +329,10 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repo_aliases, params, search_type, effective_limit
     )
 
-    config = MultiSearchConfig.from_config(get_config_service())
-    service = MultiSearchService(config)
+    # C6 Phase 3: use the shared multi-search singleton (ownership-injected at
+    # startup) so MCP omni caches repos this node owns, consistent with the REST
+    # /api/query/multi path. Also avoids building a new thread pool per call.
+    service = get_multi_search_service()
     try:
         response = service.search(request)
     except Exception as e:
