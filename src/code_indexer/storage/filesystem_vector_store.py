@@ -21,6 +21,7 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
+from ..utils.file_lock import exclusive_file_lock
 
 # Minimum and default timeout (seconds) for git subprocess calls.
 # GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
@@ -3318,7 +3319,6 @@ class FilesystemVectorStore:
         Note:
             Thread-safe: Uses file locking to prevent race conditions with daemon indexing
         """
-        import fcntl
         import json
 
         # Calculate unique file count from vectors
@@ -3353,31 +3353,22 @@ class FilesystemVectorStore:
         # Update collection metadata with file locking (daemon-safe)
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
-        lock_file.touch(exist_ok=True)
 
-        with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock (blocks if daemon is writing)
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        with exclusive_file_lock(lock_file):
+            # Read current metadata
+            with open(meta_file) as f:
+                metadata = json.load(f)
 
-            try:
-                # Read current metadata
-                with open(meta_file) as f:
-                    metadata = json.load(f)
+            # Update unique_file_count
+            metadata["unique_file_count"] = unique_file_count
 
-                # Update unique_file_count
-                metadata["unique_file_count"] = unique_file_count
+            # Save metadata atomically
+            with open(meta_file, "w") as f:
+                json.dump(metadata, f, indent=2)
 
-                # Save metadata atomically
-                with open(meta_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
-
-                self.logger.debug(
-                    f"Updated collection metadata: {unique_file_count} unique files"
-                )
-
-            finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+            self.logger.debug(
+                f"Updated collection metadata: {unique_file_count} unique files"
+            )
 
         return unique_file_count
 

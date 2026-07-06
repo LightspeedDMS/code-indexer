@@ -22,12 +22,13 @@ queries to continue reading the old index without blocking.
 """
 
 import contextlib
-import fcntl
 import logging
 import os
 import time
 from pathlib import Path
 from typing import Callable, Generator
+
+from code_indexer.utils.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +74,11 @@ class BackgroundIndexRebuilder:
         Note:
             Lock is automatically released when context exits.
         """
-        with open(self.lock_file, "r") as lock_f:
+        with exclusive_file_lock(self.lock_file):
+            logger.debug(f"Acquired rebuild lock: {self.lock_file}")
             try:
-                # Acquire exclusive lock (blocks if another process holds it)
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
-                logger.debug(f"Acquired rebuild lock: {self.lock_file}")
                 yield
             finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
                 logger.debug(f"Released rebuild lock: {self.lock_file}")
 
     def atomic_swap(self, temp_file: Path, target_file: Path) -> None:

@@ -15,6 +15,8 @@ from typing import Any, Generator, Optional
 
 import psycopg
 
+from ...utils.file_lock import exclusive_file_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -196,16 +198,14 @@ class PasswordChangeConcurrencyProtection:
 
     def _is_user_locked_file(self, username: str) -> bool:
         """Check file lock status."""
-        import fcntl
-
         lock_file_path = self.lock_dir / f"password_change_{username}.lock"
         if not lock_file_path.exists():
             return False
 
+        # Probe: try to grab the lock non-blocking. Acquiring it means no one
+        # else holds it; a BlockingIOError/OSError means it is currently locked.
         try:
-            with open(lock_file_path, "r") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            with exclusive_file_lock(lock_file_path, blocking=False):
                 return False
         except (IOError, OSError):
             return True
