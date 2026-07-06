@@ -2036,6 +2036,22 @@ def make_lifespan(
                         # can warm the multi-search service's cache for owned repos
                         # (C6 Phase 3).
                         app.state.shard_ownership = _shard_ownership
+                        # Also inject into the shared multi-search singleton at
+                        # startup so the MCP omni path (which does not go through
+                        # the REST endpoint) caches owned repos too.
+                        try:
+                            from code_indexer.server.routes.multi_query_routes import (
+                                get_multi_search_service,
+                            )
+
+                            get_multi_search_service().set_shard_ownership(
+                                _shard_ownership
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "C6: could not inject shard ownership into the "
+                                "multi-search singleton at startup"
+                            )
                         # http_client_factory is set later in startup
                         # (_apply_fault_injection_state), after this cluster block,
                         # so app.state may not have it yet -- construct a dedicated
