@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.22.0] - 2026-07-06
+
+### Fixed
+
+- **Job-reconciliation no longer wall-clock-reaps legitimately-queued pending jobs (#1312).** `JobReconciliationService._reclaim_stuck_index_blocking_jobs` dropped `pending` from its status filter entirely — it now reclaims only the anomalous `status='running' AND started_at IS NULL` case. A pending job queued behind long-running index jobs for other repos (bounded worker-pool exhaustion, `max_concurrent_background_jobs`) is never failed on a wall clock, closing a milder Bug #1218 edge. Bug #1141 remains covered: genuinely-abandoned pending rows are still failed by `DistributedJobWorkerService` (Bug #582), which runs on the same leader-election gate and claims the oldest pending row unconditionally (`DistributedJobClaimer` `max_concurrent_jobs=0`), failing non-retryable ops. Bug #1310 (never reap a running job with a valid `started_at`) is intact.
+- **Realigned deployment-executor memory/swap unit-test assertions (v11.21.0 test regression).** `tests/unit/auto_update/test_deployment_executor_memory.py` asserted the pre-`_run_systemd_op_with_retry` `subprocess.run` signature (raw `timeout=30/60`); the v11.21.0 hardening routes `_ensure_memory_overcommit`/`_ensure_swap_file` through the retry helper (`input=None`, `timeout=SYSTEMD_OP_TIMEOUT_SECONDS=120`). Assertions corrected to reference the constant. Test-only; production behavior was already correct and validated live.
+
 ## [11.21.0] - 2026-07-06
 
 ### Fixed
