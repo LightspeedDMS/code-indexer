@@ -43,9 +43,12 @@ Build and Push cidx Image:
     name: tools
     action: prepare
   rules:
-    # Manual build on any branch. Master additionally moves the -tools-latest tag
-    # (guarded in the script); non-master branches push only their versioned tag,
-    # so validating a branch never poisons the live -tools-latest image.
+    # Master builds automatically on every push (auto-deploy: the build moves the
+    # -tools-latest tag the live deployment pulls). Other branches are manual and
+    # push only their versioned tag (guarded in the script), so validating a
+    # branch never poisons the live -tools-latest image.
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: on_success
     - if: '$CI_COMMIT_BRANCH'
       when: manual
   before_script:
