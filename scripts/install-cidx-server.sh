@@ -812,6 +812,52 @@ SERVICEEOF
 }
 
 # ---------------------------------------------------------------------------
+# Step: auto-update systemd service + timer
+#
+# Renders cidx-auto-update.service from the SAME template used by
+# `cidx server install-auto-update` (src/code_indexer/server/auto_update/
+# templates/cidx-auto-update.service) so the unit text is never
+# hand-duplicated between the CLI path and this installer. Substitutes
+# {USER}, {REPO_PATH}, and {BRANCH} (-> CIDX_AUTO_UPDATE_BRANCH, read by
+# run_once.py). Without this step a freshly-installed node has no working
+# auto-updater at all (only cidx-server.service is installed).
+# ---------------------------------------------------------------------------
+
+install_auto_update_service() {
+    info "--- Auto-update service ---"
+    local template_dir="${INSTALL_DIR}/src/code_indexer/server/auto_update/templates"
+    local service_template="${template_dir}/cidx-auto-update.service"
+    local timer_template="${template_dir}/cidx-auto-update.timer"
+    local service_file="/etc/systemd/system/cidx-auto-update.service"
+    local timer_file="/etc/systemd/system/cidx-auto-update.timer"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "  [dry-run] Would render ${service_template} -> ${service_file}" \
+             "(USER=$(whoami), REPO_PATH=${INSTALL_DIR}, CIDX_AUTO_UPDATE_BRANCH=${AUTO_UPDATE_BRANCH})"
+        echo "  [dry-run] Would copy ${timer_template} -> ${timer_file}"
+        echo "  [dry-run] sudo systemctl daemon-reload && sudo systemctl enable cidx-auto-update.timer && sudo systemctl start cidx-auto-update.timer"
+        return 0
+    fi
+
+    if [[ ! -f "${service_template}" || ! -f "${timer_template}" ]]; then
+        die "Auto-update templates not found under ${template_dir} (repository clone incomplete?)"
+    fi
+
+    local unit_content
+    unit_content="$(cat "${service_template}")"
+    unit_content="${unit_content//\{USER\}/$(whoami)}"
+    unit_content="${unit_content//\{REPO_PATH\}/${INSTALL_DIR}}"
+    unit_content="${unit_content//\{BRANCH\}/${AUTO_UPDATE_BRANCH}}"
+
+    echo "${unit_content}" | sudo tee "${service_file}" > /dev/null
+    sudo cp "${timer_template}" "${timer_file}"
+    sudo systemctl daemon-reload
+    sudo systemctl enable cidx-auto-update.timer
+    sudo systemctl start cidx-auto-update.timer
+    info "Auto-update service installed, enabled, and started (tracking branch: ${AUTO_UPDATE_BRANCH})"
+}
+
+# ---------------------------------------------------------------------------
 # Cluster step: open firewalld port (idempotent, non-fatal if absent)
 # ---------------------------------------------------------------------------
 
@@ -970,6 +1016,7 @@ main() {
     write_config
     install_pace_maker
     create_systemd_service
+    install_auto_update_service
 
     if [[ "${CLUSTER_MODE}" == "true" ]]; then
         open_firewall_port

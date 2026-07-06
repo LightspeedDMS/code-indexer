@@ -47,7 +47,15 @@ SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
 AUTO_UPDATE_STATUS_FILE = _cidx_data_dir / "auto-update-status.json"
-SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
+# Timeout for ALL systemd/sudo control-plane operations: daemon-reload,
+# systemctl restart, sudoers cat/tee/chmod/rm/visudo, unit-file read/write.
+# 120s (not the previous 30s/10s) because the FIRST auto-update deploy on a
+# freshly-built host compiles hnswlib and installs rustup/ripgrep/Claude-CLI/
+# pace-maker -- CPU-heavy work that transiently starves systemd/sudo
+# (pam_systemd blocks on a busy PID 1). A tighter timeout here raised
+# subprocess.TimeoutExpired, which a broad `except Exception` swallowed,
+# silently skipping real config steps (DEPLOY-GENERAL-034, -056).
+SYSTEMD_OP_TIMEOUT_SECONDS = 120
 
 # Story #355: Signal-based server restart via auto-updater
 # Server writes this file to request a restart; auto-updater detects and executes it.
@@ -1597,7 +1605,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1647,7 +1655,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1666,6 +1674,64 @@ class DeploymentExecutor:
             )
             return None
 
+    def _run_systemd_op_with_retry(
+        self,
+        cmd: list,
+        *,
+        input: Optional[str] = None,
+        timeout: int = SYSTEMD_OP_TIMEOUT_SECONDS,
+        max_attempts: int = 3,
+        retry_delay_seconds: float = 5.0,
+    ) -> subprocess.CompletedProcess:
+        """Run a systemd/sudo control-plane subprocess with retry-on-timeout.
+
+        On a freshly-built host, the FIRST auto-update deploy is CPU-heavy
+        (hnswlib compile, rustup/ripgrep/Claude-CLI/pace-maker install) and
+        transiently starves systemd/sudo (pam_systemd blocks on a busy PID 1).
+        A single 30s/10s timeout could raise subprocess.TimeoutExpired even
+        though the operation would have succeeded moments later. This helper
+        retries ONLY on subprocess.TimeoutExpired -- a completed process with
+        ANY returncode (including nonzero) is returned immediately on the
+        first attempt that does not raise; nonzero returncode is a real
+        failure, not a transient one, so it is never retried.
+
+        Args:
+            cmd: Command argv list to execute.
+            input: Optional stdin text (e.g. for `sudo tee`).
+            timeout: Per-attempt timeout in seconds.
+            max_attempts: Maximum number of attempts before giving up.
+            retry_delay_seconds: Seconds to sleep between attempts.
+
+        Returns:
+            The subprocess.CompletedProcess from the first attempt that does
+            not raise subprocess.TimeoutExpired.
+
+        Raises:
+            subprocess.TimeoutExpired: If every attempt times out.
+        """
+        last_timeout_error: Optional[subprocess.TimeoutExpired] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return subprocess.run(
+                    cmd,
+                    input=input,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as e:
+                last_timeout_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"systemd/sudo op timed out after {timeout}s "
+                        f"(attempt {attempt}/{max_attempts}), retrying: {cmd}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    time.sleep(retry_delay_seconds)
+
+        assert last_timeout_error is not None
+        raise last_timeout_error
+
     def _write_service_file_and_reload(self, service_path: Path, content: str) -> bool:
         """Write systemd service file via sudo tee and reload daemon.
 
@@ -1678,12 +1744,9 @@ class DeploymentExecutor:
         """
         try:
             # Write via sudo tee
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(service_path)],
                 input=content,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -1697,11 +1760,8 @@ class DeploymentExecutor:
                 return False
 
             # Reload systemd
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "systemctl", "daemon-reload"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -2818,11 +2878,8 @@ class DeploymentExecutor:
             expected_rule = f"{service_user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {self.service_name}"
 
             # Use sudo to check /etc/sudoers.d/ (not readable by non-root)
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sudo", "cat", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.returncode == 0:
                 existing_content = check_result.stdout.strip()
@@ -2840,12 +2897,9 @@ class DeploymentExecutor:
             )
 
             # Use sudo tee to write the sudoers file
-            tee_result = subprocess.run(
+            tee_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(sudoers_path)],
                 input=expected_rule,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if tee_result.returncode != 0:
@@ -2859,11 +2913,8 @@ class DeploymentExecutor:
                 return False
 
             # Set correct permissions (0440)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "0440", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if chmod_result.returncode != 0:
@@ -2875,20 +2926,14 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove file with wrong permissions
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
             # Validate with visudo
-            visudo_result = subprocess.run(
+            visudo_result = self._run_systemd_op_with_retry(
                 ["sudo", "visudo", "-c", "-f", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if visudo_result.returncode != 0:
@@ -2900,11 +2945,8 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove invalid sudoers file
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
@@ -3109,7 +3151,7 @@ class DeploymentExecutor:
                 ["sudo", "systemctl", "restart", AUTO_UPDATE_SERVICE_NAME],
                 capture_output=True,
                 text=True,
-                timeout=SYSTEMCTL_TIMEOUT_SECONDS,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -3156,11 +3198,8 @@ class DeploymentExecutor:
         """
         try:
             # Check current value
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sysctl", "-n", "vm.overcommit_memory"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip() == "1":
                 logger.debug(
@@ -3170,12 +3209,9 @@ class DeploymentExecutor:
                 return True
 
             # Write persistent sysctl config file
-            write_result = subprocess.run(
+            write_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", "/etc/sysctl.d/99-cidx-memory.conf"],
                 input="vm.overcommit_memory = 1\n",
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if write_result.returncode != 0:
                 logger.error(
@@ -3188,11 +3224,8 @@ class DeploymentExecutor:
                 return False
 
             # Apply immediately
-            apply_result = subprocess.run(
+            apply_result = self._run_systemd_op_with_retry(
                 ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if apply_result.returncode != 0:
                 logger.error(
@@ -3242,11 +3275,8 @@ class DeploymentExecutor:
         """
         try:
             # Check if any swap is already active
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["swapon", "--show", "--noheadings"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip():
                 logger.debug(
@@ -3256,11 +3286,8 @@ class DeploymentExecutor:
                 return True
 
             # Allocate 4GB swap file
-            fallocate_result = subprocess.run(
+            fallocate_result = self._run_systemd_op_with_retry(
                 ["sudo", "fallocate", "-l", "4G", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=60,
             )
             if fallocate_result.returncode != 0:
                 logger.warning(
@@ -3274,11 +3301,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Set secure permissions (0600 - root only)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "600", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if chmod_result.returncode != 0:
                 logger.warning(
@@ -3292,11 +3316,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Format as swap
-            mkswap_result = subprocess.run(
+            mkswap_result = self._run_systemd_op_with_retry(
                 ["sudo", "mkswap", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if mkswap_result.returncode != 0:
                 logger.warning(
@@ -3310,11 +3331,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Enable swap immediately
-            swapon_result = subprocess.run(
+            swapon_result = self._run_systemd_op_with_retry(
                 ["sudo", "swapon", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if swapon_result.returncode != 0:
                 logger.warning(
@@ -3328,19 +3346,13 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Add fstab entry for reboot persistence
-            fstab_result = subprocess.run(
+            fstab_result = self._run_systemd_op_with_retry(
                 ["cat", "/etc/fstab"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if "/swapfile" not in fstab_result.stdout:
-                tee_result = subprocess.run(
+                tee_result = self._run_systemd_op_with_retry(
                     ["sudo", "tee", "-a", "/etc/fstab"],
                     input="/swapfile none swap sw 0 0\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 if tee_result.returncode != 0:
                     # Non-fatal: swap is active but will not survive reboot

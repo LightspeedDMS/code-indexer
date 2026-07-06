@@ -11047,12 +11047,19 @@ def server_list_indexes(ctx, alias: str, json_output: bool):
 
 
 @server_group.command("install-auto-update")
+@click.option(
+    "--branch",
+    default="master",
+    show_default=True,
+    help="Git branch for the auto-updater to track (CIDX_AUTO_UPDATE_BRANCH).",
+)
 @click.pass_context
-def server_install_auto_update(ctx):
+def server_install_auto_update(ctx, branch):
     """Install and enable auto-update service for CIDX server.
 
     Installs systemd service and timer that automatically deploys
-    updates when changes are pushed to the master branch.
+    updates when changes are pushed to the tracked branch (--branch,
+    default: master).
     """
     try:
         import subprocess
@@ -11098,6 +11105,7 @@ def server_install_auto_update(ctx):
         service_content = service_template.read_text()
         service_content = service_content.replace("{USER}", current_user)
         service_content = service_content.replace("{REPO_PATH}", repo_path)
+        service_content = service_content.replace("{BRANCH}", branch)
 
         # Write substituted service file to temp location
         with tempfile.NamedTemporaryFile(
