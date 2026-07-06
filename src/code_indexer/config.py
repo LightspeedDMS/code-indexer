@@ -7,7 +7,7 @@ import yaml  # type: ignore
 from pathlib import Path
 from typing import List, Optional, Any, Literal, Tuple, Dict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +431,49 @@ class TemporalConfig(BaseModel):
         le=50,
         description="Number of context lines in git diffs (0-50, default 5)",
     )
+
+    # Story #1290: pluggable TemporalEmbedder adapters.
+    embedders: List[str] = Field(
+        default_factory=lambda: ["voyage-context-4"],
+        description=(
+            "Set of temporal embedder adapter names to build shards for "
+            "(e.g. voyage-context-4, cohere-embed-v4)."
+        ),
+    )
+    active_embedder: str = Field(
+        default="voyage-context-4",
+        description="Embedder adapter name used for temporal recall by default.",
+    )
+    aggregation_chunk_chars: int = Field(
+        default=4096,
+        gt=0,
+        description=(
+            "Character size used to chunk the per-commit aggregated document "
+            "(message + diffs) before embedding."
+        ),
+    )
+
+    @field_validator("embedders")
+    @classmethod
+    def _validate_embedders_non_empty_and_dedup(cls, v: List[str]) -> List[str]:
+        """embedders must be non-empty; duplicates are removed preserving order."""
+        deduped: List[str] = []
+        for name in v:
+            if name not in deduped:
+                deduped.append(name)
+        if not deduped:
+            raise ValueError("embedders must not be empty")
+        return deduped
+
+    @model_validator(mode="after")
+    def _validate_active_embedder_is_member(self) -> "TemporalConfig":
+        """active_embedder must be a member of embedders."""
+        if self.active_embedder not in self.embedders:
+            raise ValueError(
+                f"active_embedder {self.active_embedder!r} must be a member of "
+                f"embedders {self.embedders!r}"
+            )
+        return self
 
 
 class GlobalRefreshConfig(BaseModel):

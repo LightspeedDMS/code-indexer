@@ -345,6 +345,16 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # sites; a genuine FTS-missing-index bug on any OTHER real user repo would carry
     # that repo's own alias, not "cidx-meta-global", and would NOT be suppressed.
     "FTS index not available for repository 'cidx-meta-global'",
+    # Story #1292 (test_18_temporal_dual_embedder_1292.py::
+    # test_rest_temporal_embedder_override_to_unconfigured_returns_typed_empty):
+    # deliberately queries with temporal_embedder="not-a-configured-embedder"
+    # to prove the AC7/AC8 typed-empty-result contract (an override naming an
+    # embedder with no indexed collections returns a typed empty result, NEVER
+    # a silent fallback to a different embedder's data). These two WARNINGs
+    # are the test's own asserted signal that the no-fallback path fired
+    # correctly -- not a service defect.
+    "Temporal embedder 'not-a-configured-embedder' has no indexed collections",
+    "Temporal index not available for repository, returning empty results repository_alias=temporal-dual-embedder-1292",
 ]
 
 

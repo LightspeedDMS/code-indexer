@@ -62,8 +62,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import threading
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, cast
 
 import httpx
 import pytest
@@ -735,6 +737,7 @@ def _coalesced_burst(
     *,
     gov: ProviderConcurrencyGovernor,
     lane: str = VOYAGE_EMBED,
+    capture_metas: Optional[List[Optional[Any]]] = None,
 ) -> List[Tuple[Optional[List[float]], Optional[BaseException]]]:
     """Submit ``texts`` so they DETERMINISTICALLY coalesce into ONE batch.
 
@@ -746,6 +749,13 @@ def _coalesced_burst(
 
     The gate release + holder join run in ``finally`` so a failed witness/submit
     can never leak the gated holder threads. Collects (vector, exc) per caller.
+
+    Story #1293 (#1304 known-defect fix): coalescer.submit() returns a
+    ``(vec, EmbeddingCacheMetadata)`` tuple (Issue #1159) -- this helper must
+    unpack it so ``results`` holds the plain vector (matching every existing
+    caller's ``vec is not None and len(vec) == N`` assertions). Pass a list
+    via ``capture_metas`` (pre-sized to ``len(texts)``) to also observe the
+    per-caller metadata (Story #1293 S1b invariant tests).
     """
     n = len(texts)
     holders = gov.current_k[lane]
@@ -758,7 +768,10 @@ def _coalesced_burst(
 
     def _worker(idx: int) -> None:
         try:
-            results[idx] = (coalescer.submit(texts[idx]), None)
+            vec, meta = coalescer.submit(texts[idx])
+            if capture_metas is not None:
+                capture_metas[idx] = meta
+            results[idx] = (vec, None)
         except BaseException as exc:  # noqa: BLE001 - record shared fate
             results[idx] = (None, exc)
 
@@ -951,7 +964,7 @@ def test_one_http_call_per_batch_sealed_by_token_limit() -> None:
         f"(measured={measured}, target={target})"
     )
 
-    vec = coalescer.submit(big_text)
+    vec, _meta = coalescer.submit(big_text)
     assert isinstance(vec, list) and len(vec) == 1024
 
     assert transport.call_count == 1, (
@@ -1204,13 +1217,586 @@ def test_dedup_same_key_k_requests_produce_one_embed_call_1146() -> None:
             f"the same vector to all same-key requestors"
         )
 
-    # --- Counter assertion: dedup_savings == K - 1 ---
-    assert coalescer.dedup_savings == K - 1, (
-        f"dedup_savings={coalescer.dedup_savings}, expected {K - 1} "
-        f"(K={K} requestors - 1 unique provider text)"
+    # Story #1295 (Epic #1288 final): the trailing dedup_savings/
+    # provider_embed_calls counter assertions that used to live here were
+    # removed -- both attributes are deleted (restart-volatile per-node
+    # tallies; durable equivalent is WindowedCacheMetrics.overall.{dedup,
+    # provider_embed_calls}). The wire-level assertions above
+    # (transport.call_count == 1, len(sent_texts) == 1) already conclusively
+    # prove the same K-1 dedup-savings fact against the REAL HTTP wire.
+
+
+# ===========================================================================
+# Story #1293 — Direct-path invariant gate: provider_embed_calls (from
+# search_embed_event rows) == transport HTTP-call count.
+# ===========================================================================
+
+
+def test_direct_path_provider_embed_calls_matches_transport_call_count_1293() -> None:
+    """Story #1293 S1a fault-injection gate: for the DIRECT (no-coalescer) path,
+    the search_embed_event invariant
+
+        provider_embed_calls = COUNT(DISTINCT live_batch_id)
+                              + COUNT(*) WHERE role='direct'
+                                           AND outcome IN ('miss', 'shadow_miss')
+
+    must equal the REAL transport HTTP-call count. No coalescer registry is
+    installed (registry=None, the CLI/solo-equivalent state), so
+    coalesced_query_embedding() takes Path B (direct governed call) for every
+    text — each of N distinct queries makes exactly ONE HTTP call, driving
+    the REAL governed_query_embedding -> execute_with_backoff -> governor ->
+    scripted-transport pipeline (nothing mocked below the wire).
+
+    Each call's returned EmbeddingCacheMetadata is fed through the REAL
+    emit_embed_event() shared helper into a REAL SQLite-backed
+    SearchEmbedEventWriter, then the writer is flushed and the backend's
+    count_provider_embed_calls() aggregate is asserted against
+    transport.call_count -- proving the durable-event invariant holds for
+    every needed embed on the direct path, with zero phantom hits.
+    """
+    import uuid
+
+    from code_indexer.server.services.coalescer_registry import (
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        clear_query_embedding_cache,
+        coalesced_query_embedding,
+        get_query_embedding_cache,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
     )
 
-    # --- provider_embed_calls == 1 (one HTTP call per dispatched batch) ---
-    assert coalescer.provider_embed_calls == 1, (
-        f"provider_embed_calls={coalescer.provider_embed_calls}, expected 1"
+    # Preconditions: no coalescer, no cache -> guarantees Path B for every call.
+    clear_coalescer_registry()
+    clear_query_embedding_cache()
+    assert get_coalescer_registry() is None
+    assert get_query_embedding_cache() is None
+
+    N = 4
+    transport = _ScriptedTransport([_voyage_embed_200()])
+    provider = _voyage_provider(_ScriptedClientFactory(transport))
+
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1293_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+
+    set_search_embed_event_writer(writer)
+    try:
+        for i in range(N):
+            vec, meta = coalesced_query_embedding(
+                provider, f"direct path probe {i}-{uuid.uuid4().hex[:6]}"
+            )
+            assert isinstance(vec, list) and len(vec) == 1024
+            # Mirrors the production call-site pattern (search_service.py /
+            # mcp/handlers/search.py): emit right after the call returns.
+            emit_embed_event(meta)
+
+        writer.flush()
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        assert transport.call_count == N, (
+            f"expected {N} real HTTP calls at the wire (one per distinct "
+            f"direct query), got {transport.call_count}"
+        )
+        assert provider_embed_calls == transport.call_count, (
+            f"search_embed_event invariant broken: provider_embed_calls="
+            f"{provider_embed_calls} != transport.call_count="
+            f"{transport.call_count} (direct path must record exactly one "
+            f"role='direct' outcome='miss' row per real HTTP call, no "
+            f"phantom hits)"
+        )
+
+        # Zero phantom hits: N events total, all outcome='miss' role='direct'.
+        events, total = backend.query()
+        assert total == N
+        assert all(e["outcome"] == "miss" and e["role"] == "direct" for e in events)
+        assert all(e["correlation_id"] for e in events), (
+            "every event must carry a non-null/non-empty correlation_id"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ===========================================================================
+# Story #1293 S1b — Coalesced-path invariant gate: provider_embed_calls (from
+# search_embed_event rows) == transport HTTP-call count, extended to cover the
+# owner/joiner coalescer path AND a mix with the direct (no-coalescer) path in
+# the SAME request flow.
+# ===========================================================================
+
+
+def test_coalesced_and_direct_paths_provider_embed_calls_matches_transport_call_count_1293() -> (
+    None
+):
+    """Story #1293 S1b fault-injection gate: extends the S1a direct-path
+    invariant to the COALESCED (owner/joiner) path, and proves both terms of
+    the formula combine correctly when both paths fire in the same flow:
+
+        provider_embed_calls = COUNT(DISTINCT live_batch_id)
+                              + COUNT(*) WHERE role='direct'
+                                           AND outcome IN ('miss', 'shadow_miss')
+
+    Part 1 (coalesced): K concurrent identical cold queries coalesce into ONE
+    sealed batch -> ONE real HTTP call at the scripted wire -> 1 owner event
+    (role=owner, live_batch_id=<uuid>) + (K-1) joiner events (role=joiner,
+    SAME live_batch_id). COUNT(DISTINCT live_batch_id) == 1 == transport calls
+    for this batch.
+
+    Part 2 (direct): M distinct direct (no-coalescer) queries each make their
+    own real HTTP call -> M events (role=direct, outcome=miss). These add M to
+    provider_embed_calls via the role='direct' term (NOT via live_batch_id,
+    which stays NULL for direct calls).
+
+    Combined: transport.call_count == 1 + M, and
+    backend.count_provider_embed_calls() must equal it exactly -- proving the
+    two terms of the formula compose correctly with zero double-counting and
+    zero phantom hits.
+    """
+    import uuid as _uuid
+
+    from tests.unit.server.services.test_coalescer_cache_1147 import (
+        _make_real_cache,
+        _run_saturated_submits,
     )
+
+    from code_indexer.server.services import governed_call
+    from code_indexer.server.services.coalescer_registry import (
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
+    )
+
+    # Preconditions: no coalescer REGISTRY (the coalesced portion drives
+    # EmbeddingCoalescer directly, bypassing the registry/shim entirely, so
+    # registry absence doesn't affect it -- Part 2's direct calls take Path B
+    # via coalesced_query_embedding).
+    #
+    # A REAL cache (mode=on) IS installed: the coalescer's _inflight_keys
+    # single-flight owner/joiner registry only activates when a cache is
+    # present and enabled (Story #1148) -- without one, K concurrent
+    # identical submits become independent batch-dispatch entries (all
+    # role=owner, deduped only inside _dispatch), never producing the
+    # owner+joiner split this test asserts. A cache MISS on the Part 2 direct
+    # calls still classifies as outcome=miss/role=direct (same decision-table
+    # row as "no cache"), so Part 2's invariant math is unaffected.
+    clear_coalescer_registry()
+    cache, _qualifier = _make_real_cache(mode="on")
+    governed_call.set_query_embedding_cache(cache)
+    assert get_coalescer_registry() is None
+
+    K = 5  # coalesced same-key requestors
+    M = 3  # direct (no-coalescer) distinct queries
+
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1293_s1b_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+    set_search_embed_event_writer(writer)
+
+    try:
+        # --- Part 1: coalesced owner/joiner burst -> ONE real HTTP call ---
+        gov = _build_governor(max_concurrency=K_MIN)
+        transport = _ScriptedTransport([_voyage_embed_200()])
+        provider = _voyage_provider(_ScriptedClientFactory(transport))
+        coalescer = EmbeddingCoalescer(
+            VOYAGE_EMBED,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            coalesce_max_batch_size=K,
+            config_digest="fi-test-digest-1293-s1b",
+        )
+        same_text = f"coalesced invariant probe {_uuid.uuid4().hex[:6]}"
+        # _inflight_keys single-flight: only the OWNER ever calls _enqueue();
+        # joiners wait on the owner's Future instead. This is INCOMPATIBLE
+        # with _coalesced_burst's open-batch witness (which requires every
+        # caller to land in the SAME _open_batch) -- use the governor-
+        # saturation harness instead (works for single-flight regardless of
+        # whether callers ever reach _enqueue()).
+        outcome = _run_saturated_submits(
+            coalescer, gov, VOYAGE_EMBED, [same_text] * K, accumulate=0.2
+        )
+        assert not outcome.errors, f"coalesced callers failed: {outcome.errors}"
+        assert len(outcome.results) == K
+        # _Outcome.results is typed Dict[int, List[float]] by the shared
+        # helper (test_coalescer_cache_1147.py) but actually holds
+        # (vec, EmbeddingCacheMetadata) tuples at runtime -- cast each raw
+        # result to Any before unpacking so mypy doesn't infer `meta: float`.
+        metas: List[Any] = []
+        for idx, raw_result in outcome.results.items():
+            vec, meta = cast(Any, raw_result)
+            assert vec is not None and len(vec) == 1024, f"caller {idx} bad vector"
+            metas.append(meta)
+
+        assert transport.call_count == 1, (
+            f"K identical coalesced callers must produce exactly 1 real HTTP "
+            f"call, got {transport.call_count}"
+        )
+        owners = [m for m in metas if m.role == "owner"]
+        joiners = [m for m in metas if m.role == "joiner"]
+        assert len(owners) == 1 and len(joiners) == K - 1
+        assert owners[0].live_batch_id is not None
+        assert all(j.live_batch_id == owners[0].live_batch_id for j in joiners)
+
+        for meta in metas:
+            emit_embed_event(meta)
+
+        # --- Part 2: M distinct DIRECT (no-coalescer) queries -> M real HTTP calls ---
+        for i in range(M):
+            vec, meta = coalesced_query_embedding(
+                provider, f"direct invariant probe {i}-{_uuid.uuid4().hex[:6]}"
+            )
+            assert isinstance(vec, list) and len(vec) == 1024
+            assert meta.role == "direct" and meta.outcome == "miss"
+            emit_embed_event(meta)
+
+        writer.flush()
+
+        expected_transport_calls = 1 + M
+        assert transport.call_count == expected_transport_calls, (
+            f"expected {expected_transport_calls} real HTTP calls "
+            f"(1 coalesced batch + {M} direct), got {transport.call_count}"
+        )
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        assert provider_embed_calls == transport.call_count, (
+            f"search_embed_event invariant broken: provider_embed_calls="
+            f"{provider_embed_calls} != transport.call_count="
+            f"{transport.call_count} (COUNT(DISTINCT live_batch_id) + "
+            f"COUNT(role='direct' AND outcome IN miss/shadow_miss) must equal "
+            f"the real transport HTTP-call count across BOTH paths combined)"
+        )
+
+        # Zero phantom hits: exactly K + M events total, no null correlation_id.
+        events, total = backend.query()
+        assert total == K + M
+        assert all(e["correlation_id"] for e in events), (
+            "every event must carry a non-null/non-empty correlation_id"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        governed_call.clear_query_embedding_cache()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ===========================================================================
+# Bug #1305 — count_transport_calls(): an ADDITIVE second counter equal to the
+# REAL transport HTTP-call count in ALL modes (on, shadow, failover).
+#
+# Epic #1288's original phrasing ("provider_embed_calls == real transport
+# HTTP-call count") only holds in on-mode. It diverges in shadow mode (a
+# shadow_hit ALWAYS makes a real live provider call for comparison, yet is
+# classified role='warm_hit'/live_batch_id=NULL -> excluded from
+# count_provider_embed_calls) and on a failed failover primary attempt
+# (outcome='error'/role='direct' -- excluded, though it hit the wire).
+# provider_embed_calls' PRECISE meaning is "count of successful NEEDED
+# embeds" and is UNCHANGED by this bug fix (the #1294 dashboard depends on
+# it). count_transport_calls() is the new, separate "raw wire calls" counter.
+# ===========================================================================
+
+
+def test_direct_path_transport_calls_equals_provider_embed_calls_on_mode_1305() -> None:
+    """Bug #1305 control case: on-mode / no-cache direct path has ZERO undercount.
+
+    Every direct-path call in this test is a genuine live MISS (role='direct',
+    outcome='miss') — there is no shadow_hit, bypass, or error row to diverge
+    on. count_transport_calls() and provider_embed_calls() must therefore be
+    IDENTICAL, and both must equal the real transport.call_count — proving the
+    new counter agrees with the existing invariant everywhere it already held,
+    rather than just papering over the shadow/failover gap.
+    """
+    import uuid
+
+    from code_indexer.server.services.coalescer_registry import (
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        clear_query_embedding_cache,
+        coalesced_query_embedding,
+        get_query_embedding_cache,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
+    )
+
+    clear_coalescer_registry()
+    clear_query_embedding_cache()
+    assert get_coalescer_registry() is None
+    assert get_query_embedding_cache() is None
+
+    N = 3
+    transport = _ScriptedTransport([_voyage_embed_200()])
+    provider = _voyage_provider(_ScriptedClientFactory(transport))
+
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1305_ctrl_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+    set_search_embed_event_writer(writer)
+
+    try:
+        for i in range(N):
+            vec, meta = coalesced_query_embedding(
+                provider, f"transport-calls control probe {i}-{uuid.uuid4().hex[:6]}"
+            )
+            assert isinstance(vec, list) and len(vec) == 1024
+            emit_embed_event(meta)
+
+        writer.flush()
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        transport_calls = backend.count_transport_calls()
+
+        assert transport.call_count == N
+        assert provider_embed_calls == N
+        assert transport_calls == N, (
+            f"count_transport_calls()={transport_calls} != {N} real HTTP calls "
+            "— on-mode direct path must have ZERO divergence from "
+            "provider_embed_calls"
+        )
+        assert transport_calls == provider_embed_calls, (
+            "no shadow_hit/bypass/error rows exist in this scenario — the two "
+            "counters must agree exactly"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_shadow_mode_transport_calls_exceeds_provider_embed_calls_1305() -> None:
+    """Bug #1305 PRIMARY reproduction: shadow-mode warm cache undercounts.
+
+    shadow_hit rows (outcome='shadow_hit', role='warm_hit', live_batch_id=None)
+    are, BY DESIGN, excluded from provider_embed_calls' "needed embed" count —
+    but governed_call._serve_with_cache's shadow branch ALWAYS calls live_fn()
+    FIRST (it embeds live for comparison before ever checking the cache), so
+    every shadow_hit still burns a REAL provider HTTP call. Shadow is also the
+    DEFAULT cache mode when the query-embedding cache is otherwise
+    unconfigured (query_embedding_cache.py fallbacks), so this is not an
+    exotic edge case.
+
+    This test proves the new count_transport_calls() closes exactly this gap:
+    count_transport_calls() == transport.call_count (the true wire count) even
+    though provider_embed_calls() undercounts to 0.
+    """
+    from code_indexer.server.services import governed_call
+    from code_indexer.server.services.coalescer_registry import (
+        _digest_for_provider,
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+    from code_indexer.server.services.query_embedding_cache import (
+        QueryEmbeddingCache,
+        build_key,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
+    )
+    from tests.unit.server.services.test_coalescer_cache_1147 import _FakeBackend
+
+    clear_coalescer_registry()
+    assert get_coalescer_registry() is None
+
+    warm_text = "shadow warm cache probe 1305"
+    transport = _ScriptedTransport([_voyage_embed_200()])
+    provider = _voyage_provider(_ScriptedClientFactory(transport))
+
+    # Pre-seed the cache using the EXACT digest/key/qualifier the production
+    # code computes for THIS SAME provider instance (avoids any
+    # digest-mismatch false-miss — a shadow HIT requires an exact key match).
+    digest = _digest_for_provider(provider)
+    backend_cache = _FakeBackend()
+    cache = QueryEmbeddingCache(
+        backend_cache, enabled=True, voyage_mode="shadow", cohere_mode="shadow"
+    )
+    cache.mode_for = lambda pname: "shadow"  # type: ignore[method-assign]
+    qualifier = cache.qualifier(provider)
+    warm_key = build_key(warm_text, config_digest=digest)
+    assert warm_key is not None
+    # shadow-mode HIT detection only checks blob-is-not-None (no decode/
+    # dimension validation like on-mode) so arbitrary non-empty bytes suffice.
+    backend_cache._store[
+        (warm_key, qualifier.provider, qualifier.model, qualifier.dimension)
+    ] = b"\x00" * (qualifier.dimension * 4)
+    governed_call.set_query_embedding_cache(cache)
+
+    M = 4  # repeated requests for the SAME already-cached key
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1305_shadow_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+    set_search_embed_event_writer(writer)
+
+    try:
+        for _ in range(M):
+            vec, meta = coalesced_query_embedding(provider, warm_text)
+            assert isinstance(vec, list) and len(vec) == 1024
+            assert meta.outcome == "shadow_hit" and meta.role == "warm_hit", (
+                f"expected shadow_hit/warm_hit, got outcome={meta.outcome!r} "
+                f"role={meta.role!r}"
+            )
+            emit_embed_event(meta)
+
+        writer.flush()
+
+        assert transport.call_count == M, (
+            f"shadow mode must ALWAYS call live_fn() even on a cache HIT — "
+            f"expected {M} real HTTP calls, got {transport.call_count}"
+        )
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        transport_calls = backend.count_transport_calls()
+
+        assert provider_embed_calls == 0, (
+            f"provider_embed_calls() must stay 0 for pure shadow_hit rows "
+            f"(Epic #1288 'needed embed' semantics UNCHANGED), got "
+            f"{provider_embed_calls}"
+        )
+        assert transport_calls == transport.call_count == M, (
+            f"count_transport_calls()={transport_calls} != real transport."
+            f"call_count={transport.call_count} — shadow_hit's real "
+            f"validation call must be counted"
+        )
+        assert transport_calls > provider_embed_calls, (
+            "Bug #1305: shadow mode must show a REAL divergence between the "
+            "two counters (this is the reproduction of the bug's core claim)"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        governed_call.clear_query_embedding_cache()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_failover_primary_fail_transport_calls_includes_failed_attempt_1305() -> None:
+    """Bug #1305: a failed primary-provider attempt hits the wire but is
+    recorded as outcome='error'/role='direct' — excluded from
+    provider_embed_calls (not a "needed embed" success) yet it DID make a real
+    HTTP call before failing. count_transport_calls() must include it.
+
+    Sequence mirrors search_service.py's real failover call site: a failed
+    LIVE embedding attempt emits emit_embed_error_event() BEFORE the caller
+    falls over to a secondary provider whose own success emits its own
+    (miss/direct) event.
+    """
+    import uuid
+
+    from code_indexer.server.services.coalescer_registry import (
+        clear_coalescer_registry,
+        get_coalescer_registry,
+    )
+    from code_indexer.server.services.governed_call import (
+        clear_query_embedding_cache,
+        coalesced_query_embedding,
+        get_query_embedding_cache,
+    )
+    from code_indexer.server.services.search_embed_event_emit import (
+        clear_search_embed_event_writer,
+        emit_embed_error_event,
+        emit_embed_event,
+        set_search_embed_event_writer,
+    )
+    from code_indexer.server.services.search_embed_event_writer import (
+        SearchEmbedEventSqliteBackend,
+        SearchEmbedEventWriter,
+    )
+
+    clear_coalescer_registry()
+    clear_query_embedding_cache()
+    assert get_coalescer_registry() is None
+    assert get_query_embedding_cache() is None
+
+    primary_transport = _ScriptedTransport([_http_500()])
+    primary_provider = _voyage_provider(_ScriptedClientFactory(primary_transport))
+    secondary_transport = _ScriptedTransport([_voyage_embed_200()])
+    secondary_provider = _voyage_provider(_ScriptedClientFactory(secondary_transport))
+
+    tmp_dir = tempfile.mkdtemp(prefix="search_embed_event_1305_failover_")
+    db_path = os.path.join(tmp_dir, "search_embed_event.db")
+    backend = SearchEmbedEventSqliteBackend(db_path)
+    writer = SearchEmbedEventWriter(backend)
+    set_search_embed_event_writer(writer)
+
+    try:
+        probe = f"failover probe {uuid.uuid4().hex[:6]}"
+        try:
+            coalesced_query_embedding(primary_provider, probe)
+            raise AssertionError("primary provider must raise on the scripted 500")
+        except AssertionError:
+            raise
+        except Exception:
+            emit_embed_error_event(primary_provider.get_provider_name())
+
+        vec, meta = coalesced_query_embedding(secondary_provider, probe)
+        assert isinstance(vec, list) and len(vec) == 1024
+        assert meta.outcome == "miss" and meta.role == "direct"
+        emit_embed_event(meta)
+
+        writer.flush()
+
+        assert primary_transport.call_count == 1, (
+            "non-429 error must not be retried — exactly one real HTTP "
+            f"attempt at the primary, got {primary_transport.call_count}"
+        )
+        assert secondary_transport.call_count == 1
+        real_transport_calls = (
+            primary_transport.call_count + secondary_transport.call_count
+        )
+
+        provider_embed_calls = backend.count_provider_embed_calls()
+        transport_calls = backend.count_transport_calls()
+
+        assert provider_embed_calls == 1, (
+            f"only the secondary's successful miss counts as a 'needed embed' "
+            f"(Epic #1288 semantics unchanged), got {provider_embed_calls}"
+        )
+        assert transport_calls == real_transport_calls == 2, (
+            f"count_transport_calls()={transport_calls} must equal the real "
+            f"combined transport call count={real_transport_calls} (1 failed "
+            f"primary attempt + 1 successful secondary attempt)"
+        )
+    finally:
+        clear_search_embed_event_writer()
+        clear_coalescer_registry()
+        shutil.rmtree(tmp_dir, ignore_errors=True)

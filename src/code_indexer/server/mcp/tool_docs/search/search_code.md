@@ -94,19 +94,9 @@ inputSchema:
       description: Search all git history. Requires temporal index.
     at_commit:
       type: string
-      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Requires temporal index.'
-    include_removed:
-      type: boolean
-      default: false
-      description: Include removed files in results. Only for temporal queries.
-    show_evolution:
-      type: boolean
-      default: false
-      description: Include code change timeline with commit history. Requires temporal index.
-    evolution_limit:
-      type: integer
-      minimum: 1
-      description: Max evolution entries per result. Only with show_evolution=true.
+      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Point-in-time scoping: results
+        are restricted to commits at or before the resolved commit. Requires temporal index. An unresolvable ref/hash
+        returns an error.'
     case_sensitive:
       type: boolean
       default: false
@@ -143,6 +133,11 @@ inputSchema:
       - commit_message
       - commit_diff
       description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
+    temporal_embedder:
+      type: string
+      description: 'Explicit temporal embedder override (e.g. ''embed-v4.0''). Omit to use temporal.active_embedder. An override
+        naming an embedder with no indexed collections returns an empty/typed result -- it never silently falls back to
+        active_embedder. Requires a temporal query (time_range, time_range_all, or at_commit).'
     query_strategy:
       type: string
       enum:
@@ -283,16 +278,6 @@ outputSchema:
                   commits:
                     type: array
                     description: List of commits affecting this code
-                    items:
-                      type: object
-                  is_removed:
-                    type: boolean
-                    description: Whether file was removed from current HEAD (only when include_removed=true)
-                  evolution:
-                    type:
-                    - array
-                    - 'null'
-                    description: Code evolution timeline (only when show_evolution=true)
                     items:
                       type: object
         total_results:

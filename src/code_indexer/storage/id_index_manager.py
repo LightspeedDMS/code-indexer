@@ -11,12 +11,33 @@ from pathlib import Path
 from typing import Dict
 import threading
 
+from code_indexer.services.temporal.temporal_structure_marker import (
+    STRUCTURE_MARKER_FILENAME,
+)
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
 
 _MAX_INDEX_ENTRIES = 10_000_000
 _HEADER_SIZE = 4  # bytes occupied by the uint32 entry-count field
+
+# Bug #1297: Story #1290 per-commit temporal indexing writes bookkeeping /
+# marker JSON sidecars alongside vector JSON files in a collection dir. These
+# files structurally lack an 'id' field by design (they are not vectors), so
+# they must be skipped WITHOUT the "missing 'id' field" WARNING that a
+# genuinely malformed vector file would (correctly) still trigger.
+#
+# temporal_structure.json has an exported constant (imported above);
+# temporal_progress.json / temporal_meta.json are referenced as literal
+# strings elsewhere in the temporal package (temporal_collection_naming.py,
+# temporal_migration.py) with no shared constant to import.
+_TEMPORAL_BOOKKEEPING_FILENAMES = frozenset(
+    {
+        STRUCTURE_MARKER_FILENAME,  # temporal_structure.json
+        "temporal_progress.json",
+        "temporal_meta.json",
+    }
+)
 
 
 class CorruptIDIndexError(Exception):
@@ -248,6 +269,10 @@ class IDIndexManager:
             if "collection_meta" in json_file.name:
                 continue
             if json_file.name == self.INDEX_FILENAME:
+                continue
+            if json_file.name in _TEMPORAL_BOOKKEEPING_FILENAMES:
+                # Bug #1297: temporal marker/bookkeeping sidecars legitimately
+                # lack an 'id' field -- skip silently, no WARNING.
                 continue
 
             scanned_count += 1

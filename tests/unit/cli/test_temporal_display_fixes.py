@@ -96,15 +96,11 @@ class TestAuthorEmailInPayload:
         # Verify author_email in payload
         assert len(captured_payloads) > 0, "No payloads captured"
 
-        # Filter for commit_diff payloads (file chunks in temporal indexing)
-        commit_diff_payloads = [
-            p for p in captured_payloads if p.get("type") == "commit_diff"
-        ]
-        assert len(commit_diff_payloads) > 0, (
-            f"No commit_diff payloads found. Found types: {[p.get('type') for p in captured_payloads]}"
-        )
-
-        for payload in commit_diff_payloads:
+        # Story #1290: every payload carries type=="commit_chunk" (the old
+        # distinct "commit_diff" type value no longer exists) -- check all
+        # captured payloads directly rather than filtering by the obsolete
+        # per-value type field.
+        for payload in captured_payloads:
             assert "author_email" in payload, "author_email missing from payload"
             assert payload["author_email"] == "test@example.com", (
                 f"Expected test@example.com, got {payload.get('author_email')}"

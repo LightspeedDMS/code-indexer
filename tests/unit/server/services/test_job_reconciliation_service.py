@@ -214,110 +214,6 @@ class TestSweepDeadNode:
 
 
 # ---------------------------------------------------------------------------
-# sweep() — execution-timeout reclaim
-# ---------------------------------------------------------------------------
-
-
-class TestSweepTimeout:
-    def test_sweep_resets_timed_out_jobs_to_pending(self):
-        """
-        Jobs running longer than max_execution_time must be reset to pending.
-        """
-        # First fetchall: dead-node reclaim returns nothing
-        # Second fetchall: timeout reclaim returns one job
-        pool, _, cur = _make_pool(
-            fetchall=[[], [("job-hung", "node-1", "2026-01-01T00:00:00")]]
-        )
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
-
-        count = svc.sweep()
-
-        assert count == 1
-        all_calls = cur.execute.call_args_list
-        timeout_calls = [c for c in all_calls if "started_at <=" in c.args[0]]
-        assert len(timeout_calls) == 1
-        sql = timeout_calls[0].args[0]
-        params = timeout_calls[0].args[1]
-        assert "status" in sql
-        assert "pending" in sql
-        assert "executing_node = NULL" in sql
-        assert params[0] == 1800
-
-    def test_sweep_timeout_sql_uses_interval_multiplication(self):
-        """
-        Timeout SQL must use %s * INTERVAL '1 second', not INTERVAL '%s seconds'.
-        """
-        pool, _, cur = _make_pool(fetchall=[[], []])
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb, max_execution_time=600)
-
-        svc.sweep()
-
-        all_calls = cur.execute.call_args_list
-        timeout_calls = [c for c in all_calls if "started_at <=" in c.args[0]]
-        assert len(timeout_calls) == 1
-        sql = timeout_calls[0].args[0]
-        assert "INTERVAL '1 second'" in sql
-        assert "%s" in sql
-
-    def test_sweep_timeout_passes_max_execution_time_as_param(self):
-        """max_execution_time must be passed as a SQL parameter."""
-        pool, _, cur = _make_pool(fetchall=[[], []])
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb, max_execution_time=3600)
-
-        svc.sweep()
-
-        all_calls = cur.execute.call_args_list
-        timeout_calls = [c for c in all_calls if "started_at <=" in c.args[0]]
-        params = timeout_calls[0].args[1]
-        assert params[0] == 3600
-
-    def test_sweep_counts_both_dead_node_and_timeout_reclaims(self):
-        """sweep() return value must be the sum of both reclaim types."""
-        pool, _, cur = _make_pool(
-            fetchall=[
-                [("job-1", "dead-node"), ("job-2", "dead-node")],  # dead-node
-                [("job-3", "node-1", "2026-01-01")],  # timeout
-            ]
-        )
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb)
-
-        count = svc.sweep()
-
-        assert count == 3
-
-    def test_sweep_reclaim_status_filters(self):
-        """Per-path status filters (Bug #1141 adds a third path).
-
-        The two reclaim-to-pending paths (dead-node, timeout) target only
-        ``status = 'running'``.  The new stuck index-blocking path covers
-        ``status IN ('pending', 'running')`` because pending jobs can also be
-        stuck active and block idx_active_job_per_repo.
-        """
-        pool, _, cur = _make_pool(fetchall=[[], [], []])
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb)
-
-        svc.sweep()
-
-        update_sqls = [
-            " ".join(c.args[0].split())  # normalize whitespace
-            for c in cur.execute.call_args_list
-            if "UPDATE background_jobs" in c.args[0]
-        ]
-        assert len(update_sqls) == 3
-        running_only = [s for s in update_sqls if "status = 'running'" in s]
-        stuck = [s for s in update_sqls if "status IN ('pending', 'running')" in s]
-        assert len(running_only) == 2, f"expected 2 running-only UPDATEs: {update_sqls}"
-        assert len(stuck) == 1, (
-            f"expected 1 stuck pending/running UPDATE: {update_sqls}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # sweep() — stuck index-blocking reclaim (Bug #1141)
 # ---------------------------------------------------------------------------
 
@@ -325,16 +221,23 @@ class TestSweepTimeout:
 class TestSweepStuckIndexBlocking:
     """
     Bug #1141: Jobs in any index-blocking status (pending OR running) that
-    are older than max_execution_time but never caught by the existing two
-    reclaim paths must be moved to 'failed' so idx_active_job_per_repo
+    are older than max_execution_time but never caught by the dead-node
+    reclaim path must be moved to 'failed' so idx_active_job_per_repo
     unblocks and a fresh job can be submitted.
 
-    Gap 1: A 'running' job with started_at IS NULL — _reclaim_timed_out_jobs
-    uses ``started_at <= NOW() - timeout`` which never matches NULL.
+    Gap 1: A 'running' job with started_at IS NULL — never started, so no
+    duration-based check applies to it; only the ``started_at IS NULL``
+    guard in _reclaim_stuck_index_blocking_jobs catches it.
 
-    Gap 2: A 'pending' job older than max_execution_time — both existing
-    reclaim paths filter ``status = 'running'``, so pending jobs are never
+    Gap 2: A 'pending' job older than max_execution_time — the dead-node
+    reclaim path filters ``status = 'running'``, so pending jobs are never
     touched.
+
+    Post-Bug #1310: JobReconciliationService has exactly two reclaim paths
+    — _reclaim_dead_node_jobs (heartbeat/liveness-based) and
+    _reclaim_stuck_index_blocking_jobs (the started_at IS NULL guard
+    verified by this test class). The former _reclaim_timed_out_jobs
+    method was removed by Bug #1310.
     """
 
     def test_sweep_calls_stuck_index_blocking_reclaim(self):
@@ -343,8 +246,9 @@ class TestSweepStuckIndexBlocking:
         to the two existing paths (three execute calls total when active_nodes
         is non-empty).
         """
-        # Three fetchall entries: dead-node, timeout, stuck-index-blocking
-        pool, _, cur = _make_pool(fetchall=[[], [], []])
+        # Two fetchall entries: dead-node, stuck-index-blocking (Path 2 removed
+        # by Bug #1310 — the only two remaining reclaim paths).
+        pool, _, cur = _make_pool(fetchall=[[], []])
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb)
 
@@ -355,8 +259,8 @@ class TestSweepStuckIndexBlocking:
             for c in cur.execute.call_args_list
             if "UPDATE background_jobs" in c.args[0]
         ]
-        assert len(update_calls) == 3, (
-            "Expected 3 UPDATE calls (dead-node, timeout, stuck-index-blocking); "
+        assert len(update_calls) == 2, (
+            "Expected 2 UPDATE calls (dead-node, stuck-index-blocking); "
             f"got {len(update_calls)}"
         )
 
@@ -364,13 +268,12 @@ class TestSweepStuckIndexBlocking:
         """
         A 'running' job with started_at IS NULL that is old (via claimed_at
         or created_at fallback) must be set to 'failed' (not 'pending') so
-        idx_active_job_per_repo unblocks.
+        idx_active_job_per_repo unblocks. Bug #1141 preserved by Bug #1310.
         """
         # First fetchall (dead-node): nothing
-        # Second fetchall (timeout): nothing — started_at IS NULL so it skips
-        # Third fetchall (stuck-index-blocking): one stuck job returned
+        # Second fetchall (stuck-index-blocking): one stuck job returned
         pool, _, cur = _make_pool(
-            fetchall=[[], [], [("job-stuck-null-start", "running", None)]]
+            fetchall=[[], [("job-stuck-null-start", "running", None)]]
         )
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb, max_execution_time=1800)
@@ -398,6 +301,9 @@ class TestSweepStuckIndexBlocking:
         assert "'running'" in sql or "running" in sql
         # Must use COALESCE to handle NULL started_at
         assert "COALESCE" in sql
+        # Bug #1310: must require started_at IS NULL so a job with a valid
+        # started_at (genuinely running) can never match this query.
+        assert "started_at IS NULL" in sql
 
     def test_stuck_pending_job_older_than_timeout_is_failed(self):
         """
@@ -405,7 +311,7 @@ class TestSweepStuckIndexBlocking:
         The existing reclaim paths ignore pending — this new path must not.
         """
         pool, _, cur = _make_pool(
-            fetchall=[[], [], [("job-stuck-pending", "pending", None)]]
+            fetchall=[[], [("job-stuck-pending", "pending", None)]]
         )
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb, max_execution_time=1800)
@@ -432,7 +338,7 @@ class TestSweepStuckIndexBlocking:
         would keep the job ACTIVE (still in the partial unique index) and
         block future submissions forever.
         """
-        pool, _, cur = _make_pool(fetchall=[[], [], [("job-stuck", "running", None)]])
+        pool, _, cur = _make_pool(fetchall=[[], [("job-stuck", "running", None)]])
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb)
 
@@ -443,7 +349,7 @@ class TestSweepStuckIndexBlocking:
             for c in cur.execute.call_args_list
             if "UPDATE background_jobs" in c.args[0]
         ]
-        # The third UPDATE (stuck-index-blocking) must set status='failed'
+        # The second UPDATE (stuck-index-blocking) must set status='failed'
         stuck_calls = [
             c for c in update_calls if "failed" in c.args[0] and "COALESCE" in c.args[0]
         ]
@@ -454,7 +360,7 @@ class TestSweepStuckIndexBlocking:
 
     def test_stuck_reclaim_passes_max_execution_time_as_param(self):
         """max_execution_time must be a SQL parameter in the stuck-index-blocking query."""
-        pool, _, cur = _make_pool(fetchall=[[], [], []])
+        pool, _, cur = _make_pool(fetchall=[[], []])
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb, max_execution_time=7200)
 
@@ -475,12 +381,11 @@ class TestSweepStuckIndexBlocking:
     def test_stuck_reclaim_count_included_in_sweep_total(self):
         """
         sweep() return value must include stuck-index-blocking reclaims
-        alongside dead-node and timeout counts.
+        alongside dead-node reclaims.
         """
         pool, _, cur = _make_pool(
             fetchall=[
                 [("j1", "dead-node")],  # dead-node reclaim
-                [("j2", "node-1", "2026-01-01")],  # timeout reclaim
                 [("j3", "running", None)],  # stuck-index-blocking
             ]
         )
@@ -489,14 +394,14 @@ class TestSweepStuckIndexBlocking:
 
         count = svc.sweep()
 
-        assert count == 3
+        assert count == 2
 
     def test_stuck_reclaim_uses_interval_multiplication(self):
         """
         The COALESCE-based age check must use %s * INTERVAL '1 second'
         (not string interpolation) for safe parameterization.
         """
-        pool, _, cur = _make_pool(fetchall=[[], [], []])
+        pool, _, cur = _make_pool(fetchall=[[], []])
         hb = _make_heartbeat(active_nodes=["node-1"])
         svc = JobReconciliationService(pool, hb)
 
@@ -514,19 +419,19 @@ class TestSweepStuckIndexBlocking:
         sql = stuck_calls[0].args[0]
         assert "INTERVAL '1 second'" in sql
 
-    def test_stuck_reclaim_excludes_paths_1_and_2_reclaimed_ids(self):
+    def test_stuck_reclaim_excludes_path_1_reclaimed_ids(self):
         """
-        Clobber-safety: job_ids reclaimed by the dead-node and timeout paths in
-        the SAME sweep must be EXCLUDED from the stuck-index-blocking 'failed'
-        UPDATE (so a job path 2 just re-queued to 'pending' is not flipped to
-        'failed').  The stuck UPDATE must carry an ``job_id <> ALL(%s)`` clause
-        whose param list contains those reclaimed ids.
+        Clobber-safety: job_ids reclaimed by the dead-node path in the SAME
+        sweep must be EXCLUDED from the stuck-index-blocking 'failed' UPDATE
+        (so a job path 1 just re-queued to 'pending' is not flipped to
+        'failed'). The stuck UPDATE must carry a ``job_id <> ALL(%s)`` clause
+        whose param list contains those reclaimed ids. (Path 2 no longer
+        exists — Bug #1310 removed it.)
         """
         pool, _, cur = _make_pool(
             fetchall=[
                 [("j1", "dead-node")],  # path 1 reclaims j1
-                [("j2", "node-1", "2026-01-01")],  # path 2 reclaims j2
-                [],  # path 3: nothing matched after exclusion
+                [],  # path 2 (stuck): nothing matched after exclusion
             ]
         )
         hb = _make_heartbeat(active_nodes=["node-1"])
@@ -545,14 +450,111 @@ class TestSweepStuckIndexBlocking:
         assert stuck_calls, "No stuck-index-blocking UPDATE found"
         sql = stuck_calls[0].args[0]
         params = stuck_calls[0].args[1]
-        # The exclusion clause must be present when paths 1&2 reclaimed ids.
+        # The exclusion clause must be present when path 1 reclaimed ids.
         assert "job_id <> ALL" in sql, (
             f"stuck UPDATE missing clobber-safety exclusion clause: {sql}"
         )
-        # The reclaimed ids (j1 from dead-node, j2 from timeout) must be excluded.
+        # The reclaimed id (j1 from dead-node) must be excluded.
         excluded = [p for p in params if isinstance(p, (list, set, tuple))]
         assert excluded, f"no exclusion-list param found in {params}"
         excluded_ids = set(excluded[0])
-        assert {"j1", "j2"} <= excluded_ids, (
-            f"expected j1,j2 excluded; got {excluded_ids}"
+        assert {"j1"} <= excluded_ids, f"expected j1 excluded; got {excluded_ids}"
+
+    def test_sweep_reclaim_status_filters(self):
+        """Per-path status filters (2-path design after Bug #1310).
+
+        The dead-node reclaim-to-pending path targets only
+        ``status = 'running'``. The stuck index-blocking path covers
+        ``status IN ('pending', 'running')`` (guarded by
+        ``started_at IS NULL``) because pending/never-started jobs can also
+        be stuck active and block idx_active_job_per_repo.
+        """
+        pool, _, cur = _make_pool(fetchall=[[], []])
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb)
+
+        svc.sweep()
+
+        update_sqls = [
+            " ".join(c.args[0].split())  # normalize whitespace
+            for c in cur.execute.call_args_list
+            if "UPDATE background_jobs" in c.args[0]
+        ]
+        assert len(update_sqls) == 2
+        running_only = [s for s in update_sqls if "status = 'running'" in s]
+        stuck = [s for s in update_sqls if "status IN ('pending', 'running')" in s]
+        assert len(running_only) == 1, f"expected 1 running-only UPDATE: {update_sqls}"
+        assert len(stuck) == 1, (
+            f"expected 1 stuck pending/running UPDATE: {update_sqls}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# sweep() — Bug #1310: live running jobs must NEVER be wall-clock reaped
+# ---------------------------------------------------------------------------
+
+
+class TestSweepBug1310LiveRunningJobNotReclaimed:
+    """
+    Bug #1310: a RUNNING job with a VALID started_at older than
+    max_execution_time, whose executing_node IS present in active_nodes
+    (i.e. the node is alive and, presumably, the job is still progressing),
+    must NEVER be reclaimed or failed by sweep(). Bug #1218 forbids any
+    wall-clock timeout on indexing / golden-repo / SCIP jobs — the only
+    legitimate reclaim mechanism for a running job is the dead-node
+    (heartbeat) path.
+    """
+
+    def test_running_job_valid_started_at_alive_node_is_not_reclaimed(self):
+        """
+        sweep() must report zero reclaims for a live, long-running job.
+
+        With active_nodes=["node-1"] (alive) and no dead-node rows returned,
+        a running job with an old, valid started_at must not be reset to
+        pending nor failed by any reclaim path this sweep.
+        """
+        pool, _, cur = _make_pool(fetchall=[[], []])
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        count = svc.sweep()
+
+        assert count == 0
+        update_sqls = [
+            " ".join(c.args[0].split())
+            for c in cur.execute.call_args_list
+            if "UPDATE background_jobs" in c.args[0]
+        ]
+        # Any query capable of setting status='failed' must require a NULL
+        # started_at — a job with a valid started_at can never match it.
+        for sql in update_sqls:
+            if "'failed'" in sql:
+                assert "started_at IS NULL" in sql, (
+                    "a 'failed' UPDATE without a started_at IS NULL guard "
+                    f"would wall-clock-reap a live running job: {sql}"
+                )
+
+    def test_no_blanket_wall_clock_reclaim_of_running_jobs_remains(self):
+        """
+        No UPDATE query may reset/fail status='running' jobs purely on
+        ``started_at <= NOW() - max_execution_time`` without also requiring
+        node death (executing_node != ALL(active_nodes)). This is the
+        deleted Path 2 (_reclaim_timed_out_jobs) behavior — it must not
+        exist anywhere in the sweep.
+        """
+        pool, _, cur = _make_pool(fetchall=[[], []])
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        svc.sweep()
+
+        all_sqls = [" ".join(c.args[0].split()) for c in cur.execute.call_args_list]
+        blanket_timeout_queries = [
+            sql
+            for sql in all_sqls
+            if "started_at <=" in sql and "executing_node != ALL" not in sql
+        ]
+        assert not blanket_timeout_queries, (
+            "found a blanket wall-clock reclaim query with no dead-node "
+            f"liveness check (Bug #1310 regression): {blanket_timeout_queries}"
         )

@@ -129,12 +129,10 @@ def _reset_registry():
 
     clear_coalescer_registry()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     reset_config_service()
     yield
     clear_coalescer_registry()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     reset_config_service()
 
 

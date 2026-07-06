@@ -83,11 +83,20 @@ class TestCheckGitHubToken:
 
     @pytest.mark.asyncio
     async def test_github_token_not_configured(self):
-        """Test GitHub token not configured returns NOT_CONFIGURED (AC8)."""
+        """Test GitHub token not configured returns NOT_CONFIGURED (AC8).
+
+        Bug #1304: patch target corrected to
+        code_indexer.server.services.ci_token_manager.CITokenManager --
+        DiagnosticsService._get_token_manager() resolves CITokenManager via
+        create_token_manager() in ci_token_manager.py, so patching the name
+        re-exported into diagnostics_service.py was a no-op that let this
+        host's real GitHub token (e.g. from .local-testing) leak through,
+        yielding WORKING instead of NOT_CONFIGURED.
+        """
         service = DiagnosticsService()
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = None
@@ -99,14 +108,17 @@ class TestCheckGitHubToken:
 
     @pytest.mark.asyncio
     async def test_github_token_invalid_format_warning(self):
-        """Test GitHub token with invalid format returns WARNING."""
+        """Test GitHub token with invalid format returns WARNING.
+
+        Bug #1304: same corrected patch target as test_github_token_not_configured.
+        """
         service = DiagnosticsService()
 
         mock_token_data = MagicMock()
         mock_token_data.token = "invalid_token_format"
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data

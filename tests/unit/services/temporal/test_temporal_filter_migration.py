@@ -104,7 +104,12 @@ class TestTemporalFilterMigration:
     def test_diff_type_filter_in_filter_conditions(
         self, temporal_service, mock_vector_store, mock_embedding_provider
     ):
-        """Test that diff_types are converted to filter_conditions with any operator."""
+        """Story #1290: diff_types is a documented no-op post-hard-cut -- the
+        legacy per-file diff_type payload field no longer exists on per-commit
+        aggregated chunks (a single chunk can span multiple files with
+        different diff kinds), so diff_types must NOT be converted into a
+        `diff_type` vector-store filter_condition (that would silently zero
+        out every result since the field is never present)."""
         mock_vector_store.search.return_value = ([], {})
 
         # Execute query with diff_types
@@ -119,17 +124,13 @@ class TestTemporalFilterMigration:
         call_kwargs = mock_vector_store.search.call_args.kwargs
         filter_conditions = call_kwargs.get("filter_conditions", {})
 
-        # Verify diff_type filter is present with any operator
-        assert "must" in filter_conditions
         diff_filters = [
-            f for f in filter_conditions["must"] if f.get("key") == "diff_type"
+            f for f in filter_conditions.get("must", []) if f.get("key") == "diff_type"
         ]
-        assert len(diff_filters) == 1
-
-        diff_filter = diff_filters[0]
-        assert "match" in diff_filter
-        assert "any" in diff_filter["match"]
-        assert set(diff_filter["match"]["any"]) == {"added", "modified"}
+        assert diff_filters == [], (
+            f"diff_type must NOT be pushed as a vector-store filter "
+            f"post-#1290; got: {diff_filters}"
+        )
 
     def test_author_filter_in_filter_conditions(
         self, temporal_service, mock_vector_store, mock_embedding_provider

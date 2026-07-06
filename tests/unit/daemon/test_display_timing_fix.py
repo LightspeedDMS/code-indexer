@@ -12,7 +12,10 @@ ACCEPTANCE CRITERIA:
 ✅ Setup messages scroll at top (before progress bar appears)
 ✅ Progress bar pinned to bottom
 ✅ Display timing matches standalone behavior
-⚠️ Concurrent files documented as limitation (daemon doesn't stream slot tracker)
+✅ Concurrent files/slot tracker are extracted from kwargs and passed through
+   for UX parity with standalone mode (limitation resolved; see the
+   "FIX: Now extracts concurrent_files and slot_tracker from kwargs" comment
+   in cli_daemon_delegation.py's progress_callback)
 """
 
 import unittest
@@ -136,12 +139,18 @@ class TestDaemonDisplayTimingFix(unittest.TestCase):
 
     def test_concurrent_files_limitation_documented(self):
         """
-        Test that concurrent files limitation is properly documented in code.
+        Test that concurrent files / slot tracker handling in daemon mode is
+        correctly implemented and documented in code.
 
-        Daemon mode doesn't stream slot tracker data, so concurrent file display
-        ("├─ filename.py (size, 1s) vectorizing...") is not available.
-
-        This is documented as a TODO with clear explanation.
+        Historical context: daemon mode used to hardcode concurrent_files=[]
+        and slot_tracker=None (a documented TODO/limitation) because it could
+        not stream slot tracker data. That limitation has since been resolved:
+        the RPyC callback now deserializes concurrent_files from a JSON kwarg
+        (working around RPyC proxy-object caching/staleness) and extracts
+        slot_tracker from kwargs, passing both through to
+        progress_manager.update_complete_state() for UX parity with
+        standalone mode. This test verifies THAT current behavior rather than
+        the obsolete limitation (Bug #1304).
         """
         import code_indexer.cli_daemon_delegation as delegation_module
 
@@ -149,30 +158,52 @@ class TestDaemonDisplayTimingFix(unittest.TestCase):
         source_file = Path(delegation_module.__file__)
         source_code = source_file.read_text()
 
-        # VERIFY: TODO comment exists documenting limitation
+        # VERIFY: comment documents the fix and its purpose (UX parity)
         self.assertIn(
-            "TODO: Daemon mode doesn't provide concurrent file list",
+            "FIX: Now extracts concurrent_files and slot_tracker from kwargs",
             source_code,
-            "Concurrent file limitation must be documented",
+            "Fix must be documented in code",
+        )
+        self.assertIn(
+            "UX parity with standalone mode",
+            source_code,
+            "Comment should explain why concurrent files/slot tracker are extracted",
         )
 
-        # VERIFY: Comment explains the complexity
+        # VERIFY: concurrent_files is deserialized from the JSON kwarg, NOT hardcoded empty
         self.assertIn(
-            "streaming slot tracker data",
+            "concurrent_files = json.loads(concurrent_files_json)",
             source_code,
-            "Comment should explain why concurrent files aren't available",
+            "concurrent_files must be extracted from kwargs, not hardcoded to []",
         )
-
-        # VERIFY: concurrent_files=[] is explicitly set
-        self.assertIn(
+        self.assertNotIn(
             "concurrent_files=[],",
             source_code,
-            "Empty concurrent files list must be explicit",
+            "concurrent_files must no longer be hardcoded to an empty list",
         )
 
-        # VERIFY: slot_tracker=None is explicitly set
+        # VERIFY: slot_tracker is extracted from kwargs, NOT hardcoded to a None literal
         self.assertIn(
-            "slot_tracker=None,", source_code, "None slot tracker must be explicit"
+            'slot_tracker = kwargs.get("slot_tracker", None)',
+            source_code,
+            "slot_tracker must be extracted from kwargs",
+        )
+        self.assertNotIn(
+            "slot_tracker=None,",
+            source_code,
+            "slot_tracker must no longer be hardcoded to None",
+        )
+
+        # VERIFY: both extracted values are passed through to the progress manager
+        self.assertIn(
+            "concurrent_files=concurrent_files,",
+            source_code,
+            "Extracted concurrent_files must be passed to update_complete_state",
+        )
+        self.assertIn(
+            "slot_tracker=slot_tracker,",
+            source_code,
+            "Extracted slot_tracker must be passed to update_complete_state",
         )
 
 

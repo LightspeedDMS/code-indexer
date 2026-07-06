@@ -33,6 +33,7 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
+from ..services.constants import is_internal_meta_repo
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -420,9 +421,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -442,6 +440,8 @@ class SemanticQueryManager:
         # When True the cache lookup is skipped for this request; the live embedding
         # is computed and the cache write still fires (shadow/miss path).
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
         # MUST remain the LAST parameter to preserve positional-arg compatibility.
@@ -465,10 +465,8 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries (format: YYYY-MM-DD..YYYY-MM-DD)
             time_range_all: Query across all git history without time range limit
-            at_commit: Query code at specific commit hash or ref
-            include_removed: Include files removed from current HEAD
-            show_evolution: Include code evolution timeline with diffs
-            evolution_limit: Limit evolution entries (user-controlled)
+            at_commit: Query code at specific commit hash or ref (point-in-time
+                scoping; unresolvable ref raises ValueError)
             case_sensitive: Enable case-sensitive FTS matching (FTS-only)
             fuzzy: Enable fuzzy matching with edit distance 1 (FTS-only, incompatible with regex)
             edit_distance: Fuzzy match tolerance level 0-3 (FTS-only)
@@ -535,10 +533,46 @@ class SemanticQueryManager:
                 raise SemanticQueryError(
                     f"Repository '{repository_alias}' not found for user '{username}'"
                 )
+        elif search_mode in ("fts", "hybrid"):
+            # Bug #1287 (Defect B): an implicit fan-out (no explicit
+            # repository_alias -- "search everything visible") that requires
+            # an FTS index must skip the internal, auto-bootstrapped
+            # cidx-meta* bookkeeping repos. They are git-metadata stores
+            # (AI-generated repo descriptions, dependency-map markdown) that
+            # are never FTS-indexed by design -- not real user source code.
+            # Without this skip, every such fan-out logs a benign
+            # "FTS index not available for repository 'cidx-meta-global'"
+            # failure at WARNING ([QUERY-MIGRATE-006]) and ERROR
+            # ([QUERY-MIGRATE-008]), and -- when cidx-meta* is the only
+            # visible repo -- propagates to a top-level "Error in
+            # search_code" ERROR log too. An EXPLICIT
+            # repository_alias='cidx-meta-global' FTS request is unaffected
+            # (handled by the branch above) and still fails loud.
+            #
+            # is_internal_meta_repo() is an ANCHORED/EXACT match against
+            # {"cidx-meta", "cidx-meta-global"} -- a loose
+            # str.startswith("cidx-meta") check (the original fix) would
+            # over-match legitimate user repos such as
+            # "cidx-metadata-global" or "cidx-meta-analytics-global" and
+            # silently drop them from the fan-out (code-reviewer finding).
+            #
+            # Note this also excludes cidx-meta's semantic half in hybrid
+            # mode -- acceptable, since cidx-meta is a discovery/bookkeeping
+            # repo, not source code, and is never a hybrid search target.
+            all_repos = [
+                repo
+                for repo in all_repos
+                if not is_internal_meta_repo(str(repo.get("user_alias", "")))
+            ]
 
         # Perform the search
         start_time = time.time()
         effective_strategy: str = query_strategy or "primary_only"
+        # Bug #1298: per-request out-param capturing the embedder-specific
+        # temporal "no indexed collections" warning, so it survives the
+        # _perform_search -> _search_single_repository -> _execute_temporal_query
+        # call chain instead of being re-derived generically below.
+        _temporal_warning_out: List[str] = []
         try:
             # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
             # Routing decision is per-request; no singleton state.
@@ -562,9 +596,6 @@ class SemanticQueryManager:
                 time_range=time_range,
                 time_range_all=time_range_all,
                 at_commit=at_commit,
-                include_removed=include_removed,
-                show_evolution=show_evolution,
-                evolution_limit=evolution_limit,
                 # FTS-specific parameters (Story #503 Phase 2)
                 case_sensitive=case_sensitive,
                 fuzzy=fuzzy,
@@ -584,6 +615,10 @@ class SemanticQueryManager:
                 precomputed_query_vector=precomputed_query_vector,
                 # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
+                # Bug #1298: collect the embedder-specific warning, if any
+                _temporal_warning_out=_temporal_warning_out,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -640,7 +675,6 @@ class SemanticQueryManager:
                 time_range,
                 time_range_all,
                 at_commit,
-                show_evolution,
                 chunk_type,
                 diff_type,
                 author,
@@ -648,11 +682,24 @@ class SemanticQueryManager:
         )
         warning_message = None
         if has_temporal_params and len(results) == 0:
-            warning_message = (
-                "Temporal index not available for this repository. "
-                "No results returned. "
-                "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
-            )
+            if temporal_embedder and _temporal_warning_out:
+                # Bug #1298: an explicit temporal_embedder override with no
+                # indexed collections produces a typed, embedder-specific
+                # warning at the fusion-dispatch layer (e.g. "Temporal
+                # embedder 'X' has no indexed collections"). Surface it
+                # as-is instead of masking it with the generic message below
+                # -- the anti-fallback behavior (0 results, no redirect to
+                # the active embedder) is unchanged; only the message text
+                # is more specific. Scoped to the explicit-override case only
+                # -- the plain "no temporal index at all" case (no override
+                # requested) keeps its existing generic wording below.
+                warning_message = _temporal_warning_out[0]
+            else:
+                warning_message = (
+                    "Temporal index not available for this repository. "
+                    "No results returned. "
+                    "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
+                )
 
         # Build response with temporal context in results
         response_results = []
@@ -775,9 +822,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -797,6 +841,11 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -826,10 +875,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -915,9 +961,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     # FTS-specific parameters (Story #503 Phase 2)
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
@@ -937,8 +980,12 @@ class SemanticQueryManager:
                     precomputed_query_vector=precomputed_query_vector,
                     # Story #1108 (S4): per-request cache bypass
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
                     # AC7 (Bug #1202): collect resolved routing decision
                     _effective_strategy_out=_strat_out,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
@@ -1037,9 +1084,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -1059,10 +1103,15 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
         # AC7 (Bug #1202): out-param for routing decision — caller passes a
         # single-element list; resolved query_strategy is written into [0].
         # Per-request, no shared state.
         _effective_strategy_out: Optional[List[str]] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1072,7 +1121,7 @@ class SemanticQueryManager:
         - 'fts': Full-text search using Tantivy index
         - 'hybrid': Combined FTS + semantic search with result fusion
 
-        For temporal queries (when time_range, at_commit, or show_evolution provided),
+        For temporal queries (when time_range or at_commit provided),
         uses TemporalSearchService; returns empty list with error if temporal
         index not available.
 
@@ -1098,10 +1147,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -1153,7 +1199,6 @@ class SemanticQueryManager:
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
@@ -1592,7 +1637,6 @@ class SemanticQueryManager:
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
@@ -1609,9 +1653,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     language=language,
                     exclude_language=exclude_language,
                     path_filter=path_filter,
@@ -1621,6 +1662,10 @@ class SemanticQueryManager:
                     chunk_type=chunk_type,
                     # Story #1108 (S4): forward per-request cache bypass flag
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -2138,9 +2183,6 @@ class SemanticQueryManager:
         time_range: Optional[str],
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         language: Optional[str] = None,
         exclude_language: Optional[str] = None,
         path_filter: Optional[str] = None,
@@ -2150,6 +2192,14 @@ class SemanticQueryManager:
         chunk_type: Optional[str] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific "no indexed
+        # collections" warning produced by the fusion dispatch layer.
+        # Caller passes a single-element list; populated in place so the
+        # specific message survives instead of being re-derived generically
+        # by the caller. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2166,9 +2216,6 @@ class SemanticQueryManager:
             min_score: Minimum similarity score
             time_range: Time range filter (YYYY-MM-DD..YYYY-MM-DD)
             at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Show evolution timeline
-            evolution_limit: Limit evolution entries
             language: Filter by language
             exclude_language: Exclude language
             path_filter: Path filter pattern
@@ -2236,18 +2283,17 @@ class SemanticQueryManager:
                 limit=limit,
                 time_range=time_range_tuple,
                 file_path_filter=path_filter,
-                show_evolution=show_evolution,
                 at_commit=at_commit,
-                include_removed=include_removed,
                 language=language,
                 exclude_language=exclude_language,
-                evolution_limit=evolution_limit,
                 exclude_path=exclude_path,
                 diff_types=diff_types_list,
                 author=author,
                 chunk_type=chunk_type,
                 # Story #1108 (S4): forward per-request cache bypass flag
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully
@@ -2260,6 +2306,12 @@ class SemanticQueryManager:
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-009"),
                 )
+                # Bug #1298: preserve the embedder-specific warning (e.g.
+                # "Temporal embedder 'X' has no indexed collections") for the
+                # caller instead of letting it die here -- the caller would
+                # otherwise re-derive a generic message with no embedder name.
+                if _temporal_warning_out is not None:
+                    _temporal_warning_out.append(temporal_results.warning)
                 return []
 
             # Convert temporal results to QueryResult objects
@@ -2290,21 +2342,6 @@ class SemanticQueryManager:
                     ),
                     "diff_type": temporal_result.temporal_context.get("diff_type"),
                 }
-
-                # Add is_removed flag if applicable
-                if (
-                    include_removed
-                    and temporal_result.metadata.get("diff_type") == "deleted"
-                ):
-                    temporal_context["is_removed"] = True
-
-                # Add evolution data if requested (Acceptance Criterion 5 & 6)
-                if show_evolution and "evolution" in temporal_result.temporal_context:
-                    evolution_data = temporal_result.temporal_context["evolution"]
-                    # Apply user-controlled evolution_limit (NO arbitrary max)
-                    if evolution_limit and len(evolution_data) > evolution_limit:
-                        evolution_data = evolution_data[:evolution_limit]
-                    temporal_context["evolution"] = evolution_data
 
                 # Create QueryResult with both metadata and temporal_context
                 # (Story #503 - MCP/REST API parity with CLI)

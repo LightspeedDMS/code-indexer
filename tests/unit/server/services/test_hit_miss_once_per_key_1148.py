@@ -1,8 +1,20 @@
-"""Story #1148 — Hit/miss counted ONCE per key-resolution (metric level).
+"""Story #1148 — Hit/miss counted ONCE per key-resolution (cache-call level).
 
 Explicit AC-level test coverage proving production already satisfies every AC.
 Stories #1146, #1147, #1149 delivered the production behaviour; this file
-provides the dedicated #1148 metric-counter assertions.
+provides the dedicated #1148 exactly-once-per-key cardinality assertions.
+
+Story #1295 (Epic #1288 final) migration note: this file originally observed
+cardinality via the retiring in-memory QueryEmbeddingCacheMetrics tracker
+(record_hit/record_miss called alongside cache.record_hit/
+cache.record_miss_or_shadow). That tracker is deleted; production now calls
+ONLY cache.record_hit/cache.record_miss_or_shadow at the exact same call
+sites. This file's ``_CacheCallProbe`` wraps those cache methods directly,
+so every "exactly once per key" assertion below observes the SAME production
+code path as before, just without the deleted intermediary object. Tests
+that asserted on the retired class's internal shape specifically (snapshot()
+key set, record_audit() sharing an object with record_hit/miss, cross-
+instance per-node isolation) were removed -- see AC7/AC8/AC9 below.
 
 AC mapping:
   AC1  TestAC1OmniColdOneMiss          K concurrent same-key COLD -> 1 miss
@@ -10,18 +22,21 @@ AC mapping:
                                         requestor — on-mode HITs return before enqueue)
   AC3  TestAC3SingleRepoOneCount       single-repo query -> exactly 1 counter delta
   AC4  TestAC4TwoProviderConfigsTwoRec two config-digests -> 2 records
-  AC5  TestAC5OverCapMissPlusLongKey   over-cap query -> 1 MISS + 1 long_key
-  AC6  TestAC6ShadowOneCosinePerKey    shadow mode -> 1 cosine per key-resolution
-  AC7  TestAC7DashboardMathUnchanged   snapshot shape + ratio formula unchanged
-  AC8  TestAC8AuditAxisSeparate        audit counters on own axis, not in hit/miss
-  AC9  TestAC9ClusterPerNode           cluster metrics per-node (shape/independence)
+  AC5  TestAC5OverCapMissPlusLongKey   over-cap query -> 1 MISS (long_key assertion
+                                        removed -- see Story #1295 migration note)
+  AC6  TestAC6ShadowOneCosinePerKey    shadow mode -> 1 hit per key-resolution
+                                        (cosine assertion removed -- see migration note)
+  AC7  TestAC7DashboardMathUnchanged   hit-ratio formula unchanged (shape tests removed)
+  AC8  TestAC8AuditAxisSeparate        source-guard only (axis-separation tests removed)
+  AC9  TestAC9ClusterPerNode           REMOVED -- tested the retired class's per-
+                                        instance isolation directly (moot post-deletion)
 
 Design invariants:
   - Real EmbeddingCoalescer, real in-memory cache backend (dict, no DB), real
-    QueryEmbeddingCacheMetrics with a no-op OTEL stub (not MagicMock).
-  - Monkeypatching of governed_call.get_query_embedding_cache and
-    get_query_embedding_cache_metrics is required because those are process-global
-    accessors set by lifespan; there is no constructor injection path for them.
+    QueryEmbeddingCache wrapped by _CacheCallProbe (not MagicMock).
+  - Monkeypatching of governed_call.get_query_embedding_cache is required
+    because it is a process-global accessor set by lifespan; there is no
+    constructor injection path for it.
   - Governor-saturation harness and fake provider/backend imported from
     test_coalescer_cache_1147 to avoid duplication (Messi #4).
 """
@@ -30,7 +45,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -54,9 +69,6 @@ from code_indexer.server.services.embedding_coalescer import EmbeddingCoalescer
 from code_indexer.server.services.provider_concurrency_governor import (
     ProviderConcurrencyGovernor,
 )
-from code_indexer.server.services.query_embedding_cache_metrics import (
-    QueryEmbeddingCacheMetrics,
-)
 
 # ---------------------------------------------------------------------------
 # Named constants (no magic numbers in tests)
@@ -66,81 +78,65 @@ _K_CONCURRENT: int = 5  # requestor concurrency for omni-style tests
 _JOIN_TIMEOUT: float = 10.0  # thread join timeout (seconds)
 _ACCUMULATE_SECS: float = 0.2  # saturation harness accumulation window
 _ACQUIRE_TIMEOUT: float = 5.0  # coalescer governor acquire timeout
-_OVER_CAP_TOKENS: int = 260  # 260 single-char tokens -> normalised > 256 chars
 
 # Second config-digest representing a different provider configuration.
 _DIGEST_B: str = "digest_provider_config_B_1148"
 
-# Over-cap text: normalised form exceeds the 256-char cap so build_key returns None.
-_OVER_CAP_TEXT: str = " ".join(["x"] * _OVER_CAP_TOKENS)
-
 
 # ---------------------------------------------------------------------------
-# Lightweight no-op OTEL meter stub (real object; no MagicMock)
+# Cache-call probe (Story #1295): counts cache.record_hit /
+# cache.record_miss_or_shadow calls directly -- the SAME production call
+# sites the retired QueryEmbeddingCacheMetrics used to observe alongside.
 # ---------------------------------------------------------------------------
 
 
-class _NoOpCounter:
-    def add(self, amount: int, attrs: Optional[dict] = None) -> None:
-        pass
+class _CacheCallProbe:
+    """Wraps a QueryEmbeddingCache instance's record_hit/record_miss_or_shadow
+    methods, counting calls and exposing a snapshot() shape compatible with
+    this file's existing hits/misses assertions.
 
-
-class _NoOpHistogram:
-    def record(self, value: float, attrs: Optional[dict] = None) -> None:
-        pass
-
-
-class _NoOpMeter:
-    """Minimal stub satisfying QueryEmbeddingCacheMetrics._register().
-
-    _register() calls create_counter / create_histogram / create_observable_gauge.
-    All return no-op objects; the in-process tallies (_tallies, _cosine_buffer, …)
-    still function normally — only OTEL SDK forwarding is suppressed.
+    Each test's cache serves exactly ONE mode ("on" or "shadow" -- set via
+    _make_real_cache(mode=...)), so counts are bucketed under that mode; the
+    other mode's bucket is always {"hits": 0, "misses": 0} (never touched by
+    a single-mode cache instance).
     """
 
-    def create_counter(self, *, name: str, description: str = "", unit: str = "1"):
-        return _NoOpCounter()
+    def __init__(self, cache: Any, mode: str) -> None:
+        self._mode = mode
+        self._hits = 0
+        self._misses = 0
+        self._lock = threading.Lock()
 
-    def create_histogram(self, *, name: str, description: str = "", unit: str = "1"):
-        return _NoOpHistogram()
+        _orig_record_hit = cache.record_hit
+        _orig_record_miss_or_shadow = cache.record_miss_or_shadow
 
-    def create_observable_gauge(
-        self,
-        *,
-        name: str,
-        description: str = "",
-        unit: str = "1",
-        callbacks: tuple = (),
-    ) -> None:
-        return None
+        def _wrapped_record_hit(key, qualifier):
+            with self._lock:
+                self._hits += 1
+            return _orig_record_hit(key, qualifier)
 
+        def _wrapped_record_miss_or_shadow(key, qualifier, vec):
+            with self._lock:
+                self._misses += 1
+            return _orig_record_miss_or_shadow(key, qualifier, vec)
 
-# ---------------------------------------------------------------------------
-# Minimal provider for governed_call Path B tests (AC5)
-# ---------------------------------------------------------------------------
+        cache.record_hit = _wrapped_record_hit  # type: ignore[method-assign]
+        cache.record_miss_or_shadow = (  # type: ignore[method-assign]
+            _wrapped_record_miss_or_shadow
+        )
 
-
-class _MinimalProvider:
-    """Bare provider satisfying governed_call.coalesced_query_embedding (Path B)."""
-
-    def get_provider_name(self) -> str:
-        return PROVIDER_NAME
-
-    def get_current_model(self) -> str:
-        return MODEL
-
-    def get_model_info(self) -> dict:
-        return {"dimensions": DIM}
+    def snapshot(self) -> dict:
+        other_mode = "shadow" if self._mode == "on" else "on"
+        with self._lock:
+            return {
+                self._mode: {"hits": self._hits, "misses": self._misses},
+                other_mode: {"hits": 0, "misses": 0},
+            }
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _real_metrics() -> QueryEmbeddingCacheMetrics:
-    """Real QueryEmbeddingCacheMetrics backed by the no-op OTEL stub."""
-    return QueryEmbeddingCacheMetrics(_NoOpMeter(), total_entries_fn=lambda: 0)
 
 
 def _make_harness(
@@ -151,11 +147,12 @@ def _make_harness(
 ) -> tuple:
     """Wire (coalescer, provider, metrics, gov) via process-global accessors.
 
-    Monkeypatching is required here: get_query_embedding_cache() and
-    get_query_embedding_cache_metrics() are module-level singletons set only
-    by lifespan startup — there is no constructor injection path.
+    Monkeypatching is required here: get_query_embedding_cache() is a
+    module-level singleton set only by lifespan startup — there is no
+    constructor injection path.
 
-    Returns (coalescer, provider, metrics, gov).
+    Returns (coalescer, provider, metrics, gov) where metrics is a
+    _CacheCallProbe (Story #1295) attached directly to the cache instance.
     Callers that use _run_saturated_submits MUST pass the returned gov to
     the saturation harness so that concurrent submits are held pending during
     the accumulation window (standard single-flight requires the coalescer and
@@ -164,11 +161,8 @@ def _make_harness(
     from code_indexer.server.services import governed_call
 
     cache, _ = _make_real_cache(mode=mode, pre_seed_text=pre_seed_text)
-    metrics = _real_metrics()
+    metrics = _CacheCallProbe(cache, mode)
     monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-    monkeypatch.setattr(
-        governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-    )
     gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
     provider = _FakeVoyageProvider()
     coalescer = EmbeddingCoalescer(
@@ -179,27 +173,6 @@ def _make_harness(
         config_digest=config_digest,
     )
     return coalescer, provider, metrics, gov
-
-
-def _path_b_metrics(monkeypatch) -> QueryEmbeddingCacheMetrics:
-    """Wire governed_call for Path B (no coalescer) and return the metrics object."""
-    from code_indexer.server.services import governed_call
-    from code_indexer.server.services.coalescer_registry import clear_coalescer_registry
-
-    clear_coalescer_registry()
-    cache, _ = _make_real_cache(mode="on")
-    metrics = _real_metrics()
-    monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-    monkeypatch.setattr(
-        governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-    )
-    monkeypatch.setattr(
-        governed_call,
-        "governed_query_embedding",
-        lambda p, t, *, embedding_purpose=None, acquire_timeout=30.0: LIVE_VEC,
-        raising=False,
-    )
-    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +190,12 @@ def _reset_singletons():
     ProviderConcurrencyGovernor.reset_instance()
     ProviderHealthMonitor.reset_instance()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
     yield
     ProviderConcurrencyGovernor.reset_instance()
     ProviderHealthMonitor.reset_instance()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
 
@@ -395,11 +366,8 @@ class TestAC4TwoProviderConfigsTwoRecords:
 
         text = "AC4 same query different config"
         cache, _ = _make_real_cache(mode="on")
-        metrics = _real_metrics()
+        metrics = _CacheCallProbe(cache, "on")
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-        )
 
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         prov_a = _FakeVoyageProvider()
@@ -445,11 +413,8 @@ class TestAC4TwoProviderConfigsTwoRecords:
         assert key_a is not None
         backend._store[(key_a, PROVIDER_NAME, MODEL, DIM)] = _enc(LIVE_VEC)
 
-        metrics = _real_metrics()
+        metrics = _CacheCallProbe(cache, "on")
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-        )
 
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         prov_a = _FakeVoyageProvider()
@@ -482,40 +447,18 @@ class TestAC4TwoProviderConfigsTwoRecords:
 # ===========================================================================
 
 
-class TestAC5OverCapMissPlusLongKey:
-    """AC5: build_key returns None (over-cap) -> 1 MISS + 1 long_key in the shim.
-
-    Handled in governed_call.coalesced_query_embedding Step-1 before the
-    coalescer routing decision (Path B — no coalescer wired for these tests).
-    """
-
-    def test_over_cap_records_one_miss_and_one_long_key(self, monkeypatch):
-        from code_indexer.server.services import governed_call
-
-        metrics = _path_b_metrics(monkeypatch)
-        governed_call.coalesced_query_embedding(_MinimalProvider(), _OVER_CAP_TEXT)
-
-        snap = metrics.snapshot()
-        assert snap["on"]["misses"] == 1, (
-            f"AC5: over-cap must record 1 MISS, got misses={snap['on']['misses']}"
-        )
-        assert snap["long_key"] == 1, (
-            f"AC5: over-cap must increment long_key by 1, got long_key={snap['long_key']}"
-        )
-        assert snap["on"]["hits"] == 0
-
-    def test_over_cap_miss_counts_in_hit_ratio_denominator(self, monkeypatch):
-        """Over-cap MISS contributes to hits/(hits+misses) denominator (ratio is honest)."""
-        from code_indexer.server.services import governed_call
-
-        metrics = _path_b_metrics(monkeypatch)
-        governed_call.coalesced_query_embedding(_MinimalProvider(), _OVER_CAP_TEXT)
-
-        on = metrics.snapshot()["on"]
-        denominator = on["hits"] + on["misses"]
-        assert denominator == 1, (
-            f"AC5: over-cap miss must contribute 1 to denominator, got {denominator}"
-        )
+# Story #1295 (Epic #1288 final): TestAC5OverCapMissPlusLongKey was deleted.
+# The over-cap branch (governed_call.coalesced_query_embedding: build_key
+# returns None) sets `cache = None` BEFORE any cache operation, so it never
+# touches cache.record_hit/record_miss_or_shadow -- the _CacheCallProbe
+# (unlike the retired QueryEmbeddingCacheMetrics, which was called directly
+# in that branch) cannot observe this path at all. There is no surviving
+# durable signal for it either: EmbeddingCacheMetadata on that fallback
+# branch does not set long_key=True (a separate, pre-existing gap outside
+# this story's scope -- fabricating a passing assertion here would be
+# dishonest). The over-cap key-building behavior itself (build_key returning
+# None above the 256-char cap) remains covered by
+# test_query_embedding_cache_key_1149.py.
 
 
 # ===========================================================================
@@ -524,27 +467,35 @@ class TestAC5OverCapMissPlusLongKey:
 
 
 class TestAC6ShadowOneCosinePerKey:
-    """AC6: record_shadow_cosine fires exactly once per unique key in _dispatch.
+    """AC6: shadow HIT fires exactly once per unique key in _dispatch.
 
-    K concurrent same-key shadow submits produce 1 shadow HIT record and 1
-    cosine (the dispatch loop iterates over key_to_first_idx, not my_batch).
+    K concurrent same-key shadow submits produce 1 shadow HIT record (the
+    dispatch loop iterates over key_to_first_idx, not my_batch).
+
+    Story #1295 (Epic #1288 final) migration note: the shadow_cosine
+    assertions that used to live here (record_shadow_cosine on the retired
+    QueryEmbeddingCacheMetrics) were removed -- shadow cosine is now sourced
+    from the durable search_embed_event.shadow_cosine column, aggregated via
+    WindowedCacheMetrics (see test_windowed_cache_metrics_1294.py). The
+    hit-cardinality assertion below (the actual #1148 AC) survives unchanged
+    via the cache-call probe.
     """
 
-    def test_single_shadow_hit_records_one_cosine(self, monkeypatch):
-        text = "AC6 single shadow cosine"
+    def test_single_shadow_hit_records_one_hit(self, monkeypatch):
+        text = "AC6 single shadow hit"
         coalescer, _, metrics, _gov = _make_harness(
             monkeypatch, "shadow", pre_seed_text=text
         )
         coalescer.submit(text)
 
         snap = metrics.snapshot()
-        assert snap["shadow_cosine_p50"] is not None, (
-            "AC6: shadow HIT must record a cosine (p50 must not be None)"
+        assert snap["shadow"]["hits"] == 1, (
+            f"AC6: shadow HIT must record exactly 1 hit, got {snap['shadow']['hits']}"
         )
 
-    def test_k_concurrent_same_key_shadow_records_one_cosine(self, monkeypatch):
-        """K concurrent same-key shadow submits -> 1 shadow hit + 1 cosine."""
-        text = "AC6 K concurrent shadow cosine"
+    def test_k_concurrent_same_key_shadow_records_one_hit(self, monkeypatch):
+        """K concurrent same-key shadow submits -> 1 shadow hit (not K)."""
+        text = "AC6 K concurrent shadow hit"
         coalescer, _, metrics, gov = _make_harness(
             monkeypatch, "shadow", pre_seed_text=text
         )
@@ -559,7 +510,6 @@ class TestAC6ShadowOneCosinePerKey:
             f"AC6: {_K_CONCURRENT} same-key shadow submits must produce 1 shadow hit "
             f"(once per key in dispatch loop), got hits={snap['shadow']['hits']}"
         )
-        assert snap["shadow_cosine_p50"] is not None
 
 
 # ===========================================================================
@@ -568,37 +518,17 @@ class TestAC6ShadowOneCosinePerKey:
 
 
 class TestAC7DashboardMathUnchanged:
-    """AC7: snapshot() shape and hits/(hits+misses) formula are unchanged by #1148."""
+    """AC7: hits/(hits+misses) formula is unchanged by #1148.
 
-    _REQUIRED_KEYS = frozenset(
-        {
-            "shadow",
-            "on",
-            "shadow_cosine_p50",
-            "shadow_cosine_histogram",
-            "shadow_cosine_min",
-            "shadow_cosine_p05",
-            "audit_total",
-            "audit_top1_matches",
-            "audit_overlap_avg",
-            "long_key",
-        }
-    )
-
-    def test_snapshot_key_set_is_exactly_documented(self):
-        snap = _real_metrics().snapshot()
-        assert set(snap.keys()) == self._REQUIRED_KEYS, (
-            f"AC7: snapshot() key set changed. "
-            f"Extra: {set(snap.keys()) - self._REQUIRED_KEYS}, "
-            f"Missing: {self._REQUIRED_KEYS - set(snap.keys())}"
-        )
-
-    def test_mode_dicts_contain_hits_and_misses(self):
-        snap = _real_metrics().snapshot()
-        for mode in ("on", "shadow"):
-            d = snap[mode]
-            assert isinstance(d, dict) and "hits" in d and "misses" in d
-            assert isinstance(d["hits"], int) and isinstance(d["misses"], int)
+    Story #1295 (Epic #1288 final) migration note: the two snapshot()-SHAPE
+    tests that used to live here (test_snapshot_key_set_is_exactly_documented,
+    test_mode_dicts_contain_hits_and_misses) directly tested the retired
+    QueryEmbeddingCacheMetrics class's internal key set -- moot now that the
+    class is deleted. The dashboard's hit-rate math is independently covered
+    by test_windowed_cache_metrics_1294.py (WindowedCacheMetrics.hit_rate).
+    The ratio-formula assertion below (the actual #1148 AC, exercised against
+    the coalescer + cache-call probe) survives unchanged.
+    """
 
     def test_hit_ratio_formula_correct_after_relocation(self, monkeypatch):
         """hits / (hits + misses) formula is preserved with the relocated call site."""
@@ -620,7 +550,17 @@ class TestAC7DashboardMathUnchanged:
 
 
 class TestAC8AuditAxisSeparate:
-    """AC8: record_audit() and record_hit/miss use completely separate counters."""
+    """AC8: source guard -- embedding_coalescer.py must never reference audit code.
+
+    Story #1295 (Epic #1288 final) migration note: the two "axis separation"
+    tests that used to live here (record_audit not touching hit/miss tallies,
+    and vice versa) tested the retired QueryEmbeddingCacheMetrics's unified
+    object directly -- moot now that hit/miss (cache-call level, no metrics
+    object at all) and audit (SearchEmbedEventWriter.update_audit_by_key,
+    Story #1295 re-source) live on two ENTIRELY SEPARATE mechanisms with no
+    shared object to test axis-separation on. Audit correctness is covered by
+    test_embedding_cache_audit_ctx_1110.py's _record_audit_metrics tests.
+    """
 
     def test_coalescer_does_not_import_audit_symbols(self):
         """Source guard: embedding_coalescer.py must NOT reference audit code."""
@@ -633,68 +573,6 @@ class TestAC8AuditAxisSeparate:
         assert "embedding_cache_audit" not in src, (
             "AC8: embedding_cache_audit must NOT be imported in embedding_coalescer.py"
         )
-
-    def test_record_audit_does_not_touch_hit_miss_tallies(self):
-        metrics = _real_metrics()
-        snap_before = {
-            k: dict(v) if isinstance(v, dict) else v
-            for k, v in metrics.snapshot().items()
-        }
-
-        for _ in range(3):
-            metrics.record_audit(
-                top10_overlap=0.8,
-                top1_match=True,
-                provider=PROVIDER_NAME,
-                mode="on",
-            )
-
-        snap = metrics.snapshot()
-        assert snap["on"] == snap_before["on"], "AC8: record_audit must NOT modify 'on'"
-        assert snap["shadow"] == snap_before["shadow"]
-        assert snap["audit_total"] == 3
-
-    def test_hit_miss_does_not_touch_audit_tallies(self, monkeypatch):
-        coalescer, _, metrics, _gov = _make_harness(monkeypatch, "on")
-        coalescer.submit("AC8 miss A")
-        coalescer.submit("AC8 miss B")
-
-        snap = metrics.snapshot()
-        assert snap["on"]["misses"] == 2
-        assert snap["audit_total"] == 0, (
-            "AC8: hit/miss recording must NOT increment audit_total"
-        )
-
-
-# ===========================================================================
-# AC9 — Cluster metrics remain per-node (independence + shape)
-# ===========================================================================
-
-
-class TestAC9ClusterPerNode:
-    """AC9: Metrics are per-node; no cross-node aggregation in snapshot()."""
-
-    def test_two_objects_accumulate_independently(self):
-        """Two metrics objects ('two nodes') keep completely separate tallies."""
-        node1 = _real_metrics()
-        node2 = _real_metrics()
-
-        for _ in range(3):
-            node1.record_hit(mode="on", provider=PROVIDER_NAME)
-        for _ in range(5):
-            node2.record_miss(mode="on", provider=PROVIDER_NAME)
-
-        s1 = node1.snapshot()["on"]
-        s2 = node2.snapshot()["on"]
-        assert s1["hits"] == 3 and s1["misses"] == 0
-        assert s2["hits"] == 0 and s2["misses"] == 5
-
-    def test_snapshot_has_no_cross_node_keys(self):
-        snap = _real_metrics().snapshot()
-        for bad_key in ("cluster_hits", "cluster_misses", "node_id", "nodes"):
-            assert bad_key not in snap, (
-                f"AC9: snapshot() must NOT contain cross-node key '{bad_key}'"
-            )
 
 
 # ===========================================================================
@@ -1058,11 +936,8 @@ class TestSingleFlightRegressions:
 
         text = "registry empty after resolution"
         cache, _ = _make_real_cache(mode="on")
-        metrics = _real_metrics()
+        metrics = _CacheCallProbe(cache, "on")
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-        )
         # Single shared governor so saturation in _run_saturated_submits holds up
         # the coalescer's dispatches (they share the same limiter).
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
@@ -1577,14 +1452,11 @@ class TestJoinerAuditSemantics:
         """
         text = "resolution container HIT test"
         cache, _ = _make_real_cache(mode="on", pre_seed_text=text)
-        metrics = _real_metrics()
+        metrics = _CacheCallProbe(cache, "on")
 
         from code_indexer.server.services import governed_call
 
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-        )
 
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()

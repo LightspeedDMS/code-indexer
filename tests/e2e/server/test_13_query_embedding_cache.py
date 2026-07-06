@@ -32,13 +32,16 @@ PROVIDER ROUTING NOTE (honest coverage scope):
   live-read by the same code path tested here; the unit tests validate their
   semantics in isolation without the cost of a Cohere-indexed repo.
 
-Metrics-gating finding (RISK 4 resolution):
-  QueryEmbeddingCacheMetrics is wired by lifespan when the cache backend is
-  present, passing meter=None when telemetry is disabled. The in-process
-  tallies (snapshot()) work REGARDLESS of OTEL export — they are thread-safe
-  Python dicts incremented alongside every counter.add() call. So cache counters
-  ARE process-local and ALWAYS available via get_query_embedding_cache_metrics().
-  No telemetry enable step is needed.
+Metrics-gating finding (RISK 4 resolution; re-sourced by Story #1295):
+  Story #1295 (Epic #1288 final) deleted the in-process QueryEmbeddingCacheMetrics
+  tracker entirely. Cache hit/miss counters are now sourced from the durable
+  WindowedCacheMetrics aggregation over search_embed_event (Story #1293/#1294)
+  via the process-level search_embed_event_writer, scoped to the window opened
+  by _mark_window_start() in each test's autouse fixture (the direct replacement
+  for the old metrics.reset() call). The writer's background drain thread is
+  flushed synchronously before each read (writer.flush()) so recently-enqueued
+  events are visible immediately with no 5s lag. This is durable and cluster-
+  aggregated by construction, unlike the old per-node in-memory tallies.
 
 Config front-door:
   The REST /api/query endpoint is the search front door (JWT Bearer auth).
@@ -48,11 +51,12 @@ Config front-door:
 
 The dashboard metrics partial (GET /partials/dashboard-cache-metrics) requires
 a web-session cookie obtained through the HTML login flow. Since the in-process
-counter snapshot is accessible directly (same process), we read metrics via
-get_query_embedding_cache_metrics().snapshot() and assert total_entries via
-get_query_embedding_cache().total_entries(). This satisfies the "front-door"
-mandate for the search results while proving the metrics via the authoritative
-in-process path (not a direct DB read).
+windowed-metrics query is accessible directly (same process, same DB the
+writer flushes into), we read metrics via the re-sourced _snapshot() helper
+and assert total_entries via get_query_embedding_cache().total_entries(). This
+satisfies the "front-door" mandate for the search results while proving the
+metrics via the authoritative durable path (not bypassing it with a raw
+one-off SQL query per assertion).
 """
 
 from __future__ import annotations
@@ -124,25 +128,61 @@ def _get_cache() -> Any:
     return get_query_embedding_cache()
 
 
-def _get_metrics() -> Any:
-    """Return the process-level QueryEmbeddingCacheMetrics or None."""
-    from code_indexer.server.services.governed_call import (
-        get_query_embedding_cache_metrics,
+def _get_writer() -> Any:
+    """Return the process-level SearchEmbedEventWriter or None."""
+    from code_indexer.server.services.search_embed_event_emit import (
+        get_search_embed_event_writer,
     )
 
-    return get_query_embedding_cache_metrics()
+    return get_search_embed_event_writer()
+
+
+# Story #1295: per-test window-start marker, replacing the old
+# QueryEmbeddingCacheMetrics.reset() call. _mark_window_start() is called by
+# each test class's autouse fixture (in place of the old .reset()); _snapshot()
+# aggregates only events recorded from that marker forward, giving the same
+# "clean baseline per test" isolation the old reset() provided.
+_window_start_marker = [0.0]
+
+
+def _mark_window_start() -> None:
+    """Record 'now' as the metrics-window start for the current test."""
+    _window_start_marker[0] = time.time()
 
 
 def _snapshot() -> Dict[str, Any]:
-    """Return a metrics snapshot dict (zeroes when metrics not wired)."""
-    m = _get_metrics()
-    if m is None:
+    """Return a hits/misses snapshot dict sourced from WindowedCacheMetrics.
+
+    Story #1295 (Epic #1288 final): re-sourced from the retired in-process
+    QueryEmbeddingCacheMetrics.snapshot() onto the durable WindowedCacheMetrics
+    aggregation over search_embed_event, scoped to
+    [_window_start_marker[0], now). Flushes the writer's background-drain
+    queue first so recently-enqueued events are visible immediately.
+    """
+    writer = _get_writer()
+    if writer is None:
         return {
             "shadow": {"hits": 0, "misses": 0},
             "on": {"hits": 0, "misses": 0},
             "shadow_cosine_p50": None,
         }
-    return m.snapshot()  # type: ignore[return-value, no-any-return]
+    writer.flush()
+    windowed = writer.backend.get_windowed_metrics(_window_start_marker[0], time.time())
+    shadow_agg = windowed.by_cache_mode.get("shadow")
+    on_agg = windowed.by_cache_mode.get("on")
+    return {
+        "shadow": {
+            "hits": shadow_agg.hits if shadow_agg is not None else 0,
+            "misses": shadow_agg.misses if shadow_agg is not None else 0,
+        },
+        "on": {
+            "hits": on_agg.hits if on_agg is not None else 0,
+            "misses": on_agg.misses if on_agg is not None else 0,
+        },
+        "shadow_cosine_p50": (
+            shadow_agg.shadow_cosine_p50 if shadow_agg is not None else None
+        ),
+    }
 
 
 def _total_entries() -> int:
@@ -305,19 +345,17 @@ class TestAC1ModeSemantics:
 
     @pytest.fixture(autouse=True)
     def _reset_qec_metrics(self) -> Any:
-        """Reset metrics singleton before AND after each test.
+        """Open a fresh windowed-metrics baseline before AND after each test.
 
-        Accumulated counters from prior tests or background Cohere shadow ops
-        contaminate delta-based assertions.  Resetting on both sides of the
-        yield keeps the baseline clean and prevents leaking into sibling classes.
+        Story #1295: replaces the old QueryEmbeddingCacheMetrics.reset() call.
+        Accumulated events from prior tests or background Cohere shadow ops
+        would contaminate delta-based assertions if the window start were not
+        advanced; marking a fresh window start on both sides of the yield
+        keeps the baseline clean and prevents leaking into sibling classes.
         """
-        m = _get_metrics()
-        if m is not None:
-            m.reset()
+        _mark_window_start()
         yield
-        m = _get_metrics()
-        if m is not None:
-            m.reset()
+        _mark_window_start()
 
     def test_ac1_off_mode_no_lookup_no_write_voyage(
         self,
@@ -508,18 +546,15 @@ class TestAC2ReadBypassStillWrites:
 
     @pytest.fixture(autouse=True)
     def _reset_qec_metrics(self) -> Any:
-        """Reset metrics singleton before AND after each test.
+        """Open a fresh windowed-metrics baseline before AND after each test.
 
+        Story #1295: replaces the old QueryEmbeddingCacheMetrics.reset() call.
         Prevents delta-based counter assertions from being contaminated by
-        accumulated state from prior tests or background Cohere shadow ops.
+        accumulated events from prior tests or background Cohere shadow ops.
         """
-        m = _get_metrics()
-        if m is not None:
-            m.reset()
+        _mark_window_start()
         yield
-        m = _get_metrics()
-        if m is not None:
-            m.reset()
+        _mark_window_start()
 
     def test_ac2_shortcut_skips_read_still_writes_voyage(
         self,

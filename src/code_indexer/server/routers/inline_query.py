@@ -347,15 +347,14 @@ def register_query_routes(
                             time_range=request.time_range,
                             time_range_all=request.time_range_all,
                             at_commit=request.at_commit,
-                            include_removed=request.include_removed,
-                            show_evolution=request.show_evolution,
-                            evolution_limit=request.evolution_limit,
                             # Phase 3 temporal filtering parameters (Story #503)
                             diff_type=request.diff_type,
                             author=request.author,
                             chunk_type=request.chunk_type,
                             # Story #1108 (S4): per-request cache bypass
                             no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                            # Story #1291 AC7/AC8: explicit embedder override
+                            temporal_embedder=request.temporal_embedder,
                         )
                         semantic_results_list = [
                             QueryResultItem(**result)
@@ -474,15 +473,14 @@ def register_query_routes(
                 time_range=request.time_range,
                 time_range_all=request.time_range_all,
                 at_commit=request.at_commit,
-                include_removed=request.include_removed,
-                show_evolution=request.show_evolution,
-                evolution_limit=request.evolution_limit,
                 # Phase 3 temporal filtering parameters (Story #503)
                 diff_type=request.diff_type,
                 author=request.author,
                 chunk_type=request.chunk_type,
                 # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: explicit embedder override
+                temporal_embedder=request.temporal_embedder,
             )
 
             # Apply access filtering based on user's group membership (Story #707)

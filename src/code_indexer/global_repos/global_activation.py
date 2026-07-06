@@ -6,8 +6,9 @@ is registered, implementing the automatic activation workflow.
 """
 
 import logging
+import threading
 from pathlib import Path
-from typing import Optional, Dict, Union
+from typing import Any, Optional, Dict, Union
 
 from .alias_manager import AliasManager
 
@@ -36,17 +37,60 @@ class GlobalActivator:
         Args:
             golden_repos_dir: Path to golden repos directory
         """
-        # Lazy import to avoid circular dependency (Story #713)
-        from code_indexer.server.utils.registry_factory import (
-            get_server_global_registry,
-        )
-
         self.golden_repos_dir = Path(golden_repos_dir)
 
         # Initialize components
         aliases_dir = self.golden_repos_dir / "aliases"
         self.alias_manager = AliasManager(str(aliases_dir))
-        self.registry = get_server_global_registry(str(self.golden_repos_dir))
+
+        # Registry resolution (Bug #1308): DEFERRED to the `registry`
+        # property below instead of eagerly binding a per-node SQLite
+        # GlobalRegistry here. Eager construction-time binding split-brained
+        # cluster activation against the shared PostgreSQL registry that the
+        # read/list path already used, because app.state.backend_registry is
+        # not guaranteed to be populated yet at construction time during
+        # server startup.
+        self._registry: Optional[Any] = None
+        self._registry_lock = threading.Lock()
+
+    @property
+    def registry(self) -> Any:
+        """
+        Lazily resolve the GlobalRegistry / PostgresGlobalRegistryAdapter.
+
+        Bug #1308: mirrors GlobalRepoOperations.registry (shared_operations.py)
+        -- resolution is deferred to first access (not __init__) so
+        app.state.backend_registry is guaranteed to be populated in
+        postgres/cluster mode. Falls back to the per-node SQLite
+        GlobalRegistry in solo/CLI mode (no app.state), preserving existing
+        behavior byte-for-byte. Result is cached after first successful
+        resolution; in postgres mode with backend not yet available, the
+        result is NOT cached so the next access re-checks.
+        """
+        if self._registry is not None:
+            return self._registry
+
+        with self._registry_lock:
+            if self._registry is not None:
+                return self._registry
+
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+                resolve_backend_registry_state,
+            )
+
+            backend, postgres_mode_without_backend = resolve_backend_registry_state(
+                caller_name="GlobalActivator"
+            )
+            resolved = get_server_global_registry(
+                str(self.golden_repos_dir), backend=backend
+            )
+
+            if not postgres_mode_without_backend:
+                self._registry = resolved
+
+            return resolved
 
     def activate_golden_repo(
         self,

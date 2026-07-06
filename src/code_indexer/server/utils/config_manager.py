@@ -462,6 +462,14 @@ class IndexingConfig:
     # Story #1158 - AC2: Configurable temporal git-diff parallelism (None = inherit from provider).
     temporal_parallel_requests: Optional[int] = None
 
+    # Story #1290: Web UI exposure of per-commit temporal indexing config.
+    # These mirror TemporalConfig (src/code_indexer/config.py) and are seeded
+    # into each repo's .code-indexer/config.json "temporal" section by
+    # config_seeding.py (server values always win -- Bug #678 pattern).
+    temporal_embedders: List[str] = field(default_factory=lambda: ["voyage-context-4"])
+    temporal_active_embedder: str = "voyage-context-4"
+    temporal_aggregation_chunk_chars: int = 4096
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(

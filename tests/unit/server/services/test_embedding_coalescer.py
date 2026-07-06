@@ -94,6 +94,12 @@ class FakeVoyageProvider:
     def _get_model_token_limit(self) -> int:
         return self._token_limit
 
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient/CohereEmbeddingProvider both implement this;
+        the coalescer's _dispatch() reads it to attribute emitted events
+        (Story #1293 S1b [A3])."""
+        return "voyage-ai"
+
     def get_embeddings_batch(
         self,
         texts: List[str],
@@ -130,6 +136,9 @@ class FakeCohereProvider(FakeVoyageProvider):
 
     def _get_texts_per_request(self) -> int:
         return self._texts_per_request
+
+    def get_provider_name(self) -> str:
+        return "cohere"
 
     # Voyage-only counter absent so the resolver picks _count_tokens.
     _count_tokens_accurately = None  # type: ignore[assignment]
@@ -612,23 +621,28 @@ class TestTokenSafetyMarginFromSpec:
 
 
 class TestDispatchCounters:
-    def test_coalescer_exposes_dispatch_counters(self):
-        """submit() increments batches_dispatched and texts_coalesced."""
+    """Story #1295 (Epic #1288 final): the per-instance batches_dispatched /
+    texts_coalesced counters this class used to verify were deleted --
+    restart-volatile per-node tallies whose durable, cluster-aggregated
+    equivalent is WindowedCacheMetrics.overall.{batches,texts_coalesced}
+    (sourced from search_embed_event). Dispatch cardinality (batch/text
+    counting) is independently covered via provider-call observation in
+    test_embedding_coalescer_dedup_1146.py::TestDedupSavingsCounter and
+    TestNewCounterAttributes.
+    """
+
+    def test_coalescer_has_no_dispatch_counter_attributes(self):
+        """submit() must NOT expose the deleted batches_dispatched/texts_coalesced
+        counters on the coalescer instance."""
         governor = ProviderConcurrencyGovernor(GOV_K)
         prov = FakeVoyageProvider()
         c = EmbeddingCoalescer(LANE, prov, governor=governor)
 
-        assert c.batches_dispatched == 0
-        assert c.texts_coalesced == 0
-
         vec, _ = c.submit("text-3")
         assert vec == [3.0, 0.0]
-        assert c.batches_dispatched == 1
-        assert c.texts_coalesced == 1
 
-        c.submit("text-4")  # noqa: discard result; only counter assertions follow
-        assert c.batches_dispatched == 2
-        assert c.texts_coalesced == 2
+        assert not hasattr(c, "batches_dispatched")
+        assert not hasattr(c, "texts_coalesced")
 
 
 # ---------------------------------------------------------------------------

@@ -91,6 +91,12 @@ class _FakeVoyageProvider:
     def _get_model_token_limit(self) -> int:
         return self._token_limit
 
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient/CohereEmbeddingProvider both implement this;
+        the coalescer's _dispatch() reads it to attribute emitted events
+        (Story #1293 S1b [A3])."""
+        return "voyage-ai"
+
     def get_embeddings_batch(
         self,
         texts: List[str],
@@ -407,10 +413,21 @@ class TestSharedFateOnDispatchError:
 
 
 class TestDedupSavingsCounter:
-    """AC4: dedup_savings = requestors_in_live_batch - unique_provider_texts_sent."""
+    """AC4: dedup_savings = requestors_in_live_batch - unique_provider_texts_sent.
+
+    Story #1295 (Epic #1288 final) migration note: the per-instance
+    ``dedup_savings``/``provider_embed_calls`` counters these tests used to
+    assert on directly were deleted (restart-volatile per-node tallies; the
+    durable, cluster-aggregated equivalent is WindowedCacheMetrics.overall.
+    {dedup,provider_embed_calls}, sourced from search_embed_event). Each test
+    below now observes the SAME dedup behavior via the fake provider's own
+    call-count / unique-texts-sent spies (unrelated to the deleted counters),
+    which is what actually produced the correct dedup_savings value before.
+    """
 
     def test_dedup_savings_counts_saved_embeddings(self) -> None:
-        """dedup_savings reflects how many embed calls were saved by dedup."""
+        """K identical texts collapse to 1 provider call sending 1 unique text
+        (savings = K - 1 unique texts sent)."""
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
         coalescer = EmbeddingCoalescer(
@@ -421,33 +438,24 @@ class TestDedupSavingsCounter:
             config_digest=_TEST_DIGEST,
         )
 
-        # Initial state: zero savings
-        assert coalescer.dedup_savings == 0
-
         K = 5
         same_text = "find all error log entries"
         outcome = _run_saturated_submits(coalescer, gov, LANE, [same_text] * K)
 
         assert not outcome.errors
-        # K requestors, 1 unique text -> savings = K - 1
-        expected_savings = K - 1
-        assert coalescer.dedup_savings == expected_savings, (
-            f"dedup_savings={coalescer.dedup_savings}, expected {expected_savings}"
+        assert provider.call_count == 1, "K identical texts must dedup to 1 call"
+        assert len(provider.calls_texts[0]) == 1, (
+            f"expected 1 unique text sent, got {provider.calls_texts[0]}"
         )
 
     def test_dedup_savings_accumulates_across_batches(self) -> None:
-        """dedup_savings accumulates across multiple dispatched batches.
-
-        Each batch is run on a FRESH governor so that the saturation primitive
-        is deterministic: all K blocker slots are held before submitters run.
-        After batch 1: savings == 3 (4 requestors - 1 unique).
-        After batch 2 (same coalescer, new gov): savings >= 3+2 == 5, because
-        all 3 same-key entries in batch 2 are guaranteed to coalesce (fresh
-        saturation before release).
+        """Each of two independent batches (fresh governor each) collapses its
+        own same-key entries to exactly 1 unique text sent -- 2 total provider
+        calls across the two batches, one per batch.
         """
         provider = _FakeVoyageProvider()
 
-        # Batch 1: fresh governor, 4 same-key entries -> savings = 3
+        # Batch 1: fresh governor, 4 same-key entries -> 1 unique text sent
         gov1 = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         coalescer = EmbeddingCoalescer(
             LANE,
@@ -460,21 +468,21 @@ class TestDedupSavingsCounter:
             coalescer, gov1, LANE, ["batch one query text"] * 4
         )
         assert not outcome1.errors
-        assert coalescer.dedup_savings == 3
+        assert provider.call_count == 1
+        assert len(provider.calls_texts[0]) == 1
 
         # Batch 2: fresh governor on the SAME coalescer, 3 same-key entries.
-        # Using a fresh gov guarantees the saturation is clean and all 3 entries
-        # coalesce into one dispatch -> savings += 2 (cumulative = 5).
         gov2 = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-        coalescer._governor = gov2  # swap governor; coalescer counters persist
+        coalescer._governor = gov2  # swap governor; coalescer state persists
         outcome2 = _run_saturated_submits(
             coalescer, gov2, LANE, ["batch two query text"] * 3
         )
         assert not outcome2.errors
-        assert coalescer.dedup_savings == 5
+        assert provider.call_count == 2
+        assert len(provider.calls_texts[1]) == 1
 
     def test_dedup_savings_zero_for_all_unique_texts(self) -> None:
-        """When all texts in a batch are unique, dedup_savings remains zero."""
+        """When all texts in a batch are unique, all are sent (zero savings)."""
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
         coalescer = EmbeddingCoalescer(
@@ -490,10 +498,12 @@ class TestDedupSavingsCounter:
         outcome = _run_saturated_submits(coalescer, gov, LANE, unique_texts)
 
         assert not outcome.errors
-        assert coalescer.dedup_savings == 0
+        assert len(provider.calls_texts[0]) == 4, (
+            "all 4 unique texts must be sent (zero dedup savings)"
+        )
 
     def test_dedup_savings_mixed_batch(self) -> None:
-        """Mixed batch: 3 same-key + 2 different -> savings = 2 (3 became 1, 2 stayed 2)."""
+        """Mixed batch: 3 same-key + 2 different -> 3 unique texts sent (savings = 2)."""
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
         coalescer = EmbeddingCoalescer(
@@ -512,17 +522,13 @@ class TestDedupSavingsCounter:
         outcome = _run_saturated_submits(coalescer, gov, LANE, texts)
 
         assert not outcome.errors
-        # 5 requestors - 3 unique texts sent = 2 savings
-        assert coalescer.dedup_savings == 2
+        # 3 unique texts sent (5 requestors - 2 savings)
+        assert len(provider.calls_texts[0]) == 3
 
     def test_dedup_savings_excludes_cache_hit_savings(self) -> None:
-        """dedup_savings must NOT include savings from cache hits (those are separate).
-
-        This is enforced by the fact that dedup_savings only increments inside
-        _dispatch (for LIVE batches only).  Cache hits never reach _dispatch.
-        We verify that dedup_savings increases by exactly (requestors - unique) for
-        a live batch, and that the counter stays at that value without further change.
-        """
+        """Dedup collapses a live batch to its unique-text count; cache hits
+        never reach _dispatch (a separate code path), so this observation is
+        specific to the live-batch dedup behavior."""
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
         coalescer = EmbeddingCoalescer(
@@ -533,14 +539,12 @@ class TestDedupSavingsCounter:
             config_digest=_TEST_DIGEST,
         )
 
-        before = coalescer.dedup_savings
         outcome = _run_saturated_submits(
             coalescer, gov, LANE, ["find cache hits in logs"] * 3
         )
         assert not outcome.errors
-        # dedup_savings increased by exactly (3-1) = 2 for this live batch
-        after = coalescer.dedup_savings
-        assert after - before == 2
+        # 3 identical requestors -> 1 unique text sent (savings = 2) for this live batch
+        assert len(provider.calls_texts[0]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -675,46 +679,27 @@ class TestCliDirectPathUnchanged:
 
 
 class TestNewCounterAttributes:
-    """Verify that EmbeddingCoalescer exposes dedup_savings and provider_embed_calls."""
+    """Provider embed call cardinality (batch dedup) at the coalescer level.
 
-    def test_dedup_savings_attribute_exists(self) -> None:
-        """EmbeddingCoalescer must expose a dedup_savings counter initialized to 0."""
-        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-        provider = _FakeVoyageProvider()
-        coalescer = EmbeddingCoalescer(
-            LANE,
-            provider,
-            governor=gov,
-            acquire_timeout=5.0,
-            config_digest=_TEST_DIGEST,
-        )
-        assert hasattr(coalescer, "dedup_savings")
-        assert coalescer.dedup_savings == 0
-
-    def test_provider_embed_calls_attribute_exists(self) -> None:
-        """EmbeddingCoalescer must expose a provider_embed_calls counter (increases by 1
-        per dispatched batch)."""
-        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-        provider = _FakeVoyageProvider()
-        coalescer = EmbeddingCoalescer(
-            LANE,
-            provider,
-            governor=gov,
-            acquire_timeout=5.0,
-            config_digest=_TEST_DIGEST,
-        )
-        assert hasattr(coalescer, "provider_embed_calls")
-        assert coalescer.provider_embed_calls == 0
+    Story #1295 (Epic #1288 final) migration note: this class used to also
+    verify EmbeddingCoalescer exposed dedup_savings/provider_embed_calls
+    attributes directly (test_dedup_savings_attribute_exists,
+    test_provider_embed_calls_attribute_exists) -- both deleted, since those
+    attributes no longer exist (restart-volatile per-node tallies; the
+    durable equivalent is WindowedCacheMetrics.overall.{dedup,
+    provider_embed_calls}). The behavioral tests below now observe the same
+    per-batch dispatch cardinality via the fake provider's own call-count spy.
+    """
 
     def test_provider_embed_calls_increments_by_one_per_batch(self) -> None:
-        """provider_embed_calls increments by exactly 1 per dispatched batch.
+        """Provider embed calls increment by exactly 1 per dispatched batch.
 
         Each batch uses a FRESH governor for a clean, deterministic saturation
         so all submitters coalesce into exactly one dispatch per batch.
         """
         provider = _FakeVoyageProvider()
 
-        # Batch 1: fresh governor -> exactly 1 dispatch -> provider_embed_calls == 1
+        # Batch 1: fresh governor -> exactly 1 dispatch -> 1 provider call
         gov1 = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         coalescer = EmbeddingCoalescer(
             LANE,
@@ -727,19 +712,19 @@ class TestNewCounterAttributes:
             coalescer, gov1, LANE, ["first batch query"] * 3
         )
         assert not outcome1.errors
-        assert coalescer.provider_embed_calls == 1
+        assert provider.call_count == 1
 
         # Batch 2: fresh governor on same coalescer -> exactly 1 more dispatch
         gov2 = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-        coalescer._governor = gov2  # swap governor; coalescer counters persist
+        coalescer._governor = gov2  # swap governor; coalescer state persists
         outcome2 = _run_saturated_submits(
             coalescer, gov2, LANE, ["second batch query"] * 2
         )
         assert not outcome2.errors
-        assert coalescer.provider_embed_calls == 2
+        assert provider.call_count == 2
 
     def test_provider_embed_calls_for_k_same_key_is_one(self) -> None:
-        """K same-key entries in one batch produce exactly 1 provider_embed_calls."""
+        """K same-key entries in one batch produce exactly 1 provider call."""
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
         coalescer = EmbeddingCoalescer(
@@ -756,9 +741,9 @@ class TestNewCounterAttributes:
         )
 
         assert not outcome.errors
-        assert coalescer.provider_embed_calls == 1, (
-            f"expected provider_embed_calls=1 for {K} same-key entries, "
-            f"got {coalescer.provider_embed_calls}"
+        assert provider.call_count == 1, (
+            f"expected 1 provider call for {K} same-key entries, "
+            f"got {provider.call_count}"
         )
 
 
@@ -877,8 +862,8 @@ class TestLiveAnchorDepth:
         assert outcome.results[0] == outcome.results[1], (
             "callers received different vectors — dedup multiplex broken"
         )
-        # dedup_savings == 1 (2 requestors → 1 unique)
-        assert coalescer.dedup_savings == 1
+        # 2 requestors -> 1 unique text sent (savings = 1)
+        assert len(provider.calls_texts[0]) == 1
 
     def test_anchor_depth_provider_read_live_per_dispatch(self) -> None:
         """anchor_depth_provider is called on EACH dispatch, not cached at construction.

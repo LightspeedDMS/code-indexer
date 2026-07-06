@@ -1,353 +1,32 @@
-"""Tests for Bug #1242: migrated temporal shards lack projection_matrix.npy.
+"""Tests for Bug #1242: temporal shards must have projection_matrix.npy.
 
-Root cause:
-- _build_one_shard builds a shard from a monolithic HNSW but never copies
-  projection_matrix.npy, so the first upsert_points into that shard crashes
-  with FileNotFoundError.
-- The sharding loop in temporal_indexer.py has no self-heal for already-deployed
-  broken shards.
+Story #1290: the migration/conversion machinery this file originally also
+covered (run_temporal_migration, _build_one_shard) has been deleted as part
+of the per-commit hard cut -- temporal_migration_service.py no longer
+exists. What remains here is the RELOCATED self-heal helper
+(_ensure_shard_has_projection_matrix, now in temporal_projection_matrix.py,
+AC18) plus the end-to-end integration test proving it is still wired into
+the real TemporalIndexer.index_commits() shard-prep loop.
 
 Fixes tested here:
-- Fix 1 (_build_one_shard): projection_matrix.npy copied from monolith (or
-  regenerated if absent) before the atomic rename; quantization_range from
-  monolith meta written into shard meta.
-- Fix 2 (temporal_indexer.py loop else-branch): when a shard exists but lacks
-  the matrix, copy from the base (monolith) collection or regenerate.
-- End-to-end: after healing, load_matrix() and upsert_points() succeed without
-  FileNotFoundError.
+- Self-heal helper: projection_matrix.npy copied from a source collection
+  (or regenerated if absent/source lacks it); quantization_range backfilled
+  when missing.
+- End-to-end: after healing, load_matrix() and upsert_points() succeed
+  without FileNotFoundError.
+- Integration: the shard-prep-loop else-branch in index_commits() detects a
+  missing projection_matrix.npy and heals it before any write.
 """
 
 import json
 import math
-import struct
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict
 
 import numpy as np
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
 _DIM = 8  # small dimension for fast tests
-_Q1_2024 = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())
-_Q2_2024 = int(datetime(2024, 5, 10, tzinfo=timezone.utc).timestamp())
-
-
-def _write_id_index_bin(path: Path, id_index: Dict[str, str]) -> None:
-    with open(path, "wb") as f:
-        f.write(struct.pack("<I", len(id_index)))
-        for point_id, rel_path in id_index.items():
-            id_bytes = point_id.encode("utf-8")
-            path_bytes = rel_path.encode("utf-8")
-            f.write(struct.pack("<H", len(id_bytes)))
-            f.write(id_bytes)
-            f.write(struct.pack("<H", len(path_bytes)))
-            f.write(path_bytes)
-
-
-def _write_vector_json(json_path: Path, point_id: str, vector: list, ts: int) -> None:
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "id": point_id,
-        "vector": vector,
-        "payload": {
-            "commit_timestamp": ts,
-            "commit_date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
-                "%Y-%m-%d"
-            ),
-        },
-    }
-    with open(json_path, "w") as f:
-        json.dump(data, f)
-
-
-def _build_monolithic_collection(
-    index_path: Path,
-    collection_name: str,
-    vectors: np.ndarray,
-    timestamps: list,
-    include_projection_matrix: bool = True,
-    include_quantization_range: bool = True,
-) -> Path:
-    """Build a monolithic temporal HNSW collection on disk.
-
-    Args:
-        include_projection_matrix: If True, write a real projection_matrix.npy.
-        include_quantization_range: If True, include quantization_range in meta.
-
-    Returns:
-        Collection directory path.
-    """
-    import hnswlib
-    from code_indexer.storage.projection_matrix_manager import ProjectionMatrixManager
-
-    coll_dir = index_path / collection_name
-    coll_dir.mkdir(parents=True, exist_ok=True)
-
-    n = len(vectors)
-    dim = vectors.shape[1]
-
-    hnsw_idx = hnswlib.Index(space="cosine", dim=dim)
-    hnsw_idx.init_index(
-        max_elements=n, M=16, ef_construction=200, allow_replace_deleted=True
-    )
-    hnsw_idx.add_items(vectors, np.arange(n))
-    hnsw_idx.save_index(str(coll_dir / "hnsw_index.bin"))
-
-    id_mapping: Dict[str, str] = {}
-    id_index: Dict[str, str] = {}
-    for i, (vec, ts) in enumerate(zip(vectors, timestamps)):
-        point_id = f"repo:commit:{'a' * 40}:{i}"
-        rel_path = f"{i:02x}/vec_{i}.json"
-        _write_vector_json(coll_dir / rel_path, point_id, vec.tolist(), ts)
-        id_mapping[str(i)] = point_id
-        id_index[point_id] = rel_path
-
-    _write_id_index_bin(coll_dir / "id_index.bin", id_index)
-
-    output_dim = 64
-    std = math.sqrt(output_dim / dim)
-    meta: dict = {
-        "name": collection_name,
-        "vector_size": dim,
-        "created_at": datetime.utcnow().isoformat(),
-        "hnsw_index": {
-            "version": 1,
-            "vector_count": n,
-            "vector_dim": dim,
-            "M": 16,
-            "ef_construction": 200,
-            "space": "cosine",
-            "last_rebuild": datetime.utcnow().isoformat(),
-            "file_size_bytes": (coll_dir / "hnsw_index.bin").stat().st_size,
-            "id_mapping": id_mapping,
-            "is_stale": False,
-            "last_marked_stale": None,
-        },
-    }
-    if include_quantization_range:
-        meta["quantization_range"] = {"min": float(-3 * std), "max": float(3 * std)}
-
-    with open(coll_dir / "collection_meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
-
-    if include_projection_matrix:
-        manager = ProjectionMatrixManager()
-        matrix = manager.create_projection_matrix(input_dim=dim, output_dim=output_dim)
-        manager.save_matrix(matrix, coll_dir)
-
-    return coll_dir
-
-
-# ---------------------------------------------------------------------------
-# Fix 1: _build_one_shard copies / regenerates projection_matrix.npy
-# ---------------------------------------------------------------------------
-
-
-class TestMigrationCopiesProjectionMatrix:
-    """Fix 1: run_temporal_migration copies projection_matrix.npy into shards."""
-
-    def test_shard_has_projection_matrix_byte_identical_to_monolith(self, tmp_path):
-        """After migration each shard contains a projection_matrix.npy that is
-        byte-identical to the one in the monolith collection."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(4, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q1_2024, _Q2_2024, _Q2_2024]
-
-        coll_dir = _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=True,
-        )
-
-        # Read monolith matrix bytes BEFORE migration
-        monolith_matrix_bytes = (coll_dir / "projection_matrix.npy").read_bytes()
-
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        # Two shards expected (Q1 and Q2)
-        shards = [
-            d
-            for d in index_path.iterdir()
-            if d.is_dir()
-            and d.name.endswith("Q1")
-            or (d.is_dir() and d.name.endswith("Q2"))
-        ]
-        assert len(shards) == 2, (
-            f"Expected 2 shards, got {[d.name for d in index_path.iterdir() if d.is_dir()]}"
-        )
-
-        for shard in shards:
-            matrix_file = shard / "projection_matrix.npy"
-            assert matrix_file.exists(), (
-                f"projection_matrix.npy missing in shard {shard.name}"
-            )
-            assert matrix_file.read_bytes() == monolith_matrix_bytes, (
-                f"projection_matrix.npy in {shard.name} differs from monolith"
-            )
-
-    def test_shard_meta_carries_monolith_quantization_range(self, tmp_path):
-        """Shard collection_meta.json must contain the monolith's quantization_range."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(2, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q2_2024]
-
-        coll_dir = _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=True,
-        )
-
-        # Read monolith quantization_range
-        with open(coll_dir / "collection_meta.json") as f:
-            mono_meta = json.load(f)
-        monolith_qr = mono_meta["quantization_range"]
-
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        shards = [
-            d
-            for d in index_path.iterdir()
-            if d.is_dir()
-            and d.name.startswith(collection_name)
-            and d.name != collection_name
-        ]
-        assert len(shards) == 2
-
-        for shard in shards:
-            with open(shard / "collection_meta.json") as f:
-                shard_meta = json.load(f)
-            assert "quantization_range" in shard_meta, (
-                f"quantization_range missing in {shard.name} meta"
-            )
-            assert shard_meta["quantization_range"]["min"] == pytest.approx(
-                monolith_qr["min"]
-            ), f"quantization_range min mismatch in {shard.name}"
-            assert shard_meta["quantization_range"]["max"] == pytest.approx(
-                monolith_qr["max"]
-            ), f"quantization_range max mismatch in {shard.name}"
-
-
-class TestMigrationFallbackRegeneratesMatrix:
-    """Fix 1 fallback: monolith missing projection_matrix.npy -> shard gets fresh matrix."""
-
-    def test_fallback_regenerates_matrix_when_monolith_missing_matrix(self, tmp_path):
-        """When monolith lacks projection_matrix.npy, migration regenerates one for each shard."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(2, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q2_2024]
-
-        _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=False,  # ← monolith missing matrix
-        )
-
-        # Must not raise
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        shards = [
-            d
-            for d in index_path.iterdir()
-            if d.is_dir()
-            and d.name.startswith(collection_name)
-            and d.name != collection_name
-        ]
-        assert len(shards) == 2
-
-        for shard in shards:
-            matrix_file = shard / "projection_matrix.npy"
-            assert matrix_file.exists(), (
-                f"projection_matrix.npy missing in shard {shard.name} after fallback"
-            )
-            matrix = np.load(str(matrix_file))
-            assert matrix.shape == (_DIM, 64), (
-                f"Unexpected matrix shape {matrix.shape} in {shard.name}"
-            )
-
-    def test_fallback_computes_quantization_range_when_monolith_meta_missing_it(
-        self, tmp_path
-    ):
-        """When monolith meta has no quantization_range, shards get the computed formula."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(2, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q2_2024]
-
-        _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=False,
-            include_quantization_range=False,  # ← monolith has no qr
-        )
-
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        shards = [
-            d
-            for d in index_path.iterdir()
-            if d.is_dir()
-            and d.name.startswith(collection_name)
-            and d.name != collection_name
-        ]
-        assert len(shards) == 2
-
-        expected_std = math.sqrt(64 / _DIM)
-        expected_min = -3 * expected_std
-        expected_max = 3 * expected_std
-
-        for shard in shards:
-            with open(shard / "collection_meta.json") as f:
-                meta = json.load(f)
-            assert "quantization_range" in meta, (
-                f"quantization_range missing in {shard.name}"
-            )
-            assert meta["quantization_range"]["min"] == pytest.approx(expected_min)
-            assert meta["quantization_range"]["max"] == pytest.approx(expected_max)
-
-
-# ---------------------------------------------------------------------------
-# Fix 2: temporal_indexer.py else-branch self-heal
-# ---------------------------------------------------------------------------
 
 
 def _build_broken_shard(
@@ -359,6 +38,8 @@ def _build_broken_shard(
     """Create a shard directory with collection_meta.json but NO projection_matrix.npy."""
     shard_dir = index_path / shard_name
     shard_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+
     meta = {
         "name": shard_name,
         "vector_size": vector_dim,
@@ -381,12 +62,17 @@ def _build_broken_shard(
     return shard_dir
 
 
+# ---------------------------------------------------------------------------
+# Fix 2 (relocated, AC18): temporal_indexer.py else-branch self-heal
+# ---------------------------------------------------------------------------
+
+
 class TestSelfHealCopyFromBase:
     """Fix 2: self-heal copies projection_matrix.npy from base (monolith) collection."""
 
     def test_self_heal_copies_matrix_from_base_when_available(self, tmp_path):
         """_ensure_shard_has_projection_matrix copies matrix from base if present."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
         from code_indexer.storage.projection_matrix_manager import (
@@ -419,7 +105,7 @@ class TestSelfHealCopyFromBase:
 
     def test_self_heal_backfills_quantization_range_in_shard_meta(self, tmp_path):
         """After self-heal, shard meta has quantization_range (from base or computed)."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
         from code_indexer.storage.projection_matrix_manager import (
@@ -467,7 +153,7 @@ class TestSelfHealCopyFromBase:
 
     def test_self_heal_idempotent_when_matrix_already_present(self, tmp_path):
         """_ensure_shard_has_projection_matrix is a no-op when matrix already exists."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
         from code_indexer.storage.projection_matrix_manager import (
@@ -497,7 +183,7 @@ class TestSelfHealRegenerateFallback:
 
     def test_self_heal_regenerates_matrix_when_no_base(self, tmp_path):
         """When source_collection_path is None, _ensure_shard_has_projection_matrix regenerates."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 
@@ -516,7 +202,7 @@ class TestSelfHealRegenerateFallback:
 
     def test_self_heal_regenerates_matrix_when_base_missing_matrix(self, tmp_path):
         """When base collection exists but lacks matrix, shard still gets one regenerated."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 
@@ -539,7 +225,7 @@ class TestSelfHealRegenerateFallback:
 
     def test_self_heal_computes_quantization_range_formula_when_no_base(self, tmp_path):
         """No base → quantization_range computed as ±3·sqrt(64/dim)."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 
@@ -571,7 +257,7 @@ class TestEndToEndNoCrashAfterHealing:
     def test_load_matrix_succeeds_after_self_heal(self, tmp_path):
         """ProjectionMatrixManager.load_matrix() raises FileNotFoundError before heal
         and succeeds after _ensure_shard_has_projection_matrix is called."""
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
         from code_indexer.storage.projection_matrix_manager import (
@@ -610,7 +296,7 @@ class TestEndToEndNoCrashAfterHealing:
         temporal_indexer.py shard-prep loop) is idempotent and upsert_points
         succeeds against a shard it healed.
         """
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
@@ -637,79 +323,18 @@ class TestEndToEndNoCrashAfterHealing:
         ProjectionMatrixManager._matrix_cache.clear()
 
         # upsert_points succeeds against the pre-healed shard.
+        from datetime import datetime, timezone
+
+        _q1_2024 = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())
         test_point = {
             "id": "test:commit:" + "a" * 40 + ":0",
             "vector": np.random.rand(_DIM).astype(np.float32).tolist(),
-            "payload": {"commit_timestamp": _Q1_2024},
+            "payload": {"commit_timestamp": _q1_2024},
         }
         result = vector_store.upsert_points(
             collection_name, [test_point], watch_mode=True
         )
         assert result is not None
-
-
-# ---------------------------------------------------------------------------
-# Regression: existing migration tests still pass (smoke check via re-import)
-# ---------------------------------------------------------------------------
-
-
-class TestRegressionExistingMigration:
-    """Smoke: the migration still handles multi-quarter bucketing after Fix 1."""
-
-    def test_migration_still_groups_vectors_by_quarter(self, tmp_path):
-        """After Fix 1, quarterly shards are still created correctly."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(4, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q1_2024, _Q2_2024, _Q2_2024]
-
-        _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=True,
-        )
-
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        q1_shard = index_path / f"{collection_name}-2024Q1"
-        q2_shard = index_path / f"{collection_name}-2024Q2"
-        assert q1_shard.exists() and (q1_shard / "collection_meta.json").exists()
-        assert q2_shard.exists() and (q2_shard / "collection_meta.json").exists()
-
-    def test_migration_writes_migration_complete_marker(self, tmp_path):
-        """Marker is still written after successful migration (no regression)."""
-        from code_indexer.services.temporal.temporal_migration_service import (
-            run_temporal_migration,
-            MIGRATION_COMPLETE_MARKER,
-        )
-
-        index_path = tmp_path / "index"
-        collection_name = "code-indexer-temporal-voyage_code_3"
-        vectors = np.random.rand(2, _DIM).astype(np.float32)
-        timestamps = [_Q1_2024, _Q2_2024]
-
-        _build_monolithic_collection(
-            index_path,
-            collection_name,
-            vectors,
-            timestamps,
-            include_projection_matrix=True,
-        )
-
-        run_temporal_migration(
-            index_path=index_path, repo_alias="test-repo", progress_callback=None
-        )
-
-        monolith_dir = index_path / collection_name
-        assert (monolith_dir / MIGRATION_COMPLETE_MARKER).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +402,9 @@ class TestIndexCommitsSelfHeal:
         mock_config.embedding_provider = "voyage-ai"
         mock_config.temporal = Mock()
         mock_config.temporal.diff_context_lines = 3
+        mock_config.temporal.embedders = ["voyage-context-4"]
+        mock_config.temporal.active_embedder = "voyage-context-4"
+        mock_config.temporal.aggregation_chunk_chars = 4096
         mock_config.file_extensions = []
         mock_config.override_config = None
         mock_config.codebase_dir = tmp_path
@@ -793,7 +421,10 @@ class TestIndexCommitsSelfHeal:
         vector_store = FilesystemVectorStore(base_path=index_dir)
 
         # --- Pre-create broken shard (simulates pre-fix migration output) ---
-        collection_base = "code-indexer-temporal-voyage_code_3"
+        # Story #1290: shards are named from the temporal active_embedder
+        # ("voyage-context-4" -> slug "voyage_context_4"), not the regular
+        # semantic-search provider's model.
+        collection_base = "code-indexer-temporal-voyage_context_4"
         shard_name = f"{collection_base}-2024Q1"
 
         # create_collection writes collection_meta.json + hnsw_index.bin + matrix
@@ -825,7 +456,7 @@ class TestIndexCommitsSelfHeal:
             author_name="Test Author",
             author_email="test@example.com",
             message="Bug #1242 integration commit",
-            parent_hashes=[],
+            parent_hashes="",
         )
 
         _factory_patch = (

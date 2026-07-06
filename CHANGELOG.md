@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [11.20.0] - 2026-07-06
+
+### Fixed
+
+- **Job-reconciliation no longer wall-clock-reaps live indexing jobs (#1310).** `JobReconciliationService` deleted the blanket `max_execution_time` reclaim path that failed still-progressing long-running indexing / golden-repo-registration / SCIP / temporal jobs on a live node, restoring the Bug #1218 invariant (the indexing path carries no wall-clock timeout — a large repo legitimately takes hours). Dead-node/heartbeat reclaim (the only legitimate mechanism) is unchanged; the stuck-index-blocking reclaim now guards on `started_at IS NULL`, so it can only free genuinely never-started jobs blocking `idx_active_job_per_repo`, never a running job. Tracked follow-up: #1312 (a legitimately-queued pending job can still be reaped on queue age — pre-existing edge, out of scope here).
+- **Removed redundant "durable / windowed / cluster-aggregated" badges from the cache-metrics dashboard (#1311).** Every card on the panel is now DB-sourced from the shared store (Cache Entries = live `query_embedding_cache` COUNT; On-Mode Hit Rate = `search_event_log` request counts; all others = `WindowedCacheMetrics` over `search_embed_event`), so the per-card provenance badge introduced mid-migration by Story #1294 distinguished nothing and overflowed the card. Removed the 8 header badges, 8 footer note-prefixes, and their CSS; per-card explanatory footers and all data sources are unchanged.
+
+## [11.19.0] - 2026-07-05
+
+### Added
+
+- **Durable query-embedding decision event log `search_embed_event` (#1293, epic #1288).** One row per NEEDED embed on every live path (direct, coalesced owner/joiner sharing one `live_batch_id`, temporal), on SQLite (solo) and PostgreSQL (cluster). Replaces the restart-volatile in-memory counter that overcounted under coalescing.
+- **Windowed, cluster-aggregated cache-metrics dashboard (#1294, epic #1288).** Every cache card is re-sourced from `search_embed_event` via a fail-open `WindowedCacheMetrics` aggregation with a time-window selector, so the dashboard reconciles with the analytics export instead of a per-node counter that reset on restart.
+- **`count_transport_calls()` — real transport HTTP-call count (#1305).** Additive alongside the unchanged `provider_embed_calls` (successful NEEDED embeds); it additionally counts shadow-validation, failover-attempt, and bypass wire calls. Documented residual: an all-shadow-hit coalesced batch is not additively countable.
+
+### Changed
+
+- **Removed the `config.json` transition copies of `workers`/`log_level`/`host`/`port` (#1196, epic #1194).** These launch settings now resolve solely from shared DB / `launch.json` / `applied_launch.json`; DEPLOY preserves the live systemd ExecStart and never applies a saved-but-unconfirmed launch change.
+- **BREAKING: `cidx.cache.embedding.*` OTEL instruments re-sourced from an in-memory tracker to durable, cluster-aggregated ObservableGauge callbacks (#1295, epic #1288 final).** `cidx.cache.embedding.hits` and `.misses` were monotonic Counters (incremented once per operation, restart-volatile, per-node only); they are now windowed `ObservableGauge` instruments re-computed from the durable `search_embed_event` table (Story #1293/#1294) on every OTEL export tick. Any downstream OTEL consumer that took a `rate()`/`increase()` derivative over the old Counters must instead read the Gauge value directly. `cidx.cache.embedding.shadow_cosine` similarly moved from a push Histogram to windowed percentile/histogram Gauges (`shadow_cosine_p50`/`_p05`/`_min`/`_histogram`). `cidx.cache.embedding.total_entries` is UNCHANGED (still a cheap cache-state COUNT, not event-sourced).
+
+### Fixed
+
+- **Temporal watch mode called an undefined `TemporalIndexer.index_commits_list` (`AttributeError`) — rewired both call sites to the real per-commit `index_commits()` entry point (#1296).**
+- **Fixed pre-existing daemon/diagnostics test debt hidden from the CI gate by `@pytest.mark.slow`/marker filters, and in the process restored a production prompt-template resource (`diagnostic_troubleshooting.txt`) that an earlier "dead code removal" wrongly deleted while its live consumer remained (#1304).**
+- **id-index rebuild no longer logs benign missing-`id` WARNINGs for the temporal sidecar files (`temporal_structure.json`/`temporal_progress.json`/`temporal_meta.json`); a genuinely malformed vector file still warns (#1297).**
+
+### Removed
+
+- **The in-memory `QueryEmbeddingCacheMetrics` tracker and `CoalescerRegistry.metrics()` deleted entirely (#1295, epic #1288 final).** Both were restart-volatile, per-node-only tallies now fully superseded by the durable `WindowedCacheMetrics` aggregation. The `GET /api/admin/coalescer-metrics` REST route was removed (redundant with the windowed dashboard, which already exposes cluster-aggregated `texts_coalesced`/`batches_dispatched`/`dedup_savings`/`provider_embed_calls`). `cidx.cache.embedding.audit_top1_match` was removed (no `search_embed_event` schema column for top1-match). The deep-fidelity audit path (`embedding_cache_audit.py`) now stamps `audit_sampled`/`audit_cosine` directly onto the durable event row via the Story #1293 keyed `update_audit_by_key` UPDATE, wiring a previously-orphaned code path.
+- **Deleted the orphaned diagnostics "actionable feedback" feature (`DiagnosticsService.get_actionable_feedback()`, `_load_prompt_template()`, `_execute_claude_prompt()`, and the `server/feedback/` package) — it had zero callers and was never wired to any route/UI (#1307).**
+
+## [11.18.3] - 2026-07-04
+
+### Fixed
+
+- **Daemon-mode temporal queries were 100% broken (#1302, epic #1289).** Standalone/server temporal queries worked, but the daemon's `exposed_query_temporal` resolved the collection via the regular embedding_provider/model scheme (`resolve_temporal_collection_from_config`, yielding `code-indexer-temporal-voyage_code_3`) while per-commit temporal data lives under the active-embedder scheme (`code-indexer-temporal-voyage_context_4`), and the daemon's mmap `CacheEntry` was shard-blind (real HNSW data lives in per-quarter shard subdirectories, e.g. `...-2026Q3`). Both defects fixed by delegating `exposed_query_temporal` to `execute_temporal_query_with_fusion` -- the same shard-aware, active-embedder-named dispatch already used by the CLI, server, and multi-search paths (its docstring already claimed daemon support; the wiring had simply never been done). A `--temporal-embedder` query override is now threaded end-to-end through the daemon path. Verified with a real daemon E2E for both embedders (daemon results byte-for-byte match standalone: voyage-context-4 and Cohere embed-v4.0).
+
+### Removed
+
+- **Dead mmap temporal-cache code in the daemon (#1302).** The fusion-delegation fix left `CacheEntry.load_temporal_indexes` / `invalidate_temporal` / `is_temporal_stale_after_rebuild` (plus the `temporal_hnsw_index` / `temporal_id_mapping` / `temporal_index_version` fields and their `get_stats` keys) unreachable from any production caller. Removed (87 lines) along with the test file that only exercised them, for anti-orphan compliance. The regular non-temporal daemon cache path is unchanged.
+
+## [11.18.2] - 2026-07-03
+
+### Fixed
+
+- **Daemon-mode temporal query crashed with a 100% `AssertionError` (#1300, epic #1289).** `TemporalDaemonService.exposed_query_temporal` asserted `config_manager is not None` before the lazy-init that creates it had run, so every daemon-mode temporal query failed. The lazy-init (`ConfigManager.create_with_backtrack`) is now hoisted above the first use and the assert.
+
+- **Temporal query params `at_commit`, `show_evolution`, `evolution_limit` were silent no-ops on the per-commit temporal index (#1301, epic #1289).** `at_commit` was advertised on REST/MCP but never applied and never validated -- a bogus commit hash was silently accepted and returned the full unfiltered result set. Now implemented as point-in-time scoping: the ref/hash is resolved via git to a commit + UNIX timestamp (`resolve_commit_timestamp`), which becomes an upper bound on `commit_timestamp` -- the same mechanism `time_range`'s upper bound already uses. An unresolvable ref/hash now returns a typed HTTP 400 error instead of silently succeeding.
+
+### Removed
+
+- **`show_evolution`, `evolution_limit`, and `include_removed` retired from the REST/MCP query surface (#1301).** These parameters were advertised as working but were permanent no-ops on the per-commit temporal index (Epic #1289) -- neither filtering/augmenting results nor returning a warning/error. Per-file diff timelines belong to the existing git tools (`git_file_history`, `git_log`, `git_blame`, `git_diff`), not the semantic temporal search path. Removed end-to-end: `SemanticQueryRequest` (REST model), the MCP `search_code` tool schema/docs, the Web UI query page's "Include removed files" checkbox, and all internal plumbing (`execute_temporal_query_with_fusion`, `SemanticQueryManager` query chain). A client that still sends these fields simply has them ignored by the request parser (they no longer exist) rather than silently accepted and dropped deeper in the stack.
+
+## [11.18.1] - 2026-07-03
+
+### Fixed
+
+- **Temporal search dropped the most-relevant commits (#1299, epic #1289).** Found by a real REST/MCP front-door E2E on clean code. Two root causes: (1) `TemporalSearchService.query_temporal` sorted deduped results by commit date and then truncated to `limit`, keeping the newest matches instead of the most relevant; fixed to select the top-`limit` by relevance first, then order that subset reverse-chronologically for display. (2) Fusion across disjoint quarterly shards used reciprocal-rank fusion (RRF by within-shard rank), discarding true cosine magnitude; replaced with a score-preserving `merge_shards_by_score` for disjoint shards (RRF retained unchanged for the overlapping path). Verified via the live front door: both ground-truth commits recall at rank 0 across all tested limits for both embedders. Embedding, projection, HNSW, and the regular voyage-code-3 path were proven correct and left untouched.
+
+## [11.18.0] - 2026-07-03
+
+### Added
+
+- **Epic #1289 — Per-Commit Contextualized Temporal Indexing (Pluggable Dual Embedders).** Replaces the per-file-diff temporal layout (which exploded to millions of one-vector-per-file files) with one aggregated document per commit (commit-message head + `--- path ---`-delimited diffs), chunked and embedded into model-slug-keyed quarterly shards. Far fewer vectors: a 20-file commit produces 1 vector instead of ~21.
+  - **Story #1290** — voyage-context-4 contextualized-embeddings adapter (1024-dim, 0% overlap), per-commit aggregation, v2 `temporal_structure.json` marker, hard-cut removal of the legacy per-file-diff path and monolith->shard migration machinery, recall dedup-by-commit with commit message surfaced once.
+  - **Story #1291** — Cohere embed-v4.0 as a pluggable coexisting second embedder (1536-dim native, 15% overlap). Multiple embedders' temporal indexes live side-by-side; adding one never rebuilds another. `temporal_embedder` query override threaded through REST/MCP. Per-embedder reconcile.
+  - **Story #1292** — git-history-only file-count projection script (`scripts/analysis/temporal_vector_projection.py`), absolute recall-quality gate (`scripts/analysis/temporal_recall_gate.py`), real REST+MCP front-door dual-embedder e2e (`tests/e2e/server/test_18_temporal_dual_embedder_1292.py`), and documentation.
+
+### Fixed
+
+- **voyage-context-4 temporal search returned HTTP 400 in server/cluster mode.** `VoyageAIClient.get_embeddings_batch()` (the server coalescer's embedding entry point) bypassed the contextualized-query special case; it now routes contextualized queries correctly (non-contextual/document/CLI/voyage-code-3 paths unchanged).
+- **Contextual embedder document packing** capped each packed document at the ~108k-token request budget instead of the ~28.8k-token context window, causing HTTP 400s; now caps at the context window.
+
 ## [11.17.0] - 2026-07-02
 
 ### Fixed

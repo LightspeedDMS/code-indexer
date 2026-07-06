@@ -45,6 +45,10 @@ SEEDED_KEYS: List[str] = [
     "cohere.health_monitor.degraded_error_rate",
     "cohere.health_monitor.latency_p95_threshold_ms",
     "cohere.health_monitor.availability_threshold",
+    # Story #1290: per-commit temporal embedder registry (Web UI Config Screen).
+    "temporal.embedders",
+    "temporal.active_embedder",
+    "temporal.aggregation_chunk_chars",
 ]
 
 
@@ -115,6 +119,13 @@ def _get_server_provider_values() -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "voyage_ai": json.loads(voyage.model_dump_json()),
         "cohere": json.loads(cohere_cfg.model_dump_json()),
+        # Story #1290: per-commit temporal embedder registry defaults
+        # (overlaid with live server values below, same as voyage_ai/cohere).
+        "temporal": {
+            "embedders": ["voyage-context-4"],
+            "active_embedder": "voyage-context-4",
+            "aggregation_chunk_chars": 4096,
+        },
     }
 
     # Try to overlay with live server config if available
@@ -145,6 +156,20 @@ def _get_server_provider_values() -> Dict[str, Any]:
             temporal_val = getattr(indexing, "temporal_parallel_requests", None)
             result["voyage_ai"]["temporal_parallel_requests"] = temporal_val
             result["cohere"]["temporal_parallel_requests"] = temporal_val
+
+            # Story #1290: overlay per-commit temporal embedder registry
+            # (embedders/active_embedder/aggregation_chunk_chars) when set.
+            embedders_val = getattr(indexing, "temporal_embedders", None)
+            if embedders_val:
+                result["temporal"]["embedders"] = list(embedders_val)
+            active_embedder_val = getattr(indexing, "temporal_active_embedder", None)
+            if active_embedder_val:
+                result["temporal"]["active_embedder"] = active_embedder_val
+            chunk_chars_val = getattr(
+                indexing, "temporal_aggregation_chunk_chars", None
+            )
+            if chunk_chars_val:
+                result["temporal"]["aggregation_chunk_chars"] = chunk_chars_val
     except Exception as exc:
         logger.debug(
             "Config seeding: server config unavailable, using defaults: %s", exc

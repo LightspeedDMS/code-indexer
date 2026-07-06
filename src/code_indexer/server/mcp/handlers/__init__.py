@@ -382,6 +382,20 @@ from code_indexer.server.mcp.handlers.xray import (  # noqa: F401, E402
 )
 
 # Re-export infrastructure symbols patched by tests via handlers.X
-from code_indexer.server.middleware.correlation import get_correlation_id  # noqa: F401, E402
+#
+# Story #1293: get_correlation_id was bound to the UNWIRED
+# middleware.correlation reader (its CorrelationContextMiddleware is never
+# registered in startup/app_wiring.py). Because _ForwardingModule below
+# mirrors every write to this package namespace into any submodule that also
+# defines the SAME attribute name (see its docstring), leaving this import
+# wrong meant that any test doing
+# patch("code_indexer.server.mcp.handlers.get_correlation_id", ...) would,
+# on restore, re-propagate the WRONG function into search.py's binding --
+# silently undoing search.py's own wrong-import fix for the rest of the test
+# process. Binding this to the WIRED telemetry.correlation_bridge reader
+# keeps the forwarder's "restore to original" semantics correct everywhere.
+from code_indexer.server.telemetry.correlation_bridge import (  # noqa: F401, E402
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.logging_utils import format_error_log  # noqa: F401, E402
 from code_indexer.global_repos.global_registry import GlobalRegistry  # noqa: F401, E402

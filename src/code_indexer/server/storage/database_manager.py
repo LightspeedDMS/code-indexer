@@ -657,6 +657,42 @@ class DatabaseSchema:
             ON query_analytics_exports (initiated_by)
     """
 
+    # Story #1293 (Epic #1288): Query-embedding decision event recording.
+    # Durable, phantom-free source of truth for every query-embedding decision
+    # on every server query path. correlation_id is NOT NULL (application
+    # layer guarantees a UUID fallback -- see search_embed_event_emit.py).
+    CREATE_SEARCH_EMBED_EVENT_TABLE = """
+        CREATE TABLE IF NOT EXISTS search_embed_event (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       REAL NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            node_id         TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            model           TEXT,
+            config_digest   TEXT,
+            cache_mode      TEXT,
+            outcome         TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            live_batch_id   TEXT,
+            embed_key       TEXT,
+            long_key        INTEGER,
+            latency_ms      INTEGER,
+            shadow_cosine   REAL,
+            audit_sampled   INTEGER,
+            audit_cosine    REAL
+        )
+    """
+
+    CREATE_IDX_SEE_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_see_timestamp
+            ON search_embed_event (timestamp)
+    """
+
+    CREATE_IDX_SEE_CORRELATION_ID = """
+        CREATE INDEX IF NOT EXISTS idx_see_correlation_id
+            ON search_embed_event (correlation_id)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -813,6 +849,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
             conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
             conn.execute(self.CREATE_IDX_QAE_INITIATED_BY)
+            # Story #1293: Query-embedding decision event recording
+            conn.execute(self.CREATE_SEARCH_EMBED_EVENT_TABLE)
+            conn.execute(self.CREATE_IDX_SEE_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_SEE_CORRELATION_ID)
 
             conn.commit()
 

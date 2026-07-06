@@ -552,6 +552,42 @@ def make_lifespan(
             )
             app.state.search_event_log_writer = None
 
+        # Story #1293: Initialize SearchEmbedEventWriter (durable, phantom-free
+        # query-embedding decision events). Mirrors SearchEventLogWriter's
+        # pattern exactly: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_embed_event_writer import (
+                SearchEmbedEventSqliteBackend,
+                SearchEmbedEventWriter,
+            )
+            from code_indexer.server.services.search_embed_event_emit import (
+                set_search_embed_event_writer,
+            )
+
+            if backend_registry is not None:
+                _see_backend = backend_registry.search_embed_event
+            else:
+                see_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _see_backend = SearchEmbedEventSqliteBackend(str(see_db_path))
+
+            app.state.search_embed_event_writer = SearchEmbedEventWriter(_see_backend)
+            app.state.search_embed_event_writer.start()
+            set_search_embed_event_writer(app.state.search_embed_event_writer)
+
+            logger.info(
+                "SearchEmbedEventWriter started (Story #1293)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _see_exc:
+            logger.error(
+                "Failed to initialize SearchEmbedEventWriter: %s",
+                _see_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_embed_event_writer = None
+
         # Issue #1160: Initialize QueryAnalyticsExportService (export to Excel).
         # Mirrors SearchEventLogWriter pattern: select backend from registry or fall back
         # to SQLite. Service is stateless (no threads to start/stop).
@@ -949,23 +985,99 @@ def make_lifespan(
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
 
+        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
+        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
+        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
+        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
+        # table.  Without this early call those flags stay at bootstrap defaults (False)
+        # when the schedulers below call config_service.get_config() -- permanently
+        # skipping the one-shot startup backfill sweeps even when the operator has
+        # enabled the features in the Web UI.
+        # The late set_connection_pool + start_config_reload call in the cluster block
+        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
+        # idempotent via its internal _reload_thread.is_alive() guard).
+        #
+        # Bug #1309 (round 2): this block -- and the API key seeding block right
+        # after it -- MUST run BEFORE the "LLM Lease Lifecycle" block below.
+        # LlmLeaseLifecycleService.start() (subscription mode) sets
+        # os.environ["ANTHROPIC_API_KEY"] from its leased credential; seeding, when
+        # config's anthropic_api_key is blank (the normal case in subscription mode),
+        # unconditionally pops ANTHROPIC_API_KEY. Seeding running after the lease
+        # would clobber the lease-managed key. Placing both this pool switch and
+        # seeding before the lease means: seeding reads the PG-backed config (so
+        # VoyageAI/Cohere keys still seed correctly in cluster mode) AND the lease --
+        # which runs last -- has its ANTHROPIC_API_KEY write survive uncontested.
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _early_config_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _early_config_pool is not None:
+                    get_config_service().set_connection_pool(_early_config_pool)
+                    logger.info(
+                        "APP-GENERAL-052: ConfigService PG pool set early — "
+                        "scheduler inits will read merged runtime config",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-054",
+                            "storage_mode=postgres but no connection pool is "
+                            "available on backend_registry (critical_connection_pool "
+                            "and connection_pool both None); ConfigService will stay "
+                            "on bootstrap SQLite config, and API key seeding below "
+                            "will NOT see PG-backed VoyageAI/Cohere keys",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            except Exception as _early_pool_exc:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-053",
+                        f"Early ConfigService pool set failed (schedulers will use "
+                        f"bootstrap defaults): {_early_pool_exc}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Auto-seed API keys if server config is blank (Story #20)
+        # Bug #1309: This MUST run after the early ConfigService PG pool switch
+        # above (so postgres/cluster mode reads the PG-backed config with the
+        # VoyageAI/Cohere keys) and BEFORE the LLM Lease Lifecycle block below (so
+        # a lease-managed ANTHROPIC_API_KEY is never clobbered by this seeder's
+        # unconditional pop of a blank-config Anthropic key). This block stays
+        # unconditional (not postgres-gated) so solo/SQLite mode -- where the
+        # block above is skipped entirely -- is unaffected.
         logger.info(
             "Server startup: Checking API key auto-seeding",
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
             from code_indexer.server.startup.api_key_seeding import (
                 seed_api_keys_on_startup,
             )
 
-            seeding_result = seed_api_keys_on_startup(config_service)
+            seeding_result = seed_api_keys_on_startup(get_config_service())
 
-            if seeding_result["anthropic_seeded"] or seeding_result["voyageai_seeded"]:
+            if (
+                seeding_result["anthropic_seeded"]
+                or seeding_result["voyageai_seeded"]
+                or seeding_result["cohere_seeded"]
+            ):
                 logger.info(
                     f"API key auto-seeding completed: "
                     f"anthropic={seeding_result['anthropic_seeded']}, "
-                    f"voyageai={seeding_result['voyageai_seeded']}",
+                    f"voyageai={seeding_result['voyageai_seeded']}, "
+                    f"cohere={seeding_result['cohere_seeded']}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
@@ -1036,7 +1148,8 @@ def make_lifespan(
                 initialize_claude_manager_on_startup,
             )
 
-            # Get fresh config (may have been updated by API key seeding)
+            # Get fresh config (reflects the PG-backed runtime config merged by
+            # the ConfigService pool switch earlier in startup, in cluster mode)
             server_config = config_service.get_config()
 
             claude_init_result = initialize_claude_manager_on_startup(
@@ -1091,44 +1204,6 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-
-        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
-        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
-        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
-        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
-        # table.  Without this early call those flags stay at bootstrap defaults (False)
-        # when the schedulers below call config_service.get_config() -- permanently
-        # skipping the one-shot startup backfill sweeps even when the operator has
-        # enabled the features in the Web UI.
-        # The late set_connection_pool + start_config_reload call in the cluster block
-        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
-        # idempotent via its internal _reload_thread.is_alive() guard).
-        if storage_mode == "postgres" and backend_registry is not None:
-            try:
-                from code_indexer.server.services.config_service import (
-                    get_config_service,
-                )
-
-                _early_config_pool = (
-                    backend_registry.critical_connection_pool
-                    or backend_registry.connection_pool
-                )
-                if _early_config_pool is not None:
-                    get_config_service().set_connection_pool(_early_config_pool)
-                    logger.info(
-                        "APP-GENERAL-052: ConfigService PG pool set early — "
-                        "scheduler inits will read merged runtime config",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-            except Exception as _early_pool_exc:
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-053",
-                        f"Early ConfigService pool set failed (schedulers will use "
-                        f"bootstrap defaults): {_early_pool_exc}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
 
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
@@ -3267,64 +3342,90 @@ def make_lifespan(
                 )
             )
 
-        # Story #1109 (S5): build QueryEmbeddingCacheMetrics when BOTH the cache
-        # AND telemetry are available.  If telemetry is disabled or the cache was
-        # not built, the accessor stays None (CLI / no-backend paths are no-ops).
-        # Non-fatal: a failure must never abort startup.
+        # Story #1295 (Epic #1288 final): build EmbeddingCacheOtelMetrics --
+        # the DB-backed OTEL re-source that replaces the Story #1109 (S5)
+        # in-memory QueryEmbeddingCacheMetrics tracker. Every windowed
+        # instrument (hit_rate, provider_calls, hits, misses, long_key,
+        # audit_top10_overlap, shadow_cosine_*) is sourced from
+        # WindowedCacheMetrics via the search_embed_event_writer installed
+        # above (Story #1293/#1294) -- NOT from an in-memory tally, so there
+        # is exactly one source of truth regardless of node/restart.
+        # total_entries stays UNCHANGED: a cheap query_embedding_cache COUNT,
+        # not event-sourced. Built unconditionally (meter=None when telemetry
+        # is disabled -- the class is a documented no-op in that case; the
+        # windowed values themselves are read live by the dashboard
+        # independent of OTEL/telemetry state). Non-fatal: a failure must
+        # never abort startup.
         try:
+            from code_indexer.server.services.embedding_cache_otel_metrics import (
+                EmbeddingCacheOtelMetrics,
+            )
             from code_indexer.server.services.governed_call import (
-                set_query_embedding_cache_metrics,
                 get_query_embedding_cache,
             )
-            from code_indexer.server.services.query_embedding_cache_metrics import (
-                QueryEmbeddingCacheMetrics,
+            from code_indexer.server.services.search_embed_event_emit import (
+                get_search_embed_event_writer,
             )
 
             _wired_cache = get_query_embedding_cache()
-            if _wired_cache is not None:
-                # Pass a real OTEL meter when telemetry is enabled; None otherwise.
-                # The in-process tallies (snapshot()) work regardless — only the OTEL
-                # export instruments require a meter.  This ensures the dashboard
-                # cache-metrics cards show real data even when telemetry is disabled
-                # (the production/staging default).
-                _cache_meter = (
-                    telemetry_manager.get_meter("cidx.cache")
-                    if telemetry_manager is not None
-                    else None
-                )
-                _cache_metrics = QueryEmbeddingCacheMetrics(
-                    _cache_meter,
-                    total_entries_fn=_wired_cache.cached_total_entries,
-                )
-                set_query_embedding_cache_metrics(_cache_metrics)
-                logger.info(
-                    "QueryEmbeddingCacheMetrics built and wired "
-                    "(telemetry=%s) (Story #1109 S5 / Bug fix)",
-                    telemetry_manager is not None,
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "QueryEmbeddingCacheMetrics: skipped (cache not wired) — accessor stays None",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            _total_entries_fn = (
+                _wired_cache.cached_total_entries
+                if _wired_cache is not None
+                else (lambda: 0)
+            )
+
+            def _windowed_metrics_fn(from_ts: float, to_ts: float) -> Any:
+                _see_writer = get_search_embed_event_writer()
+                if _see_writer is None:
+                    from code_indexer.server.services.windowed_cache_metrics import (
+                        empty_windowed_result,
+                    )
+
+                    return empty_windowed_result()
+                return _see_writer.backend.get_windowed_metrics(from_ts, to_ts)
+
+            _cache_otel_meter = (
+                telemetry_manager.get_meter("cidx.cache")
+                if telemetry_manager is not None
+                else None
+            )
+            EmbeddingCacheOtelMetrics(
+                _cache_otel_meter,
+                total_entries_fn=_total_entries_fn,
+                windowed_metrics_fn=_windowed_metrics_fn,
+            )
+            logger.info(
+                "EmbeddingCacheOtelMetrics built and wired "
+                "(telemetry=%s) (Story #1295 DB-backed OTEL re-source)",
+                telemetry_manager is not None,
+                extra={"correlation_id": get_correlation_id()},
+            )
         except Exception as e:
             logger.warning(
                 format_error_log(
-                    "APP-GENERAL-1109",
-                    f"Failed to build QueryEmbeddingCacheMetrics "
-                    f"(cache metrics will be disabled): {e}",
+                    "APP-GENERAL-1295",
+                    f"Failed to build EmbeddingCacheOtelMetrics "
+                    f"(cache OTEL metrics will be disabled): {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
 
-        # Story #1172: Background startup migration — monolithic temporal indexes to quarterly shards.
-        # Scan all golden repos for unsharded temporal HNSW collections and submit BGM jobs.
-        # Non-fatal: log WARNING on any failure, never block startup.
+        # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
+        # temporal collections (AC19/AC20) for every golden repo. Replaces the
+        # old Story #1172 background HNSW-extraction migration (deleted along
+        # with temporal_migration_service.py): the hard cut has no migration
+        # path, only blank-out-then-rebuild. This sweep is cheap (directory
+        # enumeration + marker read + conditional rmtree per repo) so it runs
+        # synchronously rather than as a background job. A repo whose legacy
+        # index is blanked here is simply unavailable for temporal search
+        # until its next `cidx index` run rebuilds it in the per-commit
+        # layout (AC28 — deliberate operator re-index, no automatic
+        # coexistence machinery). Non-fatal per repo: log WARNING and
+        # continue, never block startup.
         try:
-            from code_indexer.services.temporal.temporal_migration_service import (
-                submit_temporal_migration_jobs as _submit_temporal_migrations,
+            from code_indexer.services.temporal.temporal_blank_out import (
+                blank_out_legacy_temporal_collections,
             )
 
             _temporal_repos = (
@@ -3332,15 +3433,44 @@ def make_lifespan(
                 if golden_repo_manager is not None
                 else []
             )
-            _submit_temporal_migrations(background_job_manager, _temporal_repos)
+            _blanked_total = 0
+            for _repo in _temporal_repos:
+                _alias = _repo.get("alias", "unknown")
+                _clone_path = _repo.get("clone_path", "")
+                if not _clone_path:
+                    continue
+                _index_path = Path(_clone_path) / ".code-indexer" / "index"
+                try:
+                    _deleted = blank_out_legacy_temporal_collections(_index_path)
+                    _blanked_total += len(_deleted)
+                    if _deleted:
+                        logger.info(
+                            "Story #1290: blanked out %d legacy temporal "
+                            "collection(s) for repo %s: %s",
+                            len(_deleted),
+                            _alias,
+                            _deleted,
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                except Exception as _repo_exc:
+                    logger.warning(
+                        "Story #1290: temporal blank-out failed for repo %s "
+                        "(non-fatal): %s",
+                        _alias,
+                        _repo_exc,
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             logger.info(
-                "Story #1172: temporal index migration scan complete (%d repos checked)",
+                "Story #1290: temporal blank-out startup sweep complete "
+                "(%d repos checked, %d legacy collections removed)",
                 len(_temporal_repos),
+                _blanked_total,
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as _tmig_exc:
             logger.warning(
-                "Story #1172: temporal index migration scan failed (non-fatal): %s",
+                "Story #1290: temporal blank-out startup sweep failed (non-fatal): %s",
                 _tmig_exc,
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
@@ -3399,6 +3529,23 @@ def make_lifespan(
             logger.warning(
                 "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
                 _sel_stop_exc,
+            )
+
+        # Story #1293: drain the search-embed-event writer on shutdown and
+        # clear the process-level accessor.
+        try:
+            from code_indexer.server.services.search_embed_event_emit import (
+                clear_search_embed_event_writer,
+            )
+
+            _see_writer = getattr(app.state, "search_embed_event_writer", None)
+            if _see_writer is not None:
+                _see_writer.stop()
+            clear_search_embed_event_writer()
+        except Exception as _see_stop_exc:
+            logger.warning(
+                "Story #1293: failed to drain search-embed-event writer during shutdown: %s",
+                _see_stop_exc,
             )
 
         # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
@@ -3528,20 +3675,14 @@ def make_lifespan(
                 exc_info=True,
             )
 
-        # Story #1109 (S5): clear the process-level cache metrics so a subsequent
-        # lifespan cycle does not inherit a stale metrics instance.
-        # Non-fatal — never abort the remaining shutdown chain.
-        try:
-            from code_indexer.server.services.governed_call import (
-                clear_query_embedding_cache_metrics,
-            )
-
-            clear_query_embedding_cache_metrics()
-        except Exception:
-            logger.debug(
-                "Query embedding cache metrics clear failed (expected during shutdown)",
-                exc_info=True,
-            )
+        # Story #1295 (Epic #1288 final): the Story #1109 (S5) cache-metrics
+        # accessor teardown was deleted along with the in-memory
+        # QueryEmbeddingCacheMetrics tracker it cleared.
+        # EmbeddingCacheOtelMetrics needs no equivalent teardown: its
+        # ObservableGauge instruments are registered on the OTEL SDK's
+        # MeterProvider (torn down independently by the telemetry manager),
+        # not on a process-level accessor that could leak stale state across
+        # lifespan cycles.
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in

@@ -287,34 +287,15 @@ class CoalescerRegistry:
             anchor_depth_provider=coalescer_anchor_provider,
         )
 
-    def metrics(self) -> Dict[str, int]:
-        """Return aggregated coalescer counters across all registered coalescers.
-
-        Sums texts_coalesced, batches_dispatched, dedup_savings, and
-        provider_embed_calls across every (lane, digest) coalescer held in this
-        registry. Returns per-node in-memory tallies (not persisted to DB).
-
-        Used by the front-door cache-metrics partial (dashboard) so cluster E2E
-        can read them without DB access.
-
-        Returns:
-            Dict with keys: texts_coalesced, batches_dispatched, dedup_savings,
-            provider_embed_calls.
-        """
-        totals: Dict[str, int] = {
-            "texts_coalesced": 0,
-            "batches_dispatched": 0,
-            "dedup_savings": 0,
-            "provider_embed_calls": 0,
-        }
-        with self._lock:
-            for lane_map in self._coalescers.values():
-                for coalescer in lane_map.values():
-                    totals["texts_coalesced"] += coalescer.texts_coalesced
-                    totals["batches_dispatched"] += coalescer.batches_dispatched
-                    totals["dedup_savings"] += coalescer.dedup_savings
-                    totals["provider_embed_calls"] += coalescer.provider_embed_calls
-        return totals
+    # Story #1295 (Epic #1288 final): metrics() was deleted -- it summed
+    # per-node, restart-volatile EmbeddingCoalescer counters (texts_coalesced,
+    # batches_dispatched, dedup_savings, provider_embed_calls) that were
+    # themselves deleted from EmbeddingCoalescer. Its sole consumer, the
+    # admin_coalescer_metrics REST route, is also removed: the durable,
+    # cluster-aggregated equivalents are WindowedCacheMetrics.overall.
+    # {texts_coalesced,batches,dedup,provider_embed_calls}, sourced from
+    # search_embed_event (Story #1293/#1294) and already exposed by the
+    # operator dashboard's cache-metrics partial.
 
 
 # Process-level singleton. None until lifespan sets it (CLI/solo never does).

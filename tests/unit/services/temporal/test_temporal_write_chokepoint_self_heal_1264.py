@@ -190,7 +190,7 @@ class TestAtomicShardHeal:
         be the final step, never a direct shutil.copy2 straight onto the
         target path.
         """
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 
@@ -217,7 +217,7 @@ class TestAtomicShardHeal:
             return real_replace(src, dst)
 
         monkeypatch.setattr(
-            "code_indexer.services.temporal.temporal_migration_service.os.replace",
+            "code_indexer.services.temporal.temporal_projection_matrix.os.replace",
             spy_replace,
         )
 
@@ -242,7 +242,7 @@ class TestAtomicShardHeal:
         """Regenerate branch (no base collection available): same atomic
         temp-file-then-os.replace contract applies.
         """
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 
@@ -264,7 +264,7 @@ class TestAtomicShardHeal:
             return real_replace(src, dst)
 
         monkeypatch.setattr(
-            "code_indexer.services.temporal.temporal_migration_service.os.replace",
+            "code_indexer.services.temporal.temporal_projection_matrix.os.replace",
             spy_replace,
         )
 
@@ -297,7 +297,7 @@ class TestAtomicShardHeal:
         """
         import threading
 
-        from code_indexer.services.temporal.temporal_migration_service import (
+        from code_indexer.services.temporal.temporal_projection_matrix import (
             _ensure_shard_has_projection_matrix,
         )
 

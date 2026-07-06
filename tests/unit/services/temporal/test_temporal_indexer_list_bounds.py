@@ -58,11 +58,46 @@ def test_empty_commits_after_filtering_should_return_early(temporal_indexer):
 
     Bug scenario that should be fixed:
     1. Get 366 commits from git history
-    2. Progressive metadata shows ALL 366 already completed
-    3. Filter removes all commits, leaving empty list
+    2. Every configured embedder's reconcile-based discovery finds nothing missing
+    3. Every embedder is skipped (zero work scheduled)
     4. Code should return early with zero results
     5. Currently crashes with IndexError at line 202: commits[-1].hash
+
+    Story #1291: missing-commit discovery is now ALWAYS done via
+    reconcile_temporal_index() (disk-scan-based, per embedder) rather than
+    the old single-collection progressive_metadata filter, so "all commits
+    already indexed" is simulated by patching reconcile_temporal_index to
+    report nothing missing, with a real registered fake embedder standing in
+    for the (unconfigured Mock) active_embedder.
     """
+    from code_indexer.services.temporal.embedders.base import TemporalEmbedder
+    from code_indexer.services.temporal.embedders.registry import (
+        register_embedder,
+        unregister_embedder_for_tests,
+    )
+
+    fake_embedder_name = "fake-list-bounds-1291"
+
+    class _FakeEmbedder(TemporalEmbedder):
+        name = fake_embedder_name
+        model_slug = "fake_list_bounds_1291"
+        dimensions = 4
+        overlap_percentage = 0.0
+
+        def __init__(self, config=None):
+            pass
+
+        def embed_commit_chunks(self, chunks):
+            return [[0.0] * self.dimensions for _ in chunks]
+
+        def embed_query(self, text):
+            return [0.0] * self.dimensions
+
+    register_embedder(fake_embedder_name, lambda config: _FakeEmbedder(config))
+    temporal_indexer.config.temporal = Mock()
+    temporal_indexer.config.temporal.active_embedder = fake_embedder_name
+    temporal_indexer.config.temporal.embedders = [fake_embedder_name]
+
     # Setup: Create 3 commits
     commits = [
         CommitInfo(
@@ -76,26 +111,33 @@ def test_empty_commits_after_filtering_should_return_early(temporal_indexer):
         for i in range(3)
     ]
 
-    # Mock progressive metadata to show ALL commits already completed
-    # This is the critical condition - after filtering, commits will be empty
-    temporal_indexer.progressive_metadata.load_completed = Mock(
-        return_value={c.hash for c in commits}
-    )
-
-    # Mock git operations and embedding provider
-    with patch.object(temporal_indexer, "_get_commit_history", return_value=commits):
-        with patch.object(temporal_indexer, "_get_current_branch", return_value="main"):
-            with patch(
-                "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create"
+    try:
+        # Mock git operations, embedding provider, and reconcile-based
+        # missing-commit discovery (all commits already indexed -> nothing
+        # missing for the fake embedder).
+        with patch.object(
+            temporal_indexer, "_get_commit_history", return_value=commits
+        ):
+            with patch.object(
+                temporal_indexer, "_get_current_branch", return_value="main"
             ):
-                # Expected behavior: Should return early with zero results
-                # Current bug: Crashes with IndexError at line 202
-                result = temporal_indexer.index_commits(all_branches=False)
+                with patch(
+                    "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create"
+                ):
+                    with patch(
+                        "code_indexer.services.temporal.temporal_reconciliation.reconcile_temporal_index",
+                        return_value=[],
+                    ):
+                        # Expected behavior: Should return early with zero results
+                        # Current bug: Crashes with IndexError at line 202
+                        result = temporal_indexer.index_commits(all_branches=False)
 
-                # Verify correct early return behavior with new field names
-                assert result.total_commits == 0
-                assert result.files_processed == 0
-                assert result.approximate_vectors_created == 0
-                assert result.skip_ratio == 1.0  # All commits skipped
-                assert result.branches_indexed == []
-                assert result.commits_per_branch == {}
+                        # Verify correct early return behavior with new field names
+                        assert result.total_commits == 0
+                        assert result.files_processed == 0
+                        assert result.approximate_vectors_created == 0
+                        assert result.skip_ratio == 1.0  # All commits skipped
+                        assert result.branches_indexed == []
+                        assert result.commits_per_branch == {}
+    finally:
+        unregister_embedder_for_tests(fake_embedder_name)

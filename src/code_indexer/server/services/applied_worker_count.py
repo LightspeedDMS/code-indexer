@@ -1,18 +1,24 @@
 """Applied-worker-count resolver (Story #1197 AC5 / Bug #1239).
+Story #1196 (next-release cleanup, FIX-1b): drops the config.json rung.
 
 Reads the worker count the running uvicorn unit was ACTUALLY launched with
 (APPLIED), never a saved-but-unapplied TARGET from the runtime DB.
 
-Priority:
+Priority (post Story #1196 cleanup):
   1. Live systemd ExecStart --workers    — ground truth of the running process
        ExecStart found, has --workers N  -> return N
        ExecStart found, no --workers     -> return 1 (uvicorn default; this is the
-                                           Bug #1239 first-deploy case: unit has
-                                           no --workers token but config.json says 4)
+                                           Bug #1239 first-deploy case)
        ExecStart unreadable / not found  -> fall through to Priority 2
   2. applied_launch.json["workers"]      — auto-updater-owned APPLIED file (Story 3)
-  3. config.json["workers"]             — bootstrap fallback (pre-Story-3 / new node)
-  4. ServerConfig default: 1
+  3. ServerConfig default: 1
+
+Story #1197 originally added a config.json["workers"] rung between Priority 2
+and the default (bootstrap fallback for pre-Story-3 / new nodes, while
+config.json still carried the four launch keys via TRANSITION_PRESERVE_KEYS).
+Story #1196 removes that rung in lockstep with config_service.py's removal of
+the config.json launch-key copies: a node missing applied_launch.json now
+falls straight to the ServerConfig default 1, never config.json.
 
 Consumers: ProviderConcurrencyGovernor._read_config_workers()
            startup/service_init.py cache-init worker-count read
@@ -42,17 +48,11 @@ logger = logging.getLogger(__name__)
 # The data_dir parameter is kept for test injection (callers can override the
 # directory); the filename is always sourced from the shared constant.
 _APPLIED_LAUNCH_FILENAME = APPLIED_LAUNCH_CONFIG_PATH.name
-_CONFIG_FILENAME = "config.json"
 
 
 def _default_data_dir() -> Path:
     """Return the per-node data directory (mirrors deployment_executor._cidx_data_dir)."""
     return Path(os.environ.get("CIDX_DATA_DIR", str(Path.home() / ".cidx-server")))
-
-
-def _default_config_dir() -> Path:
-    """Return the directory that contains config.json (same as data dir by convention)."""
-    return _default_data_dir()
 
 
 def _default_unit_file() -> Path:
@@ -134,40 +134,15 @@ def _read_workers_from_applied_launch(data_dir: Path) -> Optional[int]:
         if not isinstance(value, int):
             logger.debug(
                 "applied_worker_count: applied_launch.json workers is not an int (%r); "
-                "falling back to config.json",
+                "falling back to the ServerConfig default",
                 value,
             )
             return None
         return value
     except Exception as exc:
         logger.debug(
-            "applied_worker_count: could not read %s (%s); falling back to config.json",
-            path,
-            exc,
-        )
-        return None
-
-
-def _read_workers_from_config_json(config_dir: Path) -> Optional[int]:
-    """Read workers from config.json; returns None on any problem."""
-    path = config_dir / _CONFIG_FILENAME
-    try:
-        if not path.exists():
-            return None
-        with open(path) as f:
-            data = json.load(f)
-        value = data.get("workers")
-        if not isinstance(value, int):
-            logger.debug(
-                "applied_worker_count: config.json workers is not an int (%r); "
-                "falling back to default 1",
-                value,
-            )
-            return None
-        return value
-    except Exception as exc:
-        logger.debug(
-            "applied_worker_count: could not read %s (%s); falling back to default 1",
+            "applied_worker_count: could not read %s (%s); falling back to the "
+            "ServerConfig default",
             path,
             exc,
         )
@@ -176,7 +151,6 @@ def _read_workers_from_config_json(config_dir: Path) -> Optional[int]:
 
 def get_applied_worker_count(
     data_dir: Optional[str] = None,
-    config_dir: Optional[str] = None,
     unit_file: Optional[Path] = None,
 ) -> int:
     """Return the APPLIED worker count for this node.
@@ -185,13 +159,15 @@ def get_applied_worker_count(
     launched with — this differs from get_config().workers (the TARGET, which
     may have been saved but not yet restarted into effect).
 
+    Story #1196 (FIX-1b): the Story #1197 config.json rung has been removed
+    now that config.json no longer carries a launch-key copy of 'workers'
+    (config_service.py AC1). A node missing applied_launch.json falls
+    straight to the ServerConfig default 1.
+
     Args:
         data_dir:   Path to the cidx data directory (default: CIDX_DATA_DIR env
                     or ~/.cidx-server). Must contain applied_launch.json when
                     authored by the auto-updater (Story 3).
-        config_dir: Path to the directory containing config.json (default: same
-                    as data_dir). The transition-preserved config.json carries
-                    the workers key via TRANSITION_PRESERVE_KEYS (AC3/AC6).
         unit_file:  Path to the systemd unit file (default: SYSTEMD_UNIT_DIR /
                     "cidx-server.service"). Override in tests to inject a fake
                     unit file without touching the filesystem at /etc/systemd/.
@@ -200,7 +176,6 @@ def get_applied_worker_count(
         Applied worker count >= 1. Never 0, never negative, never raises.
     """
     _data_dir = Path(data_dir) if data_dir is not None else _default_data_dir()
-    _config_dir = Path(config_dir) if config_dir is not None else _default_config_dir()
     _unit_file = unit_file if unit_file is not None else _default_unit_file()
 
     # Priority 1: live systemd ExecStart --workers (Bug #1239 fix).
@@ -217,12 +192,6 @@ def get_applied_worker_count(
     if value is not None:
         return max(1, value)
 
-    # Priority 3: config.json workers (bootstrap fallback — always present via
-    # TRANSITION_PRESERVE_KEYS even after AC1 removes workers from BOOTSTRAP_KEYS)
-    value = _read_workers_from_config_json(_config_dir)
-    if value is not None:
-        return max(1, value)
-
-    # Priority 4: default
+    # Priority 3: default (Story #1196 removed the config.json rung)
     logger.debug("applied_worker_count: no source found; using default worker_count=1")
     return 1

@@ -266,15 +266,15 @@ class TestDiffTypeParameter:
     def test_filter_by_single_diff_type(
         self, temporal_service, mock_vector_store, sample_search_results
     ):
-        """Test filtering by single diff type.
-
-        EXPECTED FAILURE: This test will fail until diff_type filtering is implemented.
-        """
+        """Story #1290: diff_types is a documented no-op post-hard-cut -- the
+        per-file diff_type concept no longer applies to per-commit aggregated
+        chunks (a single chunk can span multiple files with different diff
+        kinds), so passing diff_types=["added"] must NOT filter out the other
+        (distinct-commit) sample results."""
 
         # Setup mock to return all sample results
         mock_vector_store.search.return_value = (sample_search_results, {})
 
-        # Query with diff_types=["added"] - should return only "added" results
         results = temporal_service.query_temporal(
             query="test query",
             time_range=("2025-11-01", "2025-11-05"),
@@ -282,24 +282,19 @@ class TestDiffTypeParameter:
             limit=10,
         )
 
-        # Verify only "added" results are returned
-        assert len(results.results) == 1, (
-            f"Expected 1 result, got {len(results.results)}"
+        assert len(results.results) == len(sample_search_results), (
+            f"diff_types is a no-op post-#1290; expected all "
+            f"{len(sample_search_results)} sample results, got "
+            f"{len(results.results)}"
         )
-        assert results.results[0].metadata["diff_type"] == "added"
-        assert results.results[0].metadata["file_path"] == "src/feature.py"
 
     def test_filter_by_multiple_diff_types(
         self, temporal_service, mock_vector_store, sample_search_results
     ):
-        """Test filtering by multiple diff types.
-
-        EXPECTED FAILURE: This test will fail until multiple diff_type filtering is implemented.
-        """
+        """Story #1290: multiple diff_types values are equally a no-op."""
         # Setup mock to return all sample results
         mock_vector_store.search.return_value = (sample_search_results, {})
 
-        # Query with diff_types=["added", "modified"] - should return both added and modified
         results = temporal_service.query_temporal(
             query="test query",
             time_range=("2025-11-01", "2025-11-05"),
@@ -307,14 +302,11 @@ class TestDiffTypeParameter:
             limit=10,
         )
 
-        # Verify both "added" and "modified" results are returned (but not "deleted")
-        assert len(results.results) == 2, (
-            f"Expected 2 results, got {len(results.results)}"
+        assert len(results.results) == len(sample_search_results), (
+            f"diff_types is a no-op post-#1290; expected all "
+            f"{len(sample_search_results)} sample results, got "
+            f"{len(results.results)}"
         )
-        diff_types = [r.metadata["diff_type"] for r in results.results]
-        assert "added" in diff_types
-        assert "modified" in diff_types
-        assert "deleted" not in diff_types
 
     def test_filter_by_none_diff_types(
         self, temporal_service, mock_vector_store, sample_search_results

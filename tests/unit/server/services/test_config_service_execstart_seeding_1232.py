@@ -241,10 +241,17 @@ class TestSeedLayerHostGapFill:
             f"got {row.get('host')!r}. The backfill must affect _extract_runtime_dict."
         )
 
-    def test_stripped_config_json_carries_execstart_host(
+    def test_stripped_config_json_no_longer_carries_host(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """After first-boot, config.json also carries the ExecStart host (TRANSITION_PRESERVE_KEYS)."""
+        """Story #1196: after cleanup, stripped config.json does NOT carry host.
+
+        Bug #1232's backfill still gap-fills the in-memory config and the SQLite
+        DB row (see the other two tests in this class) -- that mechanism is
+        untouched by Story #1196. What changes is the config.json write/strip
+        path: since TRANSITION_PRESERVE_KEYS is removed, 'host' (like the other
+        three launch keys) no longer survives the strip.
+        """
         unit_dir = tmp_path / "systemd"
         _write_unit_file(unit_dir, host="0.0.0.0", workers=4)
 
@@ -256,9 +263,9 @@ class TestSeedLayerHostGapFill:
 
         config_file = Path(svc.config_manager.config_file_path)
         stored = json.loads(config_file.read_text())
-        assert stored.get("host") == "0.0.0.0", (
-            f"Bug #1232: stripped config.json must carry ExecStart host 0.0.0.0 "
-            f"(kept via TRANSITION_PRESERVE_KEYS). Got: {stored.get('host')!r}"
+        assert "host" not in stored, (
+            f"Story #1196: stripped config.json must NOT carry 'host' anymore "
+            f"(transition allow-list removed). Got: {stored.get('host')!r}"
         )
 
 

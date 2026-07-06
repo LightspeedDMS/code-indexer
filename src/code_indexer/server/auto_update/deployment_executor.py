@@ -2229,14 +2229,18 @@ class DeploymentExecutor:
     def _read_launch_source(self, mode: str) -> Optional[dict]:
         """Read launch config JSON for the given mode.
 
-        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through
-                to config.json → defaults; APPLY's job is to apply the TARGET).
+        Story #1196 (next-release cleanup): the config.json rung is removed
+        from BOTH modes.
+
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (falls
+                through directly to ServerConfig defaults; APPLY's job is to
+                apply the TARGET).
         DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH. Both the MISSING and CORRUPT cases
             return None so the caller PRESERVES the live ExecStart unchanged — a routine
             code deploy must never rewrite the live unit from a stale config. The live
             ExecStart is the confirmed running state (e.g. --host 0.0.0.0 bound so HAProxy
-            on another host can reach this node); falling through to config.json /
-            ServerConfig defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
+            on another host can reach this node); falling through to ServerConfig
+            defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
             ServerConfig default), dropping the node off the load balancer (a confirmed
             production-outage path). A present+valid applied_launch.json is used normally.
         """
@@ -2248,7 +2252,7 @@ class DeploymentExecutor:
                 # DEPLOY + missing applied_launch.json: preserve the live ExecStart.
                 # The live unit IS the confirmed running state (e.g. --host 0.0.0.0 bound
                 # so HAProxy on another host can reach this node). Falling through to
-                # config.json / ServerConfig defaults risks rewriting --host 0.0.0.0
+                # ServerConfig defaults risks rewriting --host 0.0.0.0
                 # to 127.0.0.1 (the ServerConfig default), dropping the node off the
                 # load balancer (production outage).
                 # Treat identically to the CORRUPT case: return None so the caller
@@ -2273,32 +2277,39 @@ class DeploymentExecutor:
                 )
                 return None
             logger.debug(
-                f"APPLY: launch.json unreadable ({exc}); falling through to config.json",
+                f"APPLY: launch.json unreadable ({exc}); falling through to ServerConfig defaults",
                 extra={"correlation_id": get_correlation_id()},
             )
             return {}
 
-    def _fill_from_config_json(
-        self, host: Optional[str], port: Optional[int], workers: Optional[int]
+    def _fill_from_live_execstart(
+        self,
+        mode: str,
+        host: Optional[str],
+        port: Optional[int],
+        workers: Optional[int],
     ) -> tuple:
-        """Fill any still-None values from config.json; return (host, port, workers)."""
-        if all(v is not None for v in (host, port, workers)):
+        """Fill any still-None DEPLOY values from the live ExecStart.
+
+        Story #1196 AC2 (FIX-1 / MAJOR-M1): the config.json rung is removed
+        from BOTH modes.
+          APPLY:  missing values are left None here so the caller applies the
+                  ServerConfig defaults directly -- no fallback source between
+                  launch.json and the literal defaults.
+          DEPLOY: missing values (a partially-populated applied_launch.json)
+                  are filled from the CURRENT live-unit ExecStart -- the
+                  confirmed running state -- never from config.json, before
+                  falling through to ServerConfig defaults.
+        """
+        if mode != "DEPLOY" or all(v is not None for v in (host, port, workers)):
             return host, port, workers
-        config_path = _cidx_data_dir / "config.json"
-        if config_path.exists():
-            try:
-                cfg = json.loads(config_path.read_text())
-                if host is None:
-                    host = cfg.get("host")
-                if port is None:
-                    port = cfg.get("port")
-                if workers is None:
-                    workers = cfg.get("workers")
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.debug(
-                    f"config.json unreadable ({exc}); using ServerConfig defaults",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+        live = read_execstart_flags(self.service_name)
+        if host is None:
+            host = live.get("host")
+        if port is None:
+            port = live.get("port")
+        if workers is None:
+            workers = live.get("workers")
         return host, port, workers
 
     def _resolve_launch_values(self, mode: str) -> Optional[dict]:
@@ -2316,7 +2327,7 @@ class DeploymentExecutor:
             )
 
         host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
-        host, port, workers = self._fill_from_config_json(host, port, workers)
+        host, port, workers = self._fill_from_live_execstart(mode, host, port, workers)
         result: dict = {
             "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
             "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
@@ -3517,7 +3528,8 @@ class DeploymentExecutor:
             return False
 
         # Step 3: Story #1199 - Ensure launch config (host/port/workers) from applied_launch.json.
-        # DEPLOY mode reads applied_launch.json → config.json → ServerConfig defaults (NEVER launch.json)
+        # DEPLOY mode reads applied_launch.json → parse/preserve the live ExecStart → ServerConfig
+        # defaults (NEVER launch.json/TARGET; the config.json rung was removed in Story #1196)
         # so a routine code deploy preserves the last operator-applied launch config without
         # auto-applying a saved-but-unconfirmed TARGET change (decision #3).
         # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape

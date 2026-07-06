@@ -365,6 +365,12 @@ class TestSeedProviderConfigNullPropagation:
         # Needed for existing timeout overlay loop
         mock_indexing.voyage_ai_timeout = None
         mock_indexing.cohere_timeout = None
+        # Story #1290: explicit JSON-serializable values (a bare MagicMock
+        # auto-attribute breaks json.dump when _get_server_provider_values
+        # reads these fields).
+        mock_indexing.temporal_embedders = ["voyage-context-4"]
+        mock_indexing.temporal_active_embedder = "voyage-context-4"
+        mock_indexing.temporal_aggregation_chunk_chars = 4096
 
         mock_server_cfg = MagicMock()
         mock_server_cfg.indexing_config = mock_indexing
@@ -406,6 +412,12 @@ class TestSeedProviderConfigNullPropagation:
         mock_indexing.temporal_parallel_requests = 2
         mock_indexing.voyage_ai_timeout = None
         mock_indexing.cohere_timeout = None
+        # Story #1290: explicit JSON-serializable values (a bare MagicMock
+        # auto-attribute breaks json.dump when _get_server_provider_values
+        # reads these fields).
+        mock_indexing.temporal_embedders = ["voyage-context-4"]
+        mock_indexing.temporal_active_embedder = "voyage-context-4"
+        mock_indexing.temporal_aggregation_chunk_chars = 4096
 
         mock_server_cfg = MagicMock()
         mock_server_cfg.indexing_config = mock_indexing
