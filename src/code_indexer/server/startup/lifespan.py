@@ -2010,6 +2010,46 @@ def make_lifespan(
                     _heartbeat.start()
                     _cluster_services.append(("heartbeat", _heartbeat))
 
+                    # C6 repo sharding. Phase 0: ShardOwnership decides which repos
+                    # this pod caches (owned -> cache; else load-and-discard).
+                    # Phase 1: ShardRouter forwards single-repo queries for
+                    # non-owned repos to an owner pod that has them cached.
+                    # replicas=2 default (Phase-later Web UI config). All non-fatal
+                    # -> falls back to symmetric caching + local serving.
+                    try:
+                        from code_indexer.server.services.shard_ownership import (
+                            ShardOwnership,
+                        )
+                        from code_indexer.server.services.shard_router import (
+                            ShardRouter,
+                        )
+
+                        _shard_ownership = ShardOwnership(
+                            node_id=_node_id,
+                            active_nodes_provider=_heartbeat.get_active_nodes,
+                            replicas=2,
+                        )
+                        _sqm = getattr(app.state, "semantic_query_manager", None)
+                        if _sqm is not None:
+                            _sqm.set_shard_ownership(_shard_ownership)
+                        app.state.shard_router = ShardRouter(
+                            node_id=_node_id,
+                            shard_ownership=_shard_ownership,
+                            node_addresses_provider=_heartbeat.get_node_addresses,
+                            http_client_factory=getattr(
+                                app.state, "http_client_factory", None
+                            ),
+                        )
+                        logging.getLogger(__name__).info(
+                            "C6: shard ownership + router wired (node_id=%s, replicas=2)",
+                            _node_id,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "C6: failed to wire sharding; falling back to "
+                            "symmetric caching + local serving"
+                        )
+
                     # Job reconciliation
                     from code_indexer.server.services.job_reconciliation_service import (
                         JobReconciliationService,
@@ -2551,7 +2591,9 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except (
+                Exception
+            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
