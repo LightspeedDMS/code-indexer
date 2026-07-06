@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from ..utils.file_lock import exclusive_file_lock
+
 logger = logging.getLogger(__name__)
 
 # Try to import hnswlib, gracefully degrade if not available
@@ -527,64 +529,55 @@ class HNSWIndexManager:
         Note:
             This method is called by watch mode to defer HNSW rebuild until query time.
         """
-        import fcntl
-
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
-        lock_file.touch(exist_ok=True)
 
-        with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock (blocks if query is rebuilding)
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        with exclusive_file_lock(lock_file):
+            # Load existing metadata
+            if not meta_file.exists():
+                return  # No metadata to mark stale
+
+            with open(meta_file) as f:
+                metadata = json.load(f)
+
+            if "hnsw_index" not in metadata:
+                return  # No HNSW index to mark stale
+
+            # Mark as stale
+            metadata["hnsw_index"]["is_stale"] = True
+            metadata["hnsw_index"]["last_marked_stale"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            # Save metadata atomically — temp file + rename prevents corruption on crash
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(collection_path), suffix=".tmp"
+            )
+            fd_owned = False
             try:
-                # Load existing metadata
-                if not meta_file.exists():
-                    return  # No metadata to mark stale
-
-                with open(meta_file) as f:
-                    metadata = json.load(f)
-
-                if "hnsw_index" not in metadata:
-                    return  # No HNSW index to mark stale
-
-                # Mark as stale
-                metadata["hnsw_index"]["is_stale"] = True
-                metadata["hnsw_index"]["last_marked_stale"] = datetime.now(
-                    timezone.utc
-                ).isoformat()
-
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned = False
                 try:
-                    try:
-                        tmp_f = os.fdopen(tmp_fd, "w")
-                        fd_owned = True
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_path, str(meta_file))
-                    finally:
-                        if not fd_owned:
-                            try:
-                                os.close(tmp_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError as cleanup_err:
-                        # Best-effort cleanup — log and discard so original exception propagates
-                        logger.warning(
-                            "Failed to clean up temp metadata file %s: %s",
-                            tmp_path,
-                            cleanup_err,
-                        )
-                    raise
-            finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                    tmp_f = os.fdopen(tmp_fd, "w")
+                    fd_owned = True
+                    with tmp_f:
+                        json.dump(metadata, tmp_f, indent=2)
+                    os.replace(tmp_path, str(meta_file))
+                finally:
+                    if not fd_owned:
+                        try:
+                            os.close(tmp_fd)
+                        except OSError:
+                            pass  # Already closed or invalid — discard
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as cleanup_err:
+                    # Best-effort cleanup — log and discard so original exception propagates
+                    logger.warning(
+                        "Failed to clean up temp metadata file %s: %s",
+                        tmp_path,
+                        cleanup_err,
+                    )
+                raise
 
     def is_stale(self, collection_path: Path) -> bool:
         """Check if HNSW index needs rebuilding.
@@ -680,95 +673,86 @@ class HNSWIndexManager:
                            rebuilds after CoW snapshot to pass the branch to
                            rebuild_from_vectors() for hidden_branches filtering.
         """
-        import fcntl
         import uuid
 
         meta_file = collection_path / "collection_meta.json"
 
         # Use file locking to prevent race conditions in concurrent writes
         lock_file = collection_path / ".metadata.lock"
-        lock_file.touch(exist_ok=True)
+        with exclusive_file_lock(lock_file):
+            # Load existing metadata or create new
+            if meta_file.exists():
+                with open(meta_file) as f:
+                    metadata = json.load(f)
+            else:
+                metadata = {}
 
-        with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Create ID mapping (label -> ID)
+            id_mapping = {str(i): ids[i] for i in range(len(ids))}
+
+            # Update HNSW index metadata with staleness tracking + rebuild version (AC12)
+            hnsw_meta: Dict[str, Any] = {
+                "version": 1,
+                "index_rebuild_uuid": str(
+                    uuid.uuid4()
+                ),  # AC12: Track rebuild version
+                "vector_count": vector_count,
+                "vector_dim": self.vector_dim,
+                "M": M,
+                "ef_construction": ef_construction,
+                "space": self.space,
+                "last_rebuild": datetime.now(timezone.utc).isoformat(),
+                "file_size_bytes": index_file_size,
+                "id_mapping": id_mapping,
+                # Staleness tracking fields
+                "is_stale": False,  # Fresh after rebuild
+                "last_marked_stale": None,  # No staleness marking yet
+            }
+
+            # Branch isolation: write filtered rebuild metadata
+            # This allows is_stale() to compare against visible_count instead
+            # of total disk count, preventing false-positive staleness detection.
+            if filtered:
+                hnsw_meta["filtered"] = True
+                hnsw_meta["visible_count"] = visible_count
+                hnsw_meta["total_on_disk"] = total_on_disk
+                # Bug #306: Store current_branch so query-time rebuilds after
+                # CoW snapshot can use hidden_branches filtering instead of
+                # overwriting the filtered HNSW with all vectors.
+                if current_branch is not None:
+                    hnsw_meta["current_branch"] = current_branch
+
+            metadata["hnsw_index"] = hnsw_meta
+
+            # Save metadata atomically — temp file + rename prevents corruption on crash
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(collection_path), suffix=".tmp"
+            )
+            fd_owned = False
             try:
-                # Load existing metadata or create new
-                if meta_file.exists():
-                    with open(meta_file) as f:
-                        metadata = json.load(f)
-                else:
-                    metadata = {}
-
-                # Create ID mapping (label -> ID)
-                id_mapping = {str(i): ids[i] for i in range(len(ids))}
-
-                # Update HNSW index metadata with staleness tracking + rebuild version (AC12)
-                hnsw_meta: Dict[str, Any] = {
-                    "version": 1,
-                    "index_rebuild_uuid": str(
-                        uuid.uuid4()
-                    ),  # AC12: Track rebuild version
-                    "vector_count": vector_count,
-                    "vector_dim": self.vector_dim,
-                    "M": M,
-                    "ef_construction": ef_construction,
-                    "space": self.space,
-                    "last_rebuild": datetime.now(timezone.utc).isoformat(),
-                    "file_size_bytes": index_file_size,
-                    "id_mapping": id_mapping,
-                    # Staleness tracking fields
-                    "is_stale": False,  # Fresh after rebuild
-                    "last_marked_stale": None,  # No staleness marking yet
-                }
-
-                # Branch isolation: write filtered rebuild metadata
-                # This allows is_stale() to compare against visible_count instead
-                # of total disk count, preventing false-positive staleness detection.
-                if filtered:
-                    hnsw_meta["filtered"] = True
-                    hnsw_meta["visible_count"] = visible_count
-                    hnsw_meta["total_on_disk"] = total_on_disk
-                    # Bug #306: Store current_branch so query-time rebuilds after
-                    # CoW snapshot can use hidden_branches filtering instead of
-                    # overwriting the filtered HNSW with all vectors.
-                    if current_branch is not None:
-                        hnsw_meta["current_branch"] = current_branch
-
-                metadata["hnsw_index"] = hnsw_meta
-
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned = False
                 try:
-                    try:
-                        tmp_f = os.fdopen(tmp_fd, "w")
-                        fd_owned = True
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_path, str(meta_file))
-                    finally:
-                        if not fd_owned:
-                            try:
-                                os.close(tmp_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError as cleanup_err:
-                        # Best-effort cleanup — log and discard so original exception propagates
-                        logger.warning(
-                            "Failed to clean up temp metadata file %s: %s",
-                            tmp_path,
-                            cleanup_err,
-                        )
-                    raise
-            finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                    tmp_f = os.fdopen(tmp_fd, "w")
+                    fd_owned = True
+                    with tmp_f:
+                        json.dump(metadata, tmp_f, indent=2)
+                    os.replace(tmp_path, str(meta_file))
+                finally:
+                    if not fd_owned:
+                        try:
+                            os.close(tmp_fd)
+                        except OSError:
+                            pass  # Already closed or invalid — discard
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as cleanup_err:
+                    # Best-effort cleanup — log and discard so original exception propagates
+                    logger.warning(
+                        "Failed to clean up temp metadata file %s: %s",
+                        tmp_path,
+                        cleanup_err,
+                    )
+                raise
 
     def _load_id_mapping(self, collection_path: Path) -> Dict[int, str]:
         """Load ID mapping from metadata.
@@ -965,7 +949,6 @@ class HNSWIndexManager:
             Updates both index file and metadata with new mappings.
             Preserves existing HNSW parameters (M, ef_construction).
         """
-        import fcntl
 
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
@@ -1003,78 +986,70 @@ class HNSWIndexManager:
         # Update metadata with new mappings
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
-        lock_file.touch(exist_ok=True)
+        with exclusive_file_lock(lock_file):
+            # Load existing metadata
+            if meta_file.exists():
+                with open(meta_file) as f:
+                    metadata = json.load(f)
+            else:
+                metadata = {}
 
-        with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Get existing HNSW config or use defaults
+            existing_hnsw = metadata.get("hnsw_index", {})
+            M = existing_hnsw.get("M", 16)
+            ef_construction = existing_hnsw.get("ef_construction", 200)
+
+            # Create ID mapping (label -> ID) for metadata
+            id_mapping = {
+                str(label): point_id for label, point_id in label_to_id.items()
+            }
+
+            # Update HNSW index metadata (AC12: preserve or generate new UUID)
+            import uuid
+
+            # Generate new UUID for incremental updates too (version tracking)
+            metadata["hnsw_index"] = {
+                "version": 1,
+                "index_rebuild_uuid": str(
+                    uuid.uuid4()
+                ),  # AC12: Track rebuild version
+                "vector_count": vector_count,
+                "vector_dim": self.vector_dim,
+                "M": M,
+                "ef_construction": ef_construction,
+                "space": self.space,
+                "last_rebuild": datetime.now(timezone.utc).isoformat(),
+                "file_size_bytes": index_file.stat().st_size,
+                "id_mapping": id_mapping,
+                # Mark as fresh after incremental update
+                "is_stale": False,
+                "last_marked_stale": None,
+            }
+
+            # Save metadata atomically — temp file + rename prevents corruption on crash
+            tmp_meta_fd, tmp_meta_path = tempfile.mkstemp(
+                dir=str(collection_path), suffix=".tmp"
+            )
+            fd_owned_by_file_obj = False
             try:
-                # Load existing metadata
-                if meta_file.exists():
-                    with open(meta_file) as f:
-                        metadata = json.load(f)
-                else:
-                    metadata = {}
-
-                # Get existing HNSW config or use defaults
-                existing_hnsw = metadata.get("hnsw_index", {})
-                M = existing_hnsw.get("M", 16)
-                ef_construction = existing_hnsw.get("ef_construction", 200)
-
-                # Create ID mapping (label -> ID) for metadata
-                id_mapping = {
-                    str(label): point_id for label, point_id in label_to_id.items()
-                }
-
-                # Update HNSW index metadata (AC12: preserve or generate new UUID)
-                import uuid
-
-                # Generate new UUID for incremental updates too (version tracking)
-                metadata["hnsw_index"] = {
-                    "version": 1,
-                    "index_rebuild_uuid": str(
-                        uuid.uuid4()
-                    ),  # AC12: Track rebuild version
-                    "vector_count": vector_count,
-                    "vector_dim": self.vector_dim,
-                    "M": M,
-                    "ef_construction": ef_construction,
-                    "space": self.space,
-                    "last_rebuild": datetime.now(timezone.utc).isoformat(),
-                    "file_size_bytes": index_file.stat().st_size,
-                    "id_mapping": id_mapping,
-                    # Mark as fresh after incremental update
-                    "is_stale": False,
-                    "last_marked_stale": None,
-                }
-
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_meta_fd, tmp_meta_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned_by_file_obj = False
                 try:
-                    try:
-                        tmp_f = os.fdopen(tmp_meta_fd, "w")
-                        fd_owned_by_file_obj = (
-                            True  # fdopen took ownership; do not close fd directly
-                        )
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_meta_path, str(meta_file))
-                    finally:
-                        if not fd_owned_by_file_obj:
-                            # fdopen raised before taking ownership — close raw fd explicitly
-                            try:
-                                os.close(tmp_meta_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_meta_path)
-                    except FileNotFoundError:
-                        pass  # Already gone — nothing to clean up
-                    raise
-            finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                    tmp_f = os.fdopen(tmp_meta_fd, "w")
+                    fd_owned_by_file_obj = (
+                        True  # fdopen took ownership; do not close fd directly
+                    )
+                    with tmp_f:
+                        json.dump(metadata, tmp_f, indent=2)
+                    os.replace(tmp_meta_path, str(meta_file))
+                finally:
+                    if not fd_owned_by_file_obj:
+                        # fdopen raised before taking ownership — close raw fd explicitly
+                        try:
+                            os.close(tmp_meta_fd)
+                        except OSError:
+                            pass  # Already closed or invalid — discard
+            except Exception:
+                try:
+                    os.unlink(tmp_meta_path)
+                except FileNotFoundError:
+                    pass  # Already gone — nothing to clean up
+                raise
