@@ -8,7 +8,7 @@ Implements AC1: REST endpoint for multi-repository search.
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional, Dict, List, Any
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
@@ -21,9 +21,73 @@ from ..multi import (
     MultiSearchRequest,
     MultiSearchResponse,
 )
+from ..multi.models import MultiSearchMetadata
+from ..services.shard_router import FORWARD_HEADER
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_multi_responses(parts: List[Dict[str, Any]]) -> MultiSearchResponse:
+    """Merge MultiSearchResponse-shaped dicts from local + forwarded searches.
+
+    Results are grouped by repository and limited per-repo, so merging across
+    pods is a plain dict union -- no global re-ranking needed.
+    """
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    errors: Dict[str, str] = {}
+    total_repos = 0
+    exec_ms = 0
+    for part in parts:
+        results.update(part.get("results") or {})
+        errors.update(part.get("errors") or {})
+        meta = part.get("metadata") or {}
+        total_repos += int(meta.get("total_repos_searched") or 0)
+        exec_ms = max(exec_ms, int(meta.get("execution_time_ms") or 0))
+    total_results = sum(len(v) for v in results.values())
+    return MultiSearchResponse(
+        results=results,
+        metadata=MultiSearchMetadata(
+            total_results=total_results,
+            total_repos_searched=total_repos,
+            execution_time_ms=exec_ms,
+        ),
+        errors=errors or None,
+    )
+
+
+def _scatter_gather(
+    shard_router: Any, request: MultiSearchRequest, auth_header: Optional[str]
+) -> MultiSearchResponse:
+    """C6 Phase 2: split repositories by owner, search local repos locally and
+    forward each remote group to its owning pod, then merge the responses.
+
+    Distributes the fan-out across pods (each owner searches only its shard)
+    instead of one pod loading every repo. Fails open per-group: a failed
+    forward falls back to searching those repos locally.
+    """
+    local_repos, groups = shard_router.group_by_owner(request.repositories)
+    parts: List[Dict[str, Any]] = []
+    for address, repos in groups.items():
+        sub = request.model_copy(update={"repositories": repos})
+        try:
+            parts.append(
+                shard_router.forward(
+                    address, sub.model_dump(), auth_header, path="/api/query/multi"
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "C6: multi forward to %s failed (%s); searching %d repos locally",
+                address,
+                exc,
+                len(repos),
+            )
+            local_repos = local_repos + repos
+    if local_repos:
+        sub = request.model_copy(update={"repositories": local_repos})
+        parts.append(get_multi_search_service().search(sub).model_dump())
+    return _merge_multi_responses(parts)
 
 
 def _apply_multi_truncation(
@@ -87,6 +151,7 @@ def get_multi_search_service() -> MultiSearchService:
 @router.post("/multi", response_model=MultiSearchResponse)
 def multi_repository_query(
     request: MultiSearchRequest,
+    raw_request: Request,
     user: User = Depends(get_current_user),
 ) -> MultiSearchResponse:
     """
@@ -185,11 +250,27 @@ def multi_repository_query(
             f"{len(request.repositories)} repos, type={request.search_type}"
         )
 
-        # Get service instance
-        service = get_multi_search_service()
-
-        # Execute search
-        response = service.search(request)
+        # C6 Phase 2: scatter-gather across owning pods for multi-repo queries.
+        # Split the repositories by owner, search local ones locally and forward
+        # each remote group to its owning pod, then merge. A forwarded sub-request
+        # (loop-guard header) is served locally here instead of scattering again.
+        shard_router = getattr(raw_request.app.state, "shard_router", None)
+        forwarded = raw_request.headers.get(FORWARD_HEADER.lower()) == "1"
+        if shard_router is not None and not forwarded and request.repositories:
+            try:
+                response = _scatter_gather(
+                    shard_router,
+                    request,
+                    raw_request.headers.get("authorization"),
+                )
+            except Exception:
+                logger.warning(
+                    "C6: multi scatter-gather failed; searching all repos locally",
+                    extra=get_log_extra("WEB-GENERAL-030"),
+                )
+                response = get_multi_search_service().search(request)
+        else:
+            response = get_multi_search_service().search(request)
 
         # Story #683: Apply payload truncation to results
         # Story #50: Now sync call (underlying handlers are sync)

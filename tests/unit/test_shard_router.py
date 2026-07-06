@@ -131,3 +131,52 @@ def test_forward_omits_auth_when_absent():
     r.forward("2.2.2.2:8090", {}, None)
     assert "Authorization" not in record["headers"]
     assert record["headers"][FORWARD_HEADER] == "1"
+
+
+def test_forward_uses_path_param():
+    record = {}
+    resp = FakeResponse({"ok": True})
+    r = _router(FakeOwnership(False, ["peer"]), {"peer": "2.2.2.2:8090"}, resp, record)
+    r.forward("2.2.2.2:8090", {}, None, path="/api/query/multi")
+    assert record["url"] == "http://2.2.2.2:8090/api/query/multi"
+
+
+class PerAliasOwnership:
+    """Ownership stub with per-alias control (owns() and owners_of())."""
+
+    def __init__(self, owned, owners_map):
+        self._owned = set(owned)
+        self._owners = owners_map
+
+    def owns(self, alias):
+        return alias in self._owned
+
+    def owners_of(self, alias):
+        return list(self._owners.get(alias, []))
+
+
+def test_group_by_owner_partitions_local_and_remote():
+    # me owns 'a'; 'b'->peer1, 'c'->peer2; 'd' owned by peerX which has no address
+    own = PerAliasOwnership({"a"}, {"b": ["peer1"], "c": ["peer2"], "d": ["peerX"]})
+    addrs = {"peer1": "1.1.1.1:8090", "peer2": "2.2.2.2:8090"}  # no peerX
+    r = ShardRouter("me", own, lambda: addrs, FakeHttpFactory(None, {}))
+    local, groups = r.group_by_owner(["a", "b", "c", "d"])
+    # 'a' owned locally; 'd' has no reachable owner -> fail open to local
+    assert set(local) == {"a", "d"}
+    assert groups == {"1.1.1.1:8090": ["b"], "2.2.2.2:8090": ["c"]}
+
+
+def test_group_by_owner_all_local_when_solo():
+    r = _router(None, {})  # no ownership -> solo
+    local, groups = r.group_by_owner(["a", "b", "c"])
+    assert local == ["a", "b", "c"]
+    assert groups == {}
+
+
+def test_group_by_owner_groups_multiple_repos_per_owner():
+    own = PerAliasOwnership(set(), {"b": ["peer1"], "c": ["peer1"], "d": ["peer2"]})
+    addrs = {"peer1": "1.1.1.1:8090", "peer2": "2.2.2.2:8090"}
+    r = ShardRouter("me", own, lambda: addrs, FakeHttpFactory(None, {}))
+    local, groups = r.group_by_owner(["b", "c", "d"])
+    assert local == []
+    assert groups == {"1.1.1.1:8090": ["b", "c"], "2.2.2.2:8090": ["d"]}
