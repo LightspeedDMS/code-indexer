@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.20.0] - 2026-07-06
+
+### Fixed
+
+- **Job-reconciliation no longer wall-clock-reaps live indexing jobs (#1310).** `JobReconciliationService` deleted the blanket `max_execution_time` reclaim path that failed still-progressing long-running indexing / golden-repo-registration / SCIP / temporal jobs on a live node, restoring the Bug #1218 invariant (the indexing path carries no wall-clock timeout — a large repo legitimately takes hours). Dead-node/heartbeat reclaim (the only legitimate mechanism) is unchanged; the stuck-index-blocking reclaim now guards on `started_at IS NULL`, so it can only free genuinely never-started jobs blocking `idx_active_job_per_repo`, never a running job. Tracked follow-up: #1312 (a legitimately-queued pending job can still be reaped on queue age — pre-existing edge, out of scope here).
+- **Removed redundant "durable / windowed / cluster-aggregated" badges from the cache-metrics dashboard (#1311).** Every card on the panel is now DB-sourced from the shared store (Cache Entries = live `query_embedding_cache` COUNT; On-Mode Hit Rate = `search_event_log` request counts; all others = `WindowedCacheMetrics` over `search_embed_event`), so the per-card provenance badge introduced mid-migration by Story #1294 distinguished nothing and overflowed the card. Removed the 8 header badges, 8 footer note-prefixes, and their CSS; per-card explanatory footers and all data sources are unchanged.
+
 ## [11.19.0] - 2026-07-05
 
 ### Added
