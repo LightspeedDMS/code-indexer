@@ -1,28 +1,12 @@
 <!-- Story #1109 (S5): Query-embedding cache metrics partial -->
-<!-- Story #1294: cards (except Cache Entries + On-Mode Hit Rate) are now sourced
-     from WindowedCacheMetrics — a durable, windowed, cluster-aggregated
-     GROUP BY (cache_mode, provider) aggregation over search_embed_event
-     (Story #1293), not per-node in-memory tallies. The badge below marks
-     which cards are windowed/durable (everything except Cache Entries, which
-     is a live query_embedding_cache COUNT, and On-Mode Hit Rate, which is
-     already durable/request-denominated from search_event_log, Issue #1257). -->
+<!-- Bug #1311: all cards on this panel are DB-sourced (shared store), so no
+     per-card durability badge is shown. Cache Entries is a live
+     query_embedding_cache COUNT; On-Mode Hit Rate is sourced from
+     search_event_log request counts; every other card is sourced from
+     WindowedCacheMetrics over search_embed_event. There is no per-node
+     in-memory tally left to distinguish, so the Story #1294 badge that used
+     to mark shared-database-backed cards was removed as redundant noise. -->
 <style>
-    .cache-metrics-durable-badge {
-        display: inline-block;
-        font-size: 0.55rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: #2f9e6e;
-        background: rgba(47, 158, 110, 0.12);
-        border: 1px solid rgba(47, 158, 110, 0.35);
-        border-radius: 3px;
-        padding: 1px 5px;
-        margin-left: 6px;
-        vertical-align: middle;
-        white-space: nowrap;
-    }
-    .cache-metrics-durable-note { color: #2f9e6e; font-weight: 600; }
     .cosine-chart { font-size: 0.7rem; line-height: 1.8; overflow-x: hidden; }
     .cosine-chart-empty { font-size: 0.75rem; color: #888; text-align: center; padding: 1rem 0; }
     .cosine-row { display: flex; align-items: center; gap: 0.4rem; width: 100%; }
@@ -38,7 +22,7 @@
         <footer><small>Query embeddings currently stored in the cache &mdash; durable (persisted in the cache database, survives restarts)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Shadow Hit Rate <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Shadow Hit Rate</h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.shadow_requests > 0 %}
                 {{ "%.1f"|format(cache_metrics.shadow_hits / cache_metrics.shadow_requests * 100) }}%
@@ -46,7 +30,7 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> <strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
+        <footer><small><strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
     </article>
     <article class="stat-card">
         <header><h3>On-Mode Hit Rate</h3></header>
@@ -60,7 +44,7 @@
         <footer><small><strong>On mode</strong> actively serves from the cache: share of user searches served from a cached embedding, skipping the embedding provider call &mdash; durable, request-denominated (one row per search from search_event_log; persists across restarts and aggregates across cluster nodes)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Shadow Cosine P50 <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Shadow Cosine P50</h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.shadow_cosine_p50 is not none %}
                 {{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}
@@ -68,16 +52,16 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
+        <footer><small>Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Over-Cap Queries <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Over-Cap Queries</h3></header>
         <div class="stat-value">{{ cache_metrics.long_key if cache_metrics else 0 }}</div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Queries skipped (not cached) because the normalized-query part exceeded the 256-character key cap &mdash; each counts as a cache miss</small></footer>
+        <footer><small>Queries skipped (not cached) because the normalized-query part exceeded the 256-character key cap &mdash; each counts as a cache miss</small></footer>
     </article>
     {% if histogram_bars %}
     <article class="stat-card" style="grid-column: span 2;">
-        <header><h3>Shadow Cosine Distribution <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Shadow Cosine Distribution</h3></header>
         {% set total = histogram_bars | sum(attribute='count') %}
         <div class="cosine-chart" style="max-height: 14rem; overflow-y: auto;">
         {% if total == 0 %}
@@ -93,7 +77,7 @@
         {% endif %}
         </div>
         <footer>
-            <small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span>
+            <small>
             Log&#x2081;&#x2080;-scaled bar chart (40 buckets, width 0.05, highest similarity first). Bar length = log&#x2081;&#x2080;(count+1) normalized to max bucket.
             &mdash;
             Min:
@@ -107,24 +91,24 @@
     </article>
     {% endif %}
     <article class="stat-card">
-        <header><h3>Provider Embed Calls <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Provider Embed Calls</h3></header>
         <div class="stat-value">{{ cache_metrics.coalescer_provider_embed_calls if cache_metrics else 0 }}</div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Number of outbound HTTP embedding calls made to the provider &mdash; one per sealed coalesced batch plus each successful direct call (Story #1146, re-sourced from search_embed_event in Story #1294)</small></footer>
+        <footer><small>Number of outbound HTTP embedding calls made to the provider &mdash; one per sealed coalesced batch plus each successful direct call (Story #1146, re-sourced from search_embed_event in Story #1294)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Texts Coalesced <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Texts Coalesced</h3></header>
         <div class="stat-value">{{ cache_metrics.coalescer_texts_coalesced if cache_metrics else 0 }}</div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Total texts submitted across all coalesced batches &mdash; divide by Provider Embed Calls to get average batch size</small></footer>
+        <footer><small>Total texts submitted across all coalesced batches &mdash; divide by Provider Embed Calls to get average batch size</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Batches Dispatched <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Batches Dispatched</h3></header>
         <div class="stat-value">{{ cache_metrics.coalescer_batches_dispatched if cache_metrics else 0 }}</div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Number of coalesced batches dispatched through the governor to the embedding provider</small></footer>
+        <footer><small>Number of coalesced batches dispatched through the governor to the embedding provider</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Dedup Savings <span class="cache-metrics-durable-badge" title="Durable, windowed, cluster-aggregated (search_embed_event, Story #1294) — reflects the selected time window across every cluster node.">durable &middot; windowed &middot; cluster-aggregated</span></h3></header>
+        <header><h3>Dedup Savings</h3></header>
         <div class="stat-value">{{ cache_metrics.coalescer_dedup_savings if cache_metrics else 0 }}</div>
-        <footer><small><span class="cache-metrics-durable-note">Durable &middot; windowed &middot; cluster-aggregated across all nodes.</span> Embed calls saved by same-key deduplication within a batch &mdash; requestors minus unique texts sent to the provider (Story #1146)</small></footer>
+        <footer><small>Embed calls saved by same-key deduplication within a batch &mdash; requestors minus unique texts sent to the provider (Story #1146)</small></footer>
     </article>
     {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
     <article class="stat-card">

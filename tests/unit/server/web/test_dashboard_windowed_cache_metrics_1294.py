@@ -289,18 +289,24 @@ class TestCardsResourcedFromWindowedResult:
 
 
 class TestBadgeSwap:
-    def test_durable_windowed_cluster_aggregated_badge_present(
+    def test_durable_windowed_cluster_aggregated_badge_absent(
         self, client, admin_session_cookie, app
     ):
+        """Bug #1311: the "durable · windowed · cluster-aggregated" badge and
+        footer note-prefix (introduced in Story #1294 to distinguish
+        migrated-vs-not cards) are now pure noise -- every card is DB-sourced,
+        so the badge distinguishes nothing and its chip visually overflows
+        the card. It must be removed entirely, not consolidated.
+        """
         backend = _FakeSeeBackend(_build_result())
         original = _install_writer(app, backend)
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             html = resp.text
-            assert "durable" in html.lower()
-            assert "windowed" in html.lower()
-            assert "cluster-aggregated" in html.lower()
+            assert "cache-metrics-durable-badge" not in html
+            assert "cache-metrics-durable-note" not in html
+            assert "cluster-aggregated" not in html.lower()
         finally:
             _restore_writer(app, original)
 
