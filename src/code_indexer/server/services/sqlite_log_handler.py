@@ -11,6 +11,7 @@ Implements AC5: SQLite Log Storage Infrastructure
 
 import json
 import logging
+import queue
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -77,6 +78,22 @@ class SQLiteLogHandler(logging.Handler):
         # When set, log records are tagged with this node_id so the admin UI
         # can aggregate and filter logs per node in cluster deployments.
         self._node_id: Optional[str] = None
+
+        # EVO-63910: async offload for the DELEGATED (backend) path only. In
+        # cluster/PG mode every request would otherwise do a SYNCHRONOUS INSERT
+        # into the shared `logs` table on the request thread — a cross-pod
+        # serialization point that caps multi-pod scaling. emit() instead enqueues
+        # and a single daemon thread drains + inserts off the request path. The
+        # queue is BOUNDED with a synchronous fallback when full, so behaviour
+        # degrades to the old inline-insert path (never worse) if the drainer can't
+        # keep up, hasn't started, or dies. The direct-SQLite (solo) path stays
+        # synchronous — it writes a local file, not a shared table.
+        self._log_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(
+            maxsize=10000
+        )
+        self._flush_thread: Optional[threading.Thread] = None
+        self._flush_thread_lock = threading.Lock()
+        self._stopping = False
 
         if logs_backend is not None:
             # AC2: Skip SQLite init entirely when backend provided at construction.
@@ -272,18 +289,27 @@ class SQLiteLogHandler(logging.Handler):
                 # node_id is injected by set_node_id() in cluster mode (Story #501 AC3).
                 # alias carries the repo tag for lifecycle-runner rows
                 # (Story #876 Phase C).
-                self._logs_backend.insert_log(
-                    timestamp=timestamp,
-                    level=level,
-                    source=source,
-                    message=message,
-                    correlation_id=correlation_id,
-                    user_id=user_id,
-                    request_path=request_path,
-                    extra_data=extra_data_json,
-                    node_id=self._node_id,
-                    alias=alias,
-                )
+                params: Dict[str, Any] = {
+                    "timestamp": timestamp,
+                    "level": level,
+                    "source": source,
+                    "message": message,
+                    "correlation_id": correlation_id,
+                    "user_id": user_id,
+                    "request_path": request_path,
+                    "extra_data": extra_data_json,
+                    "node_id": self._node_id,
+                    "alias": alias,
+                }
+                # EVO-63910: offload the insert to the background drainer so the
+                # shared `logs` table write doesn't block the request thread. Fall
+                # back to a synchronous insert if the queue is full — this is the
+                # old behaviour, so the async path is never worse under overload.
+                self._ensure_flush_thread()
+                try:
+                    self._log_queue.put_nowait(params)
+                except queue.Full:
+                    self._logs_backend.insert_log(**params)
             else:
                 # Direct-SQLite path (backwards compatible, no backend injected).
                 # alias is persisted to its own column to stay consistent with
@@ -318,6 +344,63 @@ class SQLiteLogHandler(logging.Handler):
         finally:
             self._emit_guard.active = False
 
+    def _ensure_flush_thread(self) -> None:
+        """Lazily start the single background drainer for delegated log writes.
+
+        Started on the first backend emit (never in the direct-SQLite path). If it
+        cannot start, or has stopped, emit()'s put_nowait fills the bounded queue
+        and falls back to a synchronous insert -- so a missing drainer only ever
+        degrades to the old inline behaviour, never drops logs.
+        """
+        if self._flush_thread is not None or self._stopping:
+            return
+        with self._flush_thread_lock:
+            if self._flush_thread is not None or self._stopping:
+                return
+            thread = threading.Thread(
+                target=self._flush_loop,
+                name="cidx-log-flush",
+                daemon=True,
+            )
+            self._flush_thread = thread
+            thread.start()
+
+    def _flush_loop(self) -> None:
+        """Drain queued log params and insert them via the backend, off the
+        request thread.
+
+        Never raises. The re-entry guard is set on THIS thread while inserting so
+        that any logging emitted by a failing insert is dropped (matching emit()'s
+        guard) instead of being re-enqueued in an unbounded loop.
+        """
+        while True:
+            try:
+                params = self._log_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stopping:
+                    return  # queue drained and shutdown requested
+                continue
+            self._emit_guard.active = True
+            try:
+                backend = self._logs_backend
+                if backend is not None and params is not None:
+                    backend.insert_log(**params)
+            except Exception:
+                # Swallow: a failed audit-log insert must never kill the drainer.
+                pass
+            finally:
+                self._emit_guard.active = False
+                self._log_queue.task_done()
+
     def close(self) -> None:
-        """Close handler. Connections are managed by DatabaseConnectionManager."""
+        """Flush queued log writes, stop the drainer, then close.
+
+        Setting _stopping makes the drainer return once the queue empties; join
+        gives it a bounded window to finish outstanding inserts so shutdown does
+        not lose already-enqueued log records.
+        """
+        self._stopping = True
+        thread = self._flush_thread
+        if thread is not None:
+            thread.join(timeout=5.0)
         super().close()
