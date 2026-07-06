@@ -115,3 +115,13 @@ class ShardOwnership:
         if len(nodes) <= 1:
             return True
         return self._node_id in compute_owners(alias, nodes, self._replicas)
+
+    def owners_of(self, alias: str) -> List[str]:
+        """Return the owner node_ids for ``alias`` over the current live set.
+
+        Empty for an empty alias or empty node set. Used by the router to pick a
+        peer to forward a non-owned query to.
+        """
+        if not alias:
+            return []
+        return compute_owners(alias, self._get_nodes(), self._replicas)

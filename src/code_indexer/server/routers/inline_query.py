@@ -12,6 +12,7 @@ import logging
 from fastapi import (
     FastAPI,
     HTTPException,
+    Request,
     status,
     Depends,
 )
@@ -23,6 +24,7 @@ from ..models.query import (
 from ..models.api_models import QueryResultItem
 from ..query.semantic_query_manager import SemanticQueryError
 from ..auth import dependencies
+from ..services.shard_router import FORWARD_HEADER
 from ..logging_utils import format_error_log
 from ..middleware.correlation import get_correlation_id
 from ..app_helpers import (
@@ -56,6 +58,7 @@ def register_query_routes(
     @app.post("/api/query")
     def semantic_query(
         request: SemanticQueryRequest,
+        raw_request: Request,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -63,6 +66,7 @@ def register_query_routes(
 
         Args:
             request: Search request with mode selection and parameters
+            raw_request: Raw request (headers) for C6 shard-routing passthrough
             current_user: Current authenticated user
 
         Returns:
@@ -74,6 +78,42 @@ def register_query_routes(
         """
         import time
         from pathlib import Path as PathLib
+
+        # C6 Phase 1: if this is a single-repo query for a repo this node does not
+        # own, forward it to an owner pod (which has it cached) and return that
+        # response. Skips already-forwarded requests (loop guard). Fails open:
+        # any routing problem falls through to local handling below.
+        shard_router = getattr(raw_request.app.state, "shard_router", None)
+        if (
+            shard_router is not None
+            and raw_request.headers.get(FORWARD_HEADER.lower()) != "1"
+        ):
+            # Phase 1 routes only concrete single-repo synchronous queries.
+            # Wildcards (omni) and async job submissions stay on the local path.
+            alias = request.repository_alias
+            if (
+                isinstance(alias, str)
+                and alias
+                and "*" not in alias
+                and not request.async_query
+            ):
+                try:
+                    target = shard_router.target_for(alias)
+                    if target:
+                        from fastapi.responses import JSONResponse
+
+                        forwarded = shard_router.forward(
+                            target,
+                            request.model_dump(),
+                            raw_request.headers.get("authorization"),
+                        )
+                        return JSONResponse(content=forwarded)
+                except Exception:
+                    logger.warning(
+                        "C6: shard forward failed for %r; serving locally",
+                        alias,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
 
         start_time = time.time()
 
@@ -298,30 +338,28 @@ def register_query_routes(
                 # Execute semantic search for hybrid or degraded mode
                 if search_mode_actual in ["semantic", "hybrid"]:
                     try:
-                        semantic_results_raw = (
-                            semantic_query_manager.query_user_repositories(
-                                username=current_user.username,
-                                query_text=request.query_text,
-                                repository_alias=request.repository_alias,
-                                limit=request.limit,
-                                min_score=request.min_score,
-                                file_extensions=request.file_extensions,
-                                # Phase 1 parameters (Story #503)
-                                exclude_language=request.exclude_language,
-                                exclude_path=request.exclude_path,
-                                accuracy=request.accuracy,
-                                # Temporal parameters (Story #446)
-                                time_range=request.time_range,
-                                time_range_all=request.time_range_all,
-                                at_commit=request.at_commit,
-                                include_removed=request.include_removed,
-                                show_evolution=request.show_evolution,
-                                evolution_limit=request.evolution_limit,
-                                # Phase 3 temporal filtering parameters (Story #503)
-                                diff_type=request.diff_type,
-                                author=request.author,
-                                chunk_type=request.chunk_type,
-                            )
+                        semantic_results_raw = semantic_query_manager.query_user_repositories(
+                            username=current_user.username,
+                            query_text=request.query_text,
+                            repository_alias=request.repository_alias,
+                            limit=request.limit,
+                            min_score=request.min_score,
+                            file_extensions=request.file_extensions,
+                            # Phase 1 parameters (Story #503)
+                            exclude_language=request.exclude_language,
+                            exclude_path=request.exclude_path,
+                            accuracy=request.accuracy,
+                            # Temporal parameters (Story #446)
+                            time_range=request.time_range,
+                            time_range_all=request.time_range_all,
+                            at_commit=request.at_commit,
+                            include_removed=request.include_removed,
+                            show_evolution=request.show_evolution,
+                            evolution_limit=request.evolution_limit,
+                            # Phase 3 temporal filtering parameters (Story #503)
+                            diff_type=request.diff_type,
+                            author=request.author,
+                            chunk_type=request.chunk_type,
                         )
                         semantic_results_list = [
                             QueryResultItem(**result)

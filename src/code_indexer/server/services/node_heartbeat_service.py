@@ -209,21 +209,51 @@ class NodeHeartbeatService:
         """Insert or update this node's row with the given status."""
         import os
 
-        hostname = os.uname().nodename
+        # C6 Phase 1: peers address this node at hostname:port for shard routing.
+        # Prefer the routable pod IP from the downward API (POD_IP); fall back to
+        # the node name. Port is the server port (CIDX_PORT), default 8090.
+        hostname = os.environ.get("POD_IP") or os.uname().nodename
+        try:
+            port = int(os.environ.get("CIDX_PORT", "8090"))
+        except ValueError:
+            port = 8090
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO cluster_nodes (node_id, hostname, status, last_heartbeat)
-                    VALUES (%s, %s, %s, NOW())
+                    INSERT INTO cluster_nodes (node_id, hostname, port, status, last_heartbeat)
+                    VALUES (%s, %s, %s, %s, NOW())
                     ON CONFLICT (node_id) DO UPDATE
                         SET status         = EXCLUDED.status,
                             hostname       = EXCLUDED.hostname,
+                            port           = EXCLUDED.port,
                             last_heartbeat = NOW()
                     """,
-                    (self._node_id, hostname, status),
+                    (self._node_id, hostname, port, status),
                 )
             conn.commit()
+
+    def get_node_addresses(self) -> "dict[str, str]":
+        """Return ``{node_id: 'host:port'}`` for currently-online nodes.
+
+        Used by the shard router (C6 Phase 1) to reach the pod that owns a repo.
+        Uses an explicit tuple_row cursor so positional access is correct
+        regardless of the borrowed connection's row_factory (Bug: row_factory
+        leakage).
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    """
+                    SELECT node_id, hostname, port
+                    FROM   cluster_nodes
+                    WHERE  status = 'online'
+                      AND  last_heartbeat >= NOW() - %s * INTERVAL '1 second'
+                    """,
+                    (self._active_threshold_seconds,),
+                )
+                rows = cur.fetchall()
+        return {str(row[0]): f"{row[1]}:{row[2] or 8090}" for row in rows if row[1]}
 
     def _heartbeat_loop(self) -> None:
         """Background loop: update heartbeat every heartbeat_interval seconds."""
