@@ -39,6 +39,8 @@ The CoW Storage Daemon runs on a single host with a reflink-capable filesystem (
 
 **Clone path resolution**: The daemon returns relative paths (e.g., `cidx/my-clone`). CIDX prepends the NFS mount point to get the absolute filesystem path (`/mnt/cow-storage/cidx/my-clone`).
 
+**Golden repos live on the same shared disk**: In this dev model the cow-storage-daemon host acts as the shared disk -- an ONTAP-like emulator for development. Both cow-daemon clones AND golden repositories live on it. The server hard-codes the golden-repos directory as `<server_dir>/data/golden-repos` (`src/code_indexer/server/startup/lifespan.py:134`); it is not independently configurable, so on every node that path must resolve to this shared storage. See [Golden Repos on the Shared Mount](#golden-repos-on-the-shared-mount) below. The single cow-storage host is therefore a single point of failure -- acceptable for development installs only. If it goes down, the cluster loses its shared storage and is effectively down.
+
 ---
 
 ## Prerequisites
@@ -185,16 +187,18 @@ sudo systemctl enable --now nfs-kernel-server
 **Export the storage directory:**
 
 ```bash
-# Development/test -- open to all
-echo '/srv/cow-storage  *(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
+# Development/test -- open to all (async: see note below)
+echo '/srv/cow-storage  *(rw,async,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
 
-# Production -- restrict to cluster subnet
-echo '/srv/cow-storage  10.0.0.0/24(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
+# Development -- restrict to cluster subnet (still async)
+echo '/srv/cow-storage  10.0.0.0/24(rw,async,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
 
 # Apply and verify
 sudo exportfs -ra
 showmount -e localhost
 ```
+
+**Use `async`, not `sync`, for dev clusters**: `sync` forces a server-side commit on every write, which makes golden-repo indexing pathologically slow (measured ~65x slower). `async` acknowledges writes before they reach stable storage. This is acceptable for dev-only installs, where the single cow-storage host is already a single point of failure (if it goes down the cluster is lost). Do not use `async` where write durability matters.
 
 **Open firewall ports:**
 
@@ -262,6 +266,34 @@ echo '/srv/cow-storage  /mnt/cow-storage  none  bind  0  0' | sudo tee -a /etc/f
 This ensures all nodes -- whether remote NFS clients or the local daemon host -- see clone contents at `/mnt/cow-storage`.
 
 Note: `df -T /mnt/cow-storage` will show the underlying filesystem type (`xfs`) on the daemon host, not `nfs`. This is expected for a bind mount -- it exposes the same filesystem, not a network mount.
+
+### Golden Repos on the Shared Mount
+
+The clone mount above (`/mnt/cow-storage`) covers cow-daemon clones. Golden repositories need their own shared mount at a fixed path, and getting the options wrong here was the source of a live-debugged cluster failure.
+
+The server derives the golden-repos directory as `<server_dir>/data/golden-repos`: `golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"` (`src/code_indexer/server/startup/lifespan.py:134`). This subpath is hard-coded and NOT independently configurable. On startup the server runs an NFS atomic-create self-check against its `cidx-meta` subdirectory (`lifespan.py:1386`), so the path must be a working shared filesystem. Expose a `golden-repos` subdirectory of the daemon `base_path` at `~/.cidx-server/data/golden-repos` on every node.
+
+**Daemon host** (bind mount -- a node cannot NFS-mount from itself):
+
+```bash
+sudo mkdir -p ~/.cidx-server/data/golden-repos
+sudo mount --bind /srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
+echo '/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  none  bind  0  0' | sudo tee -a /etc/fstab
+```
+
+**Every other node** (NFSv3, `nolock`, `hard` -- NOT NFSv4, NOT `soft`):
+
+```bash
+sudo mount -t nfs -o vers=3,nolock,hard,_netdev \
+  <daemon-host>:/srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
+echo '<daemon-host>:/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  nfs  vers=3,nolock,hard,_netdev  0  0' | sudo tee -a /etc/fstab
+```
+
+Why NFSv3 with `nolock`, not NFSv4: over NFSv4 (`nfs4` / `vers=4.x`), `git index-pack` fails during golden-repo clone+index with `fatal: write error: Bad file descriptor` followed by `fatal: fetch-pack: invalid index-pack output` (NFSv4 locking plus mmap semantics vs git's pack writing). NFSv3 with `nolock` (client-side locking, equivalent to `local_lock=all`) avoids it. Reproduced and fixed live.
+
+Why `hard`, not `soft`: a `soft` mount returns an I/O error on a transient timeout, which surfaces as SIGBUS on git's mmap'd pack/index files during indexing. `hard` blocks and retries, which git's mmap path requires. Use `hard` on the golden-repos mount even though the clone mount uses `vers=3,nolock` without it.
+
+Failure mode if golden-repos stays on local disk: repos are only queryable on the node that indexed them; a query routed to any other node returns 0 results because that node's local `golden-repos` has no index. They are not cross-node visible.
 
 ---
 
@@ -513,6 +545,12 @@ sudo journalctl -u cow-storage-daemon -f
 sudo systemctl {start|stop|restart|status} cidx-server
 sudo journalctl -u cidx-server -f
 ```
+
+### Known Limitation: Temporal Indexing over NFS
+
+Per-commit dual-embedder TEMPORAL indexing (Epic #1289) over the NFS golden-repos mount is latency-bound: it performs many small HNSW quarterly-shard writes, and over NFS this is currently slow enough that a temporal-index job can exceed the background `JobReconciliationService` `max_execution_time` and be reaped/failed.
+
+Regular SEMANTIC golden-repo indexing over NFS works correctly and is cross-node-queryable. Temporal-on-NFS performance is an open issue. Until it is optimized, run temporal indexing on local storage or raise the job timeout.
 
 ---
 

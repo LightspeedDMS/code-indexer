@@ -15,7 +15,10 @@ Both methods follow the _ensure_sudoers_restart() pattern:
 from unittest.mock import MagicMock, patch, call
 import pytest
 
-from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import (
+    DeploymentExecutor,
+    SYSTEMD_OP_TIMEOUT_SECONDS,
+)
 
 
 @pytest.fixture
@@ -92,9 +95,10 @@ class TestEnsureMemoryOvercommit:
         # First call: read current value
         assert mock_run.call_args_list[0] == call(
             ["sysctl", "-n", "vm.overcommit_memory"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Second call: write config file via sudo tee
         assert mock_run.call_args_list[1] == call(
@@ -102,14 +106,15 @@ class TestEnsureMemoryOvercommit:
             input="vm.overcommit_memory = 1\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Third call: apply immediately via sysctl -p
         assert mock_run.call_args_list[2] == call(
             ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
 
     def test_memory_overcommit_write_failure(self, executor, caplog):
@@ -228,44 +233,50 @@ class TestEnsureSwapFile:
         # Call 0: swapon --show
         assert calls[0] == call(
             ["swapon", "--show", "--noheadings"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 1: fallocate
         assert calls[1] == call(
             ["sudo", "fallocate", "-l", "4G", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 2: chmod 600
         assert calls[2] == call(
             ["sudo", "chmod", "600", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 3: mkswap
         assert calls[3] == call(
             ["sudo", "mkswap", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 4: swapon
         assert calls[4] == call(
             ["sudo", "swapon", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 5: cat /etc/fstab
         assert calls[5] == call(
             ["cat", "/etc/fstab"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 6: tee -a /etc/fstab
         assert calls[6] == call(
@@ -273,7 +284,7 @@ class TestEnsureSwapFile:
             input="/swapfile none swap sw 0 0\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
 
     def test_swap_fallocate_failure(self, executor, caplog):

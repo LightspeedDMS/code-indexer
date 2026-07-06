@@ -13,6 +13,7 @@ Mock hierarchy (no real PostgreSQL required):
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 
@@ -64,6 +65,156 @@ def _make_heartbeat(active_nodes=None):
     hb = MagicMock()
     hb.get_active_nodes.return_value = active_nodes if active_nodes is not None else []
     return hb
+
+
+class _FakeJobsTable:
+    """
+    Faithful in-memory evaluator for the two UPDATE queries issued by
+    JobReconciliationService.sweep(). Unlike ``_make_pool`` above (which
+    just replays a scripted ``fetchall`` return value regardless of what
+    the SQL actually says), this interprets the REAL WHERE-clause
+    semantics -- status filters, ``started_at IS NULL``, the
+    ``COALESCE(claimed_at, created_at)`` age fallback, executing_node
+    liveness, and job_id exclusion -- against a table of row dicts and
+    mutates them exactly as a real PostgreSQL UPDATE ... RETURNING would.
+
+    This exists because the Bug #1312 code review found that SQL-shape-only
+    tests (asserting substrings in the query text against a MagicMock
+    cursor) gave false confidence: they never actually evaluated whether a
+    given row would or would not be selected, so a wrong predicate could
+    pass every test while still wall-clock-failing a legitimately-queued
+    pending job in production.
+
+    Rows are plain dicts with keys: job_id, status, executing_node,
+    started_at, claimed_at, created_at (datetimes or None).
+    """
+
+    def __init__(self, rows, now):
+        self.rows = rows
+        self.now = now
+
+    def dead_node_reclaim(self, active_nodes, grace_seconds):
+        updated = []
+        for r in self.rows:
+            if r["status"] != "running":
+                continue
+            if r["executing_node"] is None:
+                continue
+            if r["executing_node"] in active_nodes:
+                continue
+            claimed_at = r.get("claimed_at")
+            if claimed_at is not None and claimed_at >= self.now - timedelta(
+                seconds=grace_seconds
+            ):
+                continue
+            old_node = r["executing_node"]
+            r["status"] = "pending"
+            r["executing_node"] = None
+            r["started_at"] = None
+            r["claimed_at"] = None
+            updated.append((r["job_id"], old_node))
+        return updated
+
+    def stuck_index_blocking_reclaim(
+        self, sql, max_execution_time, exclude_ids, active_nodes
+    ):
+        """
+        Parses the ACTUAL generated SQL text to determine which statuses,
+        guards, and gates are really in effect -- rather than applying an
+        independently-assumed "correct" predicate -- so this evaluator
+        reacts to a real production regression (e.g. 'pending' creeping
+        back into the status filter) exactly as real PostgreSQL would.
+        """
+        if "status IN ('pending', 'running')" in sql:
+            allowed_statuses = {"pending", "running"}
+        elif "status = 'running'" in sql:
+            allowed_statuses = {"running"}
+        else:
+            raise AssertionError(f"unrecognized status filter in stuck query: {sql}")
+
+        requires_started_at_null = "started_at IS NULL" in sql
+        has_live_sibling_gate = (
+            "NOT EXISTS" in sql
+            and "sibling.repo_alias = background_jobs.repo_alias" in sql
+            and "'running' = sibling.status" in sql
+            and "sibling.executing_node = ANY" in sql
+        )
+
+        updated = []
+        for r in self.rows:
+            if r["job_id"] in exclude_ids:
+                continue
+            if r["status"] not in allowed_statuses:
+                continue
+            if requires_started_at_null and r["started_at"] is not None:
+                continue
+            age_basis = r.get("claimed_at") or r["created_at"]
+            if age_basis > self.now - timedelta(seconds=max_execution_time):
+                continue
+            if has_live_sibling_gate and r["status"] == "pending":
+                live_sibling = any(
+                    other["status"] == "running"
+                    and other.get("executing_node") in (active_nodes or [])
+                    and other.get("repo_alias") == r.get("repo_alias")
+                    and other["job_id"] != r["job_id"]
+                    for other in self.rows
+                )
+                if live_sibling:
+                    continue
+            old_status = r["status"]
+            r["status"] = "failed"
+            updated.append((r["job_id"], old_status, r["executing_node"]))
+        return updated
+
+
+def _make_behavioral_pool(rows, now):
+    """
+    Build a pool/conn/cursor whose execute() genuinely evaluates the real
+    WHERE-clause predicates (via _FakeJobsTable) against `rows`, dispatching
+    on the distinguishing SQL substring for each of the two known query
+    shapes issued by JobReconciliationService. fetchall() returns the real
+    matched rows, and the underlying dicts in `rows` are mutated (status
+    flips) exactly as a real PostgreSQL UPDATE ... RETURNING would -- this
+    is what makes the test behavioral rather than a string-shape check.
+    The stuck-index-blocking dispatch parses the ACTUAL SQL text (status
+    filter, started_at guard, sibling gate) rather than assuming it.
+    """
+    table = _FakeJobsTable(rows, now)
+    cur = MagicMock()
+
+    def _execute(sql, params=()):
+        normalized = " ".join(sql.split())
+        if "executing_node != ALL" in normalized:
+            active_nodes, grace_seconds = params
+            cur.fetchall.return_value = table.dead_node_reclaim(
+                active_nodes, grace_seconds
+            )
+        elif "COALESCE" in normalized and "'failed'" in normalized:
+            remaining = list(params[1:])
+            max_execution_time = params[0]
+            exclude_ids = set()
+            if "job_id <> ALL" in normalized:
+                exclude_ids = set(remaining.pop(0))
+            sibling_active_nodes = None
+            if "executing_node = ANY" in normalized:
+                sibling_active_nodes = remaining.pop(0)
+            cur.fetchall.return_value = table.stuck_index_blocking_reclaim(
+                normalized, max_execution_time, exclude_ids, sibling_active_nodes
+            )
+        else:
+            cur.fetchall.return_value = []
+
+    cur.execute.side_effect = _execute
+
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    pool = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+
+    return pool, conn, cur, table
 
 
 # ---------------------------------------------------------------------------
@@ -220,24 +371,25 @@ class TestSweepDeadNode:
 
 class TestSweepStuckIndexBlocking:
     """
-    Bug #1141: Jobs in any index-blocking status (pending OR running) that
-    are older than max_execution_time but never caught by the dead-node
-    reclaim path must be moved to 'failed' so idx_active_job_per_repo
-    unblocks and a fresh job can be submitted.
+    Bug #1141, narrowed by Bug #1312: a 'running' job with started_at IS
+    NULL (claimed but never actually recorded starting — a defensive
+    anomaly catch, since the normal claim paths always set started_at
+    atomically with status='running') that is older than
+    max_execution_time must be moved to 'failed' so
+    idx_active_job_per_repo unblocks and a fresh job can be submitted.
 
-    Gap 1: A 'running' job with started_at IS NULL — never started, so no
-    duration-based check applies to it; only the ``started_at IS NULL``
-    guard in _reclaim_stuck_index_blocking_jobs catches it.
+    Bug #1312 correction: 'pending' jobs are DELIBERATELY EXCLUDED from
+    this path (see TestSweepBug1312PendingNeverReaped /
+    TestSweepBug1312BehavioralPoolExhaustion below for the proof and the
+    rationale — a pending job's started_at is unconditionally NULL, so
+    naively including it here wall-clock-fails jobs merely waiting for
+    worker-pool capacity, not just genuinely-abandoned ones).
 
-    Gap 2: A 'pending' job older than max_execution_time — the dead-node
-    reclaim path filters ``status = 'running'``, so pending jobs are never
-    touched.
-
-    Post-Bug #1310: JobReconciliationService has exactly two reclaim paths
-    — _reclaim_dead_node_jobs (heartbeat/liveness-based) and
-    _reclaim_stuck_index_blocking_jobs (the started_at IS NULL guard
-    verified by this test class). The former _reclaim_timed_out_jobs
-    method was removed by Bug #1310.
+    Post-Bug #1310/#1312: JobReconciliationService has exactly two reclaim
+    paths — _reclaim_dead_node_jobs (heartbeat/liveness-based, status=
+    'running' only) and _reclaim_stuck_index_blocking_jobs (status=
+    'running' + started_at IS NULL only, verified by this test class).
+    The former _reclaim_timed_out_jobs method was removed by Bug #1310.
     """
 
     def test_sweep_calls_stuck_index_blocking_reclaim(self):
@@ -296,41 +448,15 @@ class TestSweepStuckIndexBlocking:
             f"got {len(stuck_calls)}"
         )
         sql = stuck_calls[0].args[0]
-        # Must cover BOTH pending and running (not just running)
-        assert "'pending'" in sql or "pending" in sql
-        assert "'running'" in sql or "running" in sql
+        # Bug #1312: must cover 'running' ONLY -- 'pending' must never appear
+        # as a status literal in this query (that was the #1312 false-failure).
+        assert "status = 'running'" in sql
+        assert "'pending'" not in sql
         # Must use COALESCE to handle NULL started_at
         assert "COALESCE" in sql
         # Bug #1310: must require started_at IS NULL so a job with a valid
         # started_at (genuinely running) can never match this query.
         assert "started_at IS NULL" in sql
-
-    def test_stuck_pending_job_older_than_timeout_is_failed(self):
-        """
-        A 'pending' job older than max_execution_time must be set to 'failed'.
-        The existing reclaim paths ignore pending — this new path must not.
-        """
-        pool, _, cur = _make_pool(
-            fetchall=[[], [("job-stuck-pending", "pending", None)]]
-        )
-        hb = _make_heartbeat(active_nodes=["node-1"])
-        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
-
-        count = svc.sweep()
-
-        assert count == 1
-        update_calls = [
-            c
-            for c in cur.execute.call_args_list
-            if "UPDATE background_jobs" in c.args[0]
-        ]
-        stuck_calls = [
-            c for c in update_calls if "failed" in c.args[0] and "COALESCE" in c.args[0]
-        ]
-        assert len(stuck_calls) == 1
-        # The SQL must cover the 'pending' status
-        sql = stuck_calls[0].args[0]
-        assert "'pending'" in sql or "pending" in sql
 
     def test_stuck_index_blocking_sets_status_to_failed_not_pending(self):
         """
@@ -461,13 +587,14 @@ class TestSweepStuckIndexBlocking:
         assert {"j1"} <= excluded_ids, f"expected j1 excluded; got {excluded_ids}"
 
     def test_sweep_reclaim_status_filters(self):
-        """Per-path status filters (2-path design after Bug #1310).
+        """Per-path status filters (2-path design after Bug #1310/#1312).
 
-        The dead-node reclaim-to-pending path targets only
-        ``status = 'running'``. The stuck index-blocking path covers
-        ``status IN ('pending', 'running')`` (guarded by
-        ``started_at IS NULL``) because pending/never-started jobs can also
-        be stuck active and block idx_active_job_per_repo.
+        Both paths target ``status = 'running'`` only -- Bug #1312 removed
+        ``'pending'`` from the stuck index-blocking path's status filter
+        entirely (a pending job is NEVER wall-clock-reaped by either path).
+        The two queries are distinguished by their other clauses: the
+        dead-node path has ``executing_node != ALL``; the stuck-index-
+        blocking path has ``started_at IS NULL`` + ``COALESCE``.
         """
         pool, _, cur = _make_pool(fetchall=[[], []])
         hb = _make_heartbeat(active_nodes=["node-1"])
@@ -481,11 +608,21 @@ class TestSweepStuckIndexBlocking:
             if "UPDATE background_jobs" in c.args[0]
         ]
         assert len(update_sqls) == 2
-        running_only = [s for s in update_sqls if "status = 'running'" in s]
-        stuck = [s for s in update_sqls if "status IN ('pending', 'running')" in s]
-        assert len(running_only) == 1, f"expected 1 running-only UPDATE: {update_sqls}"
-        assert len(stuck) == 1, (
-            f"expected 1 stuck pending/running UPDATE: {update_sqls}"
+        dead_node = [s for s in update_sqls if "executing_node != ALL" in s]
+        stuck = [
+            s for s in update_sqls if "started_at IS NULL" in s and "COALESCE" in s
+        ]
+        assert len(dead_node) == 1, f"expected 1 dead-node UPDATE: {update_sqls}"
+        assert len(stuck) == 1, f"expected 1 stuck running-only UPDATE: {update_sqls}"
+        assert "status = 'running'" in dead_node[0]
+        assert "status = 'running'" in stuck[0]
+        # Bug #1312: the stuck-index-blocking query specifically must NEVER
+        # reference 'pending' as a status literal (Path 1's SET clause
+        # legitimately writes status='pending' as its target -- that's fine
+        # and out of scope for this check).
+        assert "'pending'" not in stuck[0], (
+            f"Bug #1312 regression: 'pending' status literal found in the "
+            f"stuck-index-blocking query: {stuck[0]}"
         )
 
 
@@ -558,3 +695,306 @@ class TestSweepBug1310LiveRunningJobNotReclaimed:
             "found a blanket wall-clock reclaim query with no dead-node "
             f"liveness check (Bug #1310 regression): {blanket_timeout_queries}"
         )
+
+
+# ---------------------------------------------------------------------------
+# sweep() — Bug #1312: legitimately-queued pending jobs must NOT be reaped
+# ---------------------------------------------------------------------------
+
+
+class TestSweepBug1312PendingNeverReaped:
+    """
+    Bug #1312 (SQL-shape, reworked after code-review rejection): a prior
+    attempt gated the 'pending' sub-case on the absence of a live sibling
+    'running' job for the SAME repo_alias. That predicate was wrong on two
+    counts, established by reading the actual codebase (not assumed):
+
+    1. ``idx_active_job_per_repo`` is a UNIQUE index on
+       ``(operation_type, repo_alias)`` among active rows, so a pending
+       job's own key can NEVER be blocked by another active row sharing
+       that exact key -- the schema forbids it. The real reason a pending
+       job waits is generic BOUNDED WORKER-POOL exhaustion
+       (``BackgroundJobManager`` default ``max_concurrent_background_jobs
+       = 5`` -- ``utils/config_manager.py``, ``repositories/
+       background_jobs.py``) by jobs for OTHER, unrelated repos -- which a
+       same-repo_alias sibling check cannot see at all (see
+       TestSweepBug1312BehavioralPoolExhaustion below for the proof).
+    2. ``repo_alias IS NULL`` jobs (discovery jobs) were never protected,
+       since ``sibling.repo_alias = background_jobs.repo_alias`` is UNKNOWN
+       (neither true nor false) for NULL in SQL.
+
+    The corrected fix removes the 'pending' sub-case from this path
+    ENTIRELY: ``_reclaim_stuck_index_blocking_jobs`` now targets
+    ``status = 'running'`` only (never ``IN ('pending', 'running')``),
+    unconditionally, regardless of ``active_nodes``. A pending row is
+    NEVER wall-clock-failed by JobReconciliationService, no matter how
+    old -- eliminating the false-failure uniformly, including the
+    pool-exhaustion-behind-other-repos case and the repo_alias IS NULL
+    case (both trivially correct now since the predicate no longer
+    references repo_alias at all). See the module docstring for why a
+    genuinely-abandoned pending row (Bug #1141's real scenario) is still
+    cleared via the sibling DistributedJobWorkerService (Bug #582).
+    """
+
+    def test_pending_status_literal_never_appears_in_stuck_query(self):
+        """The stuck-index-blocking UPDATE must never reference 'pending'
+        as a status value -- it targets status = 'running' only."""
+        pool, _, cur = _make_pool(fetchall=[[], []])
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb)
+
+        svc.sweep()
+
+        update_calls = [
+            c
+            for c in cur.execute.call_args_list
+            if "UPDATE background_jobs" in c.args[0]
+        ]
+        stuck_calls = [
+            c for c in update_calls if "failed" in c.args[0] and "COALESCE" in c.args[0]
+        ]
+        assert stuck_calls, "No stuck-index-blocking UPDATE found"
+        sql = " ".join(stuck_calls[0].args[0].split())
+        assert "'pending'" not in sql
+        assert "status = 'running'" in sql
+        # The rejected NOT EXISTS same-repo-sibling gate must be gone too.
+        assert "NOT EXISTS" not in sql
+        assert "sibling" not in sql
+
+    def test_stuck_query_identical_regardless_of_active_nodes_state(self):
+        """
+        Cluster-correctness / outage guard: since the stuck-index-blocking
+        path no longer depends on active_nodes at all, its SQL shape (and
+        behavior) must be IDENTICAL whether active_nodes is empty (a
+        heartbeat outage) or populated -- no active_nodes-dependent branch
+        exists to get this wrong during an outage.
+        """
+        pool_live, _, cur_live = _make_pool(fetchall=[[], []])
+        hb_live = _make_heartbeat(active_nodes=["node-1", "node-2"])
+        JobReconciliationService(pool_live, hb_live).sweep()
+
+        pool_outage, _, cur_outage = _make_pool(fetchall=[[]])
+        hb_outage = _make_heartbeat(active_nodes=[])
+        JobReconciliationService(pool_outage, hb_outage).sweep()
+
+        def _stuck_sql(cur):
+            update_calls = [
+                c
+                for c in cur.execute.call_args_list
+                if "UPDATE background_jobs" in c.args[0]
+            ]
+            stuck = [
+                c
+                for c in update_calls
+                if "failed" in c.args[0] and "COALESCE" in c.args[0]
+            ]
+            assert stuck, "No stuck-index-blocking UPDATE found"
+            return " ".join(stuck[0].args[0].split())
+
+        assert _stuck_sql(cur_live) == _stuck_sql(cur_outage)
+
+    def test_max_execution_time_and_exclusion_param_shape_unchanged(self):
+        """The stuck-index-blocking query must still be fully parameterized
+        (no f-string interpolation): max_execution_time as %s, and the
+        clobber-safety exclusion list as job_id <> ALL(%s)."""
+        pool, _, cur = _make_pool(
+            fetchall=[
+                [("j1", "dead-node")],
+                [],
+            ]
+        )
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=999)
+
+        svc.sweep()
+
+        update_calls = [
+            c
+            for c in cur.execute.call_args_list
+            if "UPDATE background_jobs" in c.args[0]
+        ]
+        stuck_calls = [
+            c for c in update_calls if "failed" in c.args[0] and "COALESCE" in c.args[0]
+        ]
+        assert stuck_calls
+        sql = stuck_calls[0].args[0]
+        params = stuck_calls[0].args[1]
+        assert "job_id <> ALL" in sql
+        assert 999 in params
+        assert any(isinstance(p, (list, set, tuple)) and "j1" in p for p in params), (
+            f"exclusion list missing j1: {params}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# sweep() — Bug #1312 behavioral proof (real predicate evaluation, not
+# SQL-string-only assertions against a mocked cursor)
+# ---------------------------------------------------------------------------
+
+
+class TestSweepBug1312BehavioralPoolExhaustion:
+    """
+    Bug #1312 behavioral proof. Uses ``_make_behavioral_pool`` (a faithful
+    in-memory evaluator of the real WHERE-clause semantics, not a mock that
+    merely replays a scripted return value) to prove the FINAL PERSISTED
+    STATE of rows after sweep() -- the exact category of proof the code
+    review found missing from the original (rejected) fix.
+    """
+
+    def test_pending_job_queued_behind_other_repos_running_jobs_survives(self):
+        """
+        The core Bug #1312 scenario: 5 running jobs for OTHER repos
+        (B-F, unrelated operation_types) occupy the entire bounded worker
+        pool; a 6th job for repo A stays pending, older than
+        max_execution_time. It must remain 'pending' after sweep() -- not
+        wall-clock-failed merely for queue age.
+        """
+        now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+        old = now - timedelta(seconds=3600)  # 1h old, past the 30-min default
+        rows = [
+            {
+                "job_id": f"running-{repo}",
+                "status": "running",
+                "executing_node": "node-1",
+                "started_at": old,
+                "claimed_at": old,
+                "created_at": old,
+                "repo_alias": f"repo{repo}",
+            }
+            for repo in "BCDEF"
+        ] + [
+            {
+                "job_id": "pending-repoA",
+                "status": "pending",
+                "executing_node": None,
+                "started_at": None,
+                "claimed_at": None,
+                "created_at": old,
+                "repo_alias": "repoA",
+            }
+        ]
+        pool, _, cur, table = _make_behavioral_pool(rows, now)
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        count = svc.sweep()
+
+        pending_row = next(r for r in table.rows if r["job_id"] == "pending-repoA")
+        assert pending_row["status"] == "pending", (
+            "Bug #1312 regression: a legitimately-queued pending job "
+            "(pool exhausted by OTHER repos' running jobs) was "
+            "wall-clock-failed"
+        )
+        assert count == 0
+        # The 5 legitimately-running jobs on OTHER repos must also survive
+        # untouched (Bug #1218/#1310 -- no wall clock on live running work).
+        for repo in "BCDEF":
+            row = next(r for r in table.rows if r["job_id"] == f"running-{repo}")
+            assert row["status"] == "running"
+
+    def test_pending_job_with_null_repo_alias_also_survives(self):
+        """A discovery-style job (repo_alias=None) sitting pending must
+        also survive -- repo_alias is irrelevant to the corrected
+        predicate, so NULL rows are handled uniformly and correctly."""
+        now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+        old = now - timedelta(seconds=3600)
+        rows = [
+            {
+                "job_id": "pending-discovery",
+                "status": "pending",
+                "executing_node": None,
+                "started_at": None,
+                "claimed_at": None,
+                "created_at": old,
+                "repo_alias": None,
+            }
+        ]
+        pool, _, cur, table = _make_behavioral_pool(rows, now)
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        svc.sweep()
+
+        assert table.rows[0]["status"] == "pending"
+
+    def test_genuinely_stuck_running_null_started_at_job_is_still_freed(self):
+        """
+        Bug #1141 preserved: a job that transitioned to 'running' (has an
+        executing_node on a live node) but never actually recorded
+        started_at -- a defensive anomaly catch, not a liveness question
+        -- is still failed once older than max_execution_time, freeing
+        idx_active_job_per_repo.
+        """
+        now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+        old = now - timedelta(seconds=3600)
+        rows = [
+            {
+                "job_id": "stuck-running-null-started",
+                "status": "running",
+                "executing_node": "node-1",
+                "started_at": None,
+                "claimed_at": old,
+                "created_at": old,
+            }
+        ]
+        pool, _, cur, table = _make_behavioral_pool(rows, now)
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        count = svc.sweep()
+
+        assert table.rows[0]["status"] == "failed"
+        assert count == 1
+
+    def test_running_job_valid_started_at_on_live_node_never_reaped_bug_1310(self):
+        """Bug #1310 preserved: a running job with a valid started_at on a
+        live node is never touched, however old (no wall clock on live,
+        progressing indexing/golden-repo/SCIP work -- Bug #1218)."""
+        now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+        old = now - timedelta(seconds=99999)  # far beyond any reasonable timeout
+        rows = [
+            {
+                "job_id": "live-long-running",
+                "status": "running",
+                "executing_node": "node-1",
+                "started_at": old,
+                "claimed_at": old,
+                "created_at": old,
+            }
+        ]
+        pool, _, cur, table = _make_behavioral_pool(rows, now)
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        count = svc.sweep()
+
+        assert table.rows[0]["status"] == "running"
+        assert count == 0
+
+    def test_dead_node_running_job_still_reclaimed_to_pending(self):
+        """
+        Sanity check that the behavioral harness's dead-node path still
+        works: a running job whose executing_node is NOT in active_nodes
+        is reset to 'pending' by Path 1, independent of this bug's fix.
+        """
+        now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+        old = now - timedelta(seconds=3600)
+        rows = [
+            {
+                "job_id": "dead-node-job",
+                "status": "running",
+                "executing_node": "node-gone",
+                "started_at": old,
+                "claimed_at": old,
+                "created_at": old,
+            }
+        ]
+        pool, _, cur, table = _make_behavioral_pool(rows, now)
+        hb = _make_heartbeat(active_nodes=["node-1"])
+        svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+        count = svc.sweep()
+
+        assert table.rows[0]["status"] == "pending"
+        assert table.rows[0]["executing_node"] is None
+        assert count == 1

@@ -51,11 +51,16 @@
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real Codex run via ~/.codex/sessions before claiming "codex reviewed it"
 - [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - fast-automation/server-fast flake under concurrent load (SQLite DB-open errors, timeouts); run them ALONE, re-run failures in isolation before concluding regression; omni '*' is MCP-only not REST
+- [feedback_active_monitoring_check_back.md](feedback_active_monitoring_check_back.md) - Never stay idle while background agents/jobs run — set a check-back timer and verify progress often; detect stalls early instead of waiting on a completion ping that never comes if it hangs
+- [feedback_study_anomalies_deeply.md](feedback_study_anomalies_deeply.md) - When you see odd/anomalous behavior, study it in depth to root cause and prove the classification with FACTS — never dismiss as "artifact/benign/cosmetic" without evidence; "odd" itself is a claim needing facts
+- [feedback_never_stop_never_blame_env.md](feedback_never_stop_never_blame_env.md) - NEVER self-abort a mission or blame the environment for slow tests; a stalled subagent is a RETRY not a blocker; do NOT kill a working subagent on a frozen output-file or "no git changes yet" — those are not stall signals
 
 ## Architectural Invariants
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER RRF coalescing, BEFORE truncation — mandatory pipeline order
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - FIXED v10.125.0 (#1100): scheduler now uses registry tracking backend (PG in cluster mode); validate against PG, not SQLite
+- [project_cluster_auto_updater_service.md](project_cluster_auto_updater_service.md) - The auto-updater is a SEPARATE cidx-auto-update.service + timer (not part of cidx-server); the cluster installer must provision it (fixed v11.21.0) and set CIDX_AUTO_UPDATE_BRANCH — staging nodes track staging else default master; retrofit via `cidx server install-auto-update --branch staging`
+- [project_nfs_host_down_hangs_systemd.md](project_nfs_host_down_hangs_systemd.md) - When the CoW/NFS host node is down, hard NFS mounts on other nodes hang daemon-reload and cascade into sudo/pam_systemd (every sudo blocks, non-sudo instant); recovers when host returns — diagnose non-sudo with timeout-wrapped probes
 
 ## External References
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
