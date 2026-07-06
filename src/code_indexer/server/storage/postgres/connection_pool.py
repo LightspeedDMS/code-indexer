@@ -96,12 +96,13 @@ class ConnectionPool:
             try:
                 yield conn
             finally:
-                # Restore the default row_factory before the connection returns to
-                # the pool. Several backends set `conn.row_factory = dict_row` on a
-                # borrowed connection and never reset it, so without this the NEXT
-                # borrower silently gets dict rows — which broke
-                # NodeHeartbeatService.get_active_nodes() (`row[0]` -> KeyError: 0)
-                # and made JobReconciliationService error every ~10s in cluster mode.
+                # Convention: the pool default row_factory is tuple_row (psycopg's
+                # default, which the majority of backends rely on via positional
+                # row[N] access). Backends that read rows by name MUST opt in with
+                # an explicit `conn.cursor(row_factory=dict_row)` -- they must not
+                # rely on a dict_row left behind by a previous borrower. Reset here
+                # so a per-use override never leaks to the next borrower (the
+                # NodeHeartbeatService.get_active_nodes KeyError: 0 class of bug).
                 try:
                     conn.row_factory = tuple_row
                 except Exception:

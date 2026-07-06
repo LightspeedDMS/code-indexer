@@ -234,12 +234,18 @@ class ActivatedRepoManager:
 
     def _load_metadata_pg(self, username: str, user_alias: str) -> Optional[dict]:
         """Load metadata from PostgreSQL (cluster mode)."""
+        from psycopg.rows import dict_row
+
         assert self._pool is not None
+        # _pg_row_to_metadata reads by column name -> opt into dict rows explicitly
+        # (the pool default is tuple_row; never rely on a leaked row_factory).
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
-                (username, user_alias),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
+                    (username, user_alias),
+                )
+                row = cur.fetchone()
         if row is None:
             return None
         return self._pg_row_to_metadata(row)
@@ -346,21 +352,29 @@ class ActivatedRepoManager:
 
     def _list_user_repos_pg(self, username: str) -> List[dict]:
         """List activated repos for a user from PostgreSQL (cluster mode)."""
+        from psycopg.rows import dict_row
+
         assert self._pool is not None
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
-                (username,),
-            ).fetchall()
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
+                    (username,),
+                )
+                rows = cur.fetchall()
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def _list_all_repos_pg(self) -> List[dict]:
         """List all activated repos from PostgreSQL (cluster mode)."""
+        from psycopg.rows import dict_row
+
         assert self._pool is not None
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM activated_repos ORDER BY username, user_alias"
-            ).fetchall()
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM activated_repos ORDER BY username, user_alias"
+                )
+                rows = cur.fetchall()
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def activate_repository(

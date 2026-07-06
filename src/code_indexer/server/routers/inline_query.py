@@ -108,10 +108,11 @@ def register_query_routes(
                             raw_request.headers.get("authorization"),
                         )
                         return JSONResponse(content=forwarded)
-                except Exception:
+                except Exception as exc:
                     logger.warning(
-                        "C6: shard forward failed for %r; serving locally",
+                        "C6: shard forward failed for %r (%s); serving locally",
                         alias,
+                        exc,
                         extra={"correlation_id": get_correlation_id()},
                     )
 
