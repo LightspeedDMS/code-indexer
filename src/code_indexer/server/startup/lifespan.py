@@ -2010,6 +2010,36 @@ def make_lifespan(
                     _heartbeat.start()
                     _cluster_services.append(("heartbeat", _heartbeat))
 
+                    # C6 Phase 0: inject repo-shard ownership so each pod only
+                    # populates its per-pod index cache for repos it owns (bounds
+                    # the cache footprint to a shard instead of every repo).
+                    # replicas=2 is the default owner count per alias; Phase 1 will
+                    # surface it as a Web UI config. Failure is non-fatal -- the
+                    # manager then caches everything (today's behaviour).
+                    try:
+                        from code_indexer.server.services.shard_ownership import (
+                            ShardOwnership,
+                        )
+
+                        _sqm = getattr(app.state, "semantic_query_manager", None)
+                        if _sqm is not None:
+                            _sqm.set_shard_ownership(
+                                ShardOwnership(
+                                    node_id=_node_id,
+                                    active_nodes_provider=_heartbeat.get_active_nodes,
+                                    replicas=2,
+                                )
+                            )
+                            logging.getLogger(__name__).info(
+                                "C6 Phase 0: shard ownership wired (node_id=%s, replicas=2)",
+                                _node_id,
+                            )
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "C6 Phase 0: failed to wire shard ownership; "
+                            "falling back to caching all repos"
+                        )
+
                     # Job reconciliation
                     from code_indexer.server.services.job_reconciliation_service import (
                         JobReconciliationService,

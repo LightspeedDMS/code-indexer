@@ -201,6 +201,31 @@ class SemanticQueryManager:
         # Track concurrent queries per user (in production this would need persistence)
         self._active_queries_per_user: Dict[str, int] = {}
 
+        # Repo-shard ownership (C6 Phase 0). None in solo/sqlite mode -> this node
+        # caches every repo (today's behaviour). Injected in cluster mode so a pod
+        # only populates its per-pod index cache for repos it owns; non-owned
+        # repos are still served, just load-and-discard (hnsw_cache=None).
+        self._shard_ownership: Optional[Any] = None
+
+    def set_shard_ownership(self, shard_ownership: Any) -> None:
+        """Inject repo-shard ownership (C6 Phase 0), cluster mode only.
+
+        When set, single-repo searches only populate this pod's index cache for
+        repos this node owns; non-owned repos are served load-and-discard.
+        """
+        self._shard_ownership = shard_ownership
+
+    def _owns_for_cache(self, repository_alias: str) -> bool:
+        """Whether this node should use its shared index cache for ``alias``.
+
+        True (use the per-pod cache) when sharding is off (solo mode) or this node
+        owns the alias; False means bypass the cache (load-and-discard) so a
+        non-owned repo does not bloat this pod's cache. Fails open via
+        ShardOwnership.owns, so a query is never denied incorrectly.
+        """
+        shard_ownership = self._shard_ownership
+        return shard_ownership is None or shard_ownership.owns(repository_alias)
+
     def _is_composite_repository(self, repo_path: Path) -> bool:
         """
         Check if repository is in proxy mode (composite).
@@ -1590,10 +1615,17 @@ class SemanticQueryManager:
 
             # Perform search on the repository using direct path
             # Story #883 Phase C: pass precomputed vector to avoid duplicate Voyage call
+            # C6 Phase 0: for repos this node does not own, bypass the shared index
+            # cache (hnsw_cache=None -> load-and-discard) so each pod's cache stays
+            # bounded to its shard. Owned repos use the server default cache.
+            _cache_kwargs = (
+                {} if self._owns_for_cache(repository_alias) else {"hnsw_cache": None}
+            )
             search_response = search_service.search_repository_path(
                 repo_path=repo_path,
                 search_request=search_request,
                 precomputed_query_vector=precomputed_query_vector,
+                **_cache_kwargs,
             )
 
             # Convert search results to QueryResult objects
