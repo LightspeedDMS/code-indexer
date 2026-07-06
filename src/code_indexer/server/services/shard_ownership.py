@@ -125,3 +125,11 @@ class ShardOwnership:
         if not alias:
             return []
         return compute_owners(alias, self._get_nodes(), self._replicas)
+
+    def snapshot(self) -> "dict[str, object]":
+        """Observability view: this node's id, replicas, and live node set."""
+        return {
+            "node_id": self._node_id,
+            "replicas": self._replicas,
+            "active_nodes": self._get_nodes(),
+        }

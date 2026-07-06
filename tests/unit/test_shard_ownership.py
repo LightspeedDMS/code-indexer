@@ -5,7 +5,6 @@ from code_indexer.server.services.shard_ownership import (
     compute_owners,
 )
 
-
 NODES = [f"node-{i}" for i in range(6)]
 
 
@@ -19,9 +18,11 @@ def test_compute_owners_deterministic_and_top_r():
 
 def test_compute_owners_replicas_clamped():
     assert len(compute_owners("r", NODES, replicas=0)) == 1  # clamped up to 1
-    assert compute_owners("r", NODES, replicas=99) == sorted(
+    assert (
         compute_owners("r", NODES, replicas=99)
-    ) or True  # all nodes when replicas exceeds cluster size
+        == sorted(compute_owners("r", NODES, replicas=99))
+        or True
+    )  # all nodes when replicas exceeds cluster size
     assert set(compute_owners("r", NODES, replicas=99)) == set(NODES)
     assert compute_owners("r", [], replicas=2) == []
 
@@ -32,9 +33,7 @@ def test_every_alias_owned_by_exactly_r_nodes():
         alias = f"repo-{i}"
         designated = set(compute_owners(alias, NODES, replicas=2))
         owning = {
-            n
-            for n in NODES
-            if ShardOwnership(n, lambda: NODES, replicas=2).owns(alias)
+            n for n in NODES if ShardOwnership(n, lambda: NODES, replicas=2).owns(alias)
         }
         assert owning == designated
         assert len(owning) == 2
@@ -90,6 +89,14 @@ def test_self_is_always_in_the_ring():
     so = ShardOwnership("me", lambda: others, replicas=2)
     owned = [f"r{i}" for i in range(300) if so.owns(f"r{i}")]
     assert len(owned) > 0
+
+
+def test_snapshot_reports_identity_replicas_and_nodes():
+    so = ShardOwnership("node-2", lambda: NODES, replicas=3)
+    snap = so.snapshot()
+    assert snap["node_id"] == "node-2"
+    assert snap["replicas"] == 3
+    assert set(snap["active_nodes"]) == set(NODES)
 
 
 def test_active_nodes_cached_within_refresh_window():

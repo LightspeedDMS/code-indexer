@@ -55,6 +55,9 @@ class ShardRouter:
         self._addresses = node_addresses_provider
         self._http = http_client_factory
         self._timeout = timeout_seconds
+        # Coarse observability counters (metric-grade; small races acceptable).
+        self._forwards = 0
+        self._forward_failures = 0
 
     def target_for(self, alias: str) -> Optional[str]:
         """Return an owner peer ``"host:port"`` to forward ``alias`` to, or None
@@ -116,8 +119,30 @@ class ShardRouter:
         headers: Dict[str, str] = {FORWARD_HEADER: "1"}
         if auth_header:
             headers["Authorization"] = auth_header
-        with self._http.create_sync_client(timeout=self._timeout) as client:
-            resp = client.post(f"http://{address}{path}", json=body, headers=headers)
-            resp.raise_for_status()
-            result: Dict[str, Any] = resp.json()
-            return result
+        self._forwards += 1
+        try:
+            with self._http.create_sync_client(timeout=self._timeout) as client:
+                resp = client.post(
+                    f"http://{address}{path}", json=body, headers=headers
+                )
+                resp.raise_for_status()
+                result: Dict[str, Any] = resp.json()
+                return result
+        except Exception:
+            self._forward_failures += 1
+            raise
+
+    def stats(self) -> Dict[str, Any]:
+        """Observability snapshot: node identity, live ring, addresses, counters."""
+        info: Dict[str, Any] = {
+            "node_id": self._node_id,
+            "forwards": self._forwards,
+            "forward_failures": self._forward_failures,
+        }
+        if self._shard_ownership is not None:
+            info.update(self._shard_ownership.snapshot())
+        try:
+            info["node_addresses"] = self._addresses()
+        except Exception:
+            info["node_addresses"] = {}
+        return info
