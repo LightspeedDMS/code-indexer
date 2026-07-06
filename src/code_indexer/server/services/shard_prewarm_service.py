@@ -103,6 +103,10 @@ class ShardPrewarmService:
         self._thread = None
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
+        # Wait one interval before the first pass. Server startup wires the
+        # http_client_factory that the warm search uses, and it runs *after* this
+        # service is started, so an immediate first pass would fail. Warming is
+        # proactive, so a short initial delay is fine. wait() returns True when
+        # stopped, so the loop also exits promptly on shutdown.
+        while not self._stop.wait(self._interval):
             self.run_once()
-            self._stop.wait(self._interval)
