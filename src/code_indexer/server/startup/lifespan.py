@@ -985,23 +985,99 @@ def make_lifespan(
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
 
+        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
+        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
+        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
+        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
+        # table.  Without this early call those flags stay at bootstrap defaults (False)
+        # when the schedulers below call config_service.get_config() -- permanently
+        # skipping the one-shot startup backfill sweeps even when the operator has
+        # enabled the features in the Web UI.
+        # The late set_connection_pool + start_config_reload call in the cluster block
+        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
+        # idempotent via its internal _reload_thread.is_alive() guard).
+        #
+        # Bug #1309 (round 2): this block -- and the API key seeding block right
+        # after it -- MUST run BEFORE the "LLM Lease Lifecycle" block below.
+        # LlmLeaseLifecycleService.start() (subscription mode) sets
+        # os.environ["ANTHROPIC_API_KEY"] from its leased credential; seeding, when
+        # config's anthropic_api_key is blank (the normal case in subscription mode),
+        # unconditionally pops ANTHROPIC_API_KEY. Seeding running after the lease
+        # would clobber the lease-managed key. Placing both this pool switch and
+        # seeding before the lease means: seeding reads the PG-backed config (so
+        # VoyageAI/Cohere keys still seed correctly in cluster mode) AND the lease --
+        # which runs last -- has its ANTHROPIC_API_KEY write survive uncontested.
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _early_config_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _early_config_pool is not None:
+                    get_config_service().set_connection_pool(_early_config_pool)
+                    logger.info(
+                        "APP-GENERAL-052: ConfigService PG pool set early — "
+                        "scheduler inits will read merged runtime config",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-054",
+                            "storage_mode=postgres but no connection pool is "
+                            "available on backend_registry (critical_connection_pool "
+                            "and connection_pool both None); ConfigService will stay "
+                            "on bootstrap SQLite config, and API key seeding below "
+                            "will NOT see PG-backed VoyageAI/Cohere keys",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            except Exception as _early_pool_exc:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-053",
+                        f"Early ConfigService pool set failed (schedulers will use "
+                        f"bootstrap defaults): {_early_pool_exc}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Auto-seed API keys if server config is blank (Story #20)
+        # Bug #1309: This MUST run after the early ConfigService PG pool switch
+        # above (so postgres/cluster mode reads the PG-backed config with the
+        # VoyageAI/Cohere keys) and BEFORE the LLM Lease Lifecycle block below (so
+        # a lease-managed ANTHROPIC_API_KEY is never clobbered by this seeder's
+        # unconditional pop of a blank-config Anthropic key). This block stays
+        # unconditional (not postgres-gated) so solo/SQLite mode -- where the
+        # block above is skipped entirely -- is unaffected.
         logger.info(
             "Server startup: Checking API key auto-seeding",
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
             from code_indexer.server.startup.api_key_seeding import (
                 seed_api_keys_on_startup,
             )
 
-            seeding_result = seed_api_keys_on_startup(config_service)
+            seeding_result = seed_api_keys_on_startup(get_config_service())
 
-            if seeding_result["anthropic_seeded"] or seeding_result["voyageai_seeded"]:
+            if (
+                seeding_result["anthropic_seeded"]
+                or seeding_result["voyageai_seeded"]
+                or seeding_result["cohere_seeded"]
+            ):
                 logger.info(
                     f"API key auto-seeding completed: "
                     f"anthropic={seeding_result['anthropic_seeded']}, "
-                    f"voyageai={seeding_result['voyageai_seeded']}",
+                    f"voyageai={seeding_result['voyageai_seeded']}, "
+                    f"cohere={seeding_result['cohere_seeded']}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
@@ -1072,7 +1148,8 @@ def make_lifespan(
                 initialize_claude_manager_on_startup,
             )
 
-            # Get fresh config (may have been updated by API key seeding)
+            # Get fresh config (reflects the PG-backed runtime config merged by
+            # the ConfigService pool switch earlier in startup, in cluster mode)
             server_config = config_service.get_config()
 
             claude_init_result = initialize_claude_manager_on_startup(
@@ -1127,44 +1204,6 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-
-        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
-        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
-        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
-        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
-        # table.  Without this early call those flags stay at bootstrap defaults (False)
-        # when the schedulers below call config_service.get_config() -- permanently
-        # skipping the one-shot startup backfill sweeps even when the operator has
-        # enabled the features in the Web UI.
-        # The late set_connection_pool + start_config_reload call in the cluster block
-        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
-        # idempotent via its internal _reload_thread.is_alive() guard).
-        if storage_mode == "postgres" and backend_registry is not None:
-            try:
-                from code_indexer.server.services.config_service import (
-                    get_config_service,
-                )
-
-                _early_config_pool = (
-                    backend_registry.critical_connection_pool
-                    or backend_registry.connection_pool
-                )
-                if _early_config_pool is not None:
-                    get_config_service().set_connection_pool(_early_config_pool)
-                    logger.info(
-                        "APP-GENERAL-052: ConfigService PG pool set early — "
-                        "scheduler inits will read merged runtime config",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-            except Exception as _early_pool_exc:
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-053",
-                        f"Early ConfigService pool set failed (schedulers will use "
-                        f"bootstrap defaults): {_early_pool_exc}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
 
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
