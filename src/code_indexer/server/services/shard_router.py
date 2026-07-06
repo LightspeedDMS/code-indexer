@@ -80,21 +80,44 @@ class ShardRouter:
                 return addr
         return None  # no reachable non-self owner -> serve locally
 
+    def group_by_owner(
+        self, aliases: "list[str]"
+    ) -> "tuple[list[str], dict[str, list[str]]]":
+        """Partition ``aliases`` for a multi-repo query (C6 Phase 2).
+
+        Returns ``(local, {peer_address: [aliases]})`` where ``local`` are the
+        aliases this node should search itself -- ones it owns, or for which no
+        reachable owner exists (fail open) -- and each remaining group is the set
+        of aliases to forward to a single owning peer.
+        """
+        local: "list[str]" = []
+        groups: "dict[str, list[str]]" = {}
+        for alias in aliases:
+            address = self.target_for(alias)
+            if address is None:
+                local.append(alias)
+            else:
+                groups.setdefault(address, []).append(alias)
+        return local, groups
+
     def forward(
-        self, address: str, body: Dict[str, Any], auth_header: Optional[str]
+        self,
+        address: str,
+        body: Dict[str, Any],
+        auth_header: Optional[str],
+        path: str = "/api/query",
     ) -> Dict[str, Any]:
-        """POST ``body`` to a peer's /api/query and return its JSON response.
+        """POST ``body`` to a peer's ``path`` and return its JSON response.
 
         Raises on transport/HTTP error so the caller can fall back to local
-        handling.
+        handling. Sets the loop-guard header so the peer serves locally instead
+        of forwarding/scattering again.
         """
         headers: Dict[str, str] = {FORWARD_HEADER: "1"}
         if auth_header:
             headers["Authorization"] = auth_header
         with self._http.create_sync_client(timeout=self._timeout) as client:
-            resp = client.post(
-                f"http://{address}/api/query", json=body, headers=headers
-            )
+            resp = client.post(f"http://{address}{path}", json=body, headers=headers)
             resp.raise_for_status()
             result: Dict[str, Any] = resp.json()
             return result
