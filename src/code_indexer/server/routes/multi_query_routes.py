@@ -255,6 +255,11 @@ def multi_repository_query(
         # each remote group to its owning pod, then merge. A forwarded sub-request
         # (loop-guard header) is served locally here instead of scattering again.
         shard_router = getattr(raw_request.app.state, "shard_router", None)
+        # C6 Phase 3: let the multi-search service warm this pod's index cache for
+        # repos it owns (idempotent per-request injection). No-op in solo mode.
+        get_multi_search_service().set_shard_ownership(
+            getattr(raw_request.app.state, "shard_ownership", None)
+        )
         forwarded = raw_request.headers.get(FORWARD_HEADER.lower()) == "1"
         if shard_router is not None and not forwarded and request.repositories:
             try:
