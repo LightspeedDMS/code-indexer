@@ -2091,20 +2091,33 @@ def make_lifespan(
                                 SemanticSearchRequest,
                             )
 
-                            _global_repos = backend_registry.global_repos
-
                             def _list_shardable_repos() -> list:
-                                return list(_global_repos.list_repos().keys())
+                                # The shardable set is the GOLDEN repos (the shared,
+                                # indexed repos queries fan out over) -- resolved
+                                # lazily from app.state so startup ordering does not
+                                # matter.
+                                grm = getattr(app.state, "golden_repo_manager", None)
+                                if grm is None:
+                                    return []
+                                try:
+                                    return [
+                                        str(r.get("alias") or r.get("alias_name") or "")
+                                        for r in grm.list_golden_repos()
+                                    ]
+                                except Exception:
+                                    return []
 
                             def _warm_repo(alias: str) -> None:
-                                data = _global_repos.list_repos().get(alias)
-                                repo_path = data.get("index_path") if data else None
+                                grm = getattr(app.state, "golden_repo_manager", None)
+                                if grm is None or not alias:
+                                    return
+                                repo_path = grm.get_actual_repo_path(alias)
                                 if not repo_path:
                                     return
                                 # A minimal search loads the repo's HNSW index into
                                 # this pod's cache (Phase 0 caches it since owned).
                                 SemanticSearchService().search_repository_path(
-                                    repo_path,
+                                    str(repo_path),
                                     SemanticSearchRequest(query="warm", limit=1),
                                 )
 
