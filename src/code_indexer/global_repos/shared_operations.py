@@ -53,34 +53,26 @@ class GlobalRepoOperations:
         """
         Inspect app.state to determine the postgres backend object (if any).
 
+        Bug #1308 remediation item #4: delegates to the shared
+        resolve_backend_registry_state() helper (registry_factory.py) so
+        RefreshScheduler and GlobalActivator use the EXACT SAME resolution
+        logic instead of re-implementing the app.state introspection a
+        third time. That helper also fixes item #5: it uses a
+        sys.modules.get() lookup instead of a real import, so CLI usage of
+        GlobalRepoOperations (cli.py) never pays the cost of building the
+        whole FastAPI app just to discover "not in server mode, use SQLite".
+
         Returns:
             Tuple of (backend, postgres_mode_without_backend):
             - backend: the postgres global_repos backend, or None for SQLite/CLI mode
             - postgres_mode_without_backend: True when storage_mode=postgres but
               backend_registry is not yet set on app.state (transient startup window)
         """
-        backend = None
-        postgres_mode_without_backend = False
-        try:
-            from code_indexer.server import app as app_module
+        from code_indexer.server.utils.registry_factory import (
+            resolve_backend_registry_state,
+        )
 
-            _app_state = getattr(app_module.app, "state", None)
-            if _app_state and getattr(_app_state, "storage_mode", None) == "postgres":
-                _br = getattr(_app_state, "backend_registry", None)
-                if _br is not None:
-                    backend = _br.global_repos
-                else:
-                    postgres_mode_without_backend = True
-                    logger.warning(
-                        "GlobalRepoOperations: storage_mode=postgres but "
-                        "backend_registry not set; falling back to SQLite"
-                    )
-        except ImportError:
-            logger.debug(
-                "GlobalRepoOperations: server app module not available; "
-                "using SQLite backend"
-            )
-        return backend, postgres_mode_without_backend
+        return resolve_backend_registry_state(caller_name="GlobalRepoOperations")
 
     @property
     def registry(self):

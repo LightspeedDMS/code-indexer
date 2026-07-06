@@ -208,16 +208,16 @@ class RefreshScheduler:
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
 
-        # Use injected registry if provided (testing), otherwise create SQLite backend (production)
-        if registry is not None:
-            self.registry = registry
-        else:
-            # Lazy import to avoid circular dependency (Story #713)
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
-
-            self.registry = get_server_global_registry(str(self.golden_repos_dir))
+        # Registry resolution (Bug #1308): an explicitly injected registry
+        # (testing) is cached immediately. Otherwise resolution is DEFERRED
+        # to the `registry` property below instead of eagerly binding a
+        # per-node SQLite GlobalRegistry here. Eager construction-time
+        # binding split-brained cluster refresh against the shared
+        # PostgreSQL registry that the read/list path already used, because
+        # app.state.backend_registry is not guaranteed to be populated yet
+        # at construction time during server startup.
+        self._registry = registry
+        self._registry_lock = threading.Lock()
 
         # Thread management
         self._running = False
@@ -249,6 +249,91 @@ class RefreshScheduler:
         # since transient counters are ephemeral by nature.
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
+
+    def _get_registry_lock(self) -> threading.Lock:
+        """
+        Return the registry resolution lock, creating it lazily if absent.
+
+        Some tests construct RefreshScheduler via `object.__new__(RefreshScheduler)`
+        / `RefreshScheduler.__new__(...)` to build a lightweight instance without
+        running __init__ (deliberate pattern used across
+        tests/unit/golden_repos/), so `_registry_lock` may not exist as an
+        instance attribute yet. Falling back to getattr()+lazy-create here
+        (instead of assuming __init__ always ran) preserves that pattern while
+        keeping Bug #1308's deferred resolution.
+        """
+        lock = getattr(self, "_registry_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._registry_lock = lock
+        return lock
+
+    @property
+    def registry(self) -> Any:
+        """
+        Lazily resolve the GlobalRegistry / PostgresGlobalRegistryAdapter.
+
+        Bug #1308: mirrors GlobalRepoOperations.registry (shared_operations.py)
+        -- an explicitly injected registry (test double) is returned as-is;
+        otherwise resolution is deferred to first access (not __init__) so
+        app.state.backend_registry is guaranteed to be populated in
+        postgres/cluster mode. Falls back to the per-node SQLite
+        GlobalRegistry in solo/CLI mode (no app.state), preserving existing
+        behavior byte-for-byte. Result is cached after first successful
+        resolution; in postgres mode with backend not yet available, the
+        result is NOT cached so the next access re-checks.
+
+        Uses getattr(self, "_registry", None) rather than assuming __init__
+        ran, so instances built via object.__new__(RefreshScheduler) (a
+        deliberate lightweight-construction pattern used by several existing
+        tests) don't raise AttributeError before _registry is ever set.
+        Likewise, `golden_repos_dir` is read via getattr() rather than direct
+        attribute access: in postgres/cluster mode the resolved backend makes
+        golden_repos_dir irrelevant, so a bare uninitialized instance must
+        still resolve cleanly in that mode. Only when no backend is available
+        AND golden_repos_dir was never set do we raise -- with a clear,
+        explicit RuntimeError instead of the incidental AttributeError that
+        used to leak out of self.golden_repos_dir.
+        """
+        existing = getattr(self, "_registry", None)
+        if existing is not None:
+            return existing
+
+        with self._get_registry_lock():
+            existing = getattr(self, "_registry", None)
+            if existing is not None:
+                return existing
+
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+                resolve_backend_registry_state,
+            )
+
+            backend, postgres_mode_without_backend = resolve_backend_registry_state(
+                caller_name="RefreshScheduler"
+            )
+            golden_repos_dir = getattr(self, "golden_repos_dir", None)
+            if backend is None and golden_repos_dir is None:
+                raise RuntimeError(
+                    "RefreshScheduler.registry accessed before initialization: "
+                    "no golden_repos_dir and no cluster backend available"
+                )
+            resolved = get_server_global_registry(
+                str(golden_repos_dir) if golden_repos_dir is not None else "",
+                backend=backend,
+            )
+
+            if not postgres_mode_without_backend:
+                self._registry = resolved
+
+            return resolved
+
+    @registry.setter
+    def registry(self, value: Any) -> None:
+        """Allow explicit (re-)injection, e.g. by tests that set `.registry` post-construction."""
+        with self._get_registry_lock():
+            self._registry = value
 
     def _is_versioned_snapshot(self, path: str) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
