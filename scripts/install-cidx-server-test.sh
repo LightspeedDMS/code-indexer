@@ -528,6 +528,50 @@ test_cow_local_bind_uses_bind_mount() {
 run_test "--cow-local-bind uses bind mount (mount --bind + fstab bind form), no NFS mount" \
     test_cow_local_bind_uses_bind_mount
 
+test_dry_run_installs_auto_update_units() {
+    local tmpdir output exit_code
+    tmpdir="$(mktemp -d)"
+    output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" --dry-run 2>&1)" && exit_code=0 || exit_code=$?
+    rm -rf "${tmpdir}"
+
+    [[ ${exit_code} -eq 0 ]] \
+        && echo "${output}" | grep -q "cidx-auto-update.service" \
+        && echo "${output}" | grep -q "cidx-auto-update.timer" \
+        && echo "${output}" | grep -q "enable cidx-auto-update.timer" \
+        && echo "${output}" | grep -q "start cidx-auto-update.timer"
+}
+run_test "Dry-run installs and enables/starts cidx-auto-update.service/.timer (Bug: auto-updater never installed)" \
+    test_dry_run_installs_auto_update_units
+
+test_dry_run_threads_auto_update_branch() {
+    local tmpdir output exit_code occurrences
+    tmpdir="$(mktemp -d)"
+    output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" --branch staging --dry-run 2>&1)" && exit_code=0 || exit_code=$?
+    rm -rf "${tmpdir}"
+
+    # Must appear TWICE: once in the pre-existing cidx-server.service unit and
+    # once in the NEW cidx-auto-update.service unit rendered from the
+    # {BRANCH}-parameterized template. A single occurrence means only the
+    # pre-existing (misplaced) env line fired and the auto-update unit itself
+    # was never rendered with the branch substituted.
+    occurrences="$(echo "${output}" | grep -o "CIDX_AUTO_UPDATE_BRANCH=staging" | wc -l)"
+
+    [[ ${exit_code} -eq 0 ]] && [[ "${occurrences}" -eq 2 ]]
+}
+run_test "Dry-run threads --branch staging into CIDX_AUTO_UPDATE_BRANCH for the auto-update unit (not just the pre-existing cidx-server.service line)" \
+    test_dry_run_threads_auto_update_branch
+
+test_dry_run_no_unrendered_branch_placeholder() {
+    local tmpdir output exit_code
+    tmpdir="$(mktemp -d)"
+    output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" --branch staging --dry-run 2>&1)" && exit_code=0 || exit_code=$?
+    rm -rf "${tmpdir}"
+
+    [[ ${exit_code} -eq 0 ]] && ! echo "${output}" | grep -qF '{BRANCH}'
+}
+run_test "Dry-run never leaks an unrendered {BRANCH} placeholder" \
+    test_dry_run_no_unrendered_branch_placeholder
+
 test_repo_token_never_echoed() {
     local tmpdir output exit_code
     tmpdir="$(mktemp -d)"
