@@ -1983,6 +1983,27 @@ def _provider_temporal_index_job(
         }
 
     env = _build_provider_api_key_env(provider_name)
+
+    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
+    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
+    # subprocess installs the PostgreSQL temporal-metadata backend instead
+    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
+    # returns a NEW dict (base_env=env, so the provider API key is
+    # preserved) in postgres mode, or None in sqlite mode -- fall back to
+    # the unmodified env in that case (byte-unchanged existing behavior).
+    # get_config_service().get_config() (not ServerConfigManager().load_config())
+    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
+    # get_config_service() as the sole config-read path.
+    from code_indexer.server.storage.postgres.temporal_child_wiring import (
+        build_temporal_child_env,
+    )
+
+    _merged_env = build_temporal_child_env(
+        get_config_service().get_config(), base_env=env
+    )
+    if _merged_env is not None:
+        env = _merged_env
+
     temporal_options = kwargs.get("temporal_options", {}) or {}
     cmd = _build_temporal_index_cmd(clear, temporal_options)
 

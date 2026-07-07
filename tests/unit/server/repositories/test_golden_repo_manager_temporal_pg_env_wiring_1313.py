@@ -1,0 +1,167 @@
+"""Bug #1313 round-3: golden_repo_manager.py must thread the PG bootstrap env
+var through the temporal `--index-commits` Popen call ONLY, in postgres mode.
+
+Root cause: cluster temporal indexing runs in a CHILD `cidx index
+--index-commits` subprocess spawned via Popen by
+GoldenRepoManager._execute_post_clone_workflow. That subprocess never
+inherited a signal telling it to install the PostgreSQL temporal-metadata
+backend, so it silently fell back to SQLite even in cluster/postgres mode
+(the exact NFS-backed bottleneck Bug #1313 exists to fix). The fix: the
+parent (this manager) computes build_temporal_child_env(server_config) and
+passes it as `env=` to run_with_popen_progress ONLY for the temporal Popen
+call -- the semantic/FTS Popen call always stays env=None (untouched).
+
+These are call-site wiring tests: run_with_popen_progress itself is mocked
+(it already has its own dedicated tests in
+test_progress_subprocess_runner.py); this file proves
+_execute_post_clone_workflow computes and forwards the right env dict at the
+right call site.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+from code_indexer.server.utils.config_manager import ServerConfig
+
+
+@pytest.fixture
+def mock_repo_manager(tmp_path):
+    return GoldenRepoManager(data_dir=str(tmp_path))
+
+
+@pytest.fixture
+def mock_clone_path(tmp_path):
+    clone_path = tmp_path / "test-repo"
+    clone_path.mkdir()
+    return clone_path
+
+
+def _mock_subprocess_run(command, **kwargs):
+    return MagicMock(returncode=0, stdout="", stderr="")
+
+
+class TestTemporalPopenCallGetsPostgresEnvInClusterMode:
+    def test_temporal_command_receives_env_with_bootstrap_dir_var_in_postgres_mode(
+        self, mock_repo_manager, mock_clone_path
+    ):
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+        )
+
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server",
+            storage_mode="postgres",
+            postgres_dsn="postgresql://user:pass@host/db",
+        )
+
+        calls = []
+
+        def _fake_run_with_popen_progress(*, command, phase_name, env=None, **kwargs):
+            calls.append({"phase_name": phase_name, "env": env})
+            return 100
+
+        with (
+            patch("subprocess.run", side_effect=_mock_subprocess_run),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=_fake_run_with_popen_progress,
+            ),
+            patch(
+                "code_indexer.server.services.config_service.get_config_service"
+            ) as mock_get_cfg_svc,
+        ):
+            mock_get_cfg_svc.return_value.get_config.return_value = server_config
+
+            mock_repo_manager._execute_post_clone_workflow(
+                clone_path=str(mock_clone_path),
+                force_init=False,
+                enable_temporal=True,
+                temporal_options=None,
+            )
+
+        by_phase = {c["phase_name"]: c["env"] for c in calls}
+        assert "temporal" in by_phase, f"expected a temporal-phase call, got: {calls}"
+        assert by_phase["temporal"] is not None
+        assert by_phase["temporal"][TEMPORAL_PG_BOOTSTRAP_DIR_ENV] == "/opt/cidx-server"
+
+    def test_semantic_command_always_receives_env_none_even_in_postgres_mode(
+        self, mock_repo_manager, mock_clone_path
+    ):
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server",
+            storage_mode="postgres",
+            postgres_dsn="postgresql://user:pass@host/db",
+        )
+
+        calls = []
+
+        def _fake_run_with_popen_progress(*, command, phase_name, env=None, **kwargs):
+            calls.append({"phase_name": phase_name, "env": env})
+            return 100
+
+        with (
+            patch("subprocess.run", side_effect=_mock_subprocess_run),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=_fake_run_with_popen_progress,
+            ),
+            patch(
+                "code_indexer.server.services.config_service.get_config_service"
+            ) as mock_get_cfg_svc,
+        ):
+            mock_get_cfg_svc.return_value.get_config.return_value = server_config
+
+            mock_repo_manager._execute_post_clone_workflow(
+                clone_path=str(mock_clone_path),
+                force_init=False,
+                enable_temporal=True,
+                temporal_options=None,
+            )
+
+        by_phase = {c["phase_name"]: c["env"] for c in calls}
+        assert by_phase["semantic"] is None, (
+            "the semantic/FTS Popen call must NEVER receive the PG bootstrap "
+            "env -- only the temporal call is postgres-aware"
+        )
+
+    def test_temporal_command_receives_env_none_in_sqlite_mode(
+        self, mock_repo_manager, mock_clone_path
+    ):
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server", storage_mode="sqlite"
+        )
+
+        calls = []
+
+        def _fake_run_with_popen_progress(*, command, phase_name, env=None, **kwargs):
+            calls.append({"phase_name": phase_name, "env": env})
+            return 100
+
+        with (
+            patch("subprocess.run", side_effect=_mock_subprocess_run),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=_fake_run_with_popen_progress,
+            ),
+            patch(
+                "code_indexer.server.services.config_service.get_config_service"
+            ) as mock_get_cfg_svc,
+        ):
+            mock_get_cfg_svc.return_value.get_config.return_value = server_config
+
+            mock_repo_manager._execute_post_clone_workflow(
+                clone_path=str(mock_clone_path),
+                force_init=False,
+                enable_temporal=True,
+                temporal_options=None,
+            )
+
+        by_phase = {c["phase_name"]: c["env"] for c in calls}
+        assert by_phase["temporal"] is None, (
+            "sqlite/solo mode must be byte-unchanged: temporal Popen call "
+            "must receive env=None"
+        )

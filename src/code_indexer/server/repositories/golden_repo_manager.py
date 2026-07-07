@@ -1614,25 +1614,45 @@ class GoldenRepoManager:
         _popen_stdout: List[str] = []
         _popen_stderr: List[str] = []
 
-        def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
+        def _run_popen(
+            command: List[str],
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
+        ) -> None:
             """Run command with Popen progress, re-raising as GitOperationError on failure.
 
             No whole-job timeout is applied (Bug #1218): the only legitimate timeout
             is the per-request outbound embedding-provider HTTP call.
+
+            Bug #1313 round-3: env is forwarded to run_with_popen_progress so
+            the temporal (--index-commits) child subprocess can be handed
+            CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
+            temporal call site below. Defaults to None (inherit current
+            process env, unchanged for the semantic/FTS call).
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
+            # Bug #1313 round-3 regression guard: only pass the env= kwarg
+            # when it is not None, so the semantic/FTS call (and sqlite
+            # mode) keep the EXACT pre-existing call shape -- several
+            # pre-existing tests mock run_with_popen_progress with a strict
+            # (non-**kwargs) signature that does not accept an env kwarg at
+            # all.
+            _popen_kwargs: dict = dict(
+                command=command,
+                phase_name=phase_name,
+                allocator=allocator,
+                progress_callback=progress_callback,
+                all_stdout=_popen_stdout,
+                all_stderr=_popen_stderr,
+                cwd=clone_path,
+                error_label=error_label,
+            )
+            if env is not None:
+                _popen_kwargs["env"] = env
             try:
-                run_with_popen_progress(
-                    command=command,
-                    phase_name=phase_name,
-                    allocator=allocator,
-                    progress_callback=progress_callback,
-                    all_stdout=_popen_stdout,
-                    all_stderr=_popen_stderr,
-                    cwd=clone_path,
-                    error_label=error_label,
-                )
+                run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 # Check for "No files found" — acceptable for golden repo registration
                 combined = "".join(_popen_stdout) + "".join(_popen_stderr)
@@ -1719,7 +1739,10 @@ class GoldenRepoManager:
             # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
             # at DEBUG and never interrupt indexing.
             def _run_popen_with_telemetry(
-                command: List[str], phase_name: str, error_label: str
+                command: List[str],
+                phase_name: str,
+                error_label: str,
+                env: Optional[dict] = None,
             ) -> None:
                 try:
                     from code_indexer.server.services.config_seeding import (
@@ -1733,7 +1756,9 @@ class GoldenRepoManager:
                         _seed_exc,
                     )
                 try:
-                    _run_popen(command, phase_name=phase_name, error_label=error_label)
+                    _run_popen(
+                        command, phase_name=phase_name, error_label=error_label, env=env
+                    )
                 finally:
                     try:
                         from code_indexer.services.provider_health_bridge import (
@@ -1772,11 +1797,29 @@ class GoldenRepoManager:
 
             # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
             if temporal_command is not None:
+                # Bug #1313 round-3: in postgres/cluster mode, hand the child
+                # subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs
+                # the PostgreSQL temporal-metadata backend instead of
+                # silently falling back to SQLite-on-NFS. sqlite/solo mode
+                # (or a failed bootstrap read) yields env=None -- byte
+                # -unchanged existing behavior. ONLY this temporal call site
+                # is postgres-aware; the semantic/FTS call above is
+                # untouched.
+                from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                    build_temporal_child_env,
+                )
+                from ..services.config_service import get_config_service
+
+                _temporal_env = build_temporal_child_env(
+                    get_config_service().get_config()
+                )
+
                 logging.info(f"Executing cidx index --index-commits for {clone_path}")
                 _run_popen_with_telemetry(
                     temporal_command,
                     phase_name="temporal",
                     error_label="temporal indexing",
+                    env=_temporal_env,
                 )
                 logging.info(f"cidx index --index-commits completed for {clone_path}")
 
@@ -3108,25 +3151,36 @@ class GoldenRepoManager:
                     command: List[str],
                     phase_name: str,
                     error_label: str,
+                    env: Optional[dict] = None,
                 ) -> None:
                     """Delegate to shared run_with_popen_progress utility.
 
                     Catches IndexingSubprocessError (raised by the shared utility
                     to avoid circular imports) and re-raises as GoldenRepoError
                     which is the expected error type for callers of this path.
+
+                    Bug #1313 round-4 (Codex Finding 1): env is forwarded so the
+                    temporal (--index-commits) child subprocess can be handed
+                    CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode --
+                    see the temporal branch below. Only passed to the shared
+                    utility when not None, so the semantic/fts call keeps the
+                    EXACT pre-existing call shape (no env kwarg at all).
                     """
                     nonlocal all_stdout, all_stderr
+                    _shared_kwargs: dict = dict(
+                        command=command,
+                        phase_name=phase_name,
+                        allocator=allocator,
+                        progress_callback=progress_callback,
+                        all_stdout=_stdout_lines,
+                        all_stderr=_stderr_lines,
+                        cwd=str(repo_path),
+                        error_label=error_label,
+                    )
+                    if env is not None:
+                        _shared_kwargs["env"] = env
                     try:
-                        _run_with_popen_progress_shared(
-                            command=command,
-                            phase_name=phase_name,
-                            allocator=allocator,
-                            progress_callback=progress_callback,
-                            all_stdout=_stdout_lines,
-                            all_stderr=_stderr_lines,
-                            cwd=str(repo_path),
-                            error_label=error_label,
-                        )
+                        _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
                         raise GoldenRepoError(str(e)) from e
                     finally:
@@ -3241,10 +3295,28 @@ class GoldenRepoManager:
                         if temporal_options.get("all_branches"):
                             command.append("--all-branches")
 
+                        # Bug #1313 round-4 (Codex Finding 1): in postgres/cluster
+                        # mode, hand the child subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR
+                        # so it installs the PostgreSQL temporal-metadata backend
+                        # instead of silently falling back to SQLite-on-NFS.
+                        # sqlite/solo mode (or a failed bootstrap read) yields
+                        # env=None -- byte-unchanged existing behavior.
+                        from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                            build_temporal_child_env,
+                        )
+                        from code_indexer.server.services.config_service import (
+                            get_config_service,
+                        )
+
+                        _temporal_env = build_temporal_child_env(
+                            get_config_service().get_config()
+                        )
+
                         _run_with_popen_progress(
                             command,
                             phase_name="temporal",
                             error_label="create temporal index",
+                            env=_temporal_env,
                         )
 
                         # Bug #131: Update enable_temporal flag in BOTH tables

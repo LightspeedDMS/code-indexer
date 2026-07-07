@@ -565,11 +565,19 @@ class ActivatedRepoIndexManager:
         self,
         args: List[str],
         repo_path: str,
+        env: Optional[dict] = None,
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
         Bug #678: Seeds config before the subprocess starts and drains health events
         in a finally block so telemetry is collected even when the command fails.
+
+        Bug #1313 round-4 (Finding 3): env is forwarded to subprocess.run so
+        the temporal (--index-commits) child subprocess can be handed
+        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see
+        _execute_temporal_indexing. Defaults to None, which subprocess.run
+        treats identically to omitting the kwarg (inherit current process
+        env) -- byte-unchanged for the FTS/semantic callers.
 
         Note (Bug #1218): no whole-job timeout is applied. The only legitimate timeout
         is the per-request outbound embedding-provider HTTP call.
@@ -581,6 +589,7 @@ class ActivatedRepoIndexManager:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
+                env=env,
             )
         finally:
             self._drain_telemetry(repo_path)
@@ -660,15 +669,29 @@ class ActivatedRepoIndexManager:
             return {"success": False, "error": f"FTS indexing error: {str(e)}"}
 
     def _execute_temporal_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute temporal indexing using GitCommitIndexer."""
+        """Execute temporal indexing using GitCommitIndexer.
+
+        Bug #1313 round-4 (Finding 3): in postgres/cluster mode, hand the
+        child subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs the
+        PostgreSQL temporal-metadata backend instead of silently falling
+        back to SQLite-on-NFS. sqlite/solo mode yields env=None --
+        byte-unchanged existing behavior.
+        """
         try:
+            from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                build_temporal_child_env,
+            )
+
             args = ["cidx", "index", "--index-commits"]
             if clear:
                 args.append("--clear")
 
+            _temporal_env = build_temporal_child_env(get_config_service().get_config())
+
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
+                env=_temporal_env,
             )
 
             if result.returncode != 0:
