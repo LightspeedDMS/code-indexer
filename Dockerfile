@@ -58,19 +58,26 @@ ENV PYTHONUNBUFFERED=1 \
 # launched on demand via Coursier and runs the target project's gradle/maven
 # build, both of which need a JDK. curl fetches the Coursier launcher.
 #
-# Pin JDK 17 (LTS), NOT the distro default (21 on bookworm): the JDK that RUNS
-# the project's Gradle must be old enough for that Gradle version. Gradle 7.x
-# (still the most common) only supports Java <=17; on Java 21 the build fails
-# with "Unsupported class file major version 65". Java 17 runs Gradle 7.x and
-# 8.x and scip-java itself, so it is the broadly-compatible choice.
+# Java SCIP needs TWO JDKs:
+#  - JDK 17 (openjdk-17, apt) is the Gradle LAUNCHER. The JDK that runs a
+#    project's Gradle must be old enough for that Gradle version: Gradle 7.x
+#    (still common) only supports Java <=17 (Java 21 -> "Unsupported class file
+#    major version 65"), and Java 17 also runs Gradle 8.x and scip-java itself.
+#  - JDK 21 (Temurin, tarball at /opt/jdk-21) is available as a Gradle TOOLCHAIN
+#    for projects that compile at languageVersion=21 (e.g. the Evolution
+#    monolith). Gradle launched with 17 picks 21 up via installations.paths
+#    (set in the cidx user's gradle.properties below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git libgomp1 tini openjdk-17-jdk-headless curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/coursier/launchers/raw/master/cs-x86_64-pc-linux.gz \
          | gzip -d > /usr/local/bin/cs \
-    && chmod +x /usr/local/bin/cs
+    && chmod +x /usr/local/bin/cs \
+    && mkdir -p /opt/jdk-21 \
+    && curl -fsSL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse" \
+         | tar -xz -C /opt/jdk-21 --strip-components=1
 
-# JAVA_HOME so scip-java / gradle reliably find the JDK.
+# JAVA_HOME points at the 17 launcher; 21 is a toolchain (installations.paths).
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 # Bring over the installed site-packages + the `cidx` console script from the builder.
@@ -81,6 +88,19 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
 USER cidx
 WORKDIR /home/cidx
+
+# Gradle setup for the cidx user so scip-java indexing works out-of-the-box:
+#  - installations.paths=/opt/jdk-21: expose the Java 21 toolchain (see above) so
+#    projects requiring languageVersion=21 compile without "No matching toolchains".
+#  - init.d repositoriesMode=PREFER_PROJECT: let scip-java's SemanticdbGradlePlugin
+#    add its own repository (to fetch semanticdb-javac) on projects that set
+#    dependencyResolutionManagement FAIL_ON_PROJECT_REPOS (e.g. Evolution). cidx
+#    only runs Gradle for SCIP indexing, so relaxing this globally is safe.
+RUN mkdir -p /home/cidx/.gradle/init.d \
+    && printf 'org.gradle.java.installations.paths=/opt/jdk-21\n' \
+         > /home/cidx/.gradle/gradle.properties \
+    && printf 'settingsEvaluated { s -> s.dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.PREFER_PROJECT) } }\n' \
+         > /home/cidx/.gradle/init.d/cidx-scip.gradle
 
 # C11: pre-fetch the scip-java artifact into the runtime user's Coursier cache so
 # index-time `cs launch` is offline-safe (no Maven Central round-trip per index).
