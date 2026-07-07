@@ -21,7 +21,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from typing import Protocol, runtime_checkable
 
-
 # ---------------------------------------------------------------------------
 # GlobalReposBackend
 # ---------------------------------------------------------------------------
@@ -201,6 +200,8 @@ class BackgroundJobsBackend(Protocol):
         metadata: Optional[Dict[str, Any]] = None,
         executing_node: Optional[str] = None,
         claimed_at: Optional[str] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
     ) -> None: ...
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]: ...
