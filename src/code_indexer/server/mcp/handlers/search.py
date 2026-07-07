@@ -865,7 +865,10 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         (repo_entry, target_path, None) on success.
         (None, None, mcp_error_response) on failure.
     """
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
     golden_repos_dir = _get_golden_repos_dir()
     global_repos = _list_global_repos()
@@ -881,8 +884,13 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
+    # Bug #1315: fall back to the registry's own index_path when the alias
+    # pointer file is missing/unreadable, mirroring MultiSearchService's
+    # omni-path resolution so direct and omni queries behave identically.
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
     if not target_path:
         err = _repo_lookup_error(
             user,
