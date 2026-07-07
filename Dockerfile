@@ -13,7 +13,10 @@
 # postgres_dsn, cluster.node_id) to enable cluster mode.
 
 # ---- Build stage ----
-FROM python:3.11-slim AS builder
+# Pin bookworm: it ships openjdk-17 (trixie, the current `slim` default, does
+# not) which the runtime stage needs for scip-java + Gradle 7.x compatibility.
+# Both stages must match so the copied site-packages/glibc are consistent.
+FROM python:3.11-slim-bookworm AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -41,7 +44,7 @@ COPY src ./src
 RUN pip install ".[cluster]"
 
 # ---- Runtime stage ----
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
