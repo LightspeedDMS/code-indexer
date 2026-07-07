@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.26.0] - 2026-07-07
+
+### Fixed
+
+- **Auto-updater now provisions `scip-python`, enabling SCIP indexing cluster-wide.** SCIP index generation (`cidx scip generate` / `add_golden_repo_index index_type=scip`) failed on server nodes with `[Errno 2] No such file or directory: 'scip-python'` — the binary was never installed by the installer or the auto-updater. New idempotent `DeploymentExecutor.ensure_scip_python()` (wired non-fatally as deploy Step 7.1, right after `ensure_ripgrep()`) checks `shutil.which("scip-python")` and, if absent, runs `npm install -g @sourcegraph/scip-python` (300s timeout; nonzero/timeout/OSError logged as WARNING `DEPLOY-GENERAL-201`, never raising — a failed provisioning never aborts a deploy). Mirrors the existing ripgrep/Codex-CLI provisioning pattern. Fresh installs inherit the same coverage: `install-cidx-server.sh` (which itself provisions no toolchain deps) starts the auto-update timer, so `execute()` runs and provisions scip-python on first cycle. Follow-up: `scip-typescript` is a trivial npm mirror; go/csharp/java SCIP indexers use different install patterns.
+
 ## [11.25.0] - 2026-07-07
 
 ### Fixed
