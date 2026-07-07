@@ -66,7 +66,11 @@ class CacheConfig:
     fts_cache_ttl_minutes: float = 10.0
     fts_cache_cleanup_interval: int = 60
     fts_cache_max_size_mb: Optional[int] = None
-    fts_cache_reload_on_access: bool = True
+    # Default False: cidx serves immutable versioned FTS snapshots, so
+    # reloading a cached index on every hit is redundant and, over NFS, a
+    # per-query metadata re-read that drives a large p99 tail. See
+    # FTSIndexCacheConfig.reload_on_access.
+    fts_cache_reload_on_access: bool = False
 
     # Payload cache settings (Story #679)
     payload_preview_size_chars: int = 2000

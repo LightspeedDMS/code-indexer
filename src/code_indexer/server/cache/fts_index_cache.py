@@ -45,7 +45,14 @@ class FTSIndexCacheConfig:
     ttl_minutes: float = 10.0
     cleanup_interval_seconds: int = 60
     max_cache_size_mb: Optional[int] = None  # No limit by default
-    reload_on_access: bool = True  # Call reload() on cache hit for fresh data
+    # Call reload() on cache hit to pick up in-place index changes. Default
+    # False: cidx serves IMMUTABLE versioned snapshots (see CLAUDE.md "Golden
+    # Repo Versioned Path") -- the FTS index at a given cache-key path never
+    # changes (a refresh produces a new path = new key), so reloading on every
+    # hit is pure overhead and, over NFS, a per-query metadata re-read that
+    # causes a large p99 latency tail. Set True only if serving a live-updating
+    # index in place.
+    reload_on_access: bool = False
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -66,7 +73,7 @@ class FTSIndexCacheConfig:
         - CIDX_FTS_CACHE_TTL_MINUTES: TTL in minutes (default: 10)
         - CIDX_FTS_CACHE_CLEANUP_INTERVAL: Cleanup interval in seconds (default: 60)
         - CIDX_FTS_CACHE_MAX_SIZE_MB: Maximum cache size in MB (default: None)
-        - CIDX_FTS_CACHE_RELOAD_ON_ACCESS: Whether to reload on cache hit (default: true)
+        - CIDX_FTS_CACHE_RELOAD_ON_ACCESS: Whether to reload on cache hit (default: false)
 
         Returns:
             FTSIndexCacheConfig instance
@@ -76,7 +83,7 @@ class FTSIndexCacheConfig:
         max_size_mb_str = os.environ.get("CIDX_FTS_CACHE_MAX_SIZE_MB")
         max_size_mb = int(max_size_mb_str) if max_size_mb_str else None
         reload_on_access = (
-            os.environ.get("CIDX_FTS_CACHE_RELOAD_ON_ACCESS", "true").lower() == "true"
+            os.environ.get("CIDX_FTS_CACHE_RELOAD_ON_ACCESS", "false").lower() == "true"
         )
 
         return cls(
@@ -123,7 +130,7 @@ class FTSIndexCacheConfig:
                 "fts_cache_cleanup_interval_seconds", 60
             ),
             max_cache_size_mb=config_data.get("fts_cache_max_size_mb"),
-            reload_on_access=config_data.get("fts_cache_reload_on_access", True),
+            reload_on_access=config_data.get("fts_cache_reload_on_access", False),
         )
 
 
