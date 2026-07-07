@@ -1122,11 +1122,35 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
+# C12: bound the list_global_repos response. On large deployments the full list
+# was an unbounded ~533K-token payload that blows the caller's context. Page it.
+_GLOBAL_REPOS_DEFAULT_LIMIT = 50
+_GLOBAL_REPOS_MAX_LIMIT = 200
+
+
+def _clamp_global_repos_limit(raw: Any) -> int:
+    """Coerce a caller-supplied limit to [1, _GLOBAL_REPOS_MAX_LIMIT]."""
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return _GLOBAL_REPOS_DEFAULT_LIMIT
+    if limit <= 0:
+        return _GLOBAL_REPOS_DEFAULT_LIMIT
+    return min(limit, _GLOBAL_REPOS_MAX_LIMIT)
+
+
 def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for list_global_repos tool."""
+    """Handler for list_global_repos tool (C12: paginated + name filter)."""
     from code_indexer.server.auth.user_manager import UserRole
 
     try:
+        limit = _clamp_global_repos_limit(args.get("limit"))
+        try:
+            offset = max(0, int(args.get("offset", 0)))
+        except (TypeError, ValueError):
+            offset = 0
+        name_filter = str(args.get("name_filter") or "").strip().lower()
+
         repos = _list_global_repos()
 
         # Admin role bypasses group-based access filtering entirely.
@@ -1144,7 +1168,31 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 )
                 repos = [r for r in repos if r.get("repo_name", "") in accessible_names]
 
-        return _mcp_response({"success": True, "repos": repos})
+        # Optional substring filter over the repo's identifying names, so callers
+        # can find a repo without paging the whole list.
+        if name_filter:
+
+            def _matches(r: Dict[str, Any]) -> bool:
+                for key in ("repo_name", "user_alias", "golden_repo_alias"):
+                    if name_filter in str(r.get(key) or "").lower():
+                        return True
+                return False
+
+            repos = [r for r in repos if _matches(r)]
+
+        total = len(repos)
+        page = repos[offset : offset + limit]
+        return _mcp_response(
+            {
+                "success": True,
+                "repos": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(page),
+                "has_more": offset + len(page) < total,
+            }
+        )
     except Exception as e:
         logger.warning("handle_list_global_repos failed: %s", e, exc_info=True)
         return _mcp_response({"success": False, "error": str(e), "repos": []})

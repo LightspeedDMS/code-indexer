@@ -6,7 +6,16 @@ tl_dr: List all globally accessible repositories.
 slim_description: "List all globally accessible repositories registered via add_golden_repo, queryable as '{name}-global' aliases."
 inputSchema:
   type: object
-  properties: {}
+  properties:
+    limit:
+      type: integer
+      description: "Max repos to return (default 50, max 200). The list is paged to avoid huge responses."
+    offset:
+      type: integer
+      description: "Number of repos to skip for pagination (default 0)."
+    name_filter:
+      type: string
+      description: "Case-insensitive substring; return only repos whose name/alias contains it."
   required: []
 outputSchema:
   type: object
@@ -47,6 +56,21 @@ outputSchema:
             - string
             - 'null'
             description: ISO 8601 creation timestamp
+    total:
+      type: integer
+      description: Total repos matching (before limit/offset) for pagination
+    offset:
+      type: integer
+      description: Offset applied to this page
+    limit:
+      type: integer
+      description: Limit applied to this page
+    returned:
+      type: integer
+      description: Number of repos in this page
+    has_more:
+      type: boolean
+      description: True if more repos remain past this page (offset+returned < total)
     error:
       type: string
       description: Error message if failed
@@ -63,3 +87,5 @@ ABOUT cidx-meta-global: This repository appears in the list but is NOT a code re
 DISCOVERY PATTERN: Before listing all repos, search 'cidx-meta-global' to discover which repositories are relevant to your topic: search_code('authentication', repository_alias='cidx-meta-global') returns repos that handle authentication, then query those specific repos for detailed code.
 
 Use list_global_repos() only when explicitly asked for the full repo list or to verify a repo exists. For detailed status of one repo (temporal support, refresh times), use repository_status instead.
+
+PAGINATION: The response is paged (default 50, max 200 per call). Use total/has_more to page with offset, or pass name_filter to jump straight to a repo by substring instead of paging the whole list. Prefer searching 'cidx-meta-global' (above) over listing everything.
