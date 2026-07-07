@@ -25,6 +25,7 @@ from code_indexer.server.mcp.protocol import (
     _resolve_handler_timeout,
     HANDLER_TIMEOUT_SECONDS,
     WRITE_MODE_HANDLER_TIMEOUT_SECONDS,
+    SEARCH_HANDLER_TIMEOUT_SECONDS,
 )
 
 EXPECTED_DEFAULT_TIMEOUT = 60
@@ -121,7 +122,7 @@ class TestHandlerTimeoutResolver:
 
     def test_arbitrary_tool_gets_default_timeout(self):
         """Any tool without an explicit override must get HANDLER_TIMEOUT_SECONDS."""
-        for tool_name in ("search_code", "get_file_content", "list_files", "git_log"):
+        for tool_name in ("get_file_content", "list_files", "git_log"):
             timeout = _resolve_handler_timeout(tool_name)
             assert timeout == HANDLER_TIMEOUT_SECONDS, (
                 f"Expected default {HANDLER_TIMEOUT_SECONDS}s for {tool_name!r}, "
@@ -135,6 +136,20 @@ class TestHandlerTimeoutResolver:
         override must give at least 120s of headroom for surrounding git work.
         """
         assert WRITE_MODE_HANDLER_TIMEOUT_SECONDS >= 720
+
+    def test_search_code_gets_extended_timeout(self):
+        """search_code must return SEARCH_HANDLER_TIMEOUT_SECONDS, not the 60s default.
+
+        Bug #1319: temporal search_code queries (query embed + HNSW over many
+        quarterly shards + hydration + reranking) legitimately take ~13-20s and
+        the tail exceeds 60s under concurrent load, even though the query is
+        correct and eventually completes. Uses the existing per-tool override
+        mechanism (Issue #1190) rather than raising the global default.
+        """
+        timeout = _resolve_handler_timeout("search_code")
+        assert timeout == SEARCH_HANDLER_TIMEOUT_SECONDS
+        assert timeout == 180
+        assert timeout > HANDLER_TIMEOUT_SECONDS  # must exceed the default
 
 
 class TestInvokeHandlerTimeoutParam:

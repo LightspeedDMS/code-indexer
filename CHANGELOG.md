@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.27.0] - 2026-07-07
+
+### Fixed
+
+- **Auto-updater now provisions the Node.js toolchain, unblocking SCIP indexing and Codex-CLI provisioning cluster-wide (#1318).** SCIP builds and the Codex-CLI install were inert on server nodes because Node.js/npm was never installed (scip-python and codex are npm packages), so v11.26.0's `ensure_scip_python()` correctly logged `npm not available on PATH` and SCIP builds failed with `[Errno 2] No such file or directory: 'scip-python'`. New idempotent `DeploymentExecutor.ensure_nodejs()` (deploy Step 6.65, before the Codex-CLI and scip-python steps) installs pinned Node.js v22.11.0 LTS from the official static tarball to `/opt/node` (mirroring the `/opt/rust` provisioning; x86_64-guarded; non-fatal WARNING `DEPLOY-GENERAL-202`, never aborts a deploy; path-traversal-guarded extraction). `/opt/node/bin` is wired onto BOTH the running auto-updater process PATH (so the same-run npm consumers, which call `shutil.which`/`npm` with no explicit env, find npm) AND the `cidx-server.service` unit PATH (so the server and its index subprocesses find scip-python at runtime), the latter mirroring `_ensure_systemd_rust_path`. Known follow-up: the reinstall/partial-extract path should also verify `bin/npm` and clear the install dir.
+- **Temporal `search_code` queries no longer hit the blanket 60s MCP handler timeout under load (#1319).** Temporal search (query embed + HNSW over many quarterly shards + hydration + reranking) legitimately takes ~13-20s and its tail intermittently exceeded the generic `HANDLER_TIMEOUT_SECONDS = 60` cap (Bug #1008) under concurrent load, aborting queries whose recall was correct. Added `search_code` to the existing per-tool `_HANDLER_TIMEOUT_OVERRIDES` with a bounded `SEARCH_HANDLER_TIMEOUT_SECONDS = 180`; the 60s default is unchanged for all other tools and `exit_write_mode` (720s) is untouched. `search_code` is the single registered query tool (temporal is a mode parameter, not a separate tool).
+
 ## [11.26.0] - 2026-07-07
 
 ### Fixed
