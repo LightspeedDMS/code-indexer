@@ -954,7 +954,11 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "job_id": None,
                 }
             )
-        if alias not in _utils.app_module.golden_repo_manager.golden_repos:
+        # Bug #1314: resolve via golden_repo_exists() (shared-backend-backed,
+        # reloads on a local cache miss) instead of a raw in-memory dict
+        # membership check, so a repo registered by ANOTHER worker/node in
+        # the cluster is found here too.
+        if not _utils.app_module.golden_repo_manager.golden_repo_exists(alias):
             return _mcp_response(
                 {
                     "success": False,
