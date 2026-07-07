@@ -3199,7 +3199,54 @@ def index(
                 )
 
         # Handle --index-commits flag (standalone mode only - daemon delegates above)
+        # Bug #1313 round-3: the CIDX_TEMPORAL_PG_BOOTSTRAP_DIR contract below
+        # lives in THIS standalone branch specifically because golden-repo
+        # clones are always `cidx init`'d WITHOUT --daemon (see
+        # golden_repo_manager.py / refresh_scheduler.py), so --index-commits
+        # always takes the standalone path here -- it never delegates to a
+        # daemon for golden/global repos. If that invariant ever changes, a
+        # daemon-delegation path would ALSO need this bootstrap wiring.
         if index_commits:
+            # Bug #1313 round-3 (Codex round-3 finding): the server's
+            # lifespan process installs the PostgreSQL temporal-metadata
+            # factory only in ITS OWN process. Cluster temporal indexing
+            # actually runs in THIS child subprocess, spawned via Popen by
+            # the server -- which never called
+            # set_temporal_metadata_backend_factory, so it silently used the
+            # SQLite backend and recreated temporal_metadata.db on the
+            # NFS-backed golden-repos mount (the exact bottleneck Bug #1313
+            # fixes). CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (set by the parent ONLY
+            # in postgres/cluster mode -- see temporal_child_wiring.py) tells
+            # this child to install the real PostgreSQL backend before
+            # constructing any TemporalMetadataStore. Absence means today's
+            # SQLite behavior (CLI/solo byte-unchanged).
+            _temporal_pg_pool = None
+            _temporal_pg_bootstrap_dir = os.environ.get(
+                "CIDX_TEMPORAL_PG_BOOTSTRAP_DIR"
+            )
+            if _temporal_pg_bootstrap_dir:
+                # Lazy import: server/psycopg machinery is only touched when
+                # this env var is actually present (cluster-mode child),
+                # never for CLI/solo -- preserves the ~329ms import budget.
+                from .server.storage.postgres.temporal_child_wiring import (
+                    install_postgres_temporal_backend_from_bootstrap,
+                )
+
+                try:
+                    _temporal_pg_pool = (
+                        install_postgres_temporal_backend_from_bootstrap(
+                            _temporal_pg_bootstrap_dir
+                        )
+                    )
+                except Exception as _pg_bootstrap_exc:
+                    console.print(
+                        f"❌ PostgreSQL temporal metadata backend is required "
+                        f"in cluster mode but could not be initialized: "
+                        f"{_pg_bootstrap_exc}",
+                        style="red",
+                    )
+                    sys.exit(1)
+
             try:
                 # Lazy import temporal indexing components
                 from .services.temporal.temporal_indexer import TemporalIndexer
@@ -3561,6 +3608,19 @@ def index(
                 ):  # Always show stack trace for debugging
                     console.print(traceback.format_exc())
                 sys.exit(1)
+            finally:
+                # Bug #1313 round-3: undo this process's PG temporal wiring
+                # regardless of success (sys.exit(0) above) or failure
+                # (sys.exit(1) above) -- SystemExit still runs finally
+                # blocks. No-op when the bootstrap env var was absent
+                # (_temporal_pg_pool stays None -- CLI/solo path untouched).
+                if _temporal_pg_pool is not None:
+                    from .storage.temporal_metadata_backend_registry import (
+                        clear_temporal_metadata_backend_factory,
+                    )
+
+                    clear_temporal_metadata_backend_factory()
+                    _temporal_pg_pool.close()
 
     # Handle --rebuild-fts-index flag (early exit path)
     if rebuild_fts_index:

@@ -2107,21 +2107,42 @@ class RefreshScheduler:
         _popen_stdout: list = []
         _popen_stderr: list = []
 
-        def _run_popen_c(command: list, phase_name: str, error_label: str) -> None:
-            """Run command with Popen progress, re-raising as RuntimeError on failure."""
+        def _run_popen_c(
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
+        ) -> None:
+            """Run command with Popen progress, re-raising as RuntimeError on failure.
+
+            Bug #1313 round-3: env is forwarded to run_with_popen_progress so
+            the temporal (--index-commits) child subprocess can be handed
+            CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
+            temporal call site below. Defaults to None (inherit current
+            process env, unchanged for the semantic/FTS call).
+            """
             _popen_stdout.clear()
             _popen_stderr.clear()
+            # Bug #1313 round-3 regression guard: only pass the env= kwarg
+            # when it is not None, so the semantic/FTS call (and sqlite
+            # mode) keep the EXACT pre-existing call shape -- several
+            # pre-existing tests mock run_with_popen_progress with a strict
+            # (non-**kwargs) signature that does not accept an env kwarg at
+            # all.
+            _popen_kwargs: dict = dict(
+                command=command,
+                phase_name=phase_name,
+                allocator=allocator,
+                progress_callback=progress_callback,
+                all_stdout=_popen_stdout,
+                all_stderr=_popen_stderr,
+                cwd=str(source_path),
+                error_label=error_label,
+            )
+            if env is not None:
+                _popen_kwargs["env"] = env
             try:
-                run_with_popen_progress(
-                    command=command,
-                    phase_name=phase_name,
-                    allocator=allocator,
-                    progress_callback=progress_callback,
-                    all_stdout=_popen_stdout,
-                    all_stderr=_popen_stderr,
-                    cwd=str(source_path),
-                    error_label=error_label,
-                )
+                run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 error_msg = str(e)
                 # SIGTERM check — returncode -15 is in the error message from popen
@@ -2144,7 +2165,10 @@ class RefreshScheduler:
         # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
         # at DEBUG and never interrupt indexing.
         def _run_popen_c_with_telemetry(
-            command: list, phase_name: str, error_label: str
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
         ) -> None:
             try:
                 from code_indexer.server.services.config_seeding import (
@@ -2157,7 +2181,9 @@ class RefreshScheduler:
                     "Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc
                 )
             try:
-                _run_popen_c(command, phase_name=phase_name, error_label=error_label)
+                _run_popen_c(
+                    command, phase_name=phase_name, error_label=error_label, env=env
+                )
             finally:
                 try:
                     from code_indexer.services.provider_health_bridge import (
@@ -2184,6 +2210,19 @@ class RefreshScheduler:
 
         # Execute Step 2: temporal indexing (if enabled)
         if temporal_command is not None:
+            # Bug #1313 round-3: in postgres/cluster mode, hand the child
+            # subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs the
+            # PostgreSQL temporal-metadata backend instead of silently
+            # falling back to SQLite-on-NFS. sqlite/solo mode (or a failed
+            # bootstrap read) yields env=None -- byte-unchanged existing
+            # behavior. ONLY this temporal call site is postgres-aware; the
+            # semantic call above is untouched.
+            from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                build_temporal_child_env,
+            )
+
+            _temporal_env = build_temporal_child_env(get_config_service().get_config())
+
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -2191,6 +2230,7 @@ class RefreshScheduler:
                 temporal_command,
                 phase_name="temporal",
                 error_label=f"temporal indexing on source for {alias_name}",
+                env=_temporal_env,
             )
             logger.info("cidx index (temporal) on source completed successfully")
 

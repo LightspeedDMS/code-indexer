@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.23.0] - 2026-07-06
+
+### Fixed
+
+- **Temporal indexing no longer bottlenecks on SQLite-WAL-over-NFS in cluster mode (#1313).** The temporal metadata store (`hash_prefix -> point_id` map, write-only at runtime) was a per-shard SQLite-WAL database living inside each quarterly shard directory -- i.e. on the shared golden-repos NFS mount in cluster (`storage_mode: postgres`) deployments -- committed and WAL-checkpointed once per commit by 8 index-worker threads. py-spy proved all 8 threads parked in `save_metadata_batch`/`checkpoint_wal`, yielding a ~25x slowdown (a ~450-commit repo took ~77 min for ~3 min of real work) and a Cluster-Aware-State invariant violation. The metadata store is now backend-pluggable behind a `TemporalMetadataBackend` protocol: `TemporalMetadataSqliteBackend` (CLI/solo, byte-for-byte unchanged) and `TemporalMetadataPostgresBackend` (cluster; new additive table `temporal_metadata` via migration 033, keyed by a `collection_key = sha256(str(collection_path))[:32]` discriminator, single-transaction batch upsert with `SET LOCAL synchronous_commit = off`). Backend selection is process-local injection: the server installs the PG factory (or a fail-loud poison factory) in postgres mode; CLI/solo installs nothing and keeps SQLite.
+- **Cluster temporal indexing subprocesses now use PostgreSQL, not per-node SQLite-on-NFS (#1313).** Cluster temporal indexing runs in child `cidx index --index-commits` subprocesses, which do not inherit the server process's in-memory backend registry. A path-only IPC contract (`CIDX_TEMPORAL_PG_BOOTSTRAP_DIR`, carrying the server dir path -- never the DSN, which the child re-reads from bootstrap `config.json`) lets each child install the PG backend before any `TemporalMetadataStore` construction, failing loud (`sys.exit(1)`) rather than silently recreating `temporal_metadata.db` on NFS. All five server-side temporal launch sites (post-clone registration, scheduled refresh, `add_golden_repo_index` temporal, provider temporal job, activated-repo temporal) pass the contract in postgres mode; a source-scan enumeration guard test fails CI if a future launch site is added without it. CLI/solo indexing is unchanged (no env -> SQLite). Existing SQLite-on-NFS temporal indexes need no forced re-index (the store is write-only at query time); PG rows populate on the next refresh.
+
 ## [11.22.0] - 2026-07-06
 
 ### Fixed

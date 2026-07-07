@@ -1046,6 +1046,117 @@ def make_lifespan(
                     )
                 )
 
+            # Bug #1313: route temporal collection metadata storage
+            # (TemporalMetadataStore) through PostgreSQL instead of SQLite in
+            # cluster mode. Root cause: the SQLite-WAL temporal_metadata.db
+            # lives on the shared NFS golden-repos mount in cluster mode; NFS
+            # cannot satisfy WAL's -shm requirement, serializing all 8
+            # indexing threads on NFS fsync. Mirrors the coalescer registry
+            # wiring pattern (Story #1079 Phase E): a process-level factory is
+            # installed ONCE here so every TemporalMetadataStore construction
+            # (in filesystem_vector_store.py / dashboard_service.py) routes
+            # through TemporalMetadataPostgresBackend.
+            #
+            # Round-2 rework (Codex Finding A): the registry factory is now
+            # ALWAYS installed in postgres mode -- either the real PostgreSQL
+            # factory on success, or a "poison" factory
+            # (install_poison_temporal_metadata_backend_factory) that raises a
+            # clear operational RuntimeError the moment any caller
+            # constructs a TemporalMetadataStore, on failure. Leaving the
+            # factory unset on failure (the round-1 behavior) let
+            # TemporalMetadataStore's facade silently default to the
+            # SQLite backend, reintroducing the exact NFS-backed
+            # SQLite-WAL Cluster-Aware-State violation this bug fixes.
+            # Server startup itself still survives (mirrors the non-fatal
+            # convention used by every other postgres-mode wiring block in
+            # this file, e.g. the coalescer registry and the early
+            # ConfigService pool switch above) -- only temporal reads/writes
+            # fail, loudly and actionably, instead of silently degrading.
+            try:
+                from code_indexer.server.storage.postgres.temporal_metadata_backend import (
+                    TemporalMetadataPostgresBackend,
+                    make_postgres_temporal_metadata_factory,
+                )
+                from code_indexer.storage.temporal_metadata_backend_registry import (
+                    install_poison_temporal_metadata_backend_factory,
+                    set_temporal_metadata_backend_factory,
+                )
+
+                _temporal_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _temporal_pool is not None:
+                    # Bug #1313 round-3: build the factory via the SINGLE
+                    # shared definition (also used by
+                    # temporal_child_wiring.py for the child-process
+                    # bootstrap path) so both compute an identical
+                    # collection_key for the same collection_path. The type
+                    # annotation keeps TemporalMetadataPostgresBackend
+                    # meaningfully referenced (mypy-checked), not merely
+                    # imported for its own sake.
+                    _pg_factory: Callable[[Path], TemporalMetadataPostgresBackend] = (
+                        make_postgres_temporal_metadata_factory(_temporal_pool)
+                    )
+                    set_temporal_metadata_backend_factory(_pg_factory)
+                    logger.info(
+                        "Bug #1313: temporal metadata backend factory installed "
+                        "(PostgreSQL) — TemporalMetadataStore will bypass the "
+                        "NFS-backed SQLite-WAL bottleneck",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    _pool_unavailable_reason = (
+                        "storage_mode=postgres but no PostgreSQL connection "
+                        "pool is available on backend_registry "
+                        "(critical_connection_pool and connection_pool both "
+                        "None)"
+                    )
+                    install_poison_temporal_metadata_backend_factory(
+                        _pool_unavailable_reason
+                    )
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1313",
+                            f"{_pool_unavailable_reason}; installed a poison "
+                            f"temporal metadata backend factory so temporal "
+                            f"reads/writes fail LOUD instead of silently "
+                            f"degrading to the NFS-backed SQLite backend "
+                            f"(Bug #1313)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            except Exception as _temporal_backend_exc:
+                try:
+                    from code_indexer.storage.temporal_metadata_backend_registry import (
+                        install_poison_temporal_metadata_backend_factory as _install_poison_on_error,
+                    )
+
+                    _install_poison_on_error(
+                        f"failed to install the PostgreSQL temporal metadata "
+                        f"backend factory: {_temporal_backend_exc!r}"
+                    )
+                except Exception:
+                    logger.critical(
+                        "Bug #1313: could not even install the poison temporal "
+                        "metadata backend factory after a wiring failure -- "
+                        "the registry may be left unset and TemporalMetadataStore "
+                        "could silently fall back to SQLite",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1313-B",
+                        f"Failed to install temporal metadata backend factory; "
+                        f"installed a poison factory so temporal reads/writes "
+                        f"fail LOUD instead of silently degrading to the "
+                        f"NFS-backed SQLite backend: {_temporal_backend_exc}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Auto-seed API keys if server config is blank (Story #20)
         # Bug #1309: This MUST run after the early ConfigService PG pool switch
         # above (so postgres/cluster mode reads the PG-backed config with the
@@ -3624,6 +3735,23 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Bug #1313: clear the process-level temporal metadata backend factory
+        # so a subsequent lifespan cycle in the same process does not inherit a
+        # stale PostgreSQL-backed factory. Non-fatal — never abort the
+        # remaining shutdown chain.
+        try:
+            from code_indexer.storage.temporal_metadata_backend_registry import (
+                clear_temporal_metadata_backend_factory,
+            )
+
+            clear_temporal_metadata_backend_factory()
+        except Exception:
+            logger.debug(
+                "Temporal metadata backend factory clear failed (expected "
+                "during shutdown)",
                 exc_info=True,
             )
 
