@@ -11,11 +11,61 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_alias_or_index_path(
+    alias_manager: "AliasManager",
+    alias_name: str,
+    repo_entry: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Resolve alias_name to a filesystem path, falling back to the registry's
+    index_path when the alias pointer file is missing/unreadable (Bug #1315).
+
+    Both direct (-global) and omni cross-repo search resolution call this
+    shared helper (Messi Rule #4 anti-duplication) so the fallback semantics
+    stay identical between the two paths -- see
+    ``code_indexer.server.multi.multi_search_service.MultiSearchService._get_repository_path``
+    and ``code_indexer.server.mcp.handlers.search._resolve_global_repo_target``.
+
+    The alias pointer JSON (managed by ``AliasManager``) is normally created
+    at activation time and is the authoritative, current target path (it
+    tracks refresh/swap operations). The registry's own ``index_path`` field
+    is written atomically at registration time and becomes a valid fallback
+    when the alias pointer file was never created or was lost (e.g. a
+    bulk-provisioning gap) -- it is an already-trusted field from the SAME
+    registry row already used to confirm the repo exists, not a new/masking
+    fallback (Messi Rule #2 anti-fallback).
+
+    Args:
+        alias_manager: AliasManager instance scoped to the aliases directory.
+        alias_name: Alias to resolve (e.g. "my-repo-global").
+        repo_entry: Registry row dict (must contain "index_path" for the
+            fallback to be attempted), or None if the repo entry is unknown.
+
+    Returns:
+        Resolved filesystem path string, or None if neither the alias
+        pointer nor a valid on-disk index_path resolves.
+    """
+    target_path = alias_manager.read_alias(alias_name)
+    if target_path:
+        return target_path
+
+    index_path = repo_entry.get("index_path") if repo_entry else None
+    if index_path and Path(index_path).exists():
+        logger.warning(
+            "Alias pointer for '%s' missing/unreadable; falling back to "
+            "registry index_path '%s' (Bug #1315)",
+            alias_name,
+            index_path,
+        )
+        return str(index_path)
+
+    return None
 
 
 class AliasManager:

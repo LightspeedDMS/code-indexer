@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.25.0] - 2026-07-07
+
+### Fixed
+
+- **Omni and global-repo search no longer fail when a repo's alias pointer file is missing (#1315).** Global-repo path resolution called `AliasManager.read_alias(alias)` and hard-failed with `"Alias for global repository '<alias>' not found"` when the alias pointer JSON was missing, ignoring the valid `index_path` already stored in the registry row. In a multi-repo cluster this made omni `*` cross-repo search silently return partial results (11 of 12 global repos erroring in `results_by_repo`) for repos registered without an alias pointer (a bulk-provisioning gap). A new shared `resolve_alias_or_index_path()` helper resolves via the alias pointer first (authoritative/current) and falls back to the registry's own `index_path` when the pointer is missing and the path exists on disk (WARNING logged, `None` -> preserved hard failure when neither resolves). The fallback is versioned-path-trap-safe: `index_path` is written only at registration and is always the mutable base clone (refresh re-indexes the base clone in place and swaps only the alias pointer, never rewriting `index_path`), so the fallback never serves a `.versioned/` immutable snapshot. Routed through the helper at all five resolution sites: `multi_search_service.py` (omni fan-out), `mcp/handlers/search.py` (direct global query), `services/search_service.py`, `multi/scip_multi_service.py`, and `services/stats_service.py`. Underlying provisioning gap (alias pointers uncreated) tracked as a follow-up.
+
 ## [11.24.0] - 2026-07-07
 
 ### Fixed
