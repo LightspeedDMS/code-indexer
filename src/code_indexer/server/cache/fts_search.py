@@ -53,7 +53,12 @@ def cached_fts_search(
         index, schema = _loader()
 
     # A fresh, lightweight manager attached to the (possibly shared, cached)
-    # open index -- no I/O, no writer -- serves the search.
+    # open index -- no I/O, no writer -- serves the search. skip_reload=True:
+    # the cache already manages freshness (loader opens fresh, reload_on_access
+    # refreshes on hit) and served snapshots are immutable, so search()'s own
+    # per-query index.reload() would be a redundant NFS metadata re-read (a p99
+    # tail source) -- unless the caller explicitly asked to reload.
     search_manager = TantivyIndexManager(fts_index_dir)
     search_manager.attach_cached_index(index, schema)
+    search_kwargs.setdefault("skip_reload", True)
     return search_manager.search(**search_kwargs)

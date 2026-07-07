@@ -31,7 +31,8 @@ def test_bypass_cache_opens_readonly_and_searches():
     loader_mgr.open_for_search.assert_called_once()
     loader_mgr.initialize_index.assert_not_called()  # never creates a writer
     search_mgr.attach_cached_index.assert_called_once_with("IDX", "SCHEMA")
-    search_mgr.search.assert_called_once_with(query_text="q", limit=5)
+    # skip_reload=True: no redundant per-query index.reload() on the cached path
+    search_mgr.search.assert_called_once_with(query_text="q", limit=5, skip_reload=True)
 
 
 def test_uses_cache_when_provided():

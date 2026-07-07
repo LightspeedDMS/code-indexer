@@ -55,6 +55,43 @@ def test_open_for_search_missing_index_raises(tmp_path):
         reader.open_for_search()
 
 
+class _IndexSpy:
+    """Delegates to a real tantivy Index but counts reload() calls.
+
+    (tantivy's native Index.reload is read-only, so it can't be patched in
+    place -- wrap it instead. search() only calls reload() + searcher().)
+    """
+
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "reloads", 0)
+
+    def reload(self):
+        object.__setattr__(self, "reloads", self.reloads + 1)
+        return self._real.reload()
+
+    def __getattr__(self, name):
+        # Delegate everything else (searcher, parse_query, ...) to the real index.
+        return getattr(object.__getattribute__(self, "_real"), name)
+
+
+def test_search_skip_reload_returns_results_without_reloading(tmp_path):
+    index_dir = tmp_path / "tantivy_index"
+    _build_index(index_dir)
+
+    reader = TantivyIndexManager(index_dir)
+    index, _ = reader.open_for_search()
+    spy = _IndexSpy(index)
+    reader._index = spy  # type: ignore[assignment]
+
+    results = reader.search(query_text="authenticate", limit=5, skip_reload=True)
+    assert any("login.py" in r.get("path", "") for r in results)
+    assert spy.reloads == 0  # no reload on the cached serving path
+
+    reader.search(query_text="authenticate", limit=5)  # default still reloads
+    assert spy.reloads == 1
+
+
 def test_attach_cached_index_serves_search_without_io(tmp_path):
     index_dir = tmp_path / "tantivy_index"
     _build_index(index_dir)

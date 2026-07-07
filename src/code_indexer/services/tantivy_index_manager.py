@@ -677,6 +677,7 @@ class TantivyIndexManager:
         path_filter: Optional[str] = None,  # Deprecated: use path_filters
         query: Optional[str] = None,  # Backwards compatibility
         use_regex: bool = False,  # NEW: Enable regex pattern matching
+        skip_reload: bool = False,  # Skip per-query index.reload() (see below)
     ) -> List[Dict[str, Any]]:
         """
         Search the FTS index with configurable options.
@@ -747,8 +748,16 @@ class TantivyIndexManager:
             import tantivy
             from tantivy import Query as TantivyQuery
 
-            # Reload index to get latest documents
-            self._index.reload()
+            # Reload index to pick up newly-committed segments. Skipped on the
+            # cached server serving path (skip_reload=True): reload() re-reads
+            # segment metadata from disk on EVERY query, which over NFS causes a
+            # p99 latency tail. There it is redundant -- the FTSIndexCache owns
+            # freshness (its loader opens fresh and reload_on_access refreshes on
+            # hit), and golden/activated snapshots are immutable between refreshes
+            # (a refresh produces a new index dir = new cache key). The CLI/daemon
+            # (live-updating index) keeps the default reload.
+            if not skip_reload:
+                self._index.reload()
             searcher = self._index.searcher()
 
             # Select field based on case sensitivity
