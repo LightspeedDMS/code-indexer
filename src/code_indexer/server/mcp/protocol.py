@@ -64,10 +64,19 @@ HANDLER_TIMEOUT_SECONDS = 60
 # WRITE_MODE_HANDLER_TIMEOUT_SECONDS AND that client cap must move together.
 WRITE_MODE_HANDLER_TIMEOUT_SECONDS = 720
 
+# Extended timeout for search_code (Bug #1319).
+# Temporal search_code queries (query embed + HNSW over many quarterly shards +
+# hydration + reranking) legitimately take ~13-20s, and the tail intermittently
+# exceeds the 60s default under concurrent load even though recall is correct
+# once the query completes. 180s is a bounded-but-larger safety cap, not an
+# unbounded wait.
+SEARCH_HANDLER_TIMEOUT_SECONDS = 180
+
 # Per-tool timeout overrides for sync handlers that legitimately need more than
 # HANDLER_TIMEOUT_SECONDS. All other tools keep the 60s default (Bug #1008).
 _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "exit_write_mode": WRITE_MODE_HANDLER_TIMEOUT_SECONDS,
+    "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
 }
 
 

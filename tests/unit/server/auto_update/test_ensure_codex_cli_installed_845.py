@@ -101,6 +101,7 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_data_dir_env_var", return_value=True),
         patch.object(executor, "_ensure_malloc_arena_max", return_value=True),
         patch.object(executor, "ensure_ripgrep", return_value=True),
+        patch.object(executor, "ensure_nodejs", return_value=True),
         patch.object(executor, "_ensure_sudoers_restart", return_value=True),
         patch.object(executor, "_ensure_memory_overcommit", return_value=True),
         patch.object(executor, "_ensure_swap_file", return_value=True),

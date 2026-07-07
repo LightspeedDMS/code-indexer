@@ -18,6 +18,9 @@ import sys
 import os
 import pwd
 import shutil
+import tarfile
+import tempfile
+import platform
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -147,6 +150,22 @@ RUSTC_VERSION_TIMEOUT_SECONDS = 10  # quick binary probe
 # The auto-updater runs as root but cidx-server runs as code-indexer;
 # /root/.cargo is unreachable (0550), so we install to /opt/rust.
 RUST_SYSTEM_DIR = Path("/opt/rust")
+
+# BUG #1318: Node.js toolchain provisioning constants. Node.js/npm is not
+# installed on any server node, so ensure_scip_python() and the Codex CLI
+# install both fail with "npm not available on PATH". Fix: provision a
+# pinned Node.js LTS release to a system-wide dir the SAME way Rust is
+# provisioned to RUST_SYSTEM_DIR (/opt/rust) — a static official tarball
+# (not a distro package, avoiding dnf/apt version drift) installed to a
+# dir reachable by both the (often root) auto-updater and the code-indexer
+# service user running cidx-server's child index subprocesses.
+NODEJS_VERSION = "22.11.0"  # current LTS ("Jod") at time of writing
+NODEJS_DIST_URL = (
+    f"https://nodejs.org/dist/v{NODEJS_VERSION}/node-v{NODEJS_VERSION}-linux-x64.tar.xz"
+)
+NODEJS_INSTALL_DIR = Path("/opt/node")
+NODEJS_INSTALL_TIMEOUT_SECONDS = 300  # curl download + tar extract; generous budget
+NODEJS_VERSION_PROBE_TIMEOUT_SECONDS = 10  # quick binary probe
 
 # Maximum bytes of subprocess stderr captured in warning log messages.
 MAX_ERROR_SNIPPET_LENGTH = 200
@@ -3588,6 +3607,20 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Step 6.65: BUG #1318 - Provision Node.js/npm BEFORE the npm-dependent
+        # steps below (Codex CLI install, scip-python install) so both can
+        # actually find npm on PATH instead of silently no-op'ing.
+        if not self.ensure_nodejs():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js provisioning could not be verified/installed — "
+                    "npm-dependent features (scip-python, Codex CLI) will be "
+                    "unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Step 6.7: Story #845 - Idempotently install/update Codex CLI (optional feature)
         if not self._ensure_codex_cli_installed():
             logger.warning(
@@ -4123,6 +4156,144 @@ class DeploymentExecutor:
         self._probe_codex_version()
         return True
 
+    def _check_node_installed(self) -> bool:
+        """BUG #1318: Return True if Node.js is already installed and runnable.
+
+        Checks NODEJS_INSTALL_DIR/bin/node first (our own provisioning
+        target) by actually invoking it with --version, then falls back to
+        shutil.which("node") to detect a system-installed Node.js elsewhere
+        on PATH. Never raises.
+        """
+        node_bin = NODEJS_INSTALL_DIR / "bin" / "node"
+        if node_bin.exists():
+            try:
+                result = subprocess.run(
+                    [str(node_bin), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=NODEJS_VERSION_PROBE_TIMEOUT_SECONDS,
+                )
+                if result.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return shutil.which("node") is not None
+
+    def _download_nodejs_tarball(self, dest_path: Path) -> bool:
+        """BUG #1318: Download the pinned Node.js LTS tarball via curl.
+
+        Mirrors the Rust toolchain's curl usage (no shell=True). Handles
+        nonzero returncode, TimeoutExpired, and OSError as WARNING +
+        return False. Never raises.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--proto",
+                    "=https",
+                    "--tlsv1.2",
+                    "-sSfL",
+                    "-o",
+                    str(dest_path),
+                    NODEJS_DIST_URL,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=NODEJS_INSTALL_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed (curl exit "
+                    f"{result.returncode}): "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def _extract_nodejs_tarball(self, tar_path: Path, install_dir: Path) -> bool:
+        """BUG #1318: Safely extract the Node.js tarball into install_dir.
+
+        tarfile has no --strip-components, so the top-level
+        node-v{NODEJS_VERSION}-linux-x64/ directory shipped by the official
+        dist is extracted to a temp dir first, then its contents are moved
+        up into install_dir. Path-traversal validation mirrors
+        RipgrepInstaller._safe_extract_tar. Never raises.
+        """
+        expected_top_dir = f"node-v{NODEJS_VERSION}-linux-x64"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_extract_dir:
+                abs_dest = os.path.abspath(tmp_extract_dir)
+                with tarfile.open(tar_path, "r:xz") as tar:
+                    for member in tar.getmembers():
+                        member_path = os.path.join(tmp_extract_dir, member.name)
+                        abs_path = os.path.abspath(member_path)
+                        if (
+                            not abs_path.startswith(abs_dest + os.sep)
+                            and abs_path != abs_dest
+                        ):
+                            raise ValueError(
+                                f"Path traversal detected in tar: {member.name}"
+                            )
+                    tar.extractall(tmp_extract_dir, filter="data")
+
+                extracted_root = Path(tmp_extract_dir) / expected_top_dir
+                if not extracted_root.is_dir():
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-202",
+                            f"Extracted Node.js tarball missing expected "
+                            f"directory {expected_top_dir}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+
+                for item in extracted_root.iterdir():
+                    shutil.move(str(item), str(install_dir / item.name))
+            return True
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball extraction failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _add_nodejs_bin_to_process_path(self) -> None:
+        """BUG #1318: Prepend NODEJS_INSTALL_DIR/bin to THIS process's PATH.
+
+        ensure_scip_python()/_ensure_codex_cli_installed() call
+        shutil.which("npm")/subprocess.run(["npm", ...]) without an
+        explicit env= kwarg, relying on the inherited process environment
+        (unlike the Rust toolchain build, which passes an explicit env
+        dict). Updating os.environ here — not just the systemd unit file —
+        is what lets those SAME-execute()-run steps find npm immediately
+        after ensure_nodejs() provisions it. Idempotent: never duplicates
+        the segment. Never raises.
+        """
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        current_path = os.environ.get("PATH", "")
+        segments = current_path.split(":") if current_path else []
+        if node_bin in segments:
+            return
+        os.environ["PATH"] = f"{node_bin}:{current_path}" if current_path else node_bin
+
     def _run_scip_python_npm_install(self) -> bool:
         """Run `npm install -g @sourcegraph/scip-python`; return True on success.
 
@@ -4174,6 +4345,105 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             return False
+
+    def _provision_nodejs_install_dir(self) -> bool:
+        """BUG #1318: sudo mkdir -p + sudo chown NODEJS_INSTALL_DIR so the
+        current (unprivileged) user can extract the tarball into it.
+        Mirrors the mkdir/chown block in _ensure_rust_toolchain(). Returns
+        False (with WARNING) on either subprocess failure; never raises.
+        """
+        mkdir_result = subprocess.run(
+            ["sudo", "mkdir", "-p", str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if mkdir_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo mkdir -p {NODEJS_INSTALL_DIR} failed: "
+                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        uid_gid = f"{os.getuid()}:{os.getgid()}"
+        chown_result = subprocess.run(
+            ["sudo", "chown", "-R", uid_gid, str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if chown_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo chown -R {uid_gid} {NODEJS_INSTALL_DIR} failed: "
+                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def ensure_nodejs(self) -> bool:
+        """BUG #1318: Ensure a pinned Node.js LTS toolchain is provisioned
+        (system-wide, at NODEJS_INSTALL_DIR — mirrors RUST_SYSTEM_DIR) so
+        npm is available for scip-python / Codex CLI installation.
+
+        Idempotent (skips when already installed). Non-fatal: any failure
+        logs WARNING and returns False; never raises. On success (or when
+        already installed) wires NODEJS_INSTALL_DIR/bin onto this
+        process's PATH (so the SAME execute() run's npm-dependent steps
+        find it) and the systemd unit PATH (for the restarted server).
+        """
+        if self._check_node_installed():
+            logger.info(
+                "Node.js already installed, skipping provisioning",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            self._add_nodejs_bin_to_process_path()
+            self._ensure_systemd_node_path()
+            return True
+
+        if platform.machine() != "x86_64":
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js pinned tarball only available for x86_64, "
+                    f"found {platform.machine()}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._provision_nodejs_install_dir():
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tar_path = Path(tmp_dir) / "node.tar.xz"
+            if not self._download_nodejs_tarball(tar_path):
+                return False
+            if not self._extract_nodejs_tarball(tar_path, NODEJS_INSTALL_DIR):
+                return False
+
+        if not self._check_node_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js installation verification failed after extraction",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        logger.info(
+            f"Node.js {NODEJS_VERSION} installed successfully at {NODEJS_INSTALL_DIR}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        self._add_nodejs_bin_to_process_path()
+        self._ensure_systemd_node_path()
+        return True
 
     def ensure_scip_python(self) -> bool:
         """Idempotently install scip-python via npm for SCIP-based indexing.
@@ -4807,6 +5077,48 @@ class DeploymentExecutor:
 
         logger.info(
             f"Updated PATH in {service_file} to include {rust_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_systemd_node_path(self) -> bool:
+        """BUG #1318: Ensure the cidx-server systemd service unit has
+        NODEJS_INSTALL_DIR/bin (/opt/node/bin) in PATH.
+
+        Mirrors _ensure_systemd_rust_path() exactly. Non-fatal: returns
+        False with WARNING when the service file is missing or any
+        subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, node_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {node_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {node_bin}",
             extra={"correlation_id": get_correlation_id()},
         )
         return True
