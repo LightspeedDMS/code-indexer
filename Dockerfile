@@ -50,9 +50,19 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Runtime deps: git (GitPython + golden-repo clone/refresh), libgomp1 (hnswlib OpenMP),
 # tini (PID 1 signal handling / zombie reaping).
+#
+# C11: a headless JDK + Coursier (`cs`) so Java/Kotlin SCIP works. scip-java is
+# launched on demand via Coursier and runs the target project's gradle/maven
+# build, both of which need a JDK. curl fetches the Coursier launcher.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgomp1 tini \
-    && rm -rf /var/lib/apt/lists/*
+        git libgomp1 tini default-jdk-headless curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://github.com/coursier/launchers/raw/master/cs-x86_64-pc-linux.gz \
+         | gzip -d > /usr/local/bin/cs \
+    && chmod +x /usr/local/bin/cs
+
+# JAVA_HOME so scip-java / gradle reliably find the JDK (Debian symlinks it).
+ENV JAVA_HOME=/usr/lib/jvm/default-java
 
 # Bring over the installed site-packages + the `cidx` console script from the builder.
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -62,6 +72,12 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
 USER cidx
 WORKDIR /home/cidx
+
+# C11: pre-fetch the scip-java artifact into the runtime user's Coursier cache so
+# index-time `cs launch` is offline-safe (no Maven Central round-trip per index).
+# Non-fatal: if the build host can't reach Maven Central, index-time falls back
+# to an on-demand download.
+RUN cs fetch com.sourcegraph:scip-java_2.13:0.11.1 || true
 
 EXPOSE 8090
 
