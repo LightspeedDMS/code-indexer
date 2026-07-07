@@ -275,6 +275,44 @@ class GoldenRepoManager:
                 self.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)
             logging.info(f"Loaded {len(self.golden_repos)} golden repos from SQLite")
 
+    def _resolve_golden_repo(self, alias: str) -> Optional[GoldenRepo]:
+        """
+        Resolve a golden repo by alias, reloading from the shared backend on
+        a local cache miss (Bug #1314 -- cross-worker/cross-node staleness).
+
+        `self.golden_repos` is a per-worker in-memory cache populated once at
+        `__init__` (`_load_metadata_from_sqlite`). In a multi-worker /
+        multi-node cluster (PostgreSQL storage_backend behind HAProxy), a
+        repo registered by a DIFFERENT worker/node after this worker started
+        is absent from THIS worker's local cache even though the shared
+        backend (SQLite solo / PostgreSQL cluster) already has it -- only the
+        one worker that served `add_golden_repo` knows about it locally.
+
+        Management/mutation operations (add index, refresh/branch-change,
+        index-status lookup, removal, duplicate-alias checks) MUST see
+        freshly-registered repos, so they resolve through this method
+        instead of a raw `self.golden_repos[alias]` / `alias in
+        self.golden_repos` check. On a cache miss that resolves via the
+        backend, the local cache is populated so subsequent lookups on this
+        worker are O(1) -- this keeps `golden_repos` a legitimate read
+        cache with reload-on-miss rather than the sole source of truth.
+
+        Args:
+            alias: Repository alias.
+
+        Returns:
+            The GoldenRepo if found (cache or backend), else None.
+        """
+        cached = self.golden_repos.get(alias)
+        if cached is not None:
+            return cached
+        repo_data = self._sqlite_backend.get_repo(alias)
+        if repo_data is None:
+            return None
+        repo = GoldenRepo(**repo_data)
+        self.golden_repos[alias] = repo
+        return repo
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -343,8 +381,10 @@ class GoldenRepoManager:
                 "and cannot be used as part of an alias name"
             )
 
-        # Validate BEFORE submitting job
-        if alias in self.golden_repos:
+        # Validate BEFORE submitting job (Bug #1314: resolve via shared
+        # backend so a duplicate-alias registered by ANOTHER worker/node is
+        # still detected, not just aliases known to this worker's cache)
+        if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
         # Skip git validation for local:// URLs (Story #538) or when caller
@@ -743,8 +783,10 @@ class GoldenRepoManager:
             )
 
         with self._operation_lock:
-            # Idempotency: return False if already registered
-            if alias in self.golden_repos:
+            # Idempotency: return False if already registered (Bug #1314:
+            # resolve via shared backend so a repo registered by ANOTHER
+            # worker/node is recognized here too)
+            if self._resolve_golden_repo(alias) is not None:
                 return False
 
             # Create golden repository record
@@ -909,8 +951,10 @@ class GoldenRepoManager:
         if get_maintenance_state().is_maintenance_mode():
             raise MaintenanceModeError()
 
-        # Validate repository exists BEFORE submitting job
-        if alias not in self.golden_repos:
+        # Validate repository exists BEFORE submitting job (Bug #1314:
+        # resolve via shared backend so a repo registered by ANOTHER
+        # worker/node can still be removed from this worker)
+        if self._resolve_golden_repo(alias) is None:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
 
         # Create no-args wrapper for background execution
@@ -2145,7 +2189,11 @@ class GoldenRepoManager:
         normalizer = GitUrlNormalizer()
         matching_repos = []
 
-        for repo in self.golden_repos.values():
+        # Bug #1314: iterate a FRESH snapshot from the shared backend (not
+        # the stale in-memory `golden_repos` dict) so duplicate-URL
+        # detection sees repos registered by other workers/nodes too.
+        for repo_data in self._sqlite_backend.list_repos():
+            repo = GoldenRepo(**repo_data)
             # local:// is an internal scheme (cidx-meta, langfuse, etc.) that has
             # no canonical git URL and can never match a canonical-URL search.
             # Skip it before normalization to avoid a spurious WARNING (Bug #1188).
@@ -2246,7 +2294,9 @@ class GoldenRepoManager:
         Returns:
             True if repository exists, False otherwise
         """
-        return alias in self.golden_repos
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is recognized here too.
+        return self._resolve_golden_repo(alias) is not None
 
     def get_wiki_enabled(self, alias: str) -> bool:
         """Check if wiki is enabled for a golden repo (Story #280)."""
@@ -2323,13 +2373,14 @@ class GoldenRepoManager:
                 f"Invalid alias '{alias}': cannot contain path traversal characters (\\)"
             )
 
-        # Check if alias exists in metadata
-        if alias not in self.golden_repos:
+        # Check if alias exists in metadata (Bug #1314: resolve via shared
+        # backend on a local cache miss so a repo registered by ANOTHER
+        # worker/node is found here too)
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(
                 f"Golden repository '{alias}' not found in metadata"
             )
-
-        golden_repo = self.golden_repos[alias]
         metadata_path = golden_repo.clone_path
 
         # Get logger for this module
@@ -2850,10 +2901,11 @@ class GoldenRepoManager:
         ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
-        if alias not in self.golden_repos:
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is found here too.
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         if target_branch == golden_repo.default_branch:
             return {"success": True, "message": f"Already on branch '{target_branch}'"}
 
@@ -3007,10 +3059,12 @@ class GoldenRepoManager:
         ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
-        if alias not in self.golden_repos:
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is found here too (this is
+        # the manager-level entry point behind refresh_golden_repo).
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         if target_branch == golden_repo.default_branch:
             return {"success": True, "job_id": None}
 
@@ -3084,8 +3138,10 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found or any index_type is invalid
         """
-        # Validate alias exists
-        if alias not in self.golden_repos:
+        # Validate alias exists (Bug #1314: resolve via shared backend on a
+        # local cache miss so a repo registered by ANOTHER worker/node is
+        # found here too -- this is the named add_golden_repo_index symptom)
+        if self._resolve_golden_repo(alias) is None:
             raise ValueError(f"Golden repository '{alias}' not found")
 
         # Validate all index types up front
@@ -3620,11 +3676,12 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found
         """
-        # Validate alias exists
-        if alias not in self.golden_repos:
+        # Validate alias exists (Bug #1314: resolve via shared backend on a
+        # local cache miss so a repo registered by ANOTHER worker/node is
+        # found here too -- this is the named get_golden_repo_indexes symptom)
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise ValueError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         # Use canonical path resolution to handle versioned structure repos
         actual_path = self.get_actual_repo_path(alias)
         repo_dir = Path(actual_path)

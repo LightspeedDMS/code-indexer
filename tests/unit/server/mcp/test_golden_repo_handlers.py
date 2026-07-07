@@ -148,7 +148,9 @@ class TestRefreshGoldenRepoHandler:
         )
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = {"test-repo": MagicMock()}
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=True)
             with patch(
                 "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
                 return_value=mock_scheduler,
@@ -166,7 +168,9 @@ class TestRefreshGoldenRepoHandler:
         mcp_params = {"alias": "bad-repo"}
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = {}  # repo not found
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=False)
 
             result = refresh_golden_repo(mcp_params, mock_admin_user)
 
@@ -201,10 +205,10 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
             return_value="sched-job-001"
         )
 
-        mock_golden_repos = {"my-repo": MagicMock()}
-
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = mock_golden_repos
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=True)
             with patch(
                 "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
                 return_value=mock_scheduler,
@@ -231,7 +235,9 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
         mock_scheduler = MagicMock()
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = {}  # Empty - repo not registered
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=False)
             with patch(
                 "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
                 return_value=mock_scheduler,
@@ -249,10 +255,10 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
         """Test that refresh returns error when RefreshScheduler is not available."""
         mcp_params = {"alias": "my-repo"}
 
-        mock_golden_repos = {"my-repo": MagicMock()}
-
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = mock_golden_repos
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=True)
             with patch(
                 "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
                 return_value=None,  # Scheduler not available
@@ -271,7 +277,9 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
         mock_scheduler.trigger_refresh_for_repo = MagicMock(return_value="job-xyz")
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
-            mock_manager.golden_repos = {"code-indexer": MagicMock()}
+            # Bug #1314: handler resolves via golden_repo_exists() (shared-
+            # backend-backed) instead of raw `golden_repos` dict membership.
+            mock_manager.golden_repo_exists = Mock(return_value=True)
             with patch(
                 "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
                 return_value=mock_scheduler,

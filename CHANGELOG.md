@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.24.0] - 2026-07-07
+
+### Fixed
+
+- **Golden-repo management ops no longer use a stale per-worker in-memory dict in multi-worker clusters (#1314).** `GoldenRepoManager.golden_repos` was a per-process dict populated once at `__init__` and never reloaded, used as the sole source of truth by `add_golden_repo_index`, `refresh_golden_repo`, `get_golden_repo_indexes`, and other management ops (plus a handler-level bypass in `mcp/handlers/repos.py`). Under `uvicorn --workers N` behind HAProxy round-robin, a repo registered after workers start was visible only to the worker that served the `add_golden_repo` request, so other workers returned `Golden repository '<alias>' not found` (a Cluster-Aware-State invariant violation; observed as 28 consecutive misses on a 2-workers/node staging cluster). A new `_resolve_golden_repo(alias)` cache-aside read-through now resolves from the shared metadata backend (`GoldenRepoMetadataPostgresBackend` in cluster mode / SQLite solo) with reload-on-miss; all management call-sites route through it, and `find_by_canonical_url` iterates a fresh `list_repos()` snapshot. The query path and `manage_provider_indexes` were already DB-backed and are unchanged. A residual stale-positive on cross-node mutation (bounded, non-corrupting, self-healing on restart) is tracked separately (#1316).
+
 ## [11.23.0] - 2026-07-06
 
 ### Fixed
