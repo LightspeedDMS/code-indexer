@@ -131,11 +131,14 @@ def test_reuse_seam_computes_embedding_once_across_shards(tmp_path):
         )
 
     # The up-front reuse-seam provider is built with the resolved embedder
-    # name (per-shard provider construction for TemporalSearchService's own
-    # constructor is unrelated pre-existing behavior -- not asserted here).
-    assert (
-        call(config, "code-indexer-temporal-voyage_code_3")
-        in mock_build_provider.call_args_list
+    # MODEL name ("voyage-code-3"), NOT the collection name
+    # ("code-indexer-temporal-voyage_code_3") -- Bug #1321: passing the
+    # collection name here makes the tokenizer loader 401 against
+    # HuggingFace on every temporal query.
+    assert call(config, "voyage-code-3") in mock_build_provider.call_args_list
+    assert not any(
+        c.args[1] == "code-indexer-temporal-voyage_code_3"
+        for c in mock_build_provider.call_args_list
     )
     # Exactly ONE embed call for the whole request, regardless of shard count.
     mock_embed.assert_called_once()
@@ -209,3 +212,96 @@ def test_reuse_seam_falls_back_to_per_shard_embed_on_precompute_failure(tmp_path
     call = mock_service_instance.query_temporal.call_args
     assert call.kwargs.get("precomputed_query_vector") is None
     assert len(result.results) >= 1
+
+
+def test_reuse_seam_resolves_real_embedder_model_name_not_collection_name(tmp_path):
+    """Bug #1321: the up-front reuse-seam embed call must resolve the
+    COLLECTION base name (e.g. 'code-indexer-temporal-voyage_context_4')
+    back to the real embedder MODEL name ('voyage-context-4') before
+    building the query provider.
+
+    Passing the raw collection name straight into
+    _build_query_provider_for_embedder makes it construct a VoyageAIClient
+    whose `model` is the collection name -- the tokenizer loader then
+    requests a nonexistent HuggingFace repo
+    ('voyageai/code-indexer-temporal-voyage_context_4'), 401s on EVERY
+    temporal query, and silently falls back to per-shard embedding
+    (the up-front-embed optimization never fires).
+    """
+    config = _make_mock_config()
+    config.temporal.embedders = ["voyage-context-4"]
+    config.temporal.active_embedder = "voyage-context-4"
+    vector_store = _make_mock_vector_store(tmp_path)
+
+    result_item = _make_result("service.py")
+    service_results = _make_results_with([result_item])
+
+    one_shard = [
+        (
+            "code-indexer-temporal-voyage_context_4",
+            ["code-indexer-temporal-voyage_context_4-2025Q1"],
+        )
+    ]
+
+    fake_vec = [0.4, 0.5, 0.6]
+    fake_meta = EmbeddingCacheMetadata(
+        outcome="miss", role="direct", provider="voyage-ai"
+    )
+
+    with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=one_shard,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+        ) as MockService,
+        patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+        ) as MockFactory,
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._build_query_provider_for_embedder",
+            return_value=MagicMock(),
+        ) as mock_build_provider,
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.coalesced_query_embedding",
+            return_value=(fake_vec, fake_meta),
+        ) as mock_embed,
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.emit_embed_event"
+        ),
+    ):
+        mock_service_instance = MagicMock()
+        mock_service_instance.query_temporal.return_value = service_results
+        MockService.return_value = mock_service_instance
+        MockFactory.create.return_value = MagicMock()
+
+        execute_temporal_query_with_fusion(
+            config=config,
+            index_path=tmp_path,
+            vector_store=vector_store,
+            query_text="query",
+            limit=5,
+        )
+
+    # The provider builder must be invoked with the REAL embedder model name
+    # ("voyage-context-4"), never the raw collection name
+    # ("code-indexer-temporal-voyage_context_4") -- that collection-name
+    # string is not a valid HuggingFace/VoyageAI model id and would make the
+    # tokenizer loader 401 against HuggingFace.
+    called_names = [c.args[1] for c in mock_build_provider.call_args_list]
+    assert "voyage-context-4" in called_names
+    assert "code-indexer-temporal-voyage_context_4" not in called_names
+
+    # The up-front embed must actually fire (reuse seam active) -- not fall
+    # back to per-shard embedding.
+    mock_embed.assert_called_once()
+    call_kwargs = mock_service_instance.query_temporal.call_args.kwargs
+    assert call_kwargs.get("precomputed_query_vector") == fake_vec

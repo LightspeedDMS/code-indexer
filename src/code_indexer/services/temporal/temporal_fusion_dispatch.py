@@ -239,7 +239,20 @@ def execute_temporal_query_with_fusion(
     precomputed_query_vector: Optional[List[float]] = None
     if coalesced_query_embedding is not None:
         try:
-            _reuse_provider = _build_query_provider_for_embedder(config, base_name)
+            # Bug #1321: base_name is the COLLECTION base name (e.g.
+            # 'code-indexer-temporal-voyage_context_4'), NOT the real
+            # embedder MODEL name ('voyage-context-4'). Passing it straight
+            # to _build_query_provider_for_embedder made it construct a
+            # VoyageAIClient whose .model was the collection name, which the
+            # tokenizer loader then tried to resolve as a HuggingFace repo
+            # ('voyageai/code-indexer-temporal-voyage_context_4') -- a 401 on
+            # every temporal query. _create_embedding_provider_for_collection
+            # is the SAME reverse-mapping helper already used by the
+            # per-shard path (_query_single_provider) to correctly resolve a
+            # collection name back to its configured embedder model name.
+            _reuse_provider = _create_embedding_provider_for_collection(
+                config, base_name
+            )
             precomputed_query_vector, _temporal_embed_meta = coalesced_query_embedding(
                 _reuse_provider,
                 query_text,

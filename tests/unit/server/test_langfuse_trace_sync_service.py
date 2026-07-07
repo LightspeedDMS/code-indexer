@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -682,9 +682,31 @@ class TestSyncMetrics:
 
 
 class TestServiceLifecycle:
-    """Test service start/stop lifecycle."""
+    """Test service start/stop lifecycle.
 
-    def test_start_creates_thread(self):
+    Bug #1322: service.start() launches a background thread whose first loop
+    iteration immediately calls sync_project() -> LangfuseApiClient.discover_project(),
+    a REAL outbound HTTP request to the configured Langfuse host. These lifecycle
+    tests only assert thread creation/termination/idempotent-start semantics -- they
+    must not depend on network reachability of that host. mock_langfuse_api_client
+    patches the client factory at its import site in langfuse_trace_sync_service so
+    the background thread's sync loop completes deterministically with zero network
+    I/O, regardless of whether the real Langfuse host is up.
+    """
+
+    @pytest.fixture
+    def mock_langfuse_api_client(self):
+        """Patch the LangfuseApiClient network boundary used by the sync thread."""
+        with patch(
+            "code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient"
+        ) as mock_client_cls:
+            mock_client_cls.return_value.discover_project.return_value = {
+                "name": "mock-project"
+            }
+            mock_client_cls.return_value.fetch_traces_page.return_value = []
+            yield mock_client_cls
+
+    def test_start_creates_thread(self, mock_langfuse_api_client):
         """Starting service should create background thread."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
@@ -696,7 +718,7 @@ class TestServiceLifecycle:
 
             service.stop()
 
-    def test_stop_terminates_thread(self):
+    def test_stop_terminates_thread(self, mock_langfuse_api_client):
         """Stopping service should terminate background thread."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
@@ -709,7 +731,7 @@ class TestServiceLifecycle:
             # Thread should be stopped
             assert not service._thread.is_alive()
 
-    def test_start_twice_warns(self):
+    def test_start_twice_warns(self, mock_langfuse_api_client):
         """Starting already-running service should warn, not crash."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
