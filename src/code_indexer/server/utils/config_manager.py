@@ -1029,6 +1029,31 @@ class MemoryRetrievalConfig:
 
 
 @dataclass
+class AdmissionControlConfig:
+    """Request admission control / backpressure (C7).
+
+    Under overload the server otherwise queues every request in the anyio
+    threadpool until it times out to a 504. When enabled, a middleware caps the
+    number of in-flight (non-exempt) requests PER WORKER PROCESS and sheds
+    excess with an immediate ``429 Too Many Requests`` + ``Retry-After`` so
+    clients back off and retry instead of piling up toward the queue-collapse
+    point (Q*). Health/docs endpoints are always exempt so readiness probes and
+    schema fetches are never rejected.
+
+    Opt-in (``enabled=False``) because the right ``max_inflight_requests`` is
+    deployment-specific (roughly timeout x per-worker service rate); operators
+    enable it and tune the cap for their load.
+    """
+
+    enabled: bool = False
+    # Max concurrent non-exempt requests per worker process before shedding.
+    # 0 means "no cap" (effectively disabled even if enabled=True).
+    max_inflight_requests: int = 100
+    # Retry-After header value (seconds) sent on a shed request.
+    retry_after_seconds: int = 1
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -1065,6 +1090,8 @@ class ServerConfig:
     error_handling_config: Optional[ErrorHandlingConfig] = None
     api_limits_config: Optional[ApiLimitsConfig] = None
     web_security_config: Optional[WebSecurityConfig] = None
+    # C7 request admission control / backpressure
+    admission_control_config: Optional[AdmissionControlConfig] = None
 
     # Story #15 - Configuration Refactoring: Indexing settings
     indexing_config: Optional[IndexingConfig] = None
@@ -1216,6 +1243,8 @@ class ServerConfig:
             self.error_handling_config = ErrorHandlingConfig()
         if self.api_limits_config is None:
             self.api_limits_config = ApiLimitsConfig()
+        if self.admission_control_config is None:
+            self.admission_control_config = AdmissionControlConfig()
         if self.web_security_config is None:
             self.web_security_config = WebSecurityConfig()
         # Story #15 - Configuration Refactoring: Initialize indexing config
@@ -1565,6 +1594,14 @@ class ServerConfigManager:
         ):
             config_dict["error_handling_config"] = ErrorHandlingConfig(
                 **config_dict["error_handling_config"]
+            )
+
+        # Convert nested admission_control_config dict to AdmissionControlConfig (C7)
+        if "admission_control_config" in config_dict and isinstance(
+            config_dict["admission_control_config"], dict
+        ):
+            config_dict["admission_control_config"] = AdmissionControlConfig(
+                **config_dict["admission_control_config"]
             )
 
         # Convert nested api_limits_config dict to ApiLimitsConfig
