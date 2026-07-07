@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.28.0] - 2026-07-07
+
+### Fixed
+
+- **Temporal query reuse-seam now resolves the real embedder model name instead of the collection name (#1321).** The Story #1293 up-front-embed reuse seam passed the temporal COLLECTION base name (e.g. `code-indexer-temporal-voyage_context_4`) to `_build_query_provider_for_embedder`, which expects a real embedder MODEL name. `create_embedder()` raised `KeyError` on the collection name and fell through to the Voyage branch, building a `VoyageAIClient(model="code-indexer-temporal-<slug>")`; the tokenizer loader then requested `voyageai/code-indexer-temporal-<slug>` from HuggingFace -> 401 on every temporal query -> WARNING + silent fallback to per-shard embedding (the Cohere path was doubly wrong, building a Voyage client for a Cohere collection). Fix routes through the existing `_create_embedding_provider_for_collection` reverse-mapping helper (the same one the per-shard path already uses) to recover the real model name for both embedders. The up-front optimization now fires instead of always erroring into the fallback; query semantics are unchanged. Surfaced by the e2e Phase-3 log-audit gate (10 non-allowlisted WARNINGs).
+- **Langfuse trace-sync lifecycle unit tests are now isolated from the network (#1322).** `TestServiceLifecycle` started a `LangfuseTraceSyncService` whose background sync thread immediately called `LangfuseApiClient.discover_project()` (a real outbound HTTP request); when the Langfuse host was down that request hung and the tests tripped the 15s pytest-timeout, producing spurious `server-fast-automation.sh` failures. A `mock_langfuse_api_client` fixture now patches `LangfuseApiClient` at its import site so the sync loop completes with zero network I/O regardless of host reachability. Test-only change; no product code touched.
+
 ## [11.27.0] - 2026-07-07
 
 ### Fixed
