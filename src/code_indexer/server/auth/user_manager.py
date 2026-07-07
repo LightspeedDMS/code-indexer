@@ -196,13 +196,29 @@ class UserManager:
             # SQLite backend (Story #702)
             existing = self._sqlite_backend.get_user("admin")
             if existing is None:
-                # Create initial admin user
+                # Create initial admin user. Idempotent under concurrency: with
+                # multiple uvicorn workers (or pods) cold-starting a fresh DB,
+                # several can pass the get_user()==None check and race to INSERT.
+                # The loser hits a unique-constraint violation -- treat "admin
+                # already exists after our attempt" as success rather than
+                # crashing the worker (the previous behaviour: UniqueViolation on
+                # users_pkey took the worker down on first boot).
                 admin_password_hash = self.password_manager.hash_password("admin")
-                self._sqlite_backend.create_user(
-                    username="admin",
-                    password_hash=admin_password_hash,
-                    role="admin",
-                )
+                try:
+                    self._sqlite_backend.create_user(
+                        username="admin",
+                        password_hash=admin_password_hash,
+                        role="admin",
+                    )
+                except Exception:
+                    if self._sqlite_backend.get_user("admin") is None:
+                        raise  # genuine failure, not a lost seed race
+                    import logging
+
+                    logging.getLogger(__name__).info(
+                        "seed_initial_admin: admin already created by a "
+                        "concurrent starter; continuing"
+                    )
         else:
             # JSON file storage (backward compatible)
             users_data = self._load_users()

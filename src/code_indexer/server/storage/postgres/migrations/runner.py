@@ -177,6 +177,12 @@ class MigrationRunner:
             logger.error("Failed to apply migration: %s", filename)
             raise
 
+    # Constant session-level advisory-lock key that serializes migration runs
+    # across concurrent processes -- multiple uvicorn workers in one pod AND
+    # multiple pods cold-starting at once. Any int is fine as long as it is
+    # unique to this purpose; 0x63696478 = ASCII "cidx".
+    _MIGRATION_ADVISORY_KEY = 0x63696478
+
     def run(self) -> int:
         """
         Execute all pending migrations in numeric order.
@@ -184,25 +190,51 @@ class MigrationRunner:
         Calls ensure_migrations_table(), discovers all SQL files, compares
         against already-applied migrations, and applies each pending one.
 
+        Concurrency: the whole check-then-apply is serialized under a PostgreSQL
+        session-level advisory lock, so with multiple uvicorn workers (or
+        multiple pods starting together) only one process runs migrations at a
+        time; the others block here, then find everything already applied and
+        apply 0. Without this, concurrent starters race on
+        ``CREATE TABLE IF NOT EXISTS schema_migrations`` (a known Postgres
+        catalog race) and on the ``INSERT`` into ``schema_migrations``.
+
         Returns:
             Count of migrations applied in this run.
         """
-        self.ensure_migrations_table()
-        applied = set(self.get_applied_migrations())
-        all_migrations = self.discover_migrations()
-        pending = [m for m in all_migrations if m.name not in applied]
+        with self._conn.cursor() as _lock_cur:
+            _lock_cur.execute(
+                "SELECT pg_advisory_lock(%s)", (self._MIGRATION_ADVISORY_KEY,)
+            )
+            self._conn.commit()
+        try:
+            self.ensure_migrations_table()
+            applied = set(self.get_applied_migrations())
+            all_migrations = self.discover_migrations()
+            pending = [m for m in all_migrations if m.name not in applied]
 
-        for migration_path in pending:
-            logger.info("Applying pending migration: %s", migration_path.name)
-            self.apply_migration(migration_path)
+            for migration_path in pending:
+                logger.info("Applying pending migration: %s", migration_path.name)
+                self.apply_migration(migration_path)
 
-        count = len(pending)
-        logger.info(
-            "Migration run complete: %d applied, %d already up-to-date",
-            count,
-            len(applied),
-        )
-        return count
+            count = len(pending)
+            logger.info(
+                "Migration run complete: %d applied, %d already up-to-date",
+                count,
+                len(applied),
+            )
+            return count
+        finally:
+            # Session-level lock: released explicitly here, or automatically if
+            # the process dies (session ends), so a crash can never wedge it.
+            try:
+                with self._conn.cursor() as _unlock_cur:
+                    _unlock_cur.execute(
+                        "SELECT pg_advisory_unlock(%s)",
+                        (self._MIGRATION_ADVISORY_KEY,),
+                    )
+                    self._conn.commit()
+            except Exception:  # pragma: no cover - best-effort unlock
+                logger.warning("Failed to release migration advisory lock")
 
     def get_status(self) -> Dict[str, object]:
         """
