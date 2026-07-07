@@ -257,7 +257,7 @@ class TestNewConfigDataclasses:
         assert config.index_cache_cleanup_interval == 60
         assert config.index_cache_max_size_mb is None
         assert config.fts_cache_ttl_minutes == 10.0
-        assert config.fts_cache_reload_on_access is True
+        assert config.fts_cache_reload_on_access is False
 
     def test_server_config_includes_new_configs(self):
         """Test ServerConfig includes cache config."""
