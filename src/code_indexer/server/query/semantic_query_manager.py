@@ -2327,30 +2327,43 @@ class SemanticQueryManager:
             )
 
         try:
-            # Import TantivyIndexManager (lazy import to avoid startup overhead)
-            from ...services.tantivy_index_manager import TantivyIndexManager
-
-            # Initialize Tantivy manager
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+            # Cached, writer-free FTS read (lazy imports avoid startup overhead).
+            from ..cache import get_global_fts_cache
+            from ..cache.fts_search import cached_fts_search
 
             # Handle fuzzy flag
             effective_edit_distance = edit_distance
             if fuzzy and edit_distance == 0:
                 effective_edit_distance = 1
 
-            # Execute FTS query
-            fts_raw_results = tantivy_manager.search(
-                query_text=query_text,
-                case_sensitive=case_sensitive,
-                edit_distance=effective_edit_distance,
-                snippet_lines=snippet_lines,
-                limit=limit,
-                language_filter=language,
-                path_filter=path_filter,
-                exclude_languages=[exclude_language] if exclude_language else None,
-                exclude_paths=[exclude_path] if exclude_path else None,
-                use_regex=regex,
+            # C6 shard cache-admission: only cache FTS indexes this node owns
+            # (mirrors the HNSW hnsw_cache gate). Fails open -> caches in solo
+            # mode / on any ownership error.
+            fts_cache = (
+                get_global_fts_cache()
+                if self._owns_for_cache(repository_alias)
+                else None
+            )
+
+            # No per-query Tantivy writer lock; safe on immutable/NFS
+            # .versioned snapshots. Repeated queries reuse one open index.
+            fts_raw_results = cached_fts_search(
+                fts_index_dir,
+                {
+                    "query_text": query_text,
+                    "case_sensitive": case_sensitive,
+                    "edit_distance": effective_edit_distance,
+                    "snippet_lines": snippet_lines,
+                    "limit": limit,
+                    "language_filter": language,
+                    "path_filter": path_filter,
+                    "exclude_languages": (
+                        [exclude_language] if exclude_language else None
+                    ),
+                    "exclude_paths": [exclude_path] if exclude_path else None,
+                    "use_regex": regex,
+                },
+                fts_cache=fts_cache,
             )
 
             # Convert FTS results to QueryResult objects
