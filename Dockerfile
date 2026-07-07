@@ -54,15 +54,21 @@ ENV PYTHONUNBUFFERED=1 \
 # C11: a headless JDK + Coursier (`cs`) so Java/Kotlin SCIP works. scip-java is
 # launched on demand via Coursier and runs the target project's gradle/maven
 # build, both of which need a JDK. curl fetches the Coursier launcher.
+#
+# Pin JDK 17 (LTS), NOT the distro default (21 on bookworm): the JDK that RUNS
+# the project's Gradle must be old enough for that Gradle version. Gradle 7.x
+# (still the most common) only supports Java <=17; on Java 21 the build fails
+# with "Unsupported class file major version 65". Java 17 runs Gradle 7.x and
+# 8.x and scip-java itself, so it is the broadly-compatible choice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgomp1 tini default-jdk-headless curl ca-certificates \
+        git libgomp1 tini openjdk-17-jdk-headless curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/coursier/launchers/raw/master/cs-x86_64-pc-linux.gz \
          | gzip -d > /usr/local/bin/cs \
     && chmod +x /usr/local/bin/cs
 
-# JAVA_HOME so scip-java / gradle reliably find the JDK (Debian symlinks it).
-ENV JAVA_HOME=/usr/lib/jvm/default-java
+# JAVA_HOME so scip-java / gradle reliably find the JDK.
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 # Bring over the installed site-packages + the `cidx` console script from the builder.
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
