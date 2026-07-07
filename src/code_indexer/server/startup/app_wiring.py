@@ -98,6 +98,30 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
 
     app.add_middleware(CorrelationBridgeMiddleware)
 
+    # C7 request admission control / backpressure. Added last so it is the
+    # OUTERMOST middleware -- it sheds excess load with 429 + Retry-After before
+    # any downstream processing. Opt-in; only wired when enabled so there is
+    # zero overhead by default.
+    _admission_cfg = server_config.admission_control_config
+    if _admission_cfg is not None and _admission_cfg.enabled:
+        from code_indexer.server.middleware.admission_control import (
+            AdmissionControlMiddleware,
+            AdmissionController,
+        )
+
+        app.add_middleware(
+            AdmissionControlMiddleware,
+            controller=AdmissionController(
+                max_inflight=_admission_cfg.max_inflight_requests,
+                retry_after_seconds=_admission_cfg.retry_after_seconds,
+            ),
+        )
+        logging.getLogger(__name__).info(
+            "C7 admission control ENABLED: max_inflight=%d/worker, retry_after=%ds",
+            _admission_cfg.max_inflight_requests,
+            _admission_cfg.retry_after_seconds,
+        )
+
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
     def validation_exception_handler(request: Request, exc: RequestValidationError):
