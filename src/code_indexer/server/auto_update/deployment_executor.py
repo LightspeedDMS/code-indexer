@@ -108,6 +108,13 @@ CLAUDE_INSTALL_TIMEOUT_SECONDS = (
     300  # curl + sh pipeline; generous budget matches Codex
 )
 
+# scip-python install constants (same pattern as CODEX_CLI_INSTALL_TIMEOUT_SECONDS
+# above). scip-python (npm package @sourcegraph/scip-python) is the SCIP indexer
+# binary for Python projects (src/code_indexer/scip/indexers/python.py); without
+# it, SCIP indexing fails with "[Errno 2] No such file or directory: 'scip-python'".
+SCIP_PYTHON_PACKAGE = "@sourcegraph/scip-python"
+SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
+
 # Story #997: Pace-maker install/update constants
 PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
 PACE_MAKER_GIT_TIMEOUT = 60
@@ -3607,6 +3614,25 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 7.1: Ensure scip-python is installed for SCIP-based code intelligence
+        # (mirrors the ripgrep step above; non-fatal — SCIP indexing is degraded,
+        # not the whole deploy, when this fails).
+        scip_python_result = self.ensure_scip_python()
+        if scip_python_result:
+            logger.info(
+                "scip-python installation successful",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "scip-python installation could not be verified/installed — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Step 8: Ensure sudoers rule for server self-restart
         if not self._ensure_sudoers_restart():
             logger.warning(
@@ -4095,6 +4121,105 @@ class DeploymentExecutor:
         if not self._run_codex_npm_install():
             return False
         self._probe_codex_version()
+        return True
+
+    def _run_scip_python_npm_install(self) -> bool:
+        """Run `npm install -g @sourcegraph/scip-python`; return True on success.
+
+        Handles nonzero returncode, TimeoutExpired, and OSError as
+        WARNING + return False. Never raises. Mirrors
+        _run_codex_npm_install().
+        """
+        try:
+            result = subprocess.run(
+                ["npm", "install", "-g", SCIP_PYTHON_PACKAGE],
+                capture_output=True,
+                text=True,
+                timeout=SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            logger.debug(
+                "npm install %s stdout: %s",
+                SCIP_PYTHON_PACKAGE,
+                result.stdout,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-201",
+                        f"npm install {SCIP_PYTHON_PACKAGE} failed "
+                        f"(exit {result.returncode}): {result.stderr}",
+                    ),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} timed out after "
+                    f"{SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS}s",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} could not be spawned: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def ensure_scip_python(self) -> bool:
+        """Idempotently install scip-python via npm for SCIP-based indexing.
+
+        scip-python (npm package @sourcegraph/scip-python) is the SCIP
+        indexer binary invoked by PythonIndexer for `cidx scip generate` /
+        add_golden_repo_index(index_type="scip"). Without it, SCIP indexing
+        fails with "[Errno 2] No such file or directory: 'scip-python'".
+
+        Mirrors ensure_ripgrep() / _ensure_codex_cli_installed(): checks
+        shutil.which("scip-python") first (skip if already present), then
+        requires npm and delegates the install to
+        _run_scip_python_npm_install(). Unlike the optional Codex CLI,
+        scip-python is required for SCIP indexing, so a missing npm is
+        reported as a failed provisioning attempt (WARNING + False) rather
+        than silently "ok".
+
+        Returns:
+            True if already installed or the npm install succeeded.
+            False if it could not be provisioned (npm absent, install
+            failed, timed out, or could not be spawned).
+        """
+        if shutil.which("scip-python") is not None:
+            logger.info(
+                "scip-python already installed, skipping install",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if shutil.which("npm") is None:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "npm not available on PATH; cannot install scip-python — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._run_scip_python_npm_install():
+            return False
+        logger.info(
+            "scip-python installed successfully via npm",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return True
 
     def _ensure_claude_cli_installed(self) -> bool:
