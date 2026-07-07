@@ -938,6 +938,15 @@ class ClusterConfig:
     """Cluster node configuration (Epic #408)."""
 
     node_id: str = ""
+    # C6 repo sharding (opt-in). When False (default) the cluster runs in
+    # REPLICATION mode: every pod caches and serves every repo locally, so N
+    # replicas scale read concurrency ~linearly. When True, repos are sharded
+    # by rendezvous-hash ownership and single-repo queries are forwarded to an
+    # owner pod -- this trades concurrency for the ability to serve a working
+    # set larger than one pod's cache (many/large repos). Only enable sharding
+    # when the working set exceeds per-pod cache; for sets that fit, forwarding
+    # concentrates each repo on one owner + adds a hop and is net-negative.
+    sharding_enabled: bool = False
 
 
 @dataclass
@@ -1138,8 +1147,12 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+    enable_malloc_trim: bool = (
+        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    )
+    enable_malloc_arena_max: bool = (
+        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+    )
 
     # Bootstrap-only: anyio threadpool size for sync FastAPI handlers.
     # Default 256 (anyio default is 40). Bumped to absorb concurrent long-polls
@@ -1585,13 +1598,13 @@ class ServerConfigManager:
             if "scip_config" not in config_dict:
                 config_dict["scip_config"] = {}
             if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"]["scip_workspace_retention_days"] = (
+                config_dict["scip_config"][
+                    "scip_workspace_retention_days"
+                ] = retention_days
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict["scip_config"].scip_workspace_retention_days = (
                     retention_days
                 )
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict[
-                    "scip_config"
-                ].scip_workspace_retention_days = retention_days
 
         # Story #15 AC2: Final conversion of scip_config after migration
         # This handles the case where scip_config was created by migration above
