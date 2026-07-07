@@ -309,6 +309,12 @@ class FTSIndexCache:
         #
         # Failure safety: the finally block always removes the sentinel and signals
         # the Event, ensuring waiters are never permanently blocked even on errors.
+        #
+        # On a cache HIT the optional reload() is performed AFTER releasing the
+        # lock (see below): reload() does disk/NFS I/O, and holding the global
+        # _cache_lock across it serialized every concurrent cache hit, collapsing
+        # FTS query throughput on NFS-backed indexes to ~1 rps at C=16.
+        cache_hit: Optional[Tuple[Any, Any]] = None
         while True:
             with self._cache_lock:
                 # Check if cached (fast path: entry exists and not expired)
@@ -325,30 +331,19 @@ class FTSIndexCache:
                         self._eviction_count += 1
                         # Fall through (no return here)
                     else:
-                        # Cache hit - refresh TTL (AC3)
+                        # Cache hit - refresh TTL (AC3). Capture refs now and do
+                        # the optional reload() (AC8) OUTSIDE the lock: the index
+                        # object is already referenced, so reloading it lock-free
+                        # is safe and avoids serializing concurrent hits on the
+                        # global lock during NFS I/O.
                         entry.record_access()
                         self._hit_count += 1
-
-                        # Optionally reload to pick up index changes (AC8).
-                        # This is on the cache-HIT path: unaffected by sentinel pattern.
-                        if self.config.reload_on_access:
-                            try:
-                                entry.tantivy_index.reload()
-                                self._reload_count += 1
-                            except Exception as e:
-                                logger.warning(
-                                    format_error_log(
-                                        "GIT-GENERAL-009",
-                                        f"FTS index reload failed: {e}",
-                                        extra={"correlation_id": get_correlation_id()},
-                                    )
-                                )
-
+                        cache_hit = (entry.tantivy_index, entry.schema)
                         logger.debug(
                             f"FTS Cache HIT for {index_dir} (access_count={entry.access_count})",
                             extra={"correlation_id": get_correlation_id()},
                         )
-                        return entry.tantivy_index, entry.schema
+                        break
 
                 # No ready entry. Check if another thread is already loading this key.
                 if index_dir in self._loading:
@@ -371,6 +366,23 @@ class FTSIndexCache:
             event.wait()  # Wakes when the loader thread signals (success or failure)
             # Loop back: re-check cache (may find cached entry or become new loader)
             continue
+
+        # Cache HIT path: reload() here, with NO lock held, so concurrent hits do
+        # not serialize on the global lock during (possibly slow, NFS-backed) I/O.
+        if cache_hit is not None:
+            if self.config.reload_on_access:
+                try:
+                    cache_hit[0].reload()
+                    self._reload_count += 1
+                except Exception as e:
+                    logger.warning(
+                        format_error_log(
+                            "GIT-GENERAL-009",
+                            f"FTS index reload failed: {e}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            return cache_hit
 
         # --- NO LOCK HELD during disk I/O ---
         # We are the loader thread (sentinel planted in _loading[index_dir]).
