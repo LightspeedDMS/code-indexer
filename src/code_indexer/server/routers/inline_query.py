@@ -260,7 +260,8 @@ def register_query_routes(
 
                 if search_mode_actual in ["fts", "hybrid"] and fts_available:
                     # Execute FTS search
-                    from ...services.tantivy_index_manager import TantivyIndexManager
+                    from ..cache import get_global_fts_cache
+                    from ..cache.fts_search import cached_fts_search
                     from ..services.api_metrics_service import api_metrics_service
 
                     # Track FTS search at service layer (Story #4 AC2)
@@ -275,35 +276,54 @@ def register_query_routes(
                                 "repo_path is None despite FTS being available"
                             )
 
-                        # Initialize Tantivy manager for first available repository
-                        tantivy_manager = TantivyIndexManager(
-                            repo_path / ".code-indexer" / "tantivy_index"
-                        )
-                        tantivy_manager.initialize_index(create_new=False)
-
                         # Handle fuzzy flag
                         edit_dist = request.edit_distance
                         if request.fuzzy and edit_dist == 0:
                             edit_dist = 1
 
-                        # Execute FTS query
-                        fts_raw_results = tantivy_manager.search(
-                            query_text=request.query_text,
-                            case_sensitive=request.case_sensitive,
-                            edit_distance=edit_dist,
-                            snippet_lines=request.snippet_lines,
-                            limit=request.limit,
-                            language_filter=request.language,
-                            path_filter=request.path_filter,
-                            exclude_languages=(
-                                [request.exclude_language]
-                                if request.exclude_language
-                                else None
-                            ),  # Story #503 Phase 1
-                            exclude_paths=(
-                                [request.exclude_path] if request.exclude_path else None
-                            ),  # Story #503 Phase 1
-                            use_regex=request.regex,  # Story #503 Phase 1
+                        # C6 shard cache-admission: only cache FTS indexes this
+                        # node owns (mirrors the HNSW gate). A single-repo query
+                        # reaching local FTS here is served by this pod (Phase 1
+                        # routing forwards non-owned queries to the owner); the
+                        # gate keeps the fail-open fall-through from bloating a
+                        # non-owner's cache. Fails open in solo mode.
+                        fts_alias = (
+                            request.repository_alias or activated_repos[0]["user_alias"]
+                        )
+                        _shard_ownership = getattr(app.state, "shard_ownership", None)
+                        fts_cache = (
+                            get_global_fts_cache()
+                            if _shard_ownership is None
+                            or _shard_ownership.owns(fts_alias)
+                            else None
+                        )
+
+                        # Cached, writer-free FTS read: no per-query Tantivy
+                        # writer lock (safe on immutable/NFS .versioned
+                        # snapshots); repeated queries reuse one open index.
+                        fts_raw_results = cached_fts_search(
+                            repo_path / ".code-indexer" / "tantivy_index",
+                            {
+                                "query_text": request.query_text,
+                                "case_sensitive": request.case_sensitive,
+                                "edit_distance": edit_dist,
+                                "snippet_lines": request.snippet_lines,
+                                "limit": request.limit,
+                                "language_filter": request.language,
+                                "path_filter": request.path_filter,
+                                "exclude_languages": (
+                                    [request.exclude_language]
+                                    if request.exclude_language
+                                    else None
+                                ),  # Story #503 Phase 1
+                                "exclude_paths": (
+                                    [request.exclude_path]
+                                    if request.exclude_path
+                                    else None
+                                ),  # Story #503 Phase 1
+                                "use_regex": request.regex,  # Story #503 Phase 1
+                            },
+                            fts_cache=fts_cache,
                         )
 
                         # Convert to API response format

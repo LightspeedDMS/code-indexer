@@ -351,7 +351,8 @@ class MultiSearchService:
             Exception: If FTS search fails
         """
         from pathlib import Path as PathLib
-        from ...services.tantivy_index_manager import TantivyIndexManager
+        from ..cache import get_global_fts_cache
+        from ..cache.fts_search import cached_fts_search
 
         try:
             # Get repository path
@@ -365,24 +366,33 @@ class MultiSearchService:
                     f"FTS index not found for repository {repo_id} at {fts_index_dir}"
                 )
 
-            # Initialize FTS manager and search
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
-
             # Convert language filter to list if present
             languages = [request.language] if request.language else None
 
             # Convert path filter to list if present
             path_filters = [request.path_filter] if request.path_filter else None
 
-            # Execute FTS search
-            fts_results = tantivy_manager.search(
-                query_text=request.query,
-                limit=min(request.limit, self.config.max_results_per_repo),
-                languages=languages,
-                path_filters=path_filters,
-                use_regex=False,
-                snippet_lines=3,
+            # C6 shard cache-admission: only cache FTS indexes this node owns
+            # (mirrors the HNSW hnsw_cache gate in _search_semantic_sync). Fails
+            # open -> caches in solo mode / on any ownership error.
+            fts_cache = (
+                get_global_fts_cache() if self._owns_for_cache(repo_id) else None
+            )
+
+            # Cached, writer-free FTS read: no per-query Tantivy writer lock
+            # (safe on immutable/NFS .versioned snapshots); repeated queries
+            # reuse one open index.
+            fts_results = cached_fts_search(
+                fts_index_dir,
+                {
+                    "query_text": request.query,
+                    "limit": min(request.limit, self.config.max_results_per_repo),
+                    "languages": languages,
+                    "path_filters": path_filters,
+                    "use_regex": False,
+                    "snippet_lines": 3,
+                },
+                fts_cache=fts_cache,
             )
 
             # Convert FTS results to standardized format
