@@ -335,21 +335,35 @@ class ActivatedRepoIndexManager:
                 repo_path, index_types, clear, phase_update, allocator
             )
 
-            # Determine overall success
-            all_success = all(r.get("success", False) for r in results.values())
+            # C8: a single index-type failure/timeout must NOT fail the whole
+            # reindex. Per-type execution is already isolated (each type is
+            # attempted even if another raised), so the indexes that succeeded
+            # are built and valid. Report success as long as at least one type
+            # succeeded -- a mixed run is a PARTIAL success (failed_types
+            # surfaced) rather than a hard failure. Only an all-types-failed run
+            # is a hard failure.
+            succeeded_types = [t for t, r in results.items() if r.get("success", False)]
             failed_types = [
                 t for t, r in results.items() if not r.get("success", False)
             ]
+            success = bool(succeeded_types)
+            partial = bool(succeeded_types) and bool(failed_types)
 
-            if all_success:
+            if not failed_types:
                 message = f"Successfully reindexed all types: {', '.join(index_types)}"
+            elif partial:
+                message = (
+                    f"Reindex partially completed: succeeded="
+                    f"{', '.join(succeeded_types)}; failed={', '.join(failed_types)}"
+                )
             else:
-                message = f"Reindex completed with failures: {', '.join(failed_types)}"
+                message = f"Reindex failed for all types: {', '.join(failed_types)}"
 
             update_progress(100, message, phase="complete")
 
             return {
-                "success": all_success,
+                "success": success,
+                "partial": partial,
                 "message": message,
                 "results": results,
                 "failed_types": failed_types if failed_types else None,
