@@ -22,6 +22,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+from tests.utils.env_assertions import assert_env_present
+
 # Named constant for background thread synchronization timeout
 BACKGROUND_THREAD_WAIT_SECONDS = 5.0
 
@@ -337,10 +339,14 @@ class TestSecurityHardeningCommandFlags:
 
         assert len(captured_envs) >= 1, "subprocess.run must have been called"
         env = captured_envs[0]
-        assert "CIDX_META_BASE" in env, (
-            "MEDIUM-1: CIDX_META_BASE must be set in the subprocess environment "
-            "so cidx-meta-cleanup.sh can locate its base directory. "
-            f"Got env keys containing CIDX: {[k for k in env if 'CIDX' in k]}"
+        assert_env_present(
+            env,
+            "CIDX_META_BASE",
+            msg=(
+                "MEDIUM-1: CIDX_META_BASE must be set in the subprocess environment "
+                "so cidx-meta-cleanup.sh can locate its base directory. "
+                f"Got env keys containing CIDX: {[k for k in env if 'CIDX' in k]}"
+            ),
         )
 
     def test_pipe_behavior_comment_present(self):

@@ -26,6 +26,7 @@ from typing import List
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.services.codex_invoker import CodexInvoker
+from tests.utils.env_assertions import assert_env_absent
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +96,10 @@ class TestAuthHeaderProviderDefault:
         envs = _capture_popen_envs(mock_popen.call_args_list)
         assert envs, "Popen must have been called"
         for env in envs:
-            assert _AUTH_HEADER_ENV_VAR not in env, (
-                f"CIDX_MCP_AUTH_HEADER must NOT be in env when provider is None; "
-                f"got env keys: {list(env.keys())}"
+            assert_env_absent(
+                env,
+                _AUTH_HEADER_ENV_VAR,
+                msg="CIDX_MCP_AUTH_HEADER must NOT be in env when provider is None",
             )
 
 
