@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.utils.env_assertions import assert_env_absent, assert_env_present
+
 
 # Credential fixture used across tests
 MOCK_CREDENTIAL = {
@@ -72,6 +74,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             result.returncode = 0
             return result
 
@@ -81,7 +84,7 @@ class TestGitPushWithPatEnvVars:
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
-        assert "GIT_ASKPASS" in captured_env
+        assert_env_present(captured_env, "GIT_ASKPASS")
         # Should be an absolute path to a script
         askpass_path = Path(captured_env["GIT_ASKPASS"])
         # File should be cleaned up (in finally), so just check it was a Path
@@ -103,6 +106,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -129,6 +133,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -155,6 +160,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -181,6 +187,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -207,6 +214,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -234,6 +242,7 @@ class TestGitPushWithPatEnvVars:
             captured_env.update(kwargs.get("env", {}))
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -245,8 +254,8 @@ class TestGitPushWithPatEnvVars:
             )
 
         # Should not have been set since credential lacks these keys
-        assert "GIT_AUTHOR_NAME" not in captured_env
-        assert "GIT_AUTHOR_EMAIL" not in captured_env
+        assert_env_absent(captured_env, "GIT_AUTHOR_NAME")
+        assert_env_absent(captured_env, "GIT_AUTHOR_EMAIL")
 
 
 class TestGitPushWithPatUrlConversion:
@@ -270,6 +279,7 @@ class TestGitPushWithPatUrlConversion:
             push_cmd.extend(cmd)
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -300,6 +310,7 @@ class TestGitPushWithPatUrlConversion:
             push_cmd.extend(cmd)
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -321,6 +332,7 @@ class TestGitPushWithPatUrlConversion:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
@@ -351,6 +363,7 @@ class TestGitPushWithPatUrlConversion:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "push" in cmd:
@@ -389,6 +402,7 @@ class TestGitPushWithPatUrlConversion:
             push_cmd.extend(cmd)
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -436,6 +450,7 @@ class TestGitPushWithPatErrorHandling:
                 return result
             result = MagicMock()
             result.stdout = ""
+            result.stderr = ""
             return result
 
         with patch(
@@ -573,6 +588,7 @@ class TestGitPushWithPatReturn:
                 return result
             result = MagicMock()
             result.stdout = "abc123..def456  main -> main"
+            result.stderr = ""
             return result
 
         with patch(
