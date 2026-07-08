@@ -214,6 +214,32 @@ class SemanticQueryManager:
         # Track concurrent queries per user (in production this would need persistence)
         self._active_queries_per_user: Dict[str, int] = {}
 
+        # Repo-shard ownership (cluster sharding). None = solo/symmetric: this pod
+        # caches every repo. Injected in cluster mode so a pod only populates its
+        # per-pod index cache for repos it owns; non-owned repos are still served,
+        # just load-and-discard (hnsw_cache=None).
+        self._shard_ownership: Optional[Any] = None
+
+    def set_shard_ownership(self, shard_ownership: Any) -> None:
+        """Inject repo-shard ownership (cluster mode only).
+
+        When set, single-repo searches only populate this pod's index cache for
+        repos this node owns; non-owned repos are served load-and-discard.
+        """
+        self._shard_ownership = shard_ownership
+
+    def _owns_for_cache(self, repository_alias: str) -> bool:
+        """Whether this node should use its shared index cache for ``alias``.
+
+        True (use the per-pod cache) when sharding is off (solo mode) or this node
+        owns the alias; False means bypass the cache (load-and-discard) so a
+        non-owned repo does not bloat this pod's cache. Fails open via
+        ShardOwnership.owns, so a query is never denied incorrectly.
+        """
+        # getattr default keeps instances built via __new__ (some tests) safe.
+        shard_ownership = getattr(self, "_shard_ownership", None)
+        return shard_ownership is None or shard_ownership.owns(repository_alias)
+
     def _is_composite_repository(self, repo_path: Path) -> bool:
         """
         Check if repository is in proxy mode (composite).
@@ -1424,8 +1450,8 @@ class SemanticQueryManager:
                     _degraded_in_query.append(_pname)
                     continue
                 _captured_kwargs = _kwargs
-                provider_tasks[_pname] = (
-                    lambda _kw=_captured_kwargs: self._search_with_provider(**_kw)
+                provider_tasks[_pname] = lambda _kw=_captured_kwargs: (
+                    self._search_with_provider(**_kw)
                 )
 
             primary_results: List[QueryResult] = []
@@ -2247,7 +2273,13 @@ class SemanticQueryManager:
             backend = BackendFactory.create(
                 config=config,
                 project_root=repo_path,
-                hnsw_cache=_server_hnsw_cache,
+                # Cluster sharding: only populate this pod's shared index cache for
+                # repos it owns; non-owned repos load-and-discard (fail-open).
+                hnsw_cache=(
+                    _server_hnsw_cache
+                    if self._owns_for_cache(repository_alias)
+                    else None
+                ),
                 memory_governor=get_memory_governor(),
             )
             vector_store = backend.get_vector_store_client()
