@@ -17,7 +17,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 

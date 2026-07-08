@@ -24,7 +24,7 @@ from typing import Callable, Optional, List, Tuple
 
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 logger = logging.getLogger(__name__)
 

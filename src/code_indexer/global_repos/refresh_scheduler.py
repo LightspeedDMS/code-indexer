@@ -41,7 +41,7 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     wait_for_nfs_visibility,
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager

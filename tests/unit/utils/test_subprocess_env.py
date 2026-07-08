@@ -1,14 +1,16 @@
-"""
-Tests for cidx_subprocess_env helper module.
+"""Tests for the shared subprocess_env helper module.
 
 Verifies that build_cidx_subprocess_env absolutizes any relative PYTHONPATH
-entries so that cidx subprocesses spawned with cwd=<clone_path> do not have
-a relative PYTHONPATH entry re-anchor to the child's cwd (Bug #1325).
+entries so that cidx subprocesses spawned with cwd=<clone_or_repo_path> do
+not have a relative PYTHONPATH entry re-anchor to the child's cwd
+(Bug #1325). This module lives in the shared `code_indexer.utils` package
+(Story #1328) so both `server/` and `cli/`/`proxy/` code can import it
+without a layering violation.
 """
 
 import os
 
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 
 def test_relative_pythonpath_entry_absolutized(monkeypatch):

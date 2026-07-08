@@ -15,7 +15,7 @@ import yaml
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager

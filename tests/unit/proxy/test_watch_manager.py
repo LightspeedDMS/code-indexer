@@ -3,6 +3,7 @@
 Tests parallel watch process management across multiple repositories.
 """
 
+import os
 import pytest
 import subprocess
 from unittest.mock import Mock, patch
@@ -80,6 +81,28 @@ class TestParallelWatchManager:
 
             # Should return process
             assert process == mock_process
+
+    def test_start_watch_process_absolutizes_relative_pythonpath(
+        self, manager, tmp_path
+    ):
+        """Bug #1328: a relative PYTHONPATH must be absolutized before the
+        child watch subprocess changes cwd to the target repository,
+        otherwise the relative entry re-anchors into the repo dir and can
+        shadow an installed dependency with a same-named package inside it.
+        """
+        repo_path = str(tmp_path / "test-repo")
+
+        with (
+            patch("code_indexer.proxy.watch_manager.subprocess.Popen") as mock_popen,
+            patch.dict(os.environ, {"PYTHONPATH": "./src"}),
+        ):
+            mock_popen.return_value = Mock()
+            manager._start_watch_process(repo_path)
+
+            call_args = mock_popen.call_args
+            env = call_args[1].get("env")
+            assert env is not None, "Popen must receive an explicit env kwarg"
+            assert env["PYTHONPATH"] == os.path.abspath("./src")
 
     def test_start_all_watchers_handles_failures(self, manager, repositories):
         """Test starting watchers handles individual process failures."""

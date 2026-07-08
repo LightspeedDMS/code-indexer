@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
 # Imported at module level so the symbol is attachable via

@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Any, Callable
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
-from ..utils.cidx_subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 
 class IndexingError(Exception):
