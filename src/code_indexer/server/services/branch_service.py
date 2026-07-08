@@ -8,8 +8,11 @@ without mocking, following CLAUDE.md Foundation #1 (Anti-Mock).
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 from code_indexer.services.git_topology_service import GitTopologyService
@@ -22,6 +25,22 @@ from code_indexer.server.models.branch_models import (
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# get_branches bottleneck fix. list_branches reads a commit object PER branch
+# (GitPython) across all local + remote refs -> O(refs) object reads, ~13s on
+# many-branch repos (e.g. evolution-global). Cache the result per
+# (repo working dir, include_remote) with a short TTL. The immutable versioned
+# golden-repo snapshot's branch set is fixed, so repeated get_branches calls
+# reuse the listing; the TTL bounds staleness for mutable activated repos.
+# Module-level because BranchService is constructed per request.
+# ---------------------------------------------------------------------------
+_BRANCHES_CACHE_TTL_SECONDS = 30.0
+_BRANCHES_CACHE_MAX = 128
+_branches_cache: "OrderedDict[Tuple[str, bool], Tuple[float, List[BranchInfo]]]" = (
+    OrderedDict()
+)
+_branches_cache_lock = threading.Lock()
 
 
 class IndexStatusManager(Protocol):
@@ -72,10 +91,31 @@ class BranchService:
         Raises:
             ValueError: If git operations fail
         """
-        # Return empty list for non-git repositories
         if not self._is_git_repo:
             return []
 
+        cache_key = (str(self.repo.working_dir), include_remote)
+        now = time.monotonic()
+        with _branches_cache_lock:
+            entry = _branches_cache.get(cache_key)
+            if entry is not None and now < entry[0]:
+                _branches_cache.move_to_end(cache_key)
+                return entry[1]
+
+        branches_result = self._list_branches_uncached(include_remote)
+
+        with _branches_cache_lock:
+            _branches_cache[cache_key] = (
+                now + _BRANCHES_CACHE_TTL_SECONDS,
+                branches_result,
+            )
+            _branches_cache.move_to_end(cache_key)
+            while len(_branches_cache) > _BRANCHES_CACHE_MAX:
+                _branches_cache.popitem(last=False)
+        return branches_result
+
+    def _list_branches_uncached(self, include_remote: bool = False) -> List[BranchInfo]:
+        """Uncached branch listing: reads a commit object per local + remote ref."""
         try:
             branches = []
             current_branch_name = self.git_topology_service.get_current_branch()
