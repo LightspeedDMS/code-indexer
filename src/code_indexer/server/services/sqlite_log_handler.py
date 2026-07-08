@@ -16,11 +16,17 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+# EVO-63910 follow-up: max records the background drainer coalesces into a single
+# backend write. In cluster/PG (Aurora) mode this turns N INSERT+commit round
+# trips into ceil(N / _DRAIN_BATCH_MAX) multi-row INSERTs, cutting the commit
+# amplification (and cross-pod serialization) that caps multi-pod scaling.
+_DRAIN_BATCH_MAX = 100
 
 
 class SQLiteLogHandler(logging.Handler):
@@ -146,8 +152,7 @@ class SQLiteLogHandler(logging.Handler):
 
             # Create logs table with schema from AC5 (Story #876 Phase C adds
             # the `alias` column for lifecycle-runner row tagging).
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -161,8 +166,7 @@ class SQLiteLogHandler(logging.Handler):
                     alias TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 )
-                """
-            )
+                """)
 
             # Migrate pre-existing databases in-place: add alias if missing.
             existing_columns = {
@@ -366,8 +370,17 @@ class SQLiteLogHandler(logging.Handler):
             thread.start()
 
     def _flush_loop(self) -> None:
-        """Drain queued log params and insert them via the backend, off the
-        request thread.
+        """Drain queued log params in BATCHES and insert them via the backend,
+        off the request thread.
+
+        After taking the first queued record (blocking up to 0.5s), it coalesces
+        up to ``_DRAIN_BATCH_MAX - 1`` more that are immediately available and
+        writes them in one call via the backend's ``insert_logs`` (a single
+        multi-row INSERT + commit on Aurora), falling back to per-record
+        ``insert_log`` for backends that don't implement the batch method. This
+        collapses N commits into ceil(N / batch) so the drainer keeps up under
+        burst load and the bounded queue stops overflowing back to the inline
+        synchronous path.
 
         Never raises. The re-entry guard is set on THIS thread while inserting so
         that any logging emitted by a failing insert is dropped (matching emit()'s
@@ -375,22 +388,37 @@ class SQLiteLogHandler(logging.Handler):
         """
         while True:
             try:
-                params = self._log_queue.get(timeout=0.5)
+                first = self._log_queue.get(timeout=0.5)
             except queue.Empty:
                 if self._stopping:
                     return  # queue drained and shutdown requested
                 continue
+            # Coalesce whatever else is already queued, without blocking.
+            batch: List[Optional[Dict[str, Any]]] = [first]
+            while len(batch) < _DRAIN_BATCH_MAX:
+                try:
+                    batch.append(self._log_queue.get_nowait())
+                except queue.Empty:
+                    break
             self._emit_guard.active = True
             try:
                 backend = self._logs_backend
-                if backend is not None and params is not None:
-                    backend.insert_log(**params)
+                records = [p for p in batch if p is not None]
+                if backend is not None and records:
+                    batch_insert = getattr(backend, "insert_logs", None)
+                    if callable(batch_insert):
+                        batch_insert(records)
+                    else:
+                        for params in records:
+                            backend.insert_log(**params)
             except Exception:
                 # Swallow: a failed audit-log insert must never kill the drainer.
                 pass
             finally:
                 self._emit_guard.active = False
-                self._log_queue.task_done()
+                # One task_done per successful get() (blocking + non-blocking).
+                for _ in batch:
+                    self._log_queue.task_done()
 
     def close(self) -> None:
         """Flush queued log writes, stop the drainer, then close.

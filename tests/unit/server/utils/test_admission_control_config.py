@@ -26,3 +26,26 @@ def test_parses_explicit_values():
     assert c.enabled is True
     assert c.max_inflight_requests == 25
     assert c.retry_after_seconds == 5
+
+
+def test_per_consumer_defaults_disabled():
+    c = AdmissionControlConfig()
+    assert c.per_consumer_enabled is False
+    assert c.per_consumer_burst == 30
+    assert c.per_consumer_refill_per_second == 10.0
+    assert c.per_consumer_cleanup_seconds == 3600
+
+
+def test_parses_per_consumer_values():
+    c = AdmissionControlConfig(
+        **{
+            "per_consumer_enabled": True,
+            "per_consumer_burst": 5,
+            "per_consumer_refill_per_second": 2.5,
+            "per_consumer_cleanup_seconds": 60,
+        }
+    )
+    assert c.per_consumer_enabled is True
+    assert c.per_consumer_burst == 5
+    assert c.per_consumer_refill_per_second == 2.5
+    assert c.per_consumer_cleanup_seconds == 60

@@ -75,6 +75,8 @@ BOOTSTRAP_KEYS = frozenset(
         "fault_injection_nonprod_ack",  # Story #746
         "server_threadpool_size",  # startup threadpool config
         "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
+        "admission_control_config",  # C7 - bootstrap (read once at app-wiring startup)
+        "query_vector_cache_config",  # fork interim - bootstrap (read once at app-wiring startup)
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"
