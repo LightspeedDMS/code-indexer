@@ -373,6 +373,28 @@ class SCIPQueryService:
 
         return all_results
 
+    def _resolve_scip_scan_dir(self, repository_alias: Optional[str]) -> Path:
+        """Scope the SCIP scan to one repo's scip dir when an alias is given.
+
+        get_context/analyze_impact previously passed the WHOLE golden-repos dir to
+        the composite queries, which glob ``**/*.scip.db`` and open + query EVERY
+        repo's database -- the scip_context (31s) / scip_impact (504) bottleneck,
+        because ``repository_alias`` was ignored ("reserved for future filtering").
+        Scoping to ``<golden>/<alias>/.code-indexer/scip`` makes it scan a single
+        database. Alias normalisation mirrors the scoped discovery above (strip a
+        leading path, drop the ``-global`` suffix). Falls back to the full dir for
+        an unknown alias so results are never silently dropped.
+        """
+        golden = self.get_golden_repos_dir()
+        if not repository_alias:
+            return golden
+        name = repository_alias
+        if os.sep in name or "/" in name:
+            name = Path(name).name
+        name = name.removesuffix("-global")
+        scoped = golden / name / ".code-indexer" / "scip"
+        return scoped if scoped.exists() else golden
+
     def analyze_impact(
         self,
         symbol: str,
@@ -395,11 +417,11 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.composites import analyze_impact
 
-        # Get the scip directory from golden_repos_dir
-        scip_dir = self.get_golden_repos_dir()
-
-        # Note: repository_alias and username reserved for future filtering
-        _ = repository_alias, username
+        # Scope the scan to the requested repo. Previously repository_alias was
+        # ignored and the composite globbed + opened EVERY repo's .scip.db -- the
+        # scip_impact 504 bottleneck. _resolve_scip_scan_dir narrows it to one db.
+        scip_dir = self._resolve_scip_scan_dir(repository_alias)
+        _ = username  # reserved for future access filtering
 
         result = analyze_impact(symbol, scip_dir, depth=depth)
 
@@ -520,11 +542,11 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.composites import get_smart_context
 
-        # Get the scip directory from golden_repos_dir
-        scip_dir = self.get_golden_repos_dir()
-
-        # Note: repository_alias and username reserved for future filtering
-        _ = repository_alias, username
+        # Scope the scan to the requested repo. Previously repository_alias was
+        # ignored and get_smart_context globbed + opened EVERY repo's .scip.db --
+        # the scip_context 31s bottleneck. _resolve_scip_scan_dir narrows to one db.
+        scip_dir = self._resolve_scip_scan_dir(repository_alias)
+        _ = username  # reserved for future access filtering
 
         result = get_smart_context(
             symbol,
