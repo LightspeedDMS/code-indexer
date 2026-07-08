@@ -97,6 +97,15 @@ class AccessFilteringService:
         # Bug #338: TTL cache for _get_all_repo_aliases()
         self._repo_aliases_cache: Optional[Set[str]] = None
         self._repo_aliases_cache_time: float = 0.0
+        # Per-call latency: cache the admin "all repos" enumeration. For an admin
+        # key, get_accessible_repos() walks every group x every repo on EVERY
+        # repo-scoped tool call -- O(groups x repos), non-trivial at scale (e.g.
+        # ~900 repos). The admin set == the full tracked repo set, so it's safe to
+        # cache: invalidated by register_on_repo_change (any grant/revoke) with a
+        # short TTL backstop. Not per-user (admin always sees all repos), so no
+        # group-membership staleness.
+        self._admin_all_repos_cache: Optional[Set[str]] = None
+        self._admin_all_repos_cache_time: float = 0.0
         # Bug #338: Register automatic cache invalidation on any repo access change
         group_access_manager.register_on_repo_change(self.invalidate_repo_aliases_cache)
 
@@ -121,12 +130,25 @@ class AccessFilteringService:
 
         # Admin group has full access to ALL repos from ALL groups
         if group.name == self.ADMIN_GROUP_NAME:
+            # Per-call latency: reuse the cached admin enumeration when fresh so
+            # repo-scoped tool calls by admin keys don't re-walk every group each
+            # time. Invalidated on any repo-access change; TTL is a backstop.
+            now = time.time()
+            if (
+                self._admin_all_repos_cache is not None
+                and (now - self._admin_all_repos_cache_time)
+                < self.REPO_ALIASES_CACHE_TTL
+            ):
+                # Return a copy so callers can't mutate the cached set.
+                return set(self._admin_all_repos_cache)
             # Collect repos from ALL groups in the system
             all_repos: Set[str] = set()
             for grp in self.group_manager.get_all_groups():
                 group_repos = self.group_manager.get_group_repos(grp.id)
                 all_repos.update(group_repos)
             all_repos.add(CIDX_META_REPO)
+            self._admin_all_repos_cache = set(all_repos)
+            self._admin_all_repos_cache_time = now
             return all_repos
 
         # Regular group - get explicitly assigned repos
@@ -309,6 +331,9 @@ class AccessFilteringService:
         """
         self._repo_aliases_cache = None
         self._repo_aliases_cache_time = 0.0
+        # Same trigger invalidates the admin all-repos enumeration cache.
+        self._admin_all_repos_cache = None
+        self._admin_all_repos_cache_time = 0.0
 
     def filter_cidx_meta_files(self, files: List[str], user_id: str) -> List[str]:
         """
