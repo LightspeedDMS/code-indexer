@@ -369,6 +369,40 @@ class SemanticSearchService:
                 http_client_factory=_get_http_client_factory(),
             )
 
+            # Fork interim query-embedding cache: on a HIT reuse the cached vector
+            # via the precomputed path (no VoyageAI call); on a MISS embed once
+            # and populate. Keyed by provider:model:query so providers/models never
+            # collide. No-op when disabled (default). Never breaks search — any
+            # error falls back to the normal uncached embedding path below.
+            if precomputed_query_vector is None:
+                from code_indexer.server.cache.query_vector_cache import (
+                    get_query_vector_cache,
+                )
+
+                _qv_cache = get_query_vector_cache()
+                if _qv_cache is not None:
+                    try:
+                        _qv_key = _qv_cache.make_key(
+                            embedding_service.get_provider_name(),
+                            embedding_service.get_current_model(),
+                            query,
+                        )
+                        _cached_vec = _qv_cache.get(_qv_key)
+                        if _cached_vec is not None:
+                            precomputed_query_vector = _cached_vec
+                        else:
+                            precomputed_query_vector = embedding_service.get_embedding(
+                                query
+                            )
+                            _qv_cache.put(_qv_key, precomputed_query_vector)
+                    except Exception as _qv_exc:
+                        logger.debug(
+                            "Query-vector cache skipped: %s",
+                            _qv_exc,
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        precomputed_query_vector = None
+
             # Resolve correct collection name based on repository configuration
             collection_name = vector_store_client.resolve_collection_name(
                 config, embedding_service
@@ -425,8 +459,13 @@ class SemanticSearchService:
                     search_kwargs["filter_conditions"] = filter_conditions
                 search_results, _ = vector_store_client.search(**search_kwargs)
             else:
-                # Backend: sequential execution with pre-computed embedding
-                query_embedding = embedding_service.get_embedding(query)
+                # Backend: sequential execution with pre-computed embedding.
+                # Reuse the (possibly cache-populated) precomputed vector when set.
+                query_embedding = (
+                    precomputed_query_vector
+                    if precomputed_query_vector is not None
+                    else embedding_service.get_embedding(query)
+                )
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,

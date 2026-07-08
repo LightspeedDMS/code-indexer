@@ -1052,6 +1052,39 @@ class AdmissionControlConfig:
     # Retry-After header value (seconds) sent on a shed request.
     retry_after_seconds: int = 1
 
+    # Per-consumer (per-API-key/session) token-bucket rate limiting. INDEPENDENT
+    # of the global in-flight cap above -- enable either or both. Keyed by a hash
+    # of the caller's credential so one client (e.g. a single dealer) cannot
+    # starve the fleet. Opt-in; tune to expected per-client request patterns.
+    per_consumer_enabled: bool = False
+    # Burst: tokens a single consumer may spend back-to-back.
+    per_consumer_burst: int = 30
+    # Sustained rate (requests/second) a single consumer's bucket refills at.
+    per_consumer_refill_per_second: float = 10.0
+    # Idle seconds before an unused consumer bucket is reclaimed (memory bound).
+    per_consumer_cleanup_seconds: int = 3600
+
+
+@dataclass
+class QueryVectorCacheConfig:
+    """In-process query-embedding (vector) cache (fork interim).
+
+    Caches query-text -> embedding vector so repeated queries skip the VoyageAI
+    embedding call -- the dominant per-query cost and the shared external
+    bottleneck horizontal pod scaling can't relieve. Opt-in (default OFF): it
+    trades a small miss-path serialization (embed-then-search instead of
+    embed-in-parallel) for a large hit-path saving, which only pays off on
+    repetitive workloads (e.g. a support knowledge-base agent).
+    """
+
+    enabled: bool = False
+    # Max distinct (provider, model, query) entries kept before LRU eviction.
+    max_entries: int = 10000
+    # Seconds an entry lives. Embeddings are deterministic for a fixed
+    # (provider, model, text), so this is a memory/staleness bound (e.g. after a
+    # model swap), not a correctness requirement. Default 24h.
+    ttl_seconds: float = 86400.0
+
 
 @dataclass
 class ServerConfig:
@@ -1092,6 +1125,8 @@ class ServerConfig:
     web_security_config: Optional[WebSecurityConfig] = None
     # C7 request admission control / backpressure
     admission_control_config: Optional[AdmissionControlConfig] = None
+    # In-process query-embedding (vector) cache (fork interim)
+    query_vector_cache_config: Optional[QueryVectorCacheConfig] = None
 
     # Story #15 - Configuration Refactoring: Indexing settings
     indexing_config: Optional[IndexingConfig] = None
@@ -1245,6 +1280,8 @@ class ServerConfig:
             self.api_limits_config = ApiLimitsConfig()
         if self.admission_control_config is None:
             self.admission_control_config = AdmissionControlConfig()
+        if self.query_vector_cache_config is None:
+            self.query_vector_cache_config = QueryVectorCacheConfig()
         if self.web_security_config is None:
             self.web_security_config = WebSecurityConfig()
         # Story #15 - Configuration Refactoring: Initialize indexing config
@@ -1602,6 +1639,14 @@ class ServerConfigManager:
         ):
             config_dict["admission_control_config"] = AdmissionControlConfig(
                 **config_dict["admission_control_config"]
+            )
+
+        # Convert nested query_vector_cache_config dict to QueryVectorCacheConfig
+        if "query_vector_cache_config" in config_dict and isinstance(
+            config_dict["query_vector_cache_config"], dict
+        ):
+            config_dict["query_vector_cache_config"] = QueryVectorCacheConfig(
+                **config_dict["query_vector_cache_config"]
             )
 
         # Convert nested api_limits_config dict to ApiLimitsConfig

@@ -49,8 +49,7 @@ class LogsPostgresBackend:
         """Create the logs table and indexes if they do not already exist."""
         try:
             with self._pool.connection() as conn:
-                conn.execute(
-                    """
+                conn.execute("""
                     CREATE TABLE IF NOT EXISTS logs (
                         id SERIAL PRIMARY KEY,
                         timestamp TEXT NOT NULL,
@@ -65,8 +64,7 @@ class LogsPostgresBackend:
                         alias TEXT,
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     )
-                    """
-                )
+                    """)
                 # Story #876 Phase C: tag rows with repo alias so operators
                 # can filter lifecycle-runner failures by repo. ALTER is idempotent
                 # so legacy deployments migrate cleanly on next boot.
@@ -146,6 +144,66 @@ class LogsPostgresBackend:
                 conn.commit()
         except Exception as exc:
             logger.warning("LogsPostgresBackend: insert_log failed: %s", exc)
+
+    # Column order for batch inserts — matches insert_log's INSERT statement.
+    _INSERT_COLUMNS: Tuple[str, ...] = (
+        "timestamp",
+        "level",
+        "source",
+        "message",
+        "correlation_id",
+        "user_id",
+        "request_path",
+        "extra_data",
+        "node_id",
+        "alias",
+    )
+
+    def insert_logs(self, records: List[Dict[str, Any]]) -> None:
+        """Insert many log records with a SINGLE commit (EVO-63910 batch drain).
+
+        The async log drainer coalesces queued records and calls this so the
+        shared ``logs`` table takes one multi-row INSERT + one commit per batch
+        instead of one INSERT+commit per record — cutting the commit
+        amplification (and the cross-pod serialization it causes) that otherwise
+        caps multi-pod scaling under concurrent load.
+
+        Each record is a dict keyed by ``_INSERT_COLUMNS`` (the same fields as
+        ``insert_log``'s parameters). On a batch failure it falls back to
+        per-record ``insert_log`` so one malformed row can't drop the whole
+        batch — behaviour is never worse than the pre-batch per-record path.
+        Failures are swallowed with a warning: a failed audit-log write must
+        never crash the application.
+
+        Args:
+            records: Log records to insert; empty list is a no-op.
+        """
+        if not records:
+            return
+        rows = [tuple(r.get(col) for col in self._INSERT_COLUMNS) for r in records]
+        try:
+            with self._pool.connection() as conn:
+                conn.cursor().executemany(
+                    """
+                    INSERT INTO logs
+                        (timestamp, level, source, message, correlation_id,
+                         user_id, request_path, extra_data, node_id, alias)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "LogsPostgresBackend: insert_logs batch failed (%s); "
+                "falling back to per-record inserts",
+                exc,
+            )
+            for record in records:
+                kwargs: Dict[str, Any] = {
+                    col: record.get(col) for col in self._INSERT_COLUMNS
+                }
+                self.insert_log(**kwargs)
 
     def _build_query_conditions(
         self,

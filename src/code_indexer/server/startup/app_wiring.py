@@ -103,24 +103,69 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     # any downstream processing. Opt-in; only wired when enabled so there is
     # zero overhead by default.
     _admission_cfg = server_config.admission_control_config
-    if _admission_cfg is not None and _admission_cfg.enabled:
+    if _admission_cfg is not None and (
+        _admission_cfg.enabled or _admission_cfg.per_consumer_enabled
+    ):
         from code_indexer.server.middleware.admission_control import (
             AdmissionControlMiddleware,
             AdmissionController,
+            PerConsumerRateLimiter,
         )
 
-        app.add_middleware(
-            AdmissionControlMiddleware,
-            controller=AdmissionController(
+        _controller = (
+            AdmissionController(
                 max_inflight=_admission_cfg.max_inflight_requests,
                 retry_after_seconds=_admission_cfg.retry_after_seconds,
-            ),
+            )
+            if _admission_cfg.enabled
+            else None
+        )
+        _rate_limiter = (
+            PerConsumerRateLimiter(
+                capacity=_admission_cfg.per_consumer_burst,
+                refill_per_second=_admission_cfg.per_consumer_refill_per_second,
+                cleanup_seconds=_admission_cfg.per_consumer_cleanup_seconds,
+            )
+            if _admission_cfg.per_consumer_enabled
+            else None
+        )
+        app.add_middleware(
+            AdmissionControlMiddleware,
+            controller=_controller,
+            rate_limiter=_rate_limiter,
         )
         logging.getLogger(__name__).info(
-            "C7 admission control ENABLED: max_inflight=%d/worker, retry_after=%ds",
+            "C7 admission control ENABLED: global_cap=%s (max_inflight=%d/worker, "
+            "retry_after=%ds), per_consumer=%s (burst=%d, %.1f req/s)",
+            _admission_cfg.enabled,
             _admission_cfg.max_inflight_requests,
             _admission_cfg.retry_after_seconds,
+            _admission_cfg.per_consumer_enabled,
+            _admission_cfg.per_consumer_burst,
+            _admission_cfg.per_consumer_refill_per_second,
         )
+
+    # In-process query-embedding (vector) cache (fork interim). Configured once
+    # at startup; a no-op singleton when disabled (the default). On repetitive
+    # workloads (e.g. a support KB agent) a cache hit skips the VoyageAI call --
+    # the shared external bottleneck horizontal pod scaling cannot relieve.
+    _qvc_cfg = server_config.query_vector_cache_config
+    if _qvc_cfg is not None:
+        from code_indexer.server.cache.query_vector_cache import (
+            configure_query_vector_cache,
+        )
+
+        configure_query_vector_cache(
+            enabled=_qvc_cfg.enabled,
+            max_entries=_qvc_cfg.max_entries,
+            ttl_seconds=_qvc_cfg.ttl_seconds,
+        )
+        if _qvc_cfg.enabled:
+            logging.getLogger(__name__).info(
+                "Query-vector cache ENABLED: max_entries=%d, ttl=%.0fs",
+                _qvc_cfg.max_entries,
+                _qvc_cfg.ttl_seconds,
+            )
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
