@@ -1106,6 +1106,11 @@ class SemanticQueryManager:
         # Story #618: Auto-default to parallel when both providers configured
         # Bug #667: Skip parallel when temporal params present — temporal routing gate
         # at line ~1387 must be reached; parallel block returns early before it.
+        # Same hazard for FTS/hybrid: the parallel block runs a dual-provider
+        # SEMANTIC search and returns before the FTS branch below, so forcing
+        # parallel silently turned every fts/hybrid query into a slow embedding
+        # search (the "dual-embedder FTS" bug) when both providers were configured.
+        # Multi-provider auto-parallel applies to plain semantic search only.
         if query_strategy is None:
             _has_temporal_for_strategy = any(
                 [
@@ -1118,8 +1123,11 @@ class SemanticQueryManager:
                     author,
                 ]
             )
-            if not _has_temporal_for_strategy and self._both_providers_configured(
-                repo_path
+            _semantic_mode_for_strategy = search_mode == "semantic"
+            if (
+                _semantic_mode_for_strategy
+                and not _has_temporal_for_strategy
+                and self._both_providers_configured(repo_path)
             ):
                 query_strategy = "parallel"
                 score_fusion = score_fusion or "rrf"
@@ -1324,8 +1332,8 @@ class SemanticQueryManager:
                     _degraded_in_query.append(_pname)
                     continue
                 _captured_kwargs = _kwargs
-                provider_tasks[_pname] = (
-                    lambda _kw=_captured_kwargs: self._search_with_provider(**_kw)
+                provider_tasks[_pname] = lambda _kw=_captured_kwargs: (
+                    self._search_with_provider(**_kw)
                 )
 
             primary_results: List[QueryResult] = []
