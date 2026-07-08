@@ -172,7 +172,7 @@ Then use the `ast_debug` payload in each match to identify node type names (e.g.
   "max_results": 3,
   "max_debug_nodes": 20,
   "await_seconds": 10,
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    debug_log(&format!(\"root kind: {}\", node.kind));\n    let funcs = node.descendants_of_kind(\"function_definition\");\n    debug_log(&format!(\"found {} functions\", funcs.len()));\n    funcs.iter().map(|f| EvalFinding {\n        pattern: \"func\".to_string(),\n        line: f.start_line,\n        snippet: truncate_snippet(&f.text, 80),\n    }).collect()\n}"
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    debug_log(&format!(\"root kind: {}\", node.kind));\n    let funcs = node.descendants_of_kind(\"function_definition\");\n    debug_log(&format!(\"found {} functions\", funcs.len()));\n    funcs.iter().map(|f| EvalFinding {\n        pattern: \"func\".to_string(),\n        line: f.start_line,\n        snippet: truncate_snippet(&f.text(), 80),\n    }).collect()\n}"
 }
 ```
 

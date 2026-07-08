@@ -12,6 +12,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from tests.utils.env_assertions import assert_env_present
+
 
 class TestGitRetryLogic:
     """Test git command retry wrapper."""
@@ -319,7 +321,7 @@ class TestGetGitEnvironmentSshSafety:
         from src.code_indexer.utils.git_runner import get_git_environment
 
         env = get_git_environment(tmp_path)
-        assert "GIT_SSH_COMMAND" in env
+        assert_env_present(env, "GIT_SSH_COMMAND")
         assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
 
     def test_get_git_environment_has_terminal_prompt_disabled(self, tmp_path):

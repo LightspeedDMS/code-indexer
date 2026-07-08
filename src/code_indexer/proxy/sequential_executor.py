@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+
 from .error_formatter import ErrorMessage, ErrorMessageFormatter
 from .hint_generator import HintGenerator
 
@@ -168,6 +170,11 @@ class SequentialCommandExecutor:
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minutes
+                # Bug #1328: absolutize any relative PYTHONPATH before the
+                # child subprocess changes cwd to repo_path, so a relative
+                # dev-mode PYTHONPATH doesn't re-anchor into the repo and
+                # get shadowed by a same-named package inside it.
+                env=build_cidx_subprocess_env(),
             )
 
             return result.stdout, result.stderr, result.returncode

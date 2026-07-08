@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.29.0] - 2026-07-08
+
+### Fixed
+
+- **Relative `PYTHONPATH` no longer shadows CIDX dependencies in spawned `cidx` subprocesses (#1325, #1328).** A server (or CLI) launched with a relative `PYTHONPATH` (e.g. dev `PYTHONPATH=./src`) spawned `cidx` subprocesses with `cwd=<clone>`, and the relative `./src` re-anchored into the clone — so a cloned `src`-layout repo whose package name collides with a CIDX dependency (e.g. `click`) shadowed the installed one, breaking `cidx`'s own imports (SyntaxError under Python 3.9) and hard-failing golden-repo registration/refresh/activation/provider-index. New shared helper `code_indexer/utils/subprocess_env.py::build_cidx_subprocess_env()` absolutizes relative `PYTHONPATH` entries against the current process cwd before the child changes directory (never strips; preserves absolute/empty entries; composes with the Bug #1313 temporal PG env). Applied at every server-side (#1325) and CLI/proxy (#1328) `cidx`-with-`cwd` spawn site; git spawns untouched. Live-confirmed by registering `click` under a relative `PYTHONPATH`.
+- **X-Ray tool-doc evaluator examples now compile (#1326).** The Rust `OwnedNode.text` is a method; the shipped examples used field access (`&f.text`) and failed to compile (E0615). Corrected to `f.text()` across `xray_search.md` and `xray_explore.md`.
+- **Env-wiring unit tests no longer leak `os.environ` secrets on failure (#1327).** `assert KEY (not) in <env>` made pytest repr the whole dict (values included) on failure, dumping live secrets from `os.environ`-derived subprocess envs into logs/traces. New shared `tests/utils/env_assertions.py` converts each check to a bool/scalar before the assert; guard test proves sentinel secrets never appear in failure text.
+- **14 masked git-push tests fixed and un-hidden (#1329).** `test_git_push_with_pat.py` mocked the push result with an unconfigured `MagicMock().stderr`, so `_count_pushed_commits` (Bug #569) raised `TypeError`; the 14 failures were hidden by explicit `--deselect` lines in `fast-automation.sh`. Made the mocks faithful (`.stderr` a real string; product code untouched) and removed the deselect lines so the gate covers them again.
+
 ## [11.28.0] - 2026-07-07
 
 ### Fixed

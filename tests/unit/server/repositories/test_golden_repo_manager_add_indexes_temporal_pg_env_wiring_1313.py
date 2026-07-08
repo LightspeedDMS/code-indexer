@@ -13,6 +13,13 @@ SQLite even in cluster/postgres mode.
 Mirrors test_golden_repo_manager_temporal_pg_env_wiring_1313.py's approach,
 adapted to this method's background_worker + submit_job.side_effect pattern
 (mirrors test_golden_repo_manager_scheduler_wiring.py's construction style).
+
+Bug #1325 update: the semantic Popen call no longer stays env=None -- every
+cidx subprocess call site now receives a sanitized env via
+build_cidx_subprocess_env() (absolutizes any relative PYTHONPATH entry so
+the child does not shadow installed dependencies with clone-local
+packages). The semantic call must still NEVER receive the temporal-only PG
+bootstrap var; only the temporal call is postgres-aware for that var.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from unittest.mock import Mock, patch
 
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 from code_indexer.server.utils.config_manager import ServerConfig
+from tests.utils.env_assertions import assert_env_absent
 
 
 def _make_manager(tmp_path, temporal_options=None):
@@ -116,9 +124,13 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
         assert by_phase["temporal"] is not None
         assert by_phase["temporal"][TEMPORAL_PG_BOOTSTRAP_DIR_ENV] == "/opt/cidx-server"
 
-    def test_semantic_command_always_receives_env_none_even_in_postgres_mode(
+    def test_semantic_command_receives_sanitized_non_none_env_in_postgres_mode(
         self, tmp_path
     ):
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+        )
+
         manager, repo_path = _make_manager(tmp_path)
         server_config = ServerConfig(
             server_dir="/opt/cidx-server",
@@ -153,9 +165,19 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             _run_captured_worker(manager)
 
         by_phase = {c["phase_name"]: c["env"] for c in calls}
-        assert by_phase["semantic"] is None, (
-            "the semantic Popen call must NEVER receive the PG bootstrap env "
-            "-- only the temporal call is postgres-aware"
+        semantic_env = by_phase["semantic"]
+        assert semantic_env is not None, (
+            "Bug #1325: the semantic Popen call must receive a sanitized env "
+            "(build_cidx_subprocess_env), never raw None"
+        )
+        assert_env_absent(
+            semantic_env,
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+            msg=(
+                "the semantic Popen call must NEVER receive the temporal-only PG "
+                "bootstrap var -- only the temporal call is postgres-aware for "
+                "that var"
+            ),
         )
 
     def test_temporal_command_receives_env_none_in_sqlite_mode(self, tmp_path):

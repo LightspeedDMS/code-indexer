@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
 # Imported at module level so the symbol is attachable via
@@ -865,6 +866,7 @@ class GoldenRepoManager:
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 logging.info(
                     f"Initialized CIDX index structure for local repo '{alias}'"
@@ -1723,6 +1725,7 @@ class GoldenRepoManager:
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
 
                 if result.returncode != 0:
@@ -1836,6 +1839,7 @@ class GoldenRepoManager:
                 ["cidx", "index", "--fts", "--progress-json"],
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
+                env=build_cidx_subprocess_env(),
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
@@ -1856,6 +1860,11 @@ class GoldenRepoManager:
 
                 _temporal_env = build_temporal_child_env(
                     get_config_service().get_config()
+                )
+                _temporal_env = (
+                    build_cidx_subprocess_env(_temporal_env)
+                    if _temporal_env is not None
+                    else None
                 )
 
                 logging.info(f"Executing cidx index --index-commits for {clone_path}")
@@ -2011,6 +2020,7 @@ class GoldenRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_init_conflict_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 return result.returncode == 0
             else:
@@ -2034,6 +2044,7 @@ class GoldenRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_init_conflict_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 return result.returncode == 0
 
@@ -2082,6 +2093,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_service_cleanup_timeout,
+                env=build_cidx_subprocess_env(),
             )
 
             # Wait for service cleanup using proper event-based waiting
@@ -2099,6 +2111,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_service_conflict_timeout,
+                env=build_cidx_subprocess_env(),
             )
             return result.returncode == 0
 
@@ -2149,6 +2162,7 @@ class GoldenRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_process_check_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 # If status shows no services or fails with "not running", cleanup is complete
                 if result.returncode != 0 or "not running" in result.stdout.lower():
@@ -2578,6 +2592,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 check=True,
+                env=build_cidx_subprocess_env(),
             )
             if result.stdout:
                 logger.debug(
@@ -2630,6 +2645,7 @@ class GoldenRepoManager:
                 text=True,
                 timeout=cidx_fix_timeout,
                 check=False,
+                env=build_cidx_subprocess_env(),
             )
         except Exception as exc:
             logger.warning(
@@ -3251,6 +3267,7 @@ class GoldenRepoManager:
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 init_output = (init_result.stdout or "") + (init_result.stderr or "")
                 if (
@@ -3280,6 +3297,7 @@ class GoldenRepoManager:
                             command,
                             phase_name="semantic",
                             error_label="create semantic index",
+                            env=build_cidx_subprocess_env(),
                         )
 
                     elif index_type == "fts":
@@ -3296,6 +3314,7 @@ class GoldenRepoManager:
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            env=build_cidx_subprocess_env(),
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""
@@ -3366,6 +3385,11 @@ class GoldenRepoManager:
 
                         _temporal_env = build_temporal_child_env(
                             get_config_service().get_config()
+                        )
+                        _temporal_env = (
+                            build_cidx_subprocess_env(_temporal_env)
+                            if _temporal_env is not None
+                            else None
                         )
 
                         _run_with_popen_progress(
@@ -3441,6 +3465,7 @@ class GoldenRepoManager:
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            env=build_cidx_subprocess_env(),
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""

@@ -39,6 +39,7 @@ from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,
 )
+from tests.utils.env_assertions import assert_env_absent
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -247,9 +248,10 @@ class TestAuthHeaderProviderNoneDefault:
 
         assert mock_popen.called, "Popen must be called when provider is None"
         env = mock_popen.call_args.kwargs.get("env", {})
-        assert _AUTH_HEADER_ENV_VAR not in env, (
-            f"{_AUTH_HEADER_ENV_VAR} must NOT be in env when provider is None; "
-            f"got env keys: {list(env.keys())}"
+        assert_env_absent(
+            env,
+            _AUTH_HEADER_ENV_VAR,
+            msg=f"{_AUTH_HEADER_ENV_VAR} must NOT be in env when provider is None",
         )
         assert result.success, (
             f"Invocation must succeed when provider is None; error={result.error!r}"

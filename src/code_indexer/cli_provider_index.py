@@ -4,6 +4,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+
 
 @click.group("provider-index")
 def provider_index_group():
@@ -140,6 +142,11 @@ def add(provider: str, repo: str):
             ["cidx", "index"],
             cwd=str(repo_path),
             capture_output=False,
+            # Bug/Story #1328: absolutize any relative PYTHONPATH before the
+            # child subprocess changes cwd to repo_path, so a relative
+            # dev-mode PYTHONPATH doesn't re-anchor into the repo and get
+            # shadowed by a same-named package inside it.
+            env=build_cidx_subprocess_env(),
         )
     except FileNotFoundError:
         raise click.ClickException("cidx not found; install it or add it to PATH")
@@ -213,6 +220,11 @@ def recreate(provider: str, repo: str):
             ["cidx", "index", "--clear"],
             cwd=str(repo_path),
             capture_output=False,
+            # Bug/Story #1328: absolutize any relative PYTHONPATH before the
+            # child subprocess changes cwd to repo_path, so a relative
+            # dev-mode PYTHONPATH doesn't re-anchor into the repo and get
+            # shadowed by a same-named package inside it.
+            env=build_cidx_subprocess_env(),
         )
     except FileNotFoundError:
         raise click.ClickException("cidx not found; install it or add it to PATH")

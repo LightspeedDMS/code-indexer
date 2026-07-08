@@ -8,6 +8,7 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
 import os
@@ -2610,6 +2611,7 @@ class ActivatedRepoManager:
                 cwd=str(repo_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=30,
             )
 
@@ -2950,6 +2952,7 @@ class ActivatedRepoManager:
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=60,
                 )
 

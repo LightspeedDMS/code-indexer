@@ -17,6 +17,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -1859,6 +1860,17 @@ def _run_provider_subprocess(
     except Exception as _seed_exc:  # noqa: BLE001
         logger.debug("Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc)
 
+    # Bug #1325 (code-review follow-up): sanitize env here, the single shared
+    # call site for both the semantic (_provider_index_job) and temporal
+    # (_provider_temporal_index_job) provider-index jobs, so a relative
+    # PYTHONPATH inherited from the server process is absolutized before the
+    # child changes cwd to actual_path -- otherwise it re-anchors into
+    # actual_path and a src/-layout package there can shadow an installed
+    # cidx dependency. Preserves the provider API key vars and (in postgres
+    # mode) the #1313 CIDX_TEMPORAL_PG_BOOTSTRAP_DIR var already merged into
+    # env by the callers.
+    sanitized_env = build_cidx_subprocess_env(env)
+
     try:
         run_with_popen_progress(
             command=cmd,
@@ -1868,7 +1880,7 @@ def _run_provider_subprocess(
             all_stdout=all_stdout,
             all_stderr=all_stderr,
             cwd=actual_path,
-            env=env,
+            env=sanitized_env,
             error_label=f"provider {phase_name}",
         )
         stdout_out = "".join(all_stdout)
