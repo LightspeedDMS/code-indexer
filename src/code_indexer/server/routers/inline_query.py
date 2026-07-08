@@ -14,6 +14,7 @@ from fastapi import (
     HTTPException,
     status,
     Depends,
+    Request,
 )
 
 from ..models.query import (
@@ -66,6 +67,7 @@ def register_query_routes(
     @app.post("/api/query")
     def semantic_query(
         request: SemanticQueryRequest,
+        raw_request: Request,
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -93,6 +95,43 @@ def register_query_routes(
             SearchEventRecord,
         )
         from code_indexer.server.services.config_service import get_config_service
+        from ..services.shard_router import FORWARD_HEADER
+
+        # Cluster sharding: if this is a concrete single-repo query for a repo this
+        # node does not own, forward it to an owner pod (which has it cached) and
+        # return that response. Loop-guarded via FORWARD_HEADER; wildcards (omni)
+        # and async job submissions stay local. Fails open: any routing problem
+        # (or no shard_router at all -> solo/symmetric) falls through to local.
+        shard_router = getattr(raw_request.app.state, "shard_router", None)
+        if (
+            shard_router is not None
+            and raw_request.headers.get(FORWARD_HEADER.lower()) != "1"
+        ):
+            alias = request.repository_alias
+            if (
+                isinstance(alias, str)
+                and alias
+                and "*" not in alias
+                and not getattr(request, "async_query", False)
+            ):
+                try:
+                    target = shard_router.target_for(alias)
+                    if target:
+                        from fastapi.responses import JSONResponse
+
+                        forwarded = shard_router.forward(
+                            target,
+                            request.model_dump(),
+                            raw_request.headers.get("authorization"),
+                        )
+                        return JSONResponse(content=forwarded)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "shard forward failed for %r (%s); serving locally",
+                        alias,
+                        exc,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
 
         start_time = time.time()
 
