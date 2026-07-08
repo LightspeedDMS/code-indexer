@@ -489,8 +489,20 @@ class GoldenRepoManager:
                             f"Category auto-assignment failed for '{alias}': {e}"
                         )
 
-                # Automatic global activation (AC1 from Story #521)
-                # This is a non-blocking post-registration step (AC4)
+                # Automatic global activation (AC1 from Story #521).
+                #
+                # Bug #1317: a "successfully-provisioned" GLOBAL repo MUST
+                # always have its alias pointer file written. This used to
+                # be a non-blocking, best-effort step (AC4) that on failure
+                # just logged an error and left the golden_repos row
+                # committed with no pointer -- a registry-orphan-in-waiting
+                # that forced every future query onto the #1315
+                # index_path fallback as steady state instead of a rare
+                # safety net. Activation failure now rolls back the row
+                # (both the in-memory cache and the shared SQLite/PG
+                # backend) and re-raises as GitOperationError, which the
+                # outer except clause below cleans up the orphaned clone
+                # directory for -- registration is all-or-nothing.
                 try:
                     from code_indexer.global_repos.global_activation import (
                         GlobalActivator,
@@ -508,13 +520,39 @@ class GoldenRepoManager:
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
                     )
                 except Exception as activation_error:
-                    # Log error but don't fail the golden repo registration (AC4)
                     logging.error(
-                        f"Global activation failed for '{alias}': {activation_error}. "
-                        f"Golden repository is registered but not globally accessible. "
-                        f"Manual global activation can be retried later."
+                        f"Bug #1317: global activation failed for '{alias}': "
+                        f"{activation_error}. Rolling back registration so "
+                        f"the golden repo is never left without its alias "
+                        f"pointer."
                     )
-                    # Continue with successful registration response
+                    self.golden_repos.pop(alias, None)
+                    try:
+                        self._sqlite_backend.remove_repo(alias)
+                    except Exception as rollback_error:
+                        # The clone directory is removed unconditionally by
+                        # the outer `except GitOperationError` cleanup below
+                        # regardless of whether THIS rollback succeeds, so a
+                        # row that survives this failure resolves as
+                        # clone-absent -- it is covered by the
+                        # golden_repo_reconciler orphan-removal pass (not
+                        # its pointer-repair pass, since there is no clone
+                        # to repoint), unless the reconciler's circuit-
+                        # breaker trips because an implausible fraction of
+                        # repos are absent at once (see
+                        # golden_repo_reconciler.py).
+                        logging.error(
+                            f"Bug #1317: failed to roll back golden_repos "
+                            f"row for '{alias}' after activation failure: "
+                            f"{rollback_error}. The clone directory is "
+                            f"still being removed; this row will resolve "
+                            f"as clone-absent and is covered by the "
+                            f"registry reconcile sweep's orphan-removal "
+                            f"pass."
+                        )
+                    raise GitOperationError(
+                        f"Global activation failed for '{alias}': {activation_error}"
+                    ) from activation_error
 
                 # Lifecycle hook: Create .md file in cidx-meta (Story #538)
                 try:
@@ -1009,42 +1047,58 @@ class GoldenRepoManager:
                         f"Failed to find activated repos for cascade deletion: {e}"
                     )
 
-            # Get repository info before removal
-            golden_repo = self.golden_repos[alias]
-
-            # Perform cleanup BEFORE removing from memory
-            # Use canonical path resolution to handle versioned structure repos
+            # Bug #1317 -- provisioning atomicity guard (removal side):
+            # resolve the on-disk path BEFORE touching the registry. A
+            # GoldenRepoNotFoundError here just means "nothing to clean up
+            # on disk" -- it must never block removing the row (that IS the
+            # registry-orphan cleanup case).
             try:
-                actual_path = self.get_actual_repo_path(alias)
-                cleanup_successful = self._cleanup_repository_files(actual_path)
+                actual_path: Optional[str] = self.get_actual_repo_path(alias)
+                repo_exists_on_disk = True
             except GoldenRepoNotFoundError:
-                # If repository doesn't exist on filesystem, nothing to clean up
-                # This can happen in test scenarios or if repo was manually deleted
                 logging.info(
-                    f"Repository '{alias}' not found on filesystem during removal - skipping cleanup"
+                    f"Repository '{alias}' not found on filesystem during "
+                    f"removal - registry row will still be removed."
                 )
-                cleanup_successful = True
-            except GitOperationError as cleanup_error:
-                # Critical cleanup failures should prevent deletion
-                logging.error(
-                    f"Critical cleanup failure prevents repository deletion: {cleanup_error}"
-                )
-                raise  # Re-raise to prevent deletion
+                actual_path = None
+                repo_exists_on_disk = False
 
-            # Only remove from storage after cleanup is complete
-            del self.golden_repos[alias]
-
+            # Bug #1317: remove the registry row BEFORE deleting any on-disk
+            # files. The old order deleted files first and removed the row
+            # only afterwards -- if that row removal then failed (a
+            # transient DB/connectivity error), the "rollback" only restored
+            # the PER-WORKER in-memory dict (useless in a multi-worker /
+            # cluster deployment -- see the cluster-aware-state invariant)
+            # while the files were already gone forever, producing exactly
+            # the registry-orphan this bug is about: a golden_repos row
+            # with no corresponding clone. Removing the row first means a
+            # failure here aborts with NOTHING destroyed (row + files both
+            # still present, consistent); only after the row is confirmed
+            # gone do we touch the filesystem, so a later filesystem-cleanup
+            # failure can only ever leave a harmless orphan CLONE (files
+            # with no row), never a registry-orphan.
             try:
                 self._sqlite_backend.remove_repo(alias)
-            except Exception as save_error:
-                # If SQLite delete fails, rollback the in-memory deletion
+            except Exception as removal_error:
                 logging.error(
-                    f"Failed to remove from SQLite after deletion, rolling back: {save_error}"
+                    f"Failed to remove golden repo '{alias}' from registry: "
+                    f"{removal_error}. No files were deleted; the "
+                    f"repository remains registered and intact."
                 )
-                self.golden_repos[alias] = golden_repo  # Restore repository
                 raise GitOperationError(
-                    f"Repository deletion rollback due to SQLite removal failure: {save_error}"
+                    f"Repository deletion aborted: failed to remove "
+                    f"'{alias}' from registry: {removal_error}"
                 )
+
+            del self.golden_repos[alias]
+
+            # Filesystem cleanup happens only now, after the registry row is
+            # confirmed removed.
+            if repo_exists_on_disk:
+                assert actual_path is not None
+                cleanup_successful = self._cleanup_repository_files(actual_path)
+            else:
+                cleanup_successful = True
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
