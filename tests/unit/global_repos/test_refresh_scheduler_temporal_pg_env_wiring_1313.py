@@ -7,6 +7,13 @@ OTHER Popen call site that spawns a child `cidx index --index-commits`
 subprocess. Root cause and fix are identical: the child never installed the
 PostgreSQL temporal-metadata backend, so it silently used SQLite even in
 cluster/postgres mode.
+
+Bug #1325 update: the semantic/FTS Popen call no longer stays env=None --
+every cidx subprocess call site now receives a sanitized env via
+build_cidx_subprocess_env() (which absolutizes any relative PYTHONPATH entry
+so the child does not shadow installed dependencies with clone-local
+packages). The semantic call must still NEVER receive the temporal-only PG
+bootstrap var; only the temporal call is postgres-aware for that var.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.config import ConfigManager
 from code_indexer.server.utils.config_manager import ServerConfig
+from tests.utils.env_assertions import assert_env_absent
 
 
 @pytest.fixture
@@ -124,9 +132,13 @@ class TestTemporalPopenCallGetsPostgresEnvInClusterMode:
         assert by_phase["temporal"] is not None
         assert by_phase["temporal"][TEMPORAL_PG_BOOTSTRAP_DIR_ENV] == "/opt/cidx-server"
 
-    def test_semantic_command_always_receives_env_none_even_in_postgres_mode(
+    def test_semantic_command_receives_sanitized_non_none_env_in_postgres_mode(
         self, scheduler, source_repo
     ):
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+        )
+
         server_config = ServerConfig(
             server_dir="/opt/cidx-server",
             storage_mode="postgres",
@@ -151,9 +163,19 @@ class TestTemporalPopenCallGetsPostgresEnvInClusterMode:
             )
 
         by_phase = {c["phase_name"]: c["env"] for c in calls}
-        assert by_phase["semantic"] is None, (
-            "the semantic/FTS Popen call must NEVER receive the PG bootstrap "
-            "env -- only the temporal call is postgres-aware"
+        semantic_env = by_phase["semantic"]
+        assert semantic_env is not None, (
+            "Bug #1325: the semantic/FTS Popen call must receive a sanitized "
+            "env (build_cidx_subprocess_env), never raw None"
+        )
+        assert_env_absent(
+            semantic_env,
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+            msg=(
+                "the semantic/FTS Popen call must NEVER receive the temporal-only "
+                "PG bootstrap var -- only the temporal call is postgres-aware "
+                "for that var"
+            ),
         )
 
     def test_temporal_command_receives_env_none_in_sqlite_mode(

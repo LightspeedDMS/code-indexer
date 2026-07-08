@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Any, Callable
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
+from ..utils.cidx_subprocess_env import build_cidx_subprocess_env
 
 
 class IndexingError(Exception):
@@ -575,13 +576,27 @@ class ActivatedRepoIndexManager:
         Bug #1313 round-4 (Finding 3): env is forwarded to subprocess.run so
         the temporal (--index-commits) child subprocess can be handed
         CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see
-        _execute_temporal_indexing. Defaults to None, which subprocess.run
-        treats identically to omitting the kwarg (inherit current process
-        env) -- byte-unchanged for the FTS/semantic callers.
+        _execute_temporal_indexing.
+
+        Bug #1325: the resolved env is ALWAYS sanitized via
+        build_cidx_subprocess_env before being passed to subprocess.run, so
+        any relative PYTHONPATH entry inherited from the server process is
+        absolutized before the child changes cwd to repo_path (otherwise a
+        relative PYTHONPATH re-anchors into the repo and can shadow an
+        installed dependency with a repo-local package of the same name).
+        When the caller passes env=None (the semantic/FTS default case), a
+        fresh sanitized copy of os.environ is used. When the caller passes a
+        temporal env dict (built by build_temporal_child_env), that dict's
+        PYTHONPATH is absolutized too, preserving the PG bootstrap var.
 
         Note (Bug #1218): no whole-job timeout is applied. The only legitimate timeout
         is the per-request outbound embedding-provider HTTP call.
         """
+        resolved_env = (
+            build_cidx_subprocess_env(env)
+            if env is not None
+            else build_cidx_subprocess_env()
+        )
         self._seed_telemetry(repo_path)
         try:
             return subprocess.run(
@@ -589,7 +604,7 @@ class ActivatedRepoIndexManager:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                env=env,
+                env=resolved_env,
             )
         finally:
             self._drain_telemetry(repo_path)
@@ -717,6 +732,7 @@ class ActivatedRepoIndexManager:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
             )
 
             if result.returncode != 0:

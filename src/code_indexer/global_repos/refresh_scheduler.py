@@ -41,6 +41,7 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     wait_for_nfs_visibility,
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.utils.cidx_subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -2118,17 +2119,19 @@ class RefreshScheduler:
             Bug #1313 round-3: env is forwarded to run_with_popen_progress so
             the temporal (--index-commits) child subprocess can be handed
             CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
-            temporal call site below. Defaults to None (inherit current
-            process env, unchanged for the semantic/FTS call).
+            temporal call site below. Bug #1325: the semantic/FTS call site
+            now always passes an explicit sanitized env (never relies on this
+            default), so this None default only matters for a hypothetical
+            future caller.
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
             # Bug #1313 round-3 regression guard: only pass the env= kwarg
-            # when it is not None, so the semantic/FTS call (and sqlite
-            # mode) keep the EXACT pre-existing call shape -- several
-            # pre-existing tests mock run_with_popen_progress with a strict
-            # (non-**kwargs) signature that does not accept an env kwarg at
-            # all.
+            # when it is not None, so callers that intentionally pass None
+            # (e.g. temporal in sqlite mode, to stay byte-unchanged) do not
+            # have that None overwritten here -- several pre-existing tests
+            # mock run_with_popen_progress with a strict (non-**kwargs)
+            # signature that does not accept an env kwarg at all.
             _popen_kwargs: dict = dict(
                 command=command,
                 phase_name=phase_name,
@@ -2198,6 +2201,11 @@ class RefreshScheduler:
                     )
 
         # Execute Step 1: cidx index --fts (semantic + FTS, Popen for real progress)
+        # Bug #1325 (code-review follow-up): pass a sanitized env with an
+        # absolutized PYTHONPATH -- otherwise a relative PYTHONPATH inherited
+        # from the server process re-anchors into source_path once the
+        # child's cwd changes, letting a src/-layout package in source_path
+        # shadow an installed cidx dependency.
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
@@ -2205,6 +2213,7 @@ class RefreshScheduler:
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
+            env=build_cidx_subprocess_env(),
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
@@ -2217,11 +2226,22 @@ class RefreshScheduler:
             # bootstrap read) yields env=None -- byte-unchanged existing
             # behavior. ONLY this temporal call site is postgres-aware; the
             # semantic call above is untouched.
+            #
+            # Bug #1325: when postgres mode DOES produce a temporal env dict,
+            # run it through build_cidx_subprocess_env() too so its PYTHONPATH
+            # (inherited from the server process) is absolutized, while
+            # PRESERVING CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (Bug #1313). sqlite
+            # mode keeps env=None, byte-unchanged.
             from code_indexer.server.storage.postgres.temporal_child_wiring import (
                 build_temporal_child_env,
             )
 
             _temporal_env = build_temporal_child_env(get_config_service().get_config())
+            _temporal_env = (
+                build_cidx_subprocess_env(_temporal_env)
+                if _temporal_env is not None
+                else None
+            )
 
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
@@ -2254,6 +2274,7 @@ class RefreshScheduler:
                     capture_output=True,
                     text=True,
                     check=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 logger.info("cidx scip generate on source completed successfully")
                 if progress_callback is not None:
@@ -2402,6 +2423,7 @@ class RefreshScheduler:
                     cwd=str(versioned_path),
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=cidx_fix_timeout,
                     check=True,
                 )
@@ -2535,6 +2557,7 @@ class RefreshScheduler:
                 check=True,
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=60,
             )
             return True
@@ -2814,6 +2837,7 @@ class RefreshScheduler:
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=60,
                 check=False,
             )
