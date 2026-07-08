@@ -77,6 +77,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse" \
          | tar -xz -C /opt/jdk-21 --strip-components=1
 
+# Bake Gradle so scip-java can build + index Gradle projects. The image had
+# scip-java + JDK but NO build tool (gradle/maven), so scip-java's build step
+# failed and Java SCIP generation produced empty .scip.db -- the observed
+# "SCIP fast-but-empty" pathology. Gradle 8.5 runs on the JDK 17 launcher and
+# supports the JDK 21 toolchain (installations.paths, set below).
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -sf /opt/gradle-8.5/bin/gradle /usr/local/bin/gradle \
+    && rm /tmp/gradle.zip
+
 # JAVA_HOME points at the 17 launcher; 21 is a toolchain (installations.paths).
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
