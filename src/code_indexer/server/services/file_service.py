@@ -8,6 +8,9 @@ All operations use real file system operations with proper pagination and filter
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, Set, cast
 from datetime import datetime, timezone
@@ -26,6 +29,18 @@ from ..models.api_models import (
 from ..services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
+
+# Per-request latency: _collect_files walks the FULL repo tree (rglob + a stat
+# and an is_indexed check per file). On large repos this dominates list_files /
+# browse latency and it ran on every request. Cache the collected listing per
+# repo_path for a short TTL so repeated calls (a client paging a repo) reuse the
+# walk. Keyed on repo_path: immutable versioned golden-repo snapshots change path
+# on refresh and miss naturally; mutable paths are eventually-consistent within
+# the TTL.
+_COLLECT_CACHE_TTL_SECONDS = 30.0
+_COLLECT_CACHE_MAX_REPOS = 64
+_collect_cache: "OrderedDict[str, Tuple[float, List[FileInfo]]]" = OrderedDict()
+_collect_cache_lock = threading.Lock()
 
 # Same language detection as stats service
 LANGUAGE_EXTENSIONS = {
@@ -261,6 +276,44 @@ class FileListingService:
             raise RuntimeError(f"Unable to access repository {repo_id}: {e}")
 
     def _collect_files(self, repo_path: str) -> List[FileInfo]:
+        """Collect all files in the repo, CACHED per repo_path.
+
+        The underlying walk (:meth:`_collect_files_uncached`) is O(files) with a
+        stat + an is_indexed check per file; on large repos it cost tens of
+        seconds and list_files/browse ran it on every request. Results are cached
+        for ``_COLLECT_CACHE_TTL_SECONDS`` so repeated calls (a client paging a
+        repo) reuse the walk. Keyed on repo_path; immutable versioned golden-repo
+        snapshots change path on refresh and miss naturally.
+        """
+        now = time.monotonic()
+        with _collect_cache_lock:
+            entry = _collect_cache.get(repo_path)
+            if entry is not None and now < entry[0]:
+                _collect_cache.move_to_end(repo_path)
+                return entry[1]
+
+        files = self._collect_files_uncached(repo_path)
+
+        with _collect_cache_lock:
+            _collect_cache[repo_path] = (now + _COLLECT_CACHE_TTL_SECONDS, files)
+            _collect_cache.move_to_end(repo_path)
+            while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
+                _collect_cache.popitem(last=False)
+        return files
+
+    def _get_indexable_extensions(self) -> Set[str]:
+        """Indexable extensions from config, fetched ONCE per collection.
+
+        ``_is_file_indexed`` reads ``get_config_service().get_config()`` and
+        ``indexing_config.indexable_extensions`` once PER FILE; hoisting it here
+        removes O(files) config lookups from the collection loop.
+        """
+        config = get_config_service().get_config()
+        if config.indexing_config is None:
+            return set()
+        return set(config.indexing_config.indexable_extensions)
+
+    def _collect_files_uncached(self, repo_path: str) -> List[FileInfo]:
         """
         Collect all files in repository, excluding system directories and gitignored files.
 
@@ -280,6 +333,10 @@ class FileListingService:
 
         # Load .gitignore patterns if present
         gitignore_spec = self._load_gitignore_spec(repo_root)
+
+        # Hoist the indexable-extensions lookup out of the per-file loop below
+        # (it was one get_config() call PER FILE via _is_file_indexed()).
+        indexable_extensions = self._get_indexable_extensions()
 
         try:
             for file_path in repo_root.rglob("*"):
@@ -307,7 +364,7 @@ class FileListingService:
                                 stat_info.st_mtime, tz=timezone.utc
                             ),
                             language=self._detect_language(file_path),
-                            is_indexed=self._is_file_indexed(file_path),
+                            is_indexed=file_path.suffix.lower() in indexable_extensions,
                         )
                         files.append(file_info)
 

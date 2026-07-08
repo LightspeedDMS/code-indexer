@@ -8,8 +8,11 @@ without mocking, following CLAUDE.md Foundation #1 (Anti-Mock).
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 from code_indexer.services.git_topology_service import GitTopologyService
@@ -22,6 +25,18 @@ from code_indexer.server.models.branch_models import (
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Per-request latency: list_branches reads .commit for every local and remote
+# ref (GitPython loads each commit object), which cost tens of seconds on repos
+# with many refs and ran on every get_branches call. Cache the result per
+# (codebase_dir, include_remote) for a short TTL so repeated calls reuse the
+# walk. Branch state is eventually-consistent within the TTL.
+_BRANCHES_CACHE_TTL_SECONDS = 30.0
+_BRANCHES_CACHE_MAX = 128
+_branches_cache: "OrderedDict[Tuple[str, bool], Tuple[float, List[BranchInfo]]]" = (
+    OrderedDict()
+)
+_branches_cache_lock = threading.Lock()
 
 
 class IndexStatusManager(Protocol):
@@ -61,6 +76,35 @@ class BranchService:
             self.repo = None  # type: ignore[assignment]
 
     def list_branches(self, include_remote: bool = False) -> List[BranchInfo]:
+        """List branches, CACHED per (codebase_dir, include_remote).
+
+        The underlying walk (:meth:`_list_branches_uncached`) reads ``.commit``
+        for every local and remote ref; on repos with many refs it cost tens of
+        seconds and ran on every request. Results are cached for
+        ``_BRANCHES_CACHE_TTL_SECONDS`` so repeated calls reuse the walk. Branch
+        state is eventually-consistent within the TTL.
+        """
+        if not self._is_git_repo:
+            return []
+
+        key = (str(self.git_topology_service.codebase_dir), include_remote)
+        now = time.monotonic()
+        with _branches_cache_lock:
+            entry = _branches_cache.get(key)
+            if entry is not None and now < entry[0]:
+                _branches_cache.move_to_end(key)
+                return entry[1]
+
+        branches = self._list_branches_uncached(include_remote=include_remote)
+
+        with _branches_cache_lock:
+            _branches_cache[key] = (now + _BRANCHES_CACHE_TTL_SECONDS, branches)
+            _branches_cache.move_to_end(key)
+            while len(_branches_cache) > _BRANCHES_CACHE_MAX:
+                _branches_cache.popitem(last=False)
+        return branches
+
+    def _list_branches_uncached(self, include_remote: bool = False) -> List[BranchInfo]:
         """List all branches in the repository.
 
         Args:
