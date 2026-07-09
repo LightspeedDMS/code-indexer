@@ -66,6 +66,10 @@ class RegexSearchResult:
 class RegexSearchService:
     """Service for performing regex searches on repository files."""
 
+    # Set once, process-wide, the first time we degrade to the grep fallback so
+    # the warning in _detect_search_engine is emitted a single time, not per call.
+    _grep_fallback_warned: bool = False
+
     def __init__(self, repo_path: Path, subprocess_max_workers: int = 2):
         """Initialize the regex search service.
 
@@ -94,6 +98,18 @@ class RegexSearchService:
         if shutil.which("rg"):
             return "ripgrep"
         elif shutil.which("grep"):
+            # ripgrep is absent -> we degrade to a linear `grep -r` scan that has
+            # no gitignore awareness and reads the entire working tree. On large
+            # repos this reliably hits the search timeout. Warn loudly (once) so
+            # the degradation is visible instead of manifesting as opaque 30s
+            # timeouts. Install ripgrep in the deployment image to avoid this.
+            if not RegexSearchService._grep_fallback_warned:
+                RegexSearchService._grep_fallback_warned = True
+                logger.warning(
+                    "ripgrep (rg) not found on PATH; falling back to 'grep -r'. "
+                    "Regex search will linearly scan the full working tree and "
+                    "may time out on large repos. Install ripgrep in the image."
+                )
             return "grep"
         else:
             raise RuntimeError("Neither ripgrep nor grep found on system")
