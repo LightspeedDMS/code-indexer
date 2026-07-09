@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.30.0] - 2026-07-09
+
+### Fixed
+
+- **Dep-map verification passes are concurrency-capped again (#1323).** What looked like a flaky test was a real regression: the Bug #936 dispatcher migration routed verification through `CliDispatcher.dispatch -> ClaudeInvoker.invoke -> subprocess.run`, bypassing the `max_concurrent_claude_cli` semaphore that generation still holds — so verification ran UNCAPPED (proven: 3 concurrent at cap=2), a runaway-concurrent-Claude-process resource/cost risk. `_run_verification_attempt` now acquires the SAME process-wide verification semaphore around the dispatch (release in `finally` on all paths), so generation + verification share one cap. Scoped to verification only.
+- **Golden-repo registry-orphan guard + reconcile with mass-deletion circuit-breaker (#1317).** Registration is now all-or-nothing (activation failure rolls the row back + cleans the clone; a global repo always gets its alias pointer); removal deletes the registry row before any files. A fail-soft startup reconcile removes rows whose on-disk clone is absent — guarded by a positive health-gate and a 0.5 mass-deletion circuit-breaker (a stale/unmounted NFS can never wipe the registry) plus Pass-3 pointer-repair for the #1315 symptom, single-flighted across cluster workers.
+- **CoW versioned-snapshot publish path translation (#1320).** Part A: `CowDaemonBackend._translate_to_daemon_path` fails loud (raises) instead of silently emitting an untranslatable NFS path the daemon rejects with 400. Part B: `cow_daemon.daemon_storage_path` is populated durably in both the installer and the auto-updater (value-aware idempotent; resolved from operator param/env/co-located daemon config, never hard-coded).
+- **Golden-repo mutable fields read authoritatively on cross-node mutation (#1316).** `change_branch`/`change_branch_async`, `add_indexes` temporal_options, and the per-provider temporal rebuild route now read the decision-driving field from the shared backend (not the per-worker cache), so a cross-node branch/temporal-option change is visible without a worker restart. Reload-on-miss read cache retained.
+- **e2e Phase-6 PG-parity web-session auth (#1324).** The Phase-6 throwaway server inherited `host=0.0.0.0` (via a ConfigService gap-fill from an unrelated systemd unit), making the web-session cookie `Secure` and thus dropped over the harness's plain HTTP -> 303-to-login. Harness now pins `SYSTEMD_UNIT_DIR` so the gap-fill falls back to `host=127.0.0.1`. (Underlying product gap-fill bug filed as #1335.)
+- **De-flaked `test_sqlite_log_handler_batched_1241`** — the background writer raced the test's enqueue loop; the test now drives a single deterministic drain cycle.
+
+### Added
+
+- **Merged PR #1331 (perf): short-TTL LRU caches for `FileListingService._collect_files` and `BranchService.list_branches`** read-only hot paths, with review fixes (post-walk TTL anchoring; branch-cache invalidation on branch mutations). Cluster-safe read-only listings.
+- **Merged PR #1332 (feat): opt-in admission-control / backpressure middleware** — global per-worker in-flight cap + a genuinely cluster-shared per-consumer token-bucket rate limiter (dedicated `consumer_rate_limit_state` PG table, migration 034). Both gates off by default.
+
+### Research
+
+- **HNSW orphan-node research spike (#1330).** Findings doc (`docs/research/hnsw-temporal-orphans-1330.md`): orphans affect both temporal AND regular semantic indexes via the shared builder; two regimes (exact-tie multi-thread race vs near-tie deterministic); recommended Strategy B (post-build detect+repair). Proposed implementation story #1333 (open for review). Follow-ups: #1334 (rate-limiter atomic decrement), #1335 (ConfigService gap-fill).
+
 ## [11.29.0] - 2026-07-08
 
 ### Fixed
