@@ -19,6 +19,7 @@ from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, ca
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
@@ -1692,20 +1693,22 @@ class RefreshScheduler:
                                 # a versioned snapshot. current_target may be a .versioned/ path after first
                                 # refresh, but git pull must always operate on the canonical master.
                                 #
-                                # Bug #1336: an orphaned golden alias (registry row
-                                # present, on-disk clone directory absent at
-                                # master_path) makes GitPullUpdater's constructor
-                                # raise ValueError("Repository path does not
-                                # exist"). Before this fix, that ValueError
-                                # propagated out of _execute_refresh() as a
-                                # RuntimeError (Bug #84 re-raise), failing the
-                                # whole global_repo_refresh job. Skip gracefully
-                                # instead -- orphan CLEANUP (removing the stale
-                                # registry row) is delegated to the #1317
-                                # reconciler; this refresh path only no-ops here.
+                                # Bug #1336 (hardened by #1338): an orphaned
+                                # golden alias (registry row present, on-disk
+                                # clone directory absent at master_path) makes
+                                # GitPullUpdater's constructor raise the typed
+                                # OrphanedRepoError. Before #1336, that
+                                # exception propagated out of _execute_refresh()
+                                # as a RuntimeError (Bug #84 re-raise), failing
+                                # the whole global_repo_refresh job. Skip
+                                # gracefully instead -- orphan CLEANUP (removing
+                                # the stale registry row) is delegated to the
+                                # #1317 reconciler; this refresh path only
+                                # no-ops here. #1338: caught by TYPE, never by
+                                # message-substring matching.
                                 try:
                                     updater = GitPullUpdater(master_path)
-                                except ValueError as orphan_exc:
+                                except OrphanedRepoError as orphan_exc:
                                     logger.warning(
                                         "Golden repo %s is orphaned (registry row "
                                         "present, clone missing at %s): %s; "

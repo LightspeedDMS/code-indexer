@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import yaml
 
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.unified_response_parser import (
     CURRENT_LIFECYCLE_SCHEMA_VERSION,
 )
@@ -465,14 +466,6 @@ _DEFAULT_ESTIMATED_SECONDS_PER_REPO: int = 30
 # Lock owner name used by the batch runner when acquiring cidx-meta write lock.
 _BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
 
-# Bug #1336: exact ValueError message fragment raised by
-# LifecycleClaudeCliInvoker._validate_repo_inputs() when a golden alias's
-# repo_path does not exist on disk (an orphaned registry row). Used to
-# narrow-match the orphan-skip guard in _process_one_repo() so any OTHER
-# ValueError (e.g. a genuine Claude CLI/parsing failure) still re-raises and
-# is recorded as a real per-alias failure.
-_ORPHAN_REPO_PATH_MARKER: str = "repo_path does not exist for alias"
-
 
 class LifecycleBatchRunner:
     """
@@ -764,25 +757,24 @@ class LifecycleBatchRunner:
                 existing_description=existing_description,
                 last_analyzed=existing_last_analyzed,
             )
-        except ValueError as orphan_exc:
-            # Bug #1336: an orphaned golden alias (registry row present,
-            # on-disk clone directory absent at repo_path) makes
-            # LifecycleClaudeCliInvoker._validate_repo_inputs() raise
-            # ValueError with the exact message below. Before this fix, that
-            # exception propagated as a per-alias failure -- when ALL aliases
-            # in a sub-batch/run() call are orphaned (the common
-            # startup-sweep case), run()'s all-failed threshold fired
-            # job_tracker.fail_job(), failing the whole
-            # lifecycle_backfill/description_refresh job. Skip gracefully
-            # instead: log a WARNING, write nothing, do not re-raise. Orphan
-            # CLEANUP (removing the stale registry row) is delegated to the
-            # #1317 reconciler -- this runner only skips.
+        except OrphanedRepoError as orphan_exc:
+            # Bug #1336 (hardened by #1338): an orphaned golden alias
+            # (registry row present, on-disk clone directory absent at
+            # repo_path) makes LifecycleClaudeCliInvoker._validate_repo_inputs()
+            # raise the typed OrphanedRepoError. Before #1336, this exception
+            # propagated as a per-alias failure -- when ALL aliases in a
+            # sub-batch/run() call are orphaned (the common startup-sweep
+            # case), run()'s all-failed threshold fired job_tracker.fail_job(),
+            # failing the whole lifecycle_backfill/description_refresh job.
+            # Skip gracefully instead: log a WARNING, write nothing, do not
+            # re-raise. Orphan CLEANUP (removing the stale registry row) is
+            # delegated to the #1317 reconciler -- this runner only skips.
             #
-            # NARROW MATCH ONLY: any other ValueError (e.g. a genuine Claude
-            # CLI/parsing failure) is NOT this orphan condition and must
-            # re-raise so it is still recorded as a real per-alias failure.
-            if _ORPHAN_REPO_PATH_MARKER not in str(orphan_exc):
-                raise
+            # #1338: caught by TYPE (OrphanedRepoError, a ValueError
+            # subclass), never by message-substring matching -- any OTHER
+            # ValueError (e.g. a genuine Claude CLI/parsing failure) is a
+            # plain ValueError, not this type, so it is unaffected by this
+            # except clause and still propagates as a real per-alias failure.
             _logger.warning(
                 "lifecycle-runner: alias %r appears orphaned (registry row "
                 "present, clone missing at %s): %s; skipping",

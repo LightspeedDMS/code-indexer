@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional
 import pytest
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.unified_response_parser import UnifiedResult
 
 DEFAULT_TTL_SECONDS: int = 3600
@@ -90,13 +91,17 @@ class _StubScheduler:
 def _orphan_aware_invoker(
     alias: str, repo_path: Path, **_kwargs: object
 ) -> UnifiedResult:
-    """Real-shaped stand-in for LifecycleClaudeCliInvoker: raises the exact
-    ValueError the production invoker raises for a missing repo_path, without
-    needing a live CliDispatcher/Claude CLI. Mirrors
-    LifecycleClaudeCliInvoker._validate_repo_inputs()'s contract exactly."""
+    """Real-shaped stand-in for LifecycleClaudeCliInvoker: raises the typed
+    OrphanedRepoError the production invoker raises for a missing repo_path
+    (Bug #1338), without needing a live CliDispatcher/Claude CLI. Mirrors
+    LifecycleClaudeCliInvoker._validate_repo_inputs()'s contract exactly --
+    including the exception TYPE, since the skip site now catches by type
+    rather than by message substring."""
     path_obj = Path(repo_path)
     if not path_obj.exists():
-        raise ValueError(f"repo_path does not exist for alias {alias!r}: {path_obj}")
+        raise OrphanedRepoError(
+            f"repo_path does not exist for alias {alias!r}: {path_obj}"
+        )
     return _VALID_RESULT
 
 
