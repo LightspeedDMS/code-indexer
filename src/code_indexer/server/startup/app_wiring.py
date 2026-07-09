@@ -54,6 +54,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     secret_key = services["secret_key"]
     # SCIPAuditRepository with backend support (may be None on legacy startup)
     scip_audit_repository = services.get("scip_audit_repository")
+    # BackendRegistry (may be None in solo/SQLite mode). Its .connection_pool
+    # is the shared PG pool -- already created by initialize_services() (PG
+    # migrations + StorageFactory.create_backends() both run there, well
+    # ahead of this function), so it is available here at app-wiring time.
+    backend_registry = services.get("backend_registry")
 
     # Create FastAPI app with metadata and lifespan
     app = FastAPI(
@@ -129,6 +134,17 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
             if _admission_cfg.per_consumer_enabled
             else None
         )
+        # Cluster-shared enforcement: attach the PG pool (when present) so
+        # ALL workers/nodes consume from the SAME row in
+        # consumer_rate_limit_state instead of independent per-process
+        # buckets. Solo/SQLite mode has no pool -- per-process is correct
+        # there (there is only one process).
+        if (
+            _rate_limiter is not None
+            and backend_registry is not None
+            and backend_registry.connection_pool is not None
+        ):
+            _rate_limiter.set_connection_pool(backend_registry.connection_pool)
         app.add_middleware(
             AdmissionControlMiddleware,
             controller=_controller,

@@ -41,6 +41,20 @@ _SESSION_COOKIE = "cidx_session"
 # flood is throttled as one group (auth rejects those requests downstream anyway).
 _ANON_CONSUMER = "anon"
 
+# Default idle-seconds window before an unused per-consumer bucket is reclaimed
+# (memory bound). Foundation #8 Pattern #7: named constant, not a bare literal.
+_DEFAULT_CONSUMER_CLEANUP_SECONDS = 3600
+
+# Cap (seconds) for the Retry-After header when a consumer's refill rate is 0
+# (bucket never refills, so retry_after is math.inf) -- prevents math.ceil()
+# from raising OverflowError on a misconfig. Foundation #8 Pattern #7.
+MAX_RETRY_AFTER_SECONDS = 3600
+
+# Truncation length for the SHA-256 hexdigest used as the per-consumer bucket
+# key -- 32 hex chars (128 bits) is ample collision resistance for a rate-limit
+# bucket key while keeping the PG primary key compact. Foundation #8 Pattern #7.
+_CONSUMER_KEY_HASH_LENGTH = 32
+
 
 class AdmissionController:
     """Thread-safe per-process in-flight counter with a hard cap.
@@ -80,23 +94,61 @@ class PerConsumerRateLimiter:
     The global :class:`AdmissionController` cap is fleet-wide: one abusive client
     (e.g. a single dealer hammering the support agent) can consume every in-flight
     slot and get everyone else shed. This limiter throttles each caller
-    INDIVIDUALLY, keyed by a hash of its presented credential, so a noisy consumer
-    is capped without starving the rest. It reuses the tested ``TokenBucketManager``
-    (auth/token_bucket) — ``capacity`` is the burst allowance and ``refill_per_second``
-    the sustained rate; idle buckets are reclaimed after ``cleanup_seconds``.
+    INDIVIDUALLY, keyed by a hash of its presented credential. It reuses the
+    tested ``TokenBucketManager`` (auth/token_bucket) — ``capacity`` is the
+    burst allowance and ``refill_per_second`` the sustained rate; idle buckets
+    are reclaimed after ``cleanup_seconds``.
+
+    Enforcement scope depends on whether :meth:`set_connection_pool` has been
+    called:
+
+    * **PG pool attached** (cluster/postgres mode) — the underlying manager is
+      constructed against the dedicated ``consumer_rate_limit_state`` table
+      (never the auth login-limiter's ``token_bucket_state``, which would
+      co-mingle hashed non-identity keys with real usernames), so ALL
+      workers/nodes sharing that pool consume from the SAME row. One consumer
+      is bounded by the configured rate fleet-wide; a small transient
+      overshoot is possible under simultaneous cross-node bursts (the PG path
+      is SELECT-then-UPDATE under a per-process lock, not a single atomic
+      decrement -- same mechanism as the auth login limiter).
+    * **No pool attached** (solo/SQLite, or cluster mode before wiring) —
+      buckets are per-process in-memory. Each worker process enforces the
+      configured rate independently, so the real effective rate across N
+      worker processes is ``configured x N`` for that single client.
     """
 
     def __init__(
         self,
         capacity: int,
         refill_per_second: float,
-        cleanup_seconds: int = 3600,
+        cleanup_seconds: int = _DEFAULT_CONSUMER_CLEANUP_SECONDS,
     ) -> None:
+        # Dedicated table/key-column (NEVER token_bucket_state/username): the
+        # consumer_key here is a SHA-256 hash of a credential, not an identity.
+        # Sharing the auth login-limiter's table would co-mingle hashed,
+        # non-identity keys with real usernames in the same namespace.
         self._manager = TokenBucketManager(
             capacity=capacity,
             refill_rate=refill_per_second,
             cleanup_seconds=cleanup_seconds,
+            table_name="consumer_rate_limit_state",
+            key_column="consumer_key",
         )
+
+    def set_connection_pool(self, pool) -> None:
+        """Attach a PostgreSQL connection pool for cluster-shared enforcement.
+
+        Without this, buckets live per-worker-process in memory and the
+        real effective rate is ``configured x workers x nodes`` -- NOT the
+        configured rate. When a pool is attached (cluster/postgres mode),
+        all workers/nodes sharing the pool consume from the SAME row in
+        ``consumer_rate_limit_state``, so the configured rate bounds one
+        consumer fleet-wide (a small transient overshoot is possible under
+        simultaneous cross-node bursts -- same SELECT-then-UPDATE mechanism
+        as the auth login limiter). In solo/SQLite mode no pool is attached
+        and per-process buckets are correct (there is only one process).
+        """
+        self._manager.set_connection_pool(pool)
 
     @staticmethod
     def consumer_key(request: Request) -> str:
@@ -112,7 +164,9 @@ class PerConsumerRateLimiter:
             cred = request.cookies.get(_SESSION_COOKIE)
         if not cred:
             return _ANON_CONSUMER
-        return hashlib.sha256(cred.encode("utf-8")).hexdigest()[:32]
+        return hashlib.sha256(cred.encode("utf-8")).hexdigest()[
+            :_CONSUMER_KEY_HASH_LENGTH
+        ]
 
     def check(self, request: Request) -> Tuple[bool, float]:
         """Consume one token for this request's consumer.
@@ -164,7 +218,7 @@ class AdmissionControlMiddleware(BaseHTTPMiddleware):
                 retry_secs = (
                     max(1, math.ceil(retry_after))
                     if math.isfinite(retry_after)
-                    else 3600
+                    else MAX_RETRY_AFTER_SECONDS
                 )
                 return JSONResponse(
                     status_code=429,

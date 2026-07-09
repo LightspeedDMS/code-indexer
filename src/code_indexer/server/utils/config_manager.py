@@ -1183,8 +1183,11 @@ class AdmissionControlConfig:
     retry_after_seconds: int = 1
 
     # Per-consumer (per-API-key/session) token-bucket rate limiting. INDEPENDENT
-    # of the global cap; keyed by a hash of the caller's credential so one client
-    # cannot starve the fleet.
+    # of the global cap; keyed by a hash of the caller's credential. Enforcement
+    # is cluster-shared (fleet-wide, via a dedicated PG table) ONLY when a PG
+    # connection pool is attached at app-wiring time (cluster/postgres mode);
+    # in solo/SQLite mode each worker process enforces the rate independently
+    # (per-process buckets).
     per_consumer_enabled: bool = False
     # Burst: tokens a single consumer may spend back-to-back.
     per_consumer_burst: int = 30
