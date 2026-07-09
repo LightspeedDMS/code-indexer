@@ -465,6 +465,14 @@ _DEFAULT_ESTIMATED_SECONDS_PER_REPO: int = 30
 # Lock owner name used by the batch runner when acquiring cidx-meta write lock.
 _BATCH_RUNNER_LOCK_OWNER: str = "lifecycle_batch_runner"
 
+# Bug #1336: exact ValueError message fragment raised by
+# LifecycleClaudeCliInvoker._validate_repo_inputs() when a golden alias's
+# repo_path does not exist on disk (an orphaned registry row). Used to
+# narrow-match the orphan-skip guard in _process_one_repo() so any OTHER
+# ValueError (e.g. a genuine Claude CLI/parsing failure) still re-raises and
+# is recorded as a real per-alias failure.
+_ORPHAN_REPO_PATH_MARKER: str = "repo_path does not exist for alias"
+
 
 class LifecycleBatchRunner:
     """
@@ -749,12 +757,40 @@ class LifecycleBatchRunner:
             la = pre_fm.get("last_analyzed") if pre_fm else None
             existing_last_analyzed = str(la) if la is not None else None
 
-        result = self._claude_cli_invoker(
-            alias,
-            repo_path,
-            existing_description=existing_description,
-            last_analyzed=existing_last_analyzed,
-        )
+        try:
+            result = self._claude_cli_invoker(
+                alias,
+                repo_path,
+                existing_description=existing_description,
+                last_analyzed=existing_last_analyzed,
+            )
+        except ValueError as orphan_exc:
+            # Bug #1336: an orphaned golden alias (registry row present,
+            # on-disk clone directory absent at repo_path) makes
+            # LifecycleClaudeCliInvoker._validate_repo_inputs() raise
+            # ValueError with the exact message below. Before this fix, that
+            # exception propagated as a per-alias failure -- when ALL aliases
+            # in a sub-batch/run() call are orphaned (the common
+            # startup-sweep case), run()'s all-failed threshold fired
+            # job_tracker.fail_job(), failing the whole
+            # lifecycle_backfill/description_refresh job. Skip gracefully
+            # instead: log a WARNING, write nothing, do not re-raise. Orphan
+            # CLEANUP (removing the stale registry row) is delegated to the
+            # #1317 reconciler -- this runner only skips.
+            #
+            # NARROW MATCH ONLY: any other ValueError (e.g. a genuine Claude
+            # CLI/parsing failure) is NOT this orphan condition and must
+            # re-raise so it is still recorded as a real per-alias failure.
+            if _ORPHAN_REPO_PATH_MARKER not in str(orphan_exc):
+                raise
+            _logger.warning(
+                "lifecycle-runner: alias %r appears orphaned (registry row "
+                "present, clone missing at %s): %s; skipping",
+                alias,
+                repo_path,
+                orphan_exc,
+            )
+            return
 
         # Bug #940: acquire the per-alias write lock BEFORE reading the existing
         # frontmatter so the entire read-merge-write sequence is atomic.

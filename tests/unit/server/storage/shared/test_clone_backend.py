@@ -1532,6 +1532,76 @@ class TestCowDaemonBackendTranslateToDaemonPathGuard:
         assert result == "/home/jsbattig/cow-storage/.versioned/ns/v_123"
 
 
+class TestBug1337GoldenReposSymlinkTranslation:
+    """Bug #1337: confirms _translate_to_daemon_path already handles a REAL,
+    filesystem-symlinked golden_repos_dir correctly. The root cause of the
+    per-user activation failure ("... is not under mount_point ... or
+    daemon_storage_path ... cannot translate to daemon view") is NOT in this
+    function -- it already raises correctly when the golden clone is a plain
+    directory outside the CoW tree. The bug is upstream provisioning drift:
+    golden-repos was never made a symlink into the CoW mount. These are
+    characterization/regression tests guarding the existing, correct behavior
+    so a future change cannot silently break it again.
+    """
+
+    def test_symlinked_golden_repos_dir_resolves_under_mount_point_translates(
+        self, tmp_path
+    ):
+        """A golden repo path reached via a REAL symlinked golden_repos_dir
+        (-> mount_point) is translated to daemon_storage_path form -- the
+        fixed-per-Bug#1337 provisioning shape."""
+        from dataclasses import replace
+
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        mount_point = tmp_path / "mnt-cow-storage"
+        mount_point.mkdir()
+        (mount_point / "golden-repos").mkdir()
+
+        golden_repos_dir = tmp_path / "cidx-server-data" / "golden-repos"
+        golden_repos_dir.parent.mkdir(parents=True)
+        golden_repos_dir.symlink_to(mount_point / "golden-repos")
+
+        config = replace(
+            _make_cow_config(),
+            mount_point=str(mount_point),
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
+
+        golden_path = str(golden_repos_dir / "myrepo")
+        result = backend._translate_to_daemon_path(golden_path)
+
+        assert result == "/home/jsbattig/cow-storage/golden-repos/myrepo"
+
+    def test_plain_golden_repos_dir_outside_cow_tree_raises(self, tmp_path):
+        """Bug #1337 repro: golden_repos_dir is a PLAIN directory (never
+        symlinked into the CoW mount) -- realpath == itself, not under
+        mount_point or daemon_storage_path -- must raise, matching the
+        verbatim staging error from the bug report."""
+        from dataclasses import replace
+
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        golden_repos_dir = tmp_path / "cidx-server-data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        config = replace(
+            _make_cow_config(),
+            mount_point="/mnt/cow-storage",
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
+
+        golden_path = str(golden_repos_dir / "myrepo")
+        with pytest.raises(ValueError, match="cannot translate to daemon view"):
+            backend._translate_to_daemon_path(golden_path)
+
+
 class TestCloneBackendFactoryMissingConfig:
     """Factory raises ValueError when required config is None."""
 

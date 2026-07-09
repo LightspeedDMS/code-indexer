@@ -43,20 +43,24 @@ class TestPerConsumerRateLimiterDocsAccuracy:
         doc = admission_control.PerConsumerRateLimiter.__doc__ or ""
         assert "set_connection_pool" in doc
 
-    def test_docstring_does_not_overclaim_strict_atomic_bound(self) -> None:
-        """Code review LOW note: cross-node SELECT-then-UPDATE under a
-        per-process lock (same mechanism as the auth login limiter) allows a
-        small BOUNDED overshoot under simultaneous cross-node bursts -- the
-        rate is bounded fleet-wide, not strictly atomic/exact."""
+    def test_docstring_states_strict_atomic_bound(self) -> None:
+        """Bug #1334 fix: the PG path is now a single atomic conditional
+        UPDATE ... WHERE ... decrement (checked via cursor.rowcount) -- no
+        SELECT-then-UPDATE race window -- so the docstring must state
+        STRICT bounding / zero overshoot, not the old 'small transient
+        overshoot possible' / SELECT-then-UPDATE caveat."""
         doc = admission_control.PerConsumerRateLimiter.__doc__ or ""
-        assert "genuinely cannot exceed" not in doc
-        assert "genuinely bounds" not in doc
-        assert "bounded" in doc.lower()
-        assert "overshoot" in doc.lower()
+        assert "small transient overshoot is possible" not in doc.lower()
+        assert "select-then-update" not in doc.lower()
+        assert "strictly" in doc.lower() or "strict" in doc.lower()
+        assert "zero" in doc.lower() and "overshoot" in doc.lower()
 
-    def test_set_connection_pool_docstring_does_not_overclaim_strict_atomic_bound(
+    def test_set_connection_pool_docstring_states_strict_atomic_bound(
         self,
     ) -> None:
+        """Same Bug #1334 fix, documented on set_connection_pool() too."""
         doc = admission_control.PerConsumerRateLimiter.set_connection_pool.__doc__ or ""
-        assert "genuinely bounds" not in doc
-        assert "genuinely cannot exceed" not in doc
+        assert "small transient overshoot is possible" not in doc.lower()
+        assert "select-then-update" not in doc.lower()
+        assert "strictly" in doc.lower() or "strict" in doc.lower()
+        assert "zero" in doc.lower() and "overshoot" in doc.lower()

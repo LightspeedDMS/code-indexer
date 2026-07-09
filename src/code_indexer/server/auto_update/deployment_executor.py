@@ -3783,6 +3783,20 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 14.7: Bug #1337 - Ensure golden-repos symlink for CoW-daemon
+        # cluster (non-fatal). Runs AFTER Step 14.6 so it can use a
+        # freshly-resolved cow_daemon.daemon_storage_path for the co-located
+        # daemon-host target form.
+        if not self._ensure_golden_repos_symlink_for_cow_daemon():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-208",
+                    "golden-repos symlink setup failed - "
+                    "per-user CoW-daemon activation may not function correctly",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 15: Ensure ~/.local/bin is in PATH in the systemd service unit (non-fatal)
         if not self._ensure_systemd_claude_path():
             logger.warning(
@@ -4992,6 +5006,163 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-205",
                     f"Bug #1320: daemon_storage_path setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _resolve_golden_repos_symlink_target(cow_cfg: Any) -> Path:
+        """Bug #1337: node-aware golden-repos symlink target.
+
+        Mirrors _resolve_daemon_storage_path's own co-located-daemon-host
+        detection (presence of the daemon's own config file at
+        COW_DAEMON_HOST_CONFIG_PATH — only readable on that node): use the
+        daemon-local form there (no bind-mount indirection needed); use the
+        mount_point form on every other (NFS-client) node. Uses safe
+        attribute access throughout — never raises on a malformed cow_cfg.
+        """
+        daemon_storage_path = (
+            getattr(cow_cfg, "daemon_storage_path", None) or ""
+        ).strip()
+        mount_point = getattr(cow_cfg, "mount_point", None) or ""
+        is_daemon_host = COW_DAEMON_HOST_CONFIG_PATH.is_file()
+        if is_daemon_host and daemon_storage_path:
+            return Path(daemon_storage_path) / "golden-repos"
+        return Path(mount_point) / "golden-repos"
+
+    @staticmethod
+    def _remove_if_empty_dir(path: Path) -> bool:
+        """Bug #1337: remove *path* iff it is an empty directory. Returns True
+        if removed (safe to replace with a symlink), False if it has content
+        or a race made it non-empty/non-removable (leave untouched, caller
+        warns)."""
+        try:
+            if any(path.iterdir()):
+                return False
+            path.rmdir()
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
+        """Bug #1337: an existing golden-repos symlink is already correct
+        (no-op) or points elsewhere (WARNING, never silently rewritten).
+        Returns False (non-fatal, logged) if the symlink cannot be read."""
+        try:
+            current_target = os.readlink(str(link_path))
+        except OSError as e:
+            logger.warning(
+                "Bug #1337: failed to read golden-repos symlink %s: %s",
+                link_path,
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if current_target == str(target):
+            logger.debug(
+                "Bug #1337: golden-repos symlink already correct: %s -> %s",
+                link_path,
+                target,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        logger.warning(
+            "Bug #1337: golden-repos symlink points to %s but expected %s "
+            "— manual review needed",
+            current_target,
+            target,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    @staticmethod
+    def _warn_golden_repos_real_dir_with_content(link_path: Path, target: Path) -> None:
+        """Bug #1337: golden-repos is a real directory WITH content — never
+        move production data unattended; log the manual migration steps."""
+        logger.warning(
+            "Bug #1337: golden-repos exists as real directory with content; "
+            "manual migration required to enable per-user CoW activation. "
+            "Run: sudo systemctl stop cidx-server && "
+            "mv %s %s.legacy.bug1337 && mkdir -p %s && ln -s %s %s && "
+            "sudo systemctl start cidx-server",
+            link_path,
+            link_path,
+            target,
+            target,
+            link_path,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    @staticmethod
+    def _create_golden_repos_symlink(link_path: Path, target: Path) -> None:
+        """Bug #1337: create *target* (if missing) and symlink link_path -> target."""
+        target.mkdir(parents=True, exist_ok=True)
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(str(target), str(link_path))
+        logger.info(
+            "Bug #1337: created golden-repos symlink %s -> %s",
+            link_path,
+            target,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _ensure_golden_repos_symlink_for_cow_daemon(self) -> bool:
+        """Bug #1337: idempotently set up golden-repos as a symlink into the
+        CoW storage tree on CoW-daemon cluster nodes, so per-user
+        activation's CowDaemonBackend.create_clone_at_path() can translate
+        the path (mirrors the Bug #1052 activated-repos twin).
+
+        Non-fatal: any exception returns False with a WARNING. Returns True
+        in all handled cases (no-op, symlink created/converted, real-dir-
+        with-content warning, unexpected-symlink warning).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1337: clone_backend=%r, not cow-daemon — skipping "
+                    "golden-repos symlink setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
+                logger.warning(
+                    "Bug #1337: clone_backend=cow-daemon but cow_daemon config "
+                    "missing or mount_point empty — skipping golden-repos "
+                    "symlink setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            target = self._resolve_golden_repos_symlink_target(cow_cfg)
+            link_path = _cidx_data_dir / "data" / "golden-repos"
+
+            if link_path.is_symlink():
+                return self._reconcile_existing_golden_repos_symlink(link_path, target)
+
+            if link_path.exists() and not self._remove_if_empty_dir(link_path):
+                self._warn_golden_repos_real_dir_with_content(link_path, target)
+                return True
+
+            self._create_golden_repos_symlink(link_path, target)
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-207",
+                    f"Bug #1337: golden-repos symlink setup failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

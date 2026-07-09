@@ -1691,7 +1691,36 @@ class RefreshScheduler:
                                 # Story #236 Fix 2: Always git pull into the master golden repo, never into
                                 # a versioned snapshot. current_target may be a .versioned/ path after first
                                 # refresh, but git pull must always operate on the canonical master.
-                                updater = GitPullUpdater(master_path)
+                                #
+                                # Bug #1336: an orphaned golden alias (registry row
+                                # present, on-disk clone directory absent at
+                                # master_path) makes GitPullUpdater's constructor
+                                # raise ValueError("Repository path does not
+                                # exist"). Before this fix, that ValueError
+                                # propagated out of _execute_refresh() as a
+                                # RuntimeError (Bug #84 re-raise), failing the
+                                # whole global_repo_refresh job. Skip gracefully
+                                # instead -- orphan CLEANUP (removing the stale
+                                # registry row) is delegated to the #1317
+                                # reconciler; this refresh path only no-ops here.
+                                try:
+                                    updater = GitPullUpdater(master_path)
+                                except ValueError as orphan_exc:
+                                    logger.warning(
+                                        "Golden repo %s is orphaned (registry row "
+                                        "present, clone missing at %s): %s; "
+                                        "skipping refresh",
+                                        alias_name,
+                                        master_path,
+                                        orphan_exc,
+                                    )
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": (
+                                            "Orphaned golden repo (clone missing), skipped"
+                                        ),
+                                    }
 
                             # Bug #469 Fix 1: Verify base clone is on expected default_branch before
                             # pulling.  If the clone was switched to a wrong branch by any previous

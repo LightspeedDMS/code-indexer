@@ -363,6 +363,154 @@ class TestCowDaemonBackendFailFast:
 
 
 # ---------------------------------------------------------------------------
+# Bug #1337: golden-repos symlink placement validation
+# ---------------------------------------------------------------------------
+
+
+class TestGoldenReposSymlinkPlacementCheck:
+    """Bug #1337: golden_repos_dir must be a symlink resolving under
+    cow_daemon.mount_point or cow_daemon.daemon_storage_path so
+    CowDaemonBackend can translate it to a daemon-local path. A plain
+    directory (never a symlink) must FAIL LOUD; a dangling symlink (mount
+    transiently unavailable) must degrade to a WARNING, never crash.
+    """
+
+    def test_passes_when_symlink_resolves_under_mount_point(self, tmp_path, caplog):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_golden_repos_symlink_placement,
+        )
+
+        mount_point = tmp_path / "mnt-cow-storage"
+        (mount_point / "golden-repos").mkdir(parents=True)
+
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.parent.mkdir(parents=True)
+        golden_repos_dir.symlink_to(mount_point / "golden-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(mount_point)
+        cow_cfg.daemon_storage_path = None
+
+        # Must not raise.
+        _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
+
+    def test_passes_when_symlink_resolves_under_daemon_storage_path(
+        self, tmp_path, caplog
+    ):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_golden_repos_symlink_placement,
+        )
+
+        daemon_storage_path = tmp_path / "srv-cow-xfs"
+        (daemon_storage_path / "golden-repos").mkdir(parents=True)
+
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.parent.mkdir(parents=True)
+        golden_repos_dir.symlink_to(daemon_storage_path / "golden-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(tmp_path / "mnt-cow-storage")
+        cow_cfg.daemon_storage_path = str(daemon_storage_path)
+
+        # Must not raise.
+        _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
+
+    def test_raises_when_golden_repos_dir_is_plain_directory(self, tmp_path):
+        """Plain directory (never a symlink) whose realpath is not under
+        mount_point or daemon_storage_path -- fail loud."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_golden_repos_symlink_placement,
+        )
+
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(tmp_path / "mnt-cow-storage")
+        cow_cfg.daemon_storage_path = str(tmp_path / "srv-cow-xfs")
+
+        with pytest.raises(RuntimeError, match="Bug #1337"):
+            _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
+
+    def test_dangling_symlink_logs_warning_and_does_not_raise(self, tmp_path, caplog):
+        """Symlink present but target unresolvable (mount/CoW host down) ->
+        degraded WARNING, never a hard crash (project_nfs_host_down_hangs_systemd)."""
+        import logging
+
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_golden_repos_symlink_placement,
+        )
+
+        mount_point = tmp_path / "mnt-cow-storage"  # never created -> dangling target
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.parent.mkdir(parents=True)
+        golden_repos_dir.symlink_to(mount_point / "golden-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(mount_point)
+        cow_cfg.daemon_storage_path = None
+
+        with caplog.at_level(logging.WARNING):
+            # Must NOT raise.
+            _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
+
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_build_snapshot_manager_raises_for_plain_golden_repos_dir(self, tmp_path):
+        """Integration: build_snapshot_manager propagates the loud failure for
+        a plain (never-symlinked) golden-repos dir under cow-daemon."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+
+        cfg = _make_cow_daemon_config(mount_point=str(tmp_path / "mnt-cow-storage"))
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ) as mock_health,
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"
+            ) as mock_nfs,
+        ):
+            mock_health.return_value = None
+            mock_nfs.return_value = None
+
+            with pytest.raises(RuntimeError, match="Bug #1337"):
+                build_snapshot_manager(cfg, versioned_base=str(golden_repos_dir))
+
+    def test_build_snapshot_manager_does_not_raise_for_dangling_symlink(self, tmp_path):
+        """Integration: a dangling golden-repos symlink degrades to a WARNING;
+        build_snapshot_manager still returns a working manager."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        mount_point = tmp_path / "mnt-cow-storage"  # never created -> dangling
+        golden_repos_dir = tmp_path / "data" / "golden-repos"
+        golden_repos_dir.parent.mkdir(parents=True)
+        golden_repos_dir.symlink_to(mount_point / "golden-repos")
+
+        cfg = _make_cow_daemon_config(mount_point=str(mount_point))
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ) as mock_health,
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"
+            ) as mock_nfs,
+        ):
+            mock_health.return_value = None
+            mock_nfs.return_value = None
+
+            manager = build_snapshot_manager(cfg, versioned_base=str(golden_repos_dir))
+
+        assert isinstance(manager, VersionedSnapshotManager)
+
+
+# ---------------------------------------------------------------------------
 # ontap backend
 # ---------------------------------------------------------------------------
 

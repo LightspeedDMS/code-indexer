@@ -178,6 +178,12 @@ class ConfigService:
         # DEBUG follow-ups instead of logging a fresh traceback every tick.
         # Shared across both try/except blocks in start_config_reload's poll loop.
         self._db_throttle = DbOutageThrottle(service_name="ConfigService")
+        # Bug #1335: memoized raw config.json snapshot captured the FIRST time
+        # _backfill_launch_keys_from_execstart runs -- i.e. BEFORE
+        # _strip_config_file_to_bootstrap has ever had a chance to strip
+        # host/port/workers off disk within this process. None means "not
+        # captured yet"; a captured value is a dict (possibly empty).
+        self._bootstrap_launch_keys_snapshot: Optional[Dict[str, Any]] = None
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -2469,6 +2475,46 @@ class ConfigService:
             )
         return 0
 
+    def _capture_bootstrap_launch_keys_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return (and memoize) config.json's raw content as it was BEFORE any
+        first-boot stripping (Bug #1335).
+
+        _backfill_launch_keys_from_execstart is invoked up to twice in a
+        single first-boot sequence: once from initialize_runtime_db while
+        config.json still holds the operator's explicit launch keys, and
+        again later from _seed_runtime_to_pg -- by which time
+        _strip_config_file_to_bootstrap has ALREADY removed those keys from
+        disk. Re-reading config.json on that second call would always see
+        the keys as "absent" and wrongly gap-fill them from an unrelated
+        systemd unit's ExecStart flags (the #1324 symptom).
+
+        Memoizing the FIRST read on this ConfigService instance -- which
+        always precedes any strip within one process's lifetime, since both
+        callers read config.json (directly or via this snapshot) before
+        _strip_config_file_to_bootstrap ever runs -- preserves the true
+        bootstrap intent for every later call.
+
+        Returns None if config.json could not be read (missing/corrupt) on
+        the first attempt; callers must skip the gap-fill entirely in that
+        case, matching the pre-#1335 error-handling behavior.
+        """
+        if self._bootstrap_launch_keys_snapshot is not None:
+            return self._bootstrap_launch_keys_snapshot
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            raw_config = (
+                json.loads(config_path.read_text()) if config_path.exists() else {}
+            )
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
+                exc,
+            )
+            return None
+        self._bootstrap_launch_keys_snapshot = raw_config
+        return raw_config
+
     def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
         """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
 
@@ -2480,21 +2526,18 @@ class ConfigService:
           2. key absent from config.json → fill from live ExecStart when available.
           3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
 
+        Bug #1335: "present in config.json" is answered from the memoized
+        bootstrap snapshot (_capture_bootstrap_launch_keys_snapshot), NOT a
+        fresh disk read -- a prior _strip_config_file_to_bootstrap() call in
+        this same process may have already removed these keys from disk,
+        which must not be misread as "operator never set them."
+
         Mutates the passed config object AND self._config so that the subsequent
         _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
         (which re-reads via get_config()) both see the corrected values.
         """
-        raw_config: dict = {}
-        try:
-            config_path = Path(self.config_manager.config_file_path)
-            if config_path.exists():
-                raw_config = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "ConfigService: unable to read raw config.json for ExecStart "
-                "backfill at first-boot seed; skipping gap-fill: %s",
-                exc,
-            )
+        raw_config = self._capture_bootstrap_launch_keys_snapshot()
+        if raw_config is None:
             return
 
         execstart = read_execstart_flags()

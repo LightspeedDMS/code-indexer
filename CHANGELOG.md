@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.31.0] - 2026-07-09
+
+### Fixed
+
+- **Per-user activation on the CoW-daemon cluster (#1337).** Per-user activation reflink-clones the golden repo, which requires the golden bytes to live on the CoW-managed filesystem; registration placed clones in a plain `<data>/golden-repos` dir outside the CoW mount, so `CowDaemonBackend` could not translate the path (`... is not under mount_point ... cannot translate to daemon view`). The installer AND the auto-updater (Step 14.7) now idempotently provision `golden-repos` as a node-aware symlink into the CoW storage (empty dir -> auto-convert; non-empty dir -> WARNING with exact migration steps, never moved unattended). Startup validation fails loud on a plain-dir misconfig but degrades (no worker crash) on a dangling symlink / NFS host down. Docs corrected: a plain bind mount gives query visibility but does NOT satisfy `realpath`-based daemon translation — a symlink (or a path physically under the CoW mount) is required.
+- **First-boot PG seed preserves bootstrap host/port/workers (#1335).** `ConfigService`'s first-boot PostgreSQL runtime seed gap-filled the now-runtime-only `host`/`port`/`workers` by re-reading an already-stripped `config.json`, always seeing them absent and falling back to an UNRELATED `cidx-server.service` systemd unit on the host (which flipped `should_use_secure_cookies` on a freshly provisioned node). The intent check now consults an in-memory bootstrap snapshot captured BEFORE the strip; only truly-absent values fall back to ExecStart. Makes the #1324 harness `SYSTEMD_UNIT_DIR` workaround unnecessary.
+- **Orphaned golden aliases are skipped, not fatal, in lifecycle_backfill / global_repo_refresh (#1336).** An orphaned alias (registry row present, on-disk clone absent) raised `ValueError` and failed the whole job. It is now skipped with a WARNING (narrow per-call-site catch; a genuine non-orphan `ValueError` still fails the job), so valid aliases process and the job succeeds. Orphan cleanup stays delegated to the #1317 reconciler. (Typed-exception hardening tracked as #1338.)
+- **Atomic token-bucket decrement eliminates cross-node rate-limit overshoot (#1334).** `TokenBucketManager._pg_consume` replaced its non-atomic SELECT-then-UPDATE with a single conditional `UPDATE` (refill+decrement inline; allow/deny read from `rowcount`). PostgreSQL EvalPlanQual re-evaluates the guard and SET against the winner's committed tuple, so simultaneous cross-node consumers on one key can no longer both pass at the boundary. Applies to both the auth login limiter and `PerConsumerRateLimiter`; refill semantics preserved; proven by a real-PG concurrency test (was 100/100 allowed, now strict capacity).
+
 ## [11.30.0] - 2026-07-09
 
 ### Fixed
