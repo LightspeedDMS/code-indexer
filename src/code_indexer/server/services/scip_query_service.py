@@ -177,6 +177,22 @@ class SCIPQueryService:
 
         return scip_files
 
+    @staticmethod
+    def _scip_dir_for_files(scip_files: List[Path]) -> Path:
+        """Return the ``.code-indexer/scip`` directory containing ``scip_files``.
+
+        For an alias-scoped query every file lives under a single
+        ``<root>/.code-indexer/scip`` directory (see :meth:`find_scip_files`).
+        Return that directory so a recursive ``**/*.scip.db`` glob crosses only
+        this repo's indexes. Falls back to the first file's parent if the
+        expected layout is not found.
+        """
+        first = scip_files[0]
+        for parent in first.parents:
+            if parent.name == "scip" and parent.parent.name == ".code-indexer":
+                return parent
+        return first.parent
+
     def _resolve_alias_scip_root(self, repo_name: str) -> Optional[Path]:
         """Resolve a repo's alias ``target_path`` to its SCIP-bearing root.
 
@@ -446,19 +462,41 @@ class SCIPQueryService:
             symbol: Symbol name to analyze
             depth: Maximum traversal depth (default 3). Clamped by underlying
                    function to MAX_TRAVERSAL_DEPTH (10).
-            repository_alias: Reserved for future filtering support
-            username: Reserved for future filtering support
+            repository_alias: Repository to scope the analysis to. When given,
+                   only that repo's SCIP indexes are traversed (mirrors the
+                   other SCIP endpoints); when None, all golden repos are.
+            username: Username for access-control filtering.
 
         Returns:
             Dictionary with impact analysis results
         """
         from code_indexer.scip.query.composites import analyze_impact
 
-        # Get the scip directory from golden_repos_dir
-        scip_dir = self.get_golden_repos_dir()
+        # Scope to the requested repo's SCIP indexes and early-out when there is
+        # no index for it. Without this, impact analysis ignored the alias and
+        # scanned EVERY golden repo's .scip.db twice with a depth-N CTE -- tens
+        # of seconds even for a repo with no SCIP index at all. find_scip_files
+        # also enforces access control for the caller.
+        scip_files = self.find_scip_files(
+            repository_alias=repository_alias, username=username
+        )
+        if not scip_files:
+            return {
+                "target_symbol": symbol,
+                "depth_analyzed": min(depth, 10),
+                "total_affected": 0,
+                "truncated": False,
+                "affected_symbols": [],
+                "affected_files": [],
+            }
 
-        # Note: repository_alias and username reserved for future filtering
-        _ = repository_alias, username
+        # Point the composite at the project's own ".code-indexer/scip" dir so
+        # its recursive glob crosses only this repo's indexes. When no alias was
+        # requested, fall back to the full golden-repos dir (cross-repo scan).
+        if repository_alias is not None:
+            scip_dir = self._scip_dir_for_files(scip_files)
+        else:
+            scip_dir = self.get_golden_repos_dir()
 
         result = analyze_impact(symbol, scip_dir, depth=depth)
 

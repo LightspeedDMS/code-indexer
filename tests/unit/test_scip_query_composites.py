@@ -643,3 +643,42 @@ class TestTraceCallChainMaxDepthValidation:
 
         # Should succeed (no exception) and return valid result
         assert result is not None
+
+
+class TestAnalyzeImpactEarlyOut:
+    """analyze_impact must skip the BFS dependents traversal when the target
+    symbol has no definition (perf: unresolved symbol -> guaranteed-empty)."""
+
+    def test_no_definition_skips_bfs(self, tmp_path):
+        with (
+            patch(
+                "code_indexer.scip.query.composites._find_target_definition",
+                return_value=None,
+            ),
+            patch(
+                "code_indexer.scip.query.composites._bfs_traverse_dependents"
+            ) as mock_bfs,
+        ):
+            result = analyze_impact("DoesNotExist", tmp_path, depth=3)
+
+        mock_bfs.assert_not_called()  # expensive pass skipped
+        assert result.total_affected == 0
+        assert result.affected_symbols == []
+        assert result.target_location is None
+
+    def test_definition_found_runs_bfs(self, tmp_path):
+        sentinel_loc = MagicMock()
+        with (
+            patch(
+                "code_indexer.scip.query.composites._find_target_definition",
+                return_value=sentinel_loc,
+            ),
+            patch(
+                "code_indexer.scip.query.composites._bfs_traverse_dependents",
+                return_value=[],
+            ) as mock_bfs,
+        ):
+            result = analyze_impact("RealSymbol", tmp_path, depth=2)
+
+        mock_bfs.assert_called_once()  # traversal runs when a definition exists
+        assert result.target_location is sentinel_loc

@@ -1647,3 +1647,79 @@ class TestAliasNormalizationBug661:
             scip_files = service.find_scip_files()
 
             assert len(scip_files) == 3
+
+
+class TestAnalyzeImpactScoping:
+    """analyze_impact must scope to the requested repo and early-out when it has
+    no SCIP index, instead of scanning every golden repo (perf bug: 48s empty)."""
+
+    def _service(self):
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        return SCIPQueryService(
+            golden_repos_dir="/data/golden-repos", access_filtering_service=None
+        )
+
+    def test_early_out_when_no_index_for_alias(self):
+        """No .scip.db for the alias -> empty result WITHOUT invoking the composite."""
+        from unittest.mock import patch
+
+        service = self._service()
+        with (
+            patch.object(service, "find_scip_files", return_value=[]) as mock_find,
+            patch(
+                "code_indexer.scip.query.composites.analyze_impact"
+            ) as mock_composite,
+        ):
+            result = service.analyze_impact(
+                "LSAuthenticator", depth=3, repository_alias="evolution-global"
+            )
+
+        mock_find.assert_called_once_with(
+            repository_alias="evolution-global", username=None
+        )
+        mock_composite.assert_not_called()  # the expensive scan must be skipped
+        assert result["total_affected"] == 0
+        assert result["affected_symbols"] == []
+        assert result["affected_files"] == []
+        assert result["target_symbol"] == "LSAuthenticator"
+
+    def test_scopes_composite_to_project_scip_dir(self):
+        """When an index exists, the composite is pointed at the repo's own
+        .code-indexer/scip dir, not the whole golden-repos root."""
+        from unittest.mock import patch
+        from code_indexer.scip.query.composites import ImpactAnalysisResult
+
+        service = self._service()
+        scip_file = Path("/data/golden-repos/evolution/.code-indexer/scip/idx.scip.db")
+        empty = ImpactAnalysisResult(
+            target_symbol="X",
+            target_location=None,
+            depth_analyzed=3,
+            affected_symbols=[],
+            affected_files=[],
+            truncated=False,
+            total_affected=0,
+        )
+        # analyze_impact is imported inside the method from composites, so patch
+        # it on the composites module (its definition site).
+        with (
+            patch.object(service, "find_scip_files", return_value=[scip_file]),
+            patch(
+                "code_indexer.scip.query.composites.analyze_impact",
+                return_value=empty,
+            ) as mock_composite,
+        ):
+            service.analyze_impact("X", depth=3, repository_alias="evolution-global")
+
+        # composite called with the scoped .code-indexer/scip dir
+        called_dir = mock_composite.call_args.args[1]
+        assert called_dir == Path("/data/golden-repos/evolution/.code-indexer/scip")
+
+    def test_scip_dir_for_files_finds_code_indexer_scip(self):
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        files = [Path("/data/golden-repos/evo/.code-indexer/scip/sub/a.scip.db")]
+        assert SCIPQueryService._scip_dir_for_files(files) == Path(
+            "/data/golden-repos/evo/.code-indexer/scip"
+        )
