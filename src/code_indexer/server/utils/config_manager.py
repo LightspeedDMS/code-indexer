@@ -1158,6 +1158,46 @@ class QueryEmbeddingCacheConfig:
 
 
 @dataclass
+class AdmissionControlConfig:
+    """Request admission control / backpressure.
+
+    Under overload the server otherwise queues every request in the anyio
+    threadpool until it times out to a 504. When enabled, a middleware caps the
+    number of in-flight (non-exempt) requests PER WORKER PROCESS and/or
+    rate-limits each caller individually, shedding excess with an immediate
+    ``429 Too Many Requests`` + ``Retry-After`` so clients back off and retry
+    instead of piling up toward queue collapse. Health/docs endpoints are always
+    exempt so readiness probes and schema fetches are never rejected.
+
+    Opt-in (both switches default False) because the right cap is
+    deployment-specific (roughly timeout x per-worker service rate). The two
+    gates are independent — enable either or both. Read at app-wiring time from
+    the merged server config (not a BOOTSTRAP key); a restart applies changes.
+    """
+
+    # Global per-worker in-flight cap.
+    enabled: bool = False
+    # Max concurrent non-exempt requests per worker before shedding. 0 = no cap.
+    max_inflight_requests: int = 100
+    # Retry-After header value (seconds) sent on a shed request.
+    retry_after_seconds: int = 1
+
+    # Per-consumer (per-API-key/session) token-bucket rate limiting. INDEPENDENT
+    # of the global cap; keyed by a hash of the caller's credential. Enforcement
+    # is cluster-shared (fleet-wide, via a dedicated PG table) ONLY when a PG
+    # connection pool is attached at app-wiring time (cluster/postgres mode);
+    # in solo/SQLite mode each worker process enforces the rate independently
+    # (per-process buckets).
+    per_consumer_enabled: bool = False
+    # Burst: tokens a single consumer may spend back-to-back.
+    per_consumer_burst: int = 30
+    # Sustained rate (requests/second) a single consumer's bucket refills at.
+    per_consumer_refill_per_second: float = 10.0
+    # Idle seconds before an unused consumer bucket is reclaimed (memory bound).
+    per_consumer_cleanup_seconds: int = 3600
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -1244,6 +1284,7 @@ class ServerConfig:
 
     # Story #1105 - Query embedding cache configuration (runtime only, not bootstrap)
     query_embedding_cache_config: Optional[QueryEmbeddingCacheConfig] = None
+    admission_control_config: Optional[AdmissionControlConfig] = None
 
     # Story #885 - Lifecycle analysis subprocess timeout configuration
     lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
@@ -1509,6 +1550,8 @@ class ServerConfig:
         # Story #1105 - Initialize query embedding cache config
         if self.query_embedding_cache_config is None:
             self.query_embedding_cache_config = QueryEmbeddingCacheConfig()
+        if self.admission_control_config is None:
+            self.admission_control_config = AdmissionControlConfig()
         # Story #885 - Initialize lifecycle analysis config
         if self.lifecycle_analysis_config is None:
             self.lifecycle_analysis_config = LifecycleAnalysisConfig()
@@ -2112,6 +2155,17 @@ class ServerConfigManager:
             _qec_allowed = {f.name for f in fields(QueryEmbeddingCacheConfig)}
             config_dict["query_embedding_cache_config"] = QueryEmbeddingCacheConfig(
                 **{k: v for k, v in _qec_dict.items() if k in _qec_allowed}
+            )
+
+        # Convert admission_control_config dict to AdmissionControlConfig. Unknown
+        # keys are filtered for rolling-upgrade safety (same fields() pattern).
+        if "admission_control_config" in config_dict and isinstance(
+            config_dict["admission_control_config"], dict
+        ):
+            _adm_dict = config_dict["admission_control_config"]
+            _adm_allowed = {f.name for f in fields(AdmissionControlConfig)}
+            config_dict["admission_control_config"] = AdmissionControlConfig(
+                **{k: v for k, v in _adm_dict.items() if k in _adm_allowed}
             )
 
         # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
