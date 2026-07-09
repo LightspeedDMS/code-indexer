@@ -515,6 +515,14 @@ class CowDaemonBackend:
             "namespace": namespace,
             "name": name,
             "dest_path": daemon_dest,
+            # Bug #1343 AC-3: forward preserve_attrs so the daemon can
+            # preserve working-tree mtimes (mirrors LocalCloneBackend's
+            # `cp --reflink=auto -a`). Without this, the daemon had no
+            # signal at all and the cluster activation path could not
+            # benefit from the checkStat=minimal fix applied downstream
+            # in ActivatedRepoManager -- an mtime-churning copy re-hashes
+            # the whole tree regardless of checkStat.
+            "preserve_attrs": preserve_attrs,
         }
         logger.info(
             "CowDaemonBackend: creating clone at path '%s' (daemon-side '%s') from '%s' (daemon-side '%s')",

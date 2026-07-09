@@ -1337,6 +1337,44 @@ class TestCowDaemonBackendCreateCloneAtPath:
         headers = mock_req.post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
 
+    def test_forwards_preserve_attrs_true_in_post_body(self):
+        """Bug #1343 AC-3: preserve_attrs=True must appear in the POST body
+        sent to the daemon so it can preserve working-tree mtimes (the
+        activation CoW-rehash fix depends on this being forwarded, not
+        silently dropped)."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-pa-true"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/repo",
+                "/mnt/nfs/cidx/dest/repo",
+                preserve_attrs=True,
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["preserve_attrs"] is True
+
+    def test_forwards_preserve_attrs_false_in_post_body(self):
+        """Bug #1343 AC-3: preserve_attrs=False must also appear (not
+        silently dropped/defaulted to True)."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-pa-false"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/repo",
+                "/mnt/nfs/cidx/dest/repo",
+                preserve_attrs=False,
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["preserve_attrs"] is False
+
 
 class TestCowDaemonBackendTranslateFromDaemonPath:
     """Story #1034: CowDaemonBackend._translate_from_daemon_path reverses daemon-local path to CIDX view."""

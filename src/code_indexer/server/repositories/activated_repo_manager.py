@@ -2776,12 +2776,18 @@ class ActivatedRepoManager:
         - CoW clone copies EVERYTHING including indexes
         - Ensures search works immediately without manual indexing
 
-        Post-clone workflow (from claude-server CowCloneOperationsService.cs):
-        1. cp --reflink=auto -r (CoW clone - copies .code-indexer/)
-        2. git update-index --refresh (fix timestamp mismatches)
-        3. git restore . (undo timestamp changes)
-        4. cidx fix-config --force (update paths in cloned config)
-        5. Configure git structure (remotes, fetch)
+        Post-clone workflow (from claude-server CowCloneOperationsService.cs,
+        refined by Bug #1343):
+        1. cp --reflink=auto -a (CoW clone, mtimes preserved - copies .code-indexer/)
+        2. git config core.checkStat minimal (mtime+size only; a reflink copy
+           always allocates a new inode/ctime, which git's DEFAULT checkStat
+           would treat as stat-dirty and re-hash the whole tree)
+        3. git update-index --refresh (O(1) stat pass, not a re-hash, given 1+2)
+        4. git status --porcelain sanity check (logs a WARNING, never restores
+           -- a byte-identical clone is already clean; blindly running
+           `git restore .` would silently discard genuinely different content)
+        5. cidx fix-config --force (update paths in cloned config)
+        6. Configure git structure (remotes, fetch)
 
         Args:
             source_path: Source repository path (golden repository)
@@ -2823,7 +2829,7 @@ class ActivatedRepoManager:
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
-                preserve_attrs=False,
+                preserve_attrs=True,
                 timeout=clone_timeout,
             )
 
@@ -2907,6 +2913,30 @@ class ActivatedRepoManager:
             # Step 3: Fix git status for CoW cloned files (only if git repo)
             git_dir = os.path.join(dest_path, ".git")
             if os.path.exists(git_dir):
+                # Bug #1343: `cp --reflink` ALWAYS allocates a new inode (and
+                # ctime) for every copied file, even with preserve_attrs=True
+                # (mtime preserved). Git's DEFAULT core.checkStat compares
+                # inode/ctime/dev/uid/gid in addition to mtime+size, so the
+                # inode change alone stat-invalidates the copied .git/index
+                # and forces update-index/status to open+hash every tracked
+                # file. core.checkStat=minimal (mtime+size only) is the
+                # decisive lever -- set it BEFORE the refresh below AND
+                # before _configure_git_structure's `git status` (persisted
+                # in dest_path/.git/config, read by both call sites).
+                checkstat_result = subprocess.run(
+                    ["git", "config", "--local", "core.checkStat", "minimal"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if checkstat_result.returncode != 0:
+                    self.logger.warning(
+                        "git config core.checkStat=minimal failed (non-fatal): "
+                        f"{checkstat_result.stderr}"
+                    )
+
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
                 self.logger.info(
                     "Running git update-index --refresh to fix CoW clone timestamps"
@@ -2924,21 +2954,31 @@ class ActivatedRepoManager:
                         f"git update-index --refresh failed (non-fatal): {result.stderr}"
                     )
 
-                # Step 2b: Run git restore . to clean up any remaining modified files
-                self.logger.info(
-                    "Running git restore . to clean up CoW clone timestamp changes"
-                )
-                result = subprocess.run(
-                    ["git", "restore", "."],
+                # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
+                # unconditionally to "clean up" CoW clone timestamp changes.
+                # That was compensating for stat-noise caused by the OLD
+                # default core.checkStat flagging inode/ctime churn as a
+                # modification even when content was byte-identical. Now that
+                # core.checkStat=minimal + preserve_attrs=True make the
+                # refresh above a pure stat pass, a byte-identical clone is
+                # already clean and there is nothing to restore. Blindly
+                # calling `git restore .` unconditionally would SILENTLY
+                # DISCARD any genuinely different content -- a real content
+                # difference immediately after a CoW clone would be abnormal,
+                # so surface it with a WARNING instead of destroying it.
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
                     timeout=60,
                 )
 
-                if result.returncode != 0:
+                if status_result.returncode == 0 and status_result.stdout.strip():
                     self.logger.warning(
-                        f"git restore . failed (non-fatal): {result.stderr}"
+                        "git status reports unexpected changes after CoW "
+                        "clone refresh; NOT running git restore (would "
+                        f"discard content): {status_result.stdout.strip()}"
                     )
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
