@@ -95,6 +95,19 @@ def test_batched_writer_one_batch_call_per_drain_cycle(tmp_path: Path) -> None:
 
     We emit exactly MAX_DRAIN_BATCH records and expect exactly ONE
     insert_log_batch call (not MAX_DRAIN_BATCH individual calls).
+
+    Root cause of the historical ~40% flake (proven via 20-run baseline before
+    this fix): the background writer thread starts draining concurrently with
+    this test's enqueue loop.  ``_writer_loop`` snapshots ``qsize()`` right
+    after its first blocking ``get()`` returns; if the writer wakes on record
+    #1 before all 512 records are enqueued, that snapshot is smaller than
+    MAX_DRAIN_BATCH, so the drain splits into 2 (occasionally 3) batch calls
+    instead of 1 -- a pure test-timing race, not a production defect (the
+    writer's batching logic itself is correct once the full batch is already
+    sitting in the queue when it drains).  We eliminate the race by stopping
+    the writer, enqueuing the full batch while nothing is consuming it, then
+    restarting the writer so its first-ever drain cycle sees all n items
+    already queued -- deterministic, no wall-clock dependency.
     """
     from code_indexer.server.services.sqlite_log_handler import (
         MAX_DRAIN_BATCH,
@@ -105,8 +118,22 @@ def test_batched_writer_one_batch_call_per_drain_cycle(tmp_path: Path) -> None:
     handler = SQLiteLogHandler(db_path=tmp_path / "unused.db", logs_backend=backend)
     try:
         n = MAX_DRAIN_BATCH  # exactly one full batch
+
+        # Stop the writer thread that _init__ started, so enqueuing below is
+        # not racing a concurrent drain.
+        handler._stop_event.set()
+        handler._writer_thread.join(timeout=5.0)
+        assert not handler._writer_thread.is_alive(), (
+            "writer thread failed to stop before deterministic enqueue setup"
+        )
+
         for i in range(n):
             handler.emit(_make_record(f"record {i}"))
+
+        # Restart the writer now that the full batch is already queued: its
+        # first drain cycle is guaranteed to observe all n items at once.
+        handler._stop_event.clear()
+        handler._start_writer()
 
         handler.flush()
 
