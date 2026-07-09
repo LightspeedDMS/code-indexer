@@ -25,7 +25,6 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     _patch_closure,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------
@@ -106,3 +105,60 @@ def test_repos_files_path_traversal_returns_400(test_client, tmp_path):
 
         r2 = test_client.get("/api/repos/myrepo2/files?path=/etc/passwd")
         assert r2.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Recursive listing (one call instead of N per-directory round-trips)
+# ---------------------------------------------------------------------------
+
+
+def _nested_repo(tmp_path):
+    repo_dir = tmp_path / "deep"
+    (repo_dir / "a" / "b" / "c").mkdir(parents=True)
+    (repo_dir / "top.txt").write_text("t")
+    (repo_dir / "a" / "one.py").write_text("1")
+    (repo_dir / "a" / "b" / "two.py").write_text("2")
+    (repo_dir / "a" / "b" / "c" / "three.py").write_text("3")
+    return repo_dir
+
+
+def test_repos_files_recursive_returns_full_tree(test_client, tmp_path):
+    """recursive=true returns the whole subtree in one response."""
+    repo_dir = _nested_repo(tmp_path)
+    with arm_mock({"user_alias": "deep"}, str(repo_dir)):
+        response = test_client.get("/api/repos/deep/files?recursive=true")
+
+    assert response.status_code == 200
+    data = response.json()
+    paths = {f["path"] for f in data["files"]}
+    # deep files reachable without per-directory calls
+    assert "a/b/c/three.py" in paths
+    assert "a/one.py" in paths
+    assert data["truncated"] is False
+    assert data["count"] == len(data["files"])
+
+
+def test_repos_files_recursive_max_depth_prunes(test_client, tmp_path):
+    """max_depth bounds how far recursion descends."""
+    repo_dir = _nested_repo(tmp_path)
+    with arm_mock({"user_alias": "deep"}, str(repo_dir)):
+        response = test_client.get("/api/repos/deep/files?recursive=true&max_depth=1")
+
+    assert response.status_code == 200
+    paths = {f["path"] for f in response.json()["files"]}
+    assert "top.txt" in paths
+    assert "a" in paths  # the dir entry at depth 1
+    assert "a/one.py" not in paths  # depth 2 not descended
+    assert "a/b/c/three.py" not in paths
+
+
+def test_repos_files_recursive_limit_truncates(test_client, tmp_path):
+    """limit caps entries and flags truncated."""
+    repo_dir = _nested_repo(tmp_path)
+    with arm_mock({"user_alias": "deep"}, str(repo_dir)):
+        response = test_client.get("/api/repos/deep/files?recursive=true&limit=2")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["truncated"] is True
+    assert len(data["files"]) == 2

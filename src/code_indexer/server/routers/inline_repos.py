@@ -40,6 +40,7 @@ from ..services.repository_discovery_service import (
     RepositoryDiscoveryError,
 )  # noqa: E402
 from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
+from ..logging_utils import mask_url_credentials  # noqa: E402
 from ..repositories.golden_repo_manager import GitOperationError  # noqa: E402
 
 from fastapi import (
@@ -1202,7 +1203,9 @@ def register_repo_routes(
             repositories = [
                 RepositoryInfo(
                     alias=repo["alias"],
-                    repo_url=repo["repo_url"],
+                    # Never expose embedded clone credentials (e.g. an oauth2 PAT)
+                    # in the listing response.
+                    repo_url=mask_url_credentials(repo["repo_url"]),
                     default_branch=repo["default_branch"],
                     created_at=repo["created_at"],
                 )
@@ -1638,18 +1641,43 @@ def register_repo_routes(
     def list_repository_files(
         user_alias: str,
         path: Optional[str] = Query(None, description="Subdirectory path to list"),
+        recursive: bool = Query(
+            False,
+            description="Walk the full subtree in one response instead of one level",
+        ),
+        max_depth: Optional[int] = Query(
+            None,
+            ge=1,
+            description="When recursive, limit descent to this many levels below path",
+        ),
+        limit: int = Query(
+            10000,
+            ge=1,
+            le=100000,
+            description="When recursive, cap total entries returned (sets truncated)",
+        ),
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
-        List files in an activated repository (non-recursive, root level by default).
+        List files in an activated repository.
+
+        By default lists a single directory level (root, or ``path``). With
+        ``recursive=true`` the whole subtree is returned in ONE response, which
+        avoids the thousands of sequential per-directory calls a client would
+        otherwise need to build a tree (a 12k-directory repo took ~59s that way).
 
         Args:
             user_alias: User's alias for the repository
             path: Optional relative subdirectory to scope the listing
+            recursive: Return the full subtree in one response
+            max_depth: When recursive, max levels to descend (None = unlimited)
+            limit: When recursive, max entries before truncating
             current_user: Current authenticated user
 
         Returns:
             JSON dict with ``files`` list; each item has name, path, type, size.
+            When ``recursive`` is set, also returns ``truncated`` (bool) and
+            ``count`` (int).
 
         Raises:
             HTTPException 400: path escapes repo root (traversal) or is not a directory
@@ -1690,19 +1718,68 @@ def register_repo_routes(
             )
 
         try:
+            if not recursive:
+                entries = []
+                with os.scandir(scan_root) as it:
+                    for entry in it:
+                        rel = Path(entry.path).relative_to(repo_resolved)
+                        entries.append(
+                            {
+                                "name": entry.name,
+                                "path": str(rel),
+                                "type": "dir" if entry.is_dir() else "file",
+                                "size": entry.stat().st_size if entry.is_file() else 0,
+                            }
+                        )
+                return {"files": entries}
+
+            # Recursive: walk the subtree once, depth-bounded and count-capped.
             entries = []
-            with os.scandir(scan_root) as it:
-                for entry in it:
-                    rel = Path(entry.path).relative_to(repo_resolved)
+            truncated = False
+            base_depth = len(scan_root.parts)
+            # topdown so we can prune directories in-place at max_depth and stop
+            # descending once the entry cap is hit; followlinks=False avoids
+            # cycles and escaping the repo via symlinks.
+            for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False):
+                current = Path(dirpath)
+                # depth of this directory relative to scan_root (root == 0); its
+                # children sit at depth+1. Skip emitting a directory's children
+                # once they would exceed max_depth, and prune descent so os.walk
+                # does not visit levels we would only discard.
+                depth = len(current.parts) - base_depth
+                if max_depth is not None and depth >= max_depth:
+                    dirnames[:] = []
+                    continue
+                for name in sorted(dirnames):  # sorted -> deterministic output
+                    if len(entries) >= limit:
+                        truncated = True
+                        break
+                    rel = (current / name).relative_to(repo_resolved)
                     entries.append(
-                        {
-                            "name": entry.name,
-                            "path": str(rel),
-                            "type": "dir" if entry.is_dir() else "file",
-                            "size": entry.stat().st_size if entry.is_file() else 0,
-                        }
+                        {"name": name, "path": str(rel), "type": "dir", "size": 0}
                     )
-            return {"files": entries}
+                if truncated:
+                    break
+                for name in sorted(filenames):
+                    if len(entries) >= limit:
+                        truncated = True
+                        break
+                    fp = current / name
+                    try:
+                        size = fp.stat().st_size
+                    except OSError:
+                        size = 0
+                    rel = fp.relative_to(repo_resolved)
+                    entries.append(
+                        {"name": name, "path": str(rel), "type": "file", "size": size}
+                    )
+                if truncated:
+                    break
+                # We have listed this directory's immediate children; if they are
+                # at the depth ceiling, do not descend into them.
+                if max_depth is not None and depth + 1 >= max_depth:
+                    dirnames[:] = []
+            return {"files": entries, "count": len(entries), "truncated": truncated}
 
         except OSError as e:
             logger.error(

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 from pydantic import BaseModel
-from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
@@ -100,10 +100,15 @@ class GoldenRepo(BaseModel):
     category_auto_assigned: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert golden repository to dictionary."""
+        """Convert golden repository to dictionary.
+
+        ``repo_url`` is credential-masked here because every consumer of this
+        method serializes the result into an API response; git/clone operations
+        read ``self.repo_url`` directly and are unaffected.
+        """
         return {
             "alias": self.alias,
-            "repo_url": self.repo_url,
+            "repo_url": mask_url_credentials(self.repo_url),
             "default_branch": self.default_branch,
             "clone_path": self.clone_path,
             "created_at": self.created_at,
