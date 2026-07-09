@@ -2722,7 +2722,19 @@ def make_lifespan(
                 try:
                     import json as _json
 
-                    _cfg_path = Path.home() / ".cidx-server" / "config.json"
+                    # Honor CIDX_SERVER_DATA_DIR for the config location (mirrors
+                    # the data-dir resolution above); a deployment that sets the
+                    # data dir elsewhere keeps config.json there, so hardcoding
+                    # ~/.cidx-server would silently skip cluster services.
+                    _cfg_path = (
+                        Path(
+                            os.environ.get(
+                                "CIDX_SERVER_DATA_DIR",
+                                str(Path.home() / ".cidx-server"),
+                            )
+                        )
+                        / "config.json"
+                    )
                     if _cfg_path.exists():
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
@@ -3474,7 +3486,15 @@ def make_lifespan(
             try:
                 import json as _nm_json
 
-                _nm_cfg_path = Path.home() / ".cidx-server" / "config.json"
+                _nm_cfg_path = (
+                    Path(
+                        os.environ.get(
+                            "CIDX_SERVER_DATA_DIR",
+                            str(Path.home() / ".cidx-server"),
+                        )
+                    )
+                    / "config.json"
+                )
                 if _nm_cfg_path.exists():
                     with open(_nm_cfg_path) as _nm_f:
                         _nm_cfg = _nm_json.load(_nm_f)
