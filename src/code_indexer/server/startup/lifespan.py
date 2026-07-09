@@ -833,8 +833,17 @@ def make_lifespan(
                 )
 
                 versioned_base = str(golden_repos_dir)
+                # Bug #1337 Gap 2: activated-repos needs the same CoW-storage
+                # placement guarantee as golden-repos (per-user activation
+                # reflink-clones INTO it, Bug #1052); pass its path so
+                # build_snapshot_manager can validate it for cow-daemon.
+                activated_repos_dir_for_check = str(
+                    Path(server_data_dir) / "data" / "activated-repos"
+                )
                 snapshot_manager = build_snapshot_manager(
-                    server_config, versioned_base=versioned_base
+                    server_config,
+                    versioned_base=versioned_base,
+                    activated_repos_dir=activated_repos_dir_for_check,
                 )
                 app.state.snapshot_manager = snapshot_manager
                 logger.info(

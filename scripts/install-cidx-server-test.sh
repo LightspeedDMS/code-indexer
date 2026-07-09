@@ -631,6 +631,252 @@ run_test "write_config (cow-daemon, --cow-local-bind) golden-repos symlink targe
     test_golden_repos_symlink_uses_daemon_storage_path_on_colocated_node
 
 # ===========================================================================
+# Group C.3: Bug #1337 Gap 2 - activated-repos symlink into CoW storage
+# ===========================================================================
+#
+# Per-user activation reflink-clones INTO activated_repos_dir (Bug #1052),
+# which must ALSO be a symlink into the CoW storage for the same reason
+# golden-repos must be. These tests mirror Group C.2 for activated-repos.
+
+test_activated_repos_symlink_created_for_cow_daemon() {
+    local tmpdir cfg mount_point link_path output
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    mount_point="${tmpdir}/mnt-cow-storage"
+
+    output="$(run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=false
+        COW_DAEMON_STORAGE_PATH=''
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    ")"
+
+    link_path="${tmpdir}/data/activated-repos"
+    local is_symlink=0 target=""
+    if [[ -L "${link_path}" ]]; then
+        is_symlink=1
+        target="$(readlink "${link_path}")"
+    fi
+
+    rm -rf "${tmpdir}"
+
+    [[ ${is_symlink} -eq 1 ]] && [[ "${target}" == "${mount_point}/activated-repos" ]]
+}
+run_test "write_config (cow-daemon) creates activated-repos symlink into the CoW mount" \
+    test_activated_repos_symlink_created_for_cow_daemon
+
+test_activated_repos_symlink_idempotent_on_rerun() {
+    local tmpdir cfg mount_point link_path inode_before inode_after
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    mount_point="${tmpdir}/mnt-cow-storage"
+
+    run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=false
+        COW_DAEMON_STORAGE_PATH=''
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    " >/dev/null
+
+    link_path="${tmpdir}/data/activated-repos"
+    inode_before="$(stat -c '%i' "${link_path}" 2>/dev/null || echo 'MISSING')"
+
+    run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=false
+        COW_DAEMON_STORAGE_PATH=''
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    " >/dev/null
+
+    inode_after="$(stat -c '%i' "${link_path}" 2>/dev/null || echo 'MISSING')"
+
+    rm -rf "${tmpdir}"
+
+    [[ "${inode_before}" != "MISSING" ]] && [[ "${inode_before}" == "${inode_after}" ]]
+}
+run_test "write_config (cow-daemon) activated-repos symlink is idempotent on re-run (inode unchanged)" \
+    test_activated_repos_symlink_idempotent_on_rerun
+
+test_activated_repos_symlink_uses_daemon_storage_path_on_colocated_node() {
+    local tmpdir cfg mount_point daemon_storage_path link_path target
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    mount_point="${tmpdir}/mnt-cow-storage"
+    daemon_storage_path="${tmpdir}/srv-cow-xfs"
+
+    run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='node-23'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=true
+        COW_DAEMON_STORAGE_PATH='${daemon_storage_path}'
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    " >/dev/null
+
+    link_path="${tmpdir}/data/activated-repos"
+    target="$(readlink "${link_path}" 2>/dev/null || echo 'MISSING')"
+
+    rm -rf "${tmpdir}"
+
+    [[ "${target}" == "${daemon_storage_path}/activated-repos" ]]
+}
+run_test "write_config (cow-daemon, --cow-local-bind) activated-repos symlink targets daemon_storage_path form" \
+    test_activated_repos_symlink_uses_daemon_storage_path_on_colocated_node
+
+test_activated_repos_real_dir_with_content_preserved() {
+    local tmpdir cfg mount_point link_path sentinel output
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    mount_point="${tmpdir}/mnt-cow-storage"
+    link_path="${tmpdir}/data/activated-repos"
+    mkdir -p "${link_path}"
+    sentinel="${link_path}/some-user-activation-metadata.json"
+    echo '{"repos": []}' > "${sentinel}"
+
+    output="$(run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=false
+        COW_DAEMON_STORAGE_PATH=''
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    ")"
+
+    local preserved=0
+    [[ -d "${link_path}" && ! -L "${link_path}" && -f "${sentinel}" ]] && preserved=1
+    local sentinel_content
+    sentinel_content="$(cat "${sentinel}" 2>/dev/null || echo 'MISSING')"
+
+    rm -rf "${tmpdir}"
+
+    [[ ${preserved} -eq 1 ]] \
+        && [[ "${sentinel_content}" == '{"repos": []}' ]] \
+        && echo "${output}" | grep -qi "bug #1337\|activated-repos"
+}
+run_test "write_config (cow-daemon) never converts a non-empty real activated-repos dir to a symlink" \
+    test_activated_repos_real_dir_with_content_preserved
+
+test_local_backend_creates_no_cow_symlinks() {
+    local tmpdir cfg golden_link activated_link
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+
+    run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='n1'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='local'
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    " >/dev/null
+
+    golden_link="${tmpdir}/data/golden-repos"
+    activated_link="${tmpdir}/data/activated-repos"
+
+    local golden_is_plain=0 activated_absent=0
+    [[ -d "${golden_link}" && ! -L "${golden_link}" ]] && golden_is_plain=1
+    [[ ! -e "${activated_link}" ]] && activated_absent=1
+
+    rm -rf "${tmpdir}"
+
+    [[ ${golden_is_plain} -eq 1 ]] && [[ ${activated_absent} -eq 1 ]]
+}
+run_test "write_config (local backend) creates neither golden-repos nor activated-repos as CoW symlinks" \
+    test_local_backend_creates_no_cow_symlinks
+
+test_fresh_cow_daemon_install_creates_both_symlinks_under_cow_root() {
+    local tmpdir cfg mount_point golden_link activated_link golden_real activated_real
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    mount_point="${tmpdir}/mnt-cow-storage"
+
+    run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        NFS_MOUNT='${mount_point}'
+        COW_LOCAL_BIND=false
+        COW_DAEMON_STORAGE_PATH=''
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+    " >/dev/null
+
+    golden_link="${tmpdir}/data/golden-repos"
+    activated_link="${tmpdir}/data/activated-repos"
+    golden_real="$(realpath "${golden_link}" 2>/dev/null || echo 'MISSING')"
+    activated_real="$(realpath "${activated_link}" 2>/dev/null || echo 'MISSING')"
+
+    rm -rf "${tmpdir}"
+
+    [[ "${golden_real}" == "${mount_point}/golden-repos" ]] \
+        && [[ "${activated_real}" == "${mount_point}/activated-repos" ]]
+}
+run_test "Fresh cow-daemon cluster install: BOTH golden-repos and activated-repos symlinks realpath under CoW root" \
+    test_fresh_cow_daemon_install_creates_both_symlinks_under_cow_root
+
+# ===========================================================================
 # Group D: standalone mode preservation
 # ===========================================================================
 

@@ -661,45 +661,51 @@ run_migrations() {
 }
 
 # ---------------------------------------------------------------------------
-# Cluster step: Bug #1337 - golden-repos MUST be a symlink into the CoW
-# storage tree (never a plain directory) when clone_backend=cow-daemon.
-# Per-user activation calls CowDaemonBackend.create_clone_at_path(), which
-# requires the golden repo bytes to already resolve under the CoW mount (cp
-# --reflink physically needs both source and dest on the daemon's local
-# XFS) -- a plain golden-repos directory cannot be translated and
-# activation fails loud with "... cannot translate to daemon view". Every
-# filesystem-mutating call in this step is guarded so a failure (e.g. the
-# mount is not yet provisioned) never aborts the script under `set -e` --
-# it warns and continues instead.
+# Cluster step: Bug #1337 - golden-repos AND activated-repos (Gap 2) MUST
+# each be a symlink into the CoW storage tree (never a plain directory) when
+# clone_backend=cow-daemon. Per-user activation calls
+# CowDaemonBackend.create_clone_at_path() for BOTH -- golden repo bytes and
+# the per-user activation destination (Bug #1052) -- which requires them to
+# already resolve under the CoW mount (cp --reflink physically needs both
+# source and dest on the daemon's local XFS); a plain directory cannot be
+# translated and activation fails loud with "... cannot translate to daemon
+# view". Every filesystem-mutating call in this step is guarded so a failure
+# (e.g. the mount is not yet provisioned) never aborts the script under
+# `set -e` -- it warns and continues instead.
+#
+# ensure_cow_symlink() is generalized over link_name ("golden-repos" |
+# "activated-repos") so both directories get identical, idempotent
+# provisioning logic.
 # ---------------------------------------------------------------------------
 
-_resolve_golden_repos_target() {
+_resolve_cow_symlink_target() {
     # Node-aware target: on the co-located CoW-daemon host (--cow-local-bind
     # with a resolved COW_DAEMON_STORAGE_PATH), target the daemon-local form
-    # directly; every other (NFS-client) node targets {NFS_MOUNT}/golden-repos.
+    # directly; every other (NFS-client) node targets {NFS_MOUNT}/{link_name}.
+    local link_name="$1"
     if [[ "${COW_LOCAL_BIND}" == "true" && -n "${COW_DAEMON_STORAGE_PATH}" ]]; then
-        echo "${COW_DAEMON_STORAGE_PATH}/golden-repos"
+        echo "${COW_DAEMON_STORAGE_PATH}/${link_name}"
     else
-        echo "${NFS_MOUNT}/golden-repos"
+        echo "${NFS_MOUNT}/${link_name}"
     fi
 }
 
-_reconcile_existing_golden_repos_entry() {
+_reconcile_existing_cow_symlink_entry() {
     # Idempotent (check-then-apply): already-correct symlink -> no-op;
     # wrong-target symlink -> WARNING, never rewritten; non-empty real
     # directory -> WARNING, never touched (no unattended data move); empty
     # real directory -> removed (safe, caller creates the symlink).
     # Returns 0 when fully handled here, 1 when the caller must still
     # create the symlink (path is absent or was an empty dir just removed).
-    local link_path="$1" target="$2"
+    local link_path="$1" target="$2" link_name="$3"
 
     if [[ -L "${link_path}" ]]; then
         local current_target
         current_target="$(readlink "${link_path}")"
         if [[ "${current_target}" == "${target}" ]]; then
-            info "golden-repos symlink already correct: ${link_path} -> ${target}"
+            info "${link_name} symlink already correct: ${link_path} -> ${target}"
         else
-            warn "golden-repos symlink points to ${current_target} but expected ${target} (Bug #1337) -- manual review needed"
+            warn "${link_name} symlink points to ${current_target} but expected ${target} (Bug #1337) -- manual review needed"
         fi
         return 0
     fi
@@ -709,7 +715,7 @@ _reconcile_existing_golden_repos_entry() {
             rmdir "${link_path}" 2>/dev/null || true
         fi
         if [[ -e "${link_path}" ]]; then
-            warn "golden-repos exists as a real directory with content; manual migration required for per-user CoW activation (Bug #1337). Run: sudo systemctl stop cidx-server && mv ${link_path} ${link_path}.legacy.bug1337 && mkdir -p ${target} && ln -s ${target} ${link_path} && sudo systemctl start cidx-server"
+            warn "${link_name} exists as a real directory with content; manual migration required for per-user CoW activation (Bug #1337). Run: sudo systemctl stop cidx-server && mv ${link_path} ${link_path}.legacy.bug1337 && mkdir -p ${target} && ln -s ${target} ${link_path} && sudo systemctl start cidx-server"
             return 0
         fi
     fi
@@ -717,34 +723,47 @@ _reconcile_existing_golden_repos_entry() {
     return 1
 }
 
-ensure_golden_repos_symlink() {
-    local link_path="${DATA_DIR}/data/golden-repos"
+ensure_cow_symlink() {
+    # $1 = link_name ("golden-repos" | "activated-repos")
+    local link_name="$1"
+    local link_path="${DATA_DIR}/data/${link_name}"
     local target
-    target="$(_resolve_golden_repos_target)"
+    target="$(_resolve_cow_symlink_target "${link_name}")"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "  [dry-run] Ensure golden-repos symlink: ${link_path} -> ${target}"
+        echo "  [dry-run] Ensure ${link_name} symlink: ${link_path} -> ${target}"
         return 0
     fi
 
     if ! mkdir -p "${DATA_DIR}/data" 2>/dev/null; then
-        warn "could not create ${DATA_DIR}/data -- skipping golden-repos symlink setup (Bug #1337)"
+        warn "could not create ${DATA_DIR}/data -- skipping ${link_name} symlink setup (Bug #1337)"
         return 0
     fi
 
-    if _reconcile_existing_golden_repos_entry "${link_path}" "${target}"; then
+    if _reconcile_existing_cow_symlink_entry "${link_path}" "${target}" "${link_name}"; then
         return 0
     fi
 
     if ! mkdir -p "${target}" 2>/dev/null; then
-        warn "golden-repos symlink target ${target} could not be created (permission denied or path unavailable) -- skipping symlink setup (Bug #1337); per-user CoW activation will fail until this is fixed manually"
+        warn "${link_name} symlink target ${target} could not be created (permission denied or path unavailable) -- skipping symlink setup (Bug #1337); per-user CoW activation will fail until this is fixed manually"
         return 0
     fi
     if ! ln -s "${target}" "${link_path}" 2>/dev/null; then
-        warn "failed to create golden-repos symlink ${link_path} -> ${target} (Bug #1337); per-user CoW activation will fail until this is fixed manually"
+        warn "failed to create ${link_name} symlink ${link_path} -> ${target} (Bug #1337); per-user CoW activation will fail until this is fixed manually"
         return 0
     fi
-    info "Created golden-repos symlink: ${link_path} -> ${target}"
+    info "Created ${link_name} symlink: ${link_path} -> ${target}"
+}
+
+ensure_golden_repos_symlink() {
+    ensure_cow_symlink "golden-repos"
+}
+
+ensure_activated_repos_symlink() {
+    # Bug #1337 Gap 2: activated-repos needs the identical CoW-storage
+    # placement guarantee as golden-repos (per-user activation
+    # reflink-clones INTO it, Bug #1052).
+    ensure_cow_symlink "activated-repos"
 }
 
 # ---------------------------------------------------------------------------
@@ -755,6 +774,7 @@ write_config() {
     if [[ "${CLONE_BACKEND}" == "cow-daemon" ]]; then
         dry_run_or_exec mkdir -p "${DATA_DIR}/logs" "${DATA_DIR}/locks"
         ensure_golden_repos_symlink
+        ensure_activated_repos_symlink
     else
         dry_run_or_exec mkdir -p "${DATA_DIR}/data/golden-repos" "${DATA_DIR}/logs" "${DATA_DIR}/locks"
     fi
