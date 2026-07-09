@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.34.0] - 2026-07-09
+
+### Fixed
+
+- **Permanent git-fetch errors no longer trigger an unbounded retry/re-clone flood (#1341).** A permanent GitLab `project you were looking for could not be found or you don't have permission` error also emits the generic `fatal: Could not read from remote repository.` line, which matched a TRANSIENT pattern — so `classify_fetch_error()` returned `transient` and the golden-repo refresh scheduler retried and auto-re-cloned the repo every cycle forever, flooding the logs. A `PERMANENT` category (project-not-found / no-permission / repository-not-found / `remote: Not Found`) is now checked before the transient patterns. On a permanent classification the scheduler no longer re-clones (cloning an inaccessible/nonexistent repo cannot succeed) but still retries the fetch later via **non-terminal exponential backoff** (base 5m, cap 6h); transient errors keep today's immediate-retry behavior below the threshold, then back off (cap 1h). The repo is NEVER removed from scheduling or quarantined — it keeps retrying at a slower cadence and recovers automatically if access is restored (a successful fetch resets to normal cadence). ERROR logging is throttled to power-of-two failure milestones, ending the flood. Transient auth/token-rotation blips (`HTTP Basic: Access denied` / `Authentication failed`) correctly remain transient.
+
 ## [11.33.0] - 2026-07-09
 
 ### Fixed
