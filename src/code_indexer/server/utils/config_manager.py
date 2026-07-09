@@ -1043,6 +1043,12 @@ class ClusterConfig:
     # set exceeds one pod's cache. Enable only when memory (not concurrency) is
     # the limit.
     sharding_enabled: bool = False
+    # How many nodes own (cache + serve) each repo under HRW sharding. MUST be
+    # < number of nodes for sharding to do anything: with shard_replicas >= node
+    # count every node owns every repo (no memory bounding, no forwarding).
+    # Default 1 = each repo on exactly one node (maximum bounding, no redundancy);
+    # raise to 2 for owner redundancy on clusters with 3+ nodes.
+    shard_replicas: int = 1
 
 
 @dataclass

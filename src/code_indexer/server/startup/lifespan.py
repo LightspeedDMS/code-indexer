@@ -2718,6 +2718,7 @@ def make_lifespan(
                 _pg_dsn = ""
                 _configured_node_id = ""
                 _sharding_enabled = False
+                _shard_replicas = 1
                 try:
                     import json as _json
 
@@ -2726,13 +2727,13 @@ def make_lifespan(
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
-                            _configured_node_id = _cfg_data.get("cluster", {}).get(
-                                "node_id", ""
-                            )
+                            _cluster_cfg = _cfg_data.get("cluster", {})
+                            _configured_node_id = _cluster_cfg.get("node_id", "")
                             _sharding_enabled = bool(
-                                _cfg_data.get("cluster", {}).get(
-                                    "sharding_enabled", False
-                                )
+                                _cluster_cfg.get("sharding_enabled", False)
+                            )
+                            _shard_replicas = max(
+                                1, int(_cluster_cfg.get("shard_replicas", 1))
                             )
                 except Exception:
                     pass
@@ -2796,7 +2797,7 @@ def make_lifespan(
                             _shard_ownership = ShardOwnership(
                                 node_id=_node_id,
                                 active_nodes_provider=_heartbeat.get_active_nodes,
-                                replicas=2,
+                                replicas=_shard_replicas,
                             )
                             _sqm = getattr(app.state, "semantic_query_manager", None)
                             if _sqm is not None:
@@ -2840,8 +2841,10 @@ def make_lifespan(
                                 http_client_factory=_http_factory,
                             )
                             logging.getLogger(__name__).info(
-                                "C6: shard ownership + router wired (node_id=%s, replicas=2)",
+                                "C6: shard ownership + router wired "
+                                "(node_id=%s, replicas=%d)",
                                 _node_id,
+                                _shard_replicas,
                             )
 
                             # C6 rebalance pre-warming: proactively load this pod's
