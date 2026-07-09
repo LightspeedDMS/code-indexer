@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.32.0] - 2026-07-09
+
+### Fixed
+
+- **#1337 startup validation no longer disables snapshot_manager on NFS-mounted golden-repos (staging regression fix).** The v11.31.0 #1337 startup check raised `RuntimeError` (caught -> `snapshot_manager=None`) when `realpath(golden_repos_dir)` was not under the CoW `mount_point`/`daemon_storage_path`. On a real cow-daemon cluster golden-repos is an NFS mount of the CoW host's storage, and `os.path.realpath()` does not follow NFS mounts -> it returns the mount-point path, tripping the check even though the storage is correct and reflink-capable. That degraded per-user activation AND versioned snapshots on every NFS-client node. The not-under-root case now logs a prominent WARNING (with the exact symlink-migration remediation) and returns; `snapshot_manager` stays functional. Per-user activation still fails at translate time until golden-repos is symlinked into the CoW tree — surfaced by the warning, not by disabling snapshots server-wide. Installer/auto-updater symlink provisioning unchanged.
+
 ## [11.31.0] - 2026-07-09
 
 ### Fixed
