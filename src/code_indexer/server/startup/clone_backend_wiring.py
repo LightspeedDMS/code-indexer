@@ -15,6 +15,7 @@ Fail-fast policy:
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -78,6 +79,61 @@ def _check_nfs_mount(mount_point: str) -> None:
     )
 
 
+def _under_root(resolved: str, root: str) -> bool:
+    """True if *resolved* equals *root* or is a path segment under it."""
+    root = root.rstrip("/")
+    return bool(root) and (resolved == root or resolved.startswith(root + "/"))
+
+
+def _check_golden_repos_symlink_placement(golden_repos_dir: str, cow_cfg: Any) -> None:
+    """Bug #1337: verify golden_repos_dir is placed so CowDaemonBackend can
+    translate it to a daemon-local path.
+
+    Per-user activation calls CowDaemonBackend.create_clone_at_path(), which
+    requires the golden repo bytes to resolve under cow_daemon.mount_point or
+    cow_daemon.daemon_storage_path (``cp --reflink`` physically needs both
+    source and dest on the daemon's local XFS). golden_repos_dir must
+    therefore be a SYMLINK into that tree, never a plain directory.
+
+    Two failure modes are distinguished:
+    - Dangling symlink (link present, target unresolvable -- e.g. the NFS/
+      CoW host is transiently down): logs a WARNING and returns. Non-fatal --
+      the mount may return (see memory project_nfs_host_down_hangs_systemd).
+    - Plain directory (never a symlink) whose realpath is not under
+      mount_point or daemon_storage_path: raises RuntimeError. This is a
+      provisioning misconfiguration that must be fixed (run the installer's
+      or auto-updater's golden-repos symlink step).
+    """
+    mount_point = getattr(cow_cfg, "mount_point", "") or ""
+    daemon_storage_path = getattr(cow_cfg, "daemon_storage_path", "") or ""
+
+    is_link = os.path.islink(golden_repos_dir)
+    if is_link and not os.path.exists(golden_repos_dir):
+        logger.warning(
+            "Bug #1337: golden_repos_dir (%s) is a dangling symlink -- CoW "
+            "storage unavailable; per-user activation will fail until the "
+            "mount returns",
+            golden_repos_dir,
+        )
+        return
+
+    resolved = os.path.realpath(golden_repos_dir)
+    if _under_root(resolved, mount_point) or _under_root(resolved, daemon_storage_path):
+        return
+
+    raise RuntimeError(
+        f"Bug #1337: golden_repos_dir ({golden_repos_dir}) resolves to "
+        f"'{resolved}', which is not under cow_daemon.mount_point "
+        f"({mount_point!r}) or daemon_storage_path ({daemon_storage_path!r}). "
+        f"Per-user activation requires golden-repos to be a symlink into the "
+        f"CoW storage tree so CowDaemonBackend can translate it to a "
+        f"daemon-local path. Run the installer's/auto-updater's golden-repos "
+        f"symlink provisioning step, or manually: "
+        f"mv {golden_repos_dir} {golden_repos_dir}.legacy.bug1337 && "
+        f"ln -s <mount_point_or_daemon_storage_path>/golden-repos {golden_repos_dir}"
+    )
+
+
 def build_snapshot_manager(config: Any, versioned_base: str) -> Any:
     """Build a VersionedSnapshotManager configured from *config*.
 
@@ -98,8 +154,10 @@ def build_snapshot_manager(config: Any, versioned_base: str) -> Any:
     Raises
     ------
     RuntimeError
-        If ``clone_backend == "cow-daemon"`` and the daemon is unreachable or
-        the NFS mount is unhealthy.  No fallback is performed.
+        If ``clone_backend == "cow-daemon"`` and the daemon is unreachable,
+        the NFS mount is unhealthy, or golden_repos_dir (versioned_base) is
+        not correctly placed under the CoW storage tree (Bug #1337).  No
+        fallback is performed.
     """
     from code_indexer.server.storage.shared.clone_backend import CloneBackendFactory  # noqa: PLC0415
     from code_indexer.server.storage.shared.snapshot_manager import (
@@ -114,6 +172,11 @@ def build_snapshot_manager(config: Any, versioned_base: str) -> Any:
         # Fail-fast: validate daemon and NFS before constructing anything
         _check_daemon_health(cow_cfg.daemon_url)
         _check_nfs_mount(cow_cfg.mount_point)
+        # Bug #1337: golden_repos_dir (versioned_base) must be a symlink into
+        # the CoW storage tree, never a plain directory, so per-user
+        # activation's CowDaemonBackend.create_clone_at_path() can translate
+        # it to a daemon-local path.
+        _check_golden_repos_symlink_placement(versioned_base, cow_cfg)
 
         backend = CloneBackendFactory.create(
             clone_backend_type="cow-daemon",
