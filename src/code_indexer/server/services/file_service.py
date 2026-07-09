@@ -294,8 +294,13 @@ class FileListingService:
 
         files = self._collect_files_uncached(repo_path)
 
+        # Anchor expiry to POST-walk time (not the pre-walk `now` captured
+        # above). A walk that takes longer than the TTL must not be born
+        # already-expired -- that would deliver zero cache benefit for
+        # exactly the slow repos this cache targets.
+        expiry = time.monotonic() + _COLLECT_CACHE_TTL_SECONDS
         with _collect_cache_lock:
-            _collect_cache[repo_path] = (now + _COLLECT_CACHE_TTL_SECONDS, files)
+            _collect_cache[repo_path] = (expiry, files)
             _collect_cache.move_to_end(repo_path)
             while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
                 _collect_cache.popitem(last=False)

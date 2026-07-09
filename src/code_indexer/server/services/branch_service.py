@@ -97,12 +97,33 @@ class BranchService:
 
         branches = self._list_branches_uncached(include_remote=include_remote)
 
+        # Anchor expiry to POST-walk time (not the pre-walk `now` captured
+        # above). A walk that takes longer than the TTL must not be born
+        # already-expired -- that would deliver zero cache benefit for
+        # exactly the slow repos this cache targets.
+        expiry = time.monotonic() + _BRANCHES_CACHE_TTL_SECONDS
         with _branches_cache_lock:
-            _branches_cache[key] = (now + _BRANCHES_CACHE_TTL_SECONDS, branches)
+            _branches_cache[key] = (expiry, branches)
             _branches_cache.move_to_end(key)
             while len(_branches_cache) > _BRANCHES_CACHE_MAX:
                 _branches_cache.popitem(last=False)
         return branches
+
+    @staticmethod
+    def invalidate(codebase_dir: "str | Path") -> None:
+        """Invalidate all cached branch listings for ``codebase_dir``.
+
+        Drops BOTH the ``include_remote=True`` and ``include_remote=False``
+        cache entries so a branch mutation (git_branch_create/switch/delete)
+        is immediately visible on the next :meth:`list_branches` call for
+        this codebase_dir, instead of serving a stale listing for up to
+        ``_BRANCHES_CACHE_TTL_SECONDS``. Thread-safe under the same lock
+        used by :meth:`list_branches`.
+        """
+        key_str = str(Path(codebase_dir))
+        with _branches_cache_lock:
+            _branches_cache.pop((key_str, False), None)
+            _branches_cache.pop((key_str, True), None)
 
     def _list_branches_uncached(self, include_remote: bool = False) -> List[BranchInfo]:
         """List all branches in the repository.
