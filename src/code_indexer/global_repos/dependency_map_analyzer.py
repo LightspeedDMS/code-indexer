@@ -3518,13 +3518,47 @@ Rules:
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
         # calling _invoke_claude_cli directly.
+        #
+        # Bug #1323: the dispatcher migration bypassed the shared verification
+        # semaphore that _invoke_claude_cli acquires before its own subprocess.run.
+        # Mirror _invoke_claude_cli's exact max-concurrency resolution (lines
+        # ~2747-2763) so both call sites initialize/read the SAME process-wide
+        # singleton via _get_verification_semaphore -- never a second, independent
+        # semaphore.
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            _max_concurrent = (
+                get_config_service()
+                .get_config()
+                .claude_integration_config.max_concurrent_claude_cli
+            )
+        except (ImportError, AttributeError):
+            # ImportError  : server package not installed (CLI-only context).
+            # AttributeError: config object structure differs (non-server context).
+            # Both cases are expected non-server deployments; use the schema default.
+            _max_concurrent = _DEFAULT_MAX_CONCURRENT_CLAUDE_CLI
+            logger.debug(
+                "_run_verification_attempt: config service unavailable; "
+                "using max_concurrent=%d",
+                _max_concurrent,
+            )
+        _sem = _get_verification_semaphore(_max_concurrent)
+
         dispatcher = self._get_cached_dispatcher("_cached_verification_dispatcher")
-        result = dispatcher.dispatch(
-            flow="dependency_map_verification",
-            cwd=str(self.golden_repos_root),
-            prompt=prompt,
-            timeout=config.fact_check_timeout_seconds,
-        )
+        _sem.acquire()
+        try:
+            result = dispatcher.dispatch(
+                flow="dependency_map_verification",
+                cwd=str(self.golden_repos_root),
+                prompt=prompt,
+                timeout=config.fact_check_timeout_seconds,
+            )
+        finally:
+            # Release before any non-CLI cleanup (postcondition file read below),
+            # matching how _invoke_claude_cli releases before its own cleanup.
+            _sem.release()
+
         if not result.success:
             logger.warning(
                 "invoke_verification_pass: dispatcher reported failure: %s",
