@@ -87,8 +87,7 @@ class SqlitePoolAdapter:
         self._create_schema()
 
     def _create_schema(self):
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS activated_repos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL,
@@ -105,8 +104,7 @@ class SqlitePoolAdapter:
                 metadata_json TEXT,
                 UNIQUE(username, user_alias)
             )
-        """
-        )
+        """)
         self._conn.commit()
 
     @contextmanager
@@ -365,3 +363,61 @@ class TestMetadataPgOperations:
         aliases = {r["user_alias"] for r in all_repos}
         assert "r1" in aliases
         assert "r2" in aliases
+
+
+class TestActivatedStorageSharedWarning:
+    """set_shared_repos_dir must warn when activated-repos is on a different
+    filesystem than golden-repos (multi-pod 404 misconfiguration)."""
+
+    def _mgr(self, tmp_path):
+        return ActivatedRepoManager(data_dir=str(tmp_path / "local"))
+
+    def test_warns_when_activated_on_different_device(self, tmp_path, caplog):
+        import logging
+        from unittest.mock import patch
+        from src.code_indexer.server.repositories import (
+            activated_repo_manager as arm_mod,
+        )
+
+        shared = tmp_path / "shared"
+        (shared / "golden-repos").mkdir(parents=True)
+        mgr = self._mgr(tmp_path)
+
+        class _St:
+            def __init__(self, dev):
+                self.st_dev = dev
+
+        def fake_stat(path, *a, **k):
+            # golden on one device, activated on another
+            return _St(1 if "golden-repos" in str(path) else 2)
+
+        with patch.object(arm_mod.os, "stat", side_effect=fake_stat):
+            with caplog.at_level(logging.WARNING):
+                mgr.set_shared_repos_dir(str(shared))
+
+        assert any(
+            "different filesystem" in r.message or "404 on the others" in r.message
+            for r in caplog.records
+        ), "expected a shared-storage misconfiguration warning"
+
+    def test_no_warning_when_same_device(self, tmp_path, caplog):
+        import logging
+        from unittest.mock import patch
+        from src.code_indexer.server.repositories import (
+            activated_repo_manager as arm_mod,
+        )
+
+        shared = tmp_path / "shared"
+        (shared / "golden-repos").mkdir(parents=True)
+        mgr = self._mgr(tmp_path)
+
+        class _St:
+            st_dev = 42  # same device for everything
+
+        with patch.object(arm_mod.os, "stat", return_value=_St()):
+            with caplog.at_level(logging.WARNING):
+                mgr.set_shared_repos_dir(str(shared))
+
+        assert not any("different filesystem" in r.message for r in caplog.records), (
+            "must not warn when both dirs share a device"
+        )
