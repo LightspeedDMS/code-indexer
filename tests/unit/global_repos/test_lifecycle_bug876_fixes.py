@@ -174,7 +174,7 @@ def test_concurrent_lifecycle_jobs_different_aliases_do_not_contend(tmp_path):
         job_tracker = _StubJobTracker()
         debouncer = _StubDebouncer()
 
-        def invoker(a: str, repo_path: Path) -> UnifiedResult:
+        def invoker(a: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             barrier.wait(timeout=5)
             return _VALID_RESULT
 
@@ -383,7 +383,7 @@ def test_lifecycle_schema_version_written_to_db_after_successful_run(tmp_path):
     job_tracker = _StubJobTracker()
     debouncer = _StubDebouncer()
 
-    def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+    def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
         return _VALID_RESULT
 
     runner = LifecycleBatchRunner(
@@ -444,7 +444,9 @@ def test_lifecycle_schema_version_not_updated_on_invoker_failure(tmp_path):
     job_tracker = _StubJobTracker()
     debouncer = _StubDebouncer()
 
-    def failing_invoker(alias: str, repo_path: Path) -> UnifiedResult:
+    def failing_invoker(
+        alias: str, repo_path: Path, **_kwargs: object
+    ) -> UnifiedResult:
         raise RuntimeError("Claude CLI failed")
 
     runner = LifecycleBatchRunner(

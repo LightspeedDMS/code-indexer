@@ -35,8 +35,9 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
     # Test 1: mark_commit_indexed creates file with format_version 2
     # ------------------------------------------------------------------
     def test_mark_commit_indexed_creates_file(self):
-        """mark_commit_indexed creates file with format_version 2."""
+        """mark_commit_indexed followed by flush_pending creates file with format_version 2."""
         self.metadata.mark_commit_indexed("abc123")
+        self.metadata.flush_pending()
 
         self.assertTrue(self.metadata.progress_path.exists())
         with open(self.metadata.progress_path) as f:
@@ -51,6 +52,7 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
         """Marking same commit twice results in only one entry."""
         self.metadata.mark_commit_indexed("abc123")
         self.metadata.mark_commit_indexed("abc123")
+        self.metadata.flush_pending()
 
         with open(self.metadata.progress_path) as f:
             data = json.load(f)
@@ -126,8 +128,9 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
     # Test 9: format_version 2 in file
     # ------------------------------------------------------------------
     def test_format_version_2_in_file(self):
-        """JSON file written by mark_commit_indexed contains format_version: 2."""
+        """JSON file written by flush_pending contains format_version: 2."""
         self.metadata.mark_commit_indexed("x")
+        self.metadata.flush_pending()
         with open(self.metadata.progress_path) as f:
             data = json.load(f)
         self.assertEqual(data["format_version"], 2)
@@ -151,6 +154,7 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
     def test_last_updated_is_iso8601(self):
         """last_updated field is a valid ISO 8601 timestamp."""
         self.metadata.mark_commit_indexed("t1")
+        self.metadata.flush_pending()
         with open(self.metadata.progress_path) as f:
             data = json.load(f)
         ts = data["last_updated"]
@@ -235,6 +239,7 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
     def test_atomic_write_via_replace(self):
         """Write uses tmp file that gets replaced atomically."""
         self.metadata.mark_commit_indexed("atomic_test")
+        self.metadata.flush_pending()
 
         # The tmp file should not exist after successful write
         self.assertFalse(self.metadata._tmp_path.exists())
@@ -247,6 +252,7 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
     def test_clear_removes_file(self):
         """clear() deletes the progress file."""
         self.metadata.mark_commit_indexed("to_be_cleared")
+        self.metadata.flush_pending()
         self.assertTrue(self.metadata.progress_path.exists())
 
         self.metadata.clear()

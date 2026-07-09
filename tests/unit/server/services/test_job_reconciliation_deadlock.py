@@ -1,9 +1,15 @@
 """
 Tests for Bug #543: Deadlock retry in job reconciliation.
 
-Verifies that _reclaim_dead_node_jobs() and _reclaim_timed_out_jobs()
+Verifies that _reclaim_dead_node_jobs() and _reclaim_stuck_index_blocking_jobs()
 catch PostgreSQL deadlock errors (SQLSTATE 40P01) and retry with jitter
 instead of failing immediately.
+
+Bug #1310: the previous "_reclaim_timed_out_jobs" path (a blanket wall-clock
+reclaim of any running job, regardless of node liveness) was deleted because
+it violated the Bug #1218 no-timeout invariant for indexing / golden-repo /
+SCIP jobs. _reclaim_stuck_index_blocking_jobs is now the only other reclaim
+path (besides dead-node) and is used here to keep deadlock-retry coverage.
 """
 
 from unittest.mock import MagicMock, patch
@@ -94,8 +100,8 @@ class TestDeadlockRetryDeadNodeReclaim:
             svc._reclaim_dead_node_jobs(["node1"])
 
 
-class TestDeadlockRetryTimedOutReclaim:
-    """Bug #543: _reclaim_timed_out_jobs retries on deadlock."""
+class TestDeadlockRetryStuckIndexBlockingReclaim:
+    """Bug #543: _reclaim_stuck_index_blocking_jobs retries on deadlock."""
 
     @patch("code_indexer.server.services.job_reconciliation_service.time.sleep")
     def test_retries_on_deadlock(self, mock_sleep):
@@ -103,7 +109,7 @@ class TestDeadlockRetryTimedOutReclaim:
         svc, pool = _make_service()
         _setup_pool_for_deadlock_then_success(pool, deadlock_on_attempt=1)
 
-        result = svc._reclaim_timed_out_jobs()
+        result = svc._reclaim_stuck_index_blocking_jobs(set())
         assert result == 0  # No rows reclaimed on retry
         assert mock_sleep.called
 
@@ -116,7 +122,7 @@ class TestDeadlockRetryTimedOutReclaim:
         pool.connection.return_value.__exit__ = MagicMock(return_value=False)
 
         with pytest.raises(RuntimeError, match="connection refused"):
-            svc._reclaim_timed_out_jobs()
+            svc._reclaim_stuck_index_blocking_jobs(set())
 
 
 class TestDeadlockConstants:

@@ -1057,6 +1057,7 @@ class TestHealthGatedParallelDispatch:
             exclude_path,
             accuracy,
             provider_name,
+            no_embedding_cache_shortcut=False,
         ):
             dispatched_providers.append(provider_name)
             return []
@@ -1149,6 +1150,7 @@ class TestHealthGatedParallelDispatch:
             exclude_path,
             accuracy,
             provider_name,
+            no_embedding_cache_shortcut=False,
         ):
             dispatched_providers.append(provider_name)
             return []

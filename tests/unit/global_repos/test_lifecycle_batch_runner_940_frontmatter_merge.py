@@ -124,7 +124,7 @@ def _make_runner(
     """Build a LifecycleBatchRunner with stubs and the given invoker result."""
     result = invoker_result if invoker_result is not None else _make_valid_result()
 
-    def _invoker(alias: str, repo_path: Path) -> UnifiedResult:
+    def _invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
         return result
 
     return LifecycleBatchRunner(
@@ -209,10 +209,17 @@ def test_existing_frontmatter_keys_preserved_after_lifecycle_write(
     written_fm = _read_frontmatter(meta_path)
     written_body = _read_body(meta_path)
 
-    # All original keys must survive the lifecycle write.
-    assert written_fm.get("last_analyzed") == "2026-04-22T18:12:00Z", (
-        "last_analyzed must be preserved after lifecycle write"
+    # #1094: last_analyzed is now FRESHLY STAMPED on every write (not preserved
+    # verbatim) so the next refresh has an accurate change-scoping anchor.
+    assert "last_analyzed" in written_fm, "last_analyzed must be stamped"
+    assert written_fm.get("last_analyzed") != "2026-04-22T18:12:00Z", (
+        "last_analyzed must be refreshed, not preserved verbatim (#1094)"
     )
+    from datetime import datetime as _dt
+
+    _dt.fromisoformat(str(written_fm["last_analyzed"]))  # must parse as ISO 8601
+
+    # The remaining original frontmatter keys must still survive the write.
     assert written_fm.get("name") == "humanize", (
         "name must be preserved after lifecycle write"
     )
@@ -261,12 +268,19 @@ def test_new_file_writes_only_lifecycle_keys(golden_repos_dir: Path) -> None:
     assert meta_path.exists(), "File must be created after _process_one_repo"
     written_fm = _read_frontmatter(meta_path)
 
-    # Only lifecycle keys should be present (today's behavior for new files).
-    assert set(written_fm.keys()) == {"lifecycle", "lifecycle_schema_version"}, (
-        f"New file must have only lifecycle and lifecycle_schema_version keys, "
-        f"got: {set(written_fm.keys())}"
+    # #1094: first write now also stamps last_analyzed — no OTHER keys invented.
+    assert set(written_fm.keys()) == {
+        "lifecycle",
+        "lifecycle_schema_version",
+        "last_analyzed",
+    }, (
+        f"New file must have only lifecycle, lifecycle_schema_version, and "
+        f"last_analyzed keys, got: {set(written_fm.keys())}"
     )
     assert written_fm["lifecycle_schema_version"] == CURRENT_LIFECYCLE_SCHEMA_VERSION
+    from datetime import datetime as _dt
+
+    _dt.fromisoformat(str(written_fm["last_analyzed"]))  # must parse as ISO 8601
 
 
 # ---------------------------------------------------------------------------
@@ -296,10 +310,15 @@ def test_lifecycle_keys_overwrite_when_pre_existing(golden_repos_dir: Path) -> N
 
     written_fm = _read_frontmatter(meta_path)
 
-    # last_analyzed must survive.
-    assert written_fm.get("last_analyzed") == "2026-01-01T00:00:00Z", (
-        "last_analyzed must be preserved even when existing lifecycle is overwritten"
+    # #1094: last_analyzed is freshly stamped (not preserved verbatim) so the
+    # next refresh has an accurate change-scoping anchor.
+    assert "last_analyzed" in written_fm, "last_analyzed must be stamped"
+    assert written_fm.get("last_analyzed") != "2026-01-01T00:00:00Z", (
+        "last_analyzed must be refreshed, not preserved verbatim (#1094)"
     )
+    from datetime import datetime as _dt
+
+    _dt.fromisoformat(str(written_fm["last_analyzed"]))  # must parse as ISO 8601
 
     # New lifecycle must win over stale.
     written_lifecycle = written_fm.get("lifecycle")

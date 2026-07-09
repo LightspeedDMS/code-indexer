@@ -16,7 +16,7 @@ Table: global_repos
     enable_temporal BOOLEAN NOT NULL DEFAULT FALSE
     temporal_options JSONB
     enable_scip     BOOLEAN NOT NULL DEFAULT FALSE
-    next_refresh    TEXT
+    next_refresh    TIMESTAMPTZ
 """
 
 from __future__ import annotations
@@ -264,6 +264,12 @@ class GlobalReposPostgresBackend:
         """
         Update the next_refresh timestamp (or clear it).
 
+        Bug #1308 Blocker B: next_refresh is a TIMESTAMPTZ column, but the
+        GlobalReposBackend contract (mirroring the SQLite backend's TEXT
+        column) passes next_refresh as an epoch-float STRING. Convert it to
+        a timezone-aware UTC datetime before binding -- writing the naked
+        string would error against a real PostgreSQL connection.
+
         Args:
             alias_name: Alias of the repository to update.
             next_refresh: Unix timestamp as string, or None to clear.
@@ -271,11 +277,17 @@ class GlobalReposPostgresBackend:
         Returns:
             True if record was updated, False if not found.
         """
+        next_refresh_dt: Optional[datetime] = (
+            datetime.fromtimestamp(float(next_refresh), tz=timezone.utc)
+            if next_refresh is not None
+            else None
+        )
+
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE global_repos SET next_refresh = %s WHERE alias_name = %s",
-                    (next_refresh, alias_name),
+                    (next_refresh_dt, alias_name),
                 )
                 updated: bool = cur.rowcount > 0
             conn.commit()
@@ -284,6 +296,51 @@ class GlobalReposPostgresBackend:
             logger.debug("Updated next_refresh for repo: %s", alias_name)
         return updated
 
+    def list_due_repos(self, limit: int, now: float) -> list[Dict[str, Any]]:
+        """
+        Return repos whose next_refresh is due (<= now), oldest-first, capped.
+
+        Bug #1308 remediation item #2: mirrors the SQLite backend's Bug #1063
+        oldest-first, capped due-query so the cluster RefreshScheduler can
+        auto-refresh in postgres mode. Without this method the PG-backed
+        registry can resolve/read/write individual repos but can never find
+        which repos are due for a scheduled refresh.
+
+        Bug #1308 Blocker B: next_refresh is a real TIMESTAMPTZ column, so the
+        comparison must be NATIVE timestamptz (via to_timestamp(%s) on the
+        bound epoch float), never `CAST(next_refresh AS DOUBLE PRECISION)` --
+        that cast is an invalid query-plan against a timestamptz column and
+        fails on every call, even with all-NULL rows.
+
+        Args:
+            limit: Maximum number of repos to return (<=0 returns empty list).
+            now: Current Unix timestamp; repos with next_refresh <= now are due.
+
+        Returns:
+            List of repo dicts ordered by next_refresh ASC (oldest first).
+        """
+        if limit <= 0:
+            return []
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT alias_name, repo_name, repo_url, index_path, created_at,
+                           last_refresh, enable_temporal, temporal_options, enable_scip,
+                           next_refresh
+                    FROM global_repos
+                    WHERE next_refresh IS NOT NULL
+                      AND next_refresh <= to_timestamp(%s)
+                    ORDER BY next_refresh ASC
+                    LIMIT %s
+                    """,
+                    (now, limit),
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_dict(row) for row in rows]
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._pool.close()
@@ -291,6 +348,24 @@ class GlobalReposPostgresBackend:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _next_refresh_to_epoch_str(value: Optional[datetime]) -> Optional[str]:
+        """
+        Convert a TIMESTAMPTZ next_refresh value (a Python datetime, as
+        returned by psycopg) to the epoch-float STRING contract the
+        scheduler/GlobalRegistry expect (matching the SQLite backend's
+        TEXT-column semantics exactly). Bug #1308 Blocker B.
+
+        Must run BEFORE sanitize_row(), which would otherwise ISO-format any
+        datetime value -- correct for created_at/last_refresh, but wrong for
+        next_refresh's epoch-float-string contract.
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return str(value.timestamp())
+        return value
 
     @staticmethod
     def _row_to_dict(row: tuple) -> Dict[str, Any]:
@@ -314,6 +389,8 @@ class GlobalReposPostgresBackend:
                 "enable_temporal": bool(row[6]),
                 "temporal_options": temporal_options,
                 "enable_scip": bool(row[8]),
-                "next_refresh": row[9],
+                "next_refresh": GlobalReposPostgresBackend._next_refresh_to_epoch_str(
+                    row[9]
+                ),
             }
         )

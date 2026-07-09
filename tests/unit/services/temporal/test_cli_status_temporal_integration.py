@@ -35,13 +35,18 @@ def test_get_temporal_collections_returns_stats_per_provider(tmp_path):
     cohere_dir = index_path / "code-indexer-temporal-embed_v4_0"
     cohere_dir.mkdir()
 
-    # Write progress files for each provider
+    # Write progress files for each provider.
+    # flush_pending() required: mark_commit_indexed stages in _pending (in-memory);
+    # load_progress() reads from disk via _load().  A real completed run always
+    # calls the final flush — mirror that here.
     voyage_meta = TemporalProgressiveMetadata(voyage_dir)
     voyage_meta.mark_commit_indexed("aaa111")
     voyage_meta.mark_commit_indexed("bbb222")
+    voyage_meta.flush_pending()
 
     cohere_meta = TemporalProgressiveMetadata(cohere_dir)
     cohere_meta.mark_commit_indexed("ccc333")
+    cohere_meta.flush_pending()
 
     config = object()  # config is not used by get_temporal_collections
     collections = get_temporal_collections(config, index_path)
@@ -74,6 +79,9 @@ def test_status_temporal_reads_progress_metadata(tmp_path):
     meta.mark_commit_indexed("abc123")
     meta.mark_commit_indexed("def456")
     meta.mark_commit_indexed("ghi789")
+    # flush_pending() required: mark_commit_indexed stages in _pending (in-memory);
+    # load_progress() reads from disk.  Mirror a real completed run's final flush.
+    meta.flush_pending()
     meta.set_state("idle")
 
     data = meta.load_progress()

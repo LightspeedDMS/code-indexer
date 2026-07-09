@@ -173,6 +173,7 @@ code-indexer-temporal*/
 /reports/bugs/
 /reports/testing/
 /reports/*.md
+/reports/perf/
 
 # Test mock artifacts (should not be committed)
 /MagicMock/
@@ -196,3 +197,6 @@ coverage.json
 /reports/manual-testing
 /reports/test-debug
 /.claude/worktrees
+/rust/xray-core/.claude/tdd-guard
+.tmp_token
+/tmp

@@ -34,6 +34,16 @@ def manager(mock_data_dir):
     """Create GoldenRepoManager instance for testing."""
     mgr = GoldenRepoManager(data_dir=mock_data_dir)
 
+    # Bug #1317: global activation is now a hard requirement for
+    # add_golden_repo() to succeed (a successfully-provisioned global repo
+    # must always get its alias pointer). Initialize the full DB schema
+    # (incl. global_repos table) so activation succeeds instead of failing
+    # on a missing table -- these tests exercise locking/serialization, not
+    # activation semantics.
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+
+    DatabaseSchema(mgr.db_path).initialize_database()
+
     # Mock background_job_manager dependency
     # Execute worker functions synchronously for testing
     def mock_submit_job(operation_type, func, submitter_username, is_admin, repo_alias):

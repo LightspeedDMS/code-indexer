@@ -141,8 +141,13 @@ class TestRegisterLocalRepo:
 
         AC1: Persist to storage backend (SQLite or JSON)
         """
-        # Mock SQLite backend (always active)
+        # Mock SQLite backend (always active). Bug #1314: register_local_repo's
+        # idempotency check now falls back to _sqlite_backend.get_repo() on a
+        # local cache miss, so the mock must honor the real contract
+        # (Optional[Dict], None when alias absent) instead of returning an
+        # unconfigured truthy MagicMock.
         mock_sqlite = MagicMock()
+        mock_sqlite.get_repo.return_value = None
         golden_repo_manager._sqlite_backend = mock_sqlite
 
         golden_repo_manager.register_local_repo(
@@ -167,8 +172,13 @@ class TestRegisterLocalRepo:
 
         AC1: Persist to storage backend (SQLite)
         """
-        # Mock SQLite backend (always active)
+        # Mock SQLite backend (always active). Bug #1314: register_local_repo's
+        # idempotency check now falls back to _sqlite_backend.get_repo() on a
+        # local cache miss, so the mock must honor the real contract
+        # (Optional[Dict], None when alias absent) instead of returning an
+        # unconfigured truthy MagicMock.
         mock_sqlite = MagicMock()
+        mock_sqlite.get_repo.return_value = None
         golden_repo_manager._sqlite_backend = mock_sqlite
 
         golden_repo_manager.register_local_repo(

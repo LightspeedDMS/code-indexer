@@ -57,6 +57,27 @@ class _FakeLogsBackend:
             }
         )
 
+    def insert_log_batch(self, items: Any) -> None:
+        """Batch insert: expand each 10-tuple and delegate to insert_log.
+
+        Issue #1241: _writer_loop now calls insert_log_batch; update the fake
+        backend so existing per-call assertions on self.calls remain valid.
+        """
+        for item in items:
+            (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+            self.insert_log(
+                timestamp=ts,
+                level=lvl,
+                source=src,
+                message=msg,
+                correlation_id=cid,
+                user_id=uid,
+                request_path=rpath,
+                extra_data=extra,
+                node_id=nid,
+                alias=alias,
+            )
+
     # Protocol completeness (not exercised by these tests)
     def query_logs(self, *args: Any, **kwargs: Any):  # pragma: no cover
         return [], 0
@@ -99,6 +120,7 @@ def test_emit_forwards_alias_from_extra_to_backend(tmp_path: Path) -> None:
     setattr(record, "alias", "my-repo")
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     assert backend.calls[0]["alias"] == "my-repo", (
@@ -123,6 +145,7 @@ def test_emit_without_alias_forwards_none(tmp_path: Path) -> None:
     )
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     assert backend.calls[0]["alias"] is None, (
@@ -152,6 +175,7 @@ def test_emit_does_not_include_alias_in_extra_data_json(tmp_path: Path) -> None:
     setattr(record, "attempt", 3)
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     call = backend.calls[0]

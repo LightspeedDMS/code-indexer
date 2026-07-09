@@ -7,24 +7,23 @@ Public API:
   _apply_cli_rerank_and_filter  -- apply rerank and truncate a result list
   calculate_cli_overfetch_limit -- compute over-fetch limit from CLI config
 
-Intermediate dict shape (consumed by _apply_reranking_sync):
-  The server reranking orchestrator expects a flat list of dicts and a
-  content_extractor callable.  This module detects the CLI result shape
-  (semantic or FTS) and supplies the correct extractor:
+Content extraction (Bug #1208):
+  All result shapes are handled by the shared extract_rerank_document helper
+  from server.mcp.reranking.  It covers every CLI result shape:
 
     Semantic shape  {"score": float, "payload": {"content": str, ...}}
-      -> extractor: result["payload"].get("content", "")
-
     FTS shape       {"path": str, "snippet": str, "match_text": str, ...}
-      -> extractor: result.get("snippet", "") or result.get("match_text", "")
+    Temporal shape  {"snippet": str, "_temporal_obj": TemporalSearchResult}
+      -> for commit_diff results, commit_message is appended to the diff text
+         so the cross-encoder scores with full commit context.
 
   All fields are passed through unchanged -- the reranker only reads the text
   returned by the extractor; it does not mutate or replace any other field.
   Round-trip fidelity is therefore guaranteed by the server orchestrator itself.
 
 Design constraints (Story #693 Must NOT):
-  - No import of server internals beyond _apply_reranking_sync and
-    calculate_overfetch_limit.
+  - No import of server internals beyond _apply_reranking_sync,
+    calculate_overfetch_limit, and extract_rerank_document.
   - No reimplementation of sin-bin, failover, or provider-chain logic.
   - No modification of display function signatures.
   - No hybrid fusion (RRF); hybrid mode is handled by callers calling this
@@ -32,49 +31,17 @@ Design constraints (Story #693 Must NOT):
 """
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.server.mcp.reranking import (
     _apply_reranking_sync,
     calculate_overfetch_limit,
+    extract_rerank_document,
 )
 from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Content extractor detection
-# ---------------------------------------------------------------------------
-
-
-def _is_semantic_result(result: Dict[str, Any]) -> bool:
-    """Return True when result carries the semantic shape (has a 'payload' key)."""
-    return "payload" in result
-
-
-def _semantic_content_extractor(result: Dict[str, Any]) -> str:
-    """Extract rerank-relevant text from a semantic search result."""
-    payload = result.get("payload", {})
-    return payload.get("content", "") or ""
-
-
-def _fts_content_extractor(result: Dict[str, Any]) -> str:
-    """Extract rerank-relevant text from an FTS / regex search result."""
-    return result.get("snippet", "") or result.get("match_text", "") or ""
-
-
-def _detect_content_extractor(
-    results: List[Dict[str, Any]],
-) -> Callable[[Dict[str, Any]], str]:
-    """Choose content extractor based on first result shape.
-
-    Defaults to FTS extractor when list is empty (caller truncates to 0 anyway).
-    """
-    if results and _is_semantic_result(results[0]):
-        return _semantic_content_extractor
-    return _fts_content_extractor
 
 
 # ---------------------------------------------------------------------------
@@ -162,14 +129,12 @@ def _apply_cli_rerank_and_filter(
     if not rerank_query:
         return results[:safe_limit]
 
-    content_extractor = _detect_content_extractor(results)
-
     try:
         reranked, _meta = _apply_reranking_sync(
             results=results,
             rerank_query=rerank_query,
             rerank_instruction=rerank_instruction,
-            content_extractor=content_extractor,
+            content_extractor=extract_rerank_document,
             requested_limit=safe_limit,
             config_service=config,
         )

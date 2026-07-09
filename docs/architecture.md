@@ -43,7 +43,7 @@ CIDX has **two operational modes** (simplified from three in v7.x), each optimiz
 - Caches HNSW/FTS indexes in memory (daemon process)
 - Auto-starts on first query when enabled
 - Unix socket communication (`.code-indexer/daemon.sock`)
-- Faster queries (~5ms cached vs ~1s from disk)
+- Eliminates per-query HNSW/FTS index cold-load (warm in-process lookup ~5ms vs ~1s cold from disk); end-to-end query latency remains bounded by the embedding-provider round trip
 - Watch mode for real-time file change indexing
 - Container-free, runs as local process
 
@@ -432,7 +432,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "9.22.0" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "__version__" } }` (dynamic value from `src/code_indexer/__init__.py`)
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:
@@ -478,6 +478,8 @@ Key components:
 - Distributed job reconciliation that reclaims abandoned jobs from crashed nodes (`src/code_indexer/server/services/job_reconciliation_service.py`)
 - Per-node system metrics collection written to `node_metrics` PostgreSQL table (`src/code_indexer/server/services/node_metrics_writer_service.py`)
 - PostgreSQL schema managed by numbered migration files in `src/code_indexer/server/storage/postgres/migrations/sql/`
+
+Note: There are currently 29 numbered migration files (001-029). See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
 
 For full details see [Cluster Architecture Guide](cluster-architecture.md).
 For setup and operations see [Cluster Setup Guide](cluster-setup.md).

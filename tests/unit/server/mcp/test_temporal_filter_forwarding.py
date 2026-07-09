@@ -52,18 +52,23 @@ def _enter_fusion_patches(
             ".migrate_legacy_temporal_collection"
         )
     )
+    # Build provider_groups shape: List[Tuple[base_name, [shard_names]]]
+    # Each (name, path) collection tuple maps to a provider group with one shard.
+    provider_groups = [(name, [name]) for name, _ in collections]
     stack.enter_context(
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch"
-            "._discover_queryable_collections",
-            return_value=collections,
+            "._discover_provider_shards_with_pruning",
+            return_value=provider_groups,
         )
     )
+    # filter_healthy_temporal_providers is called with [(shard_name, None)] tuples.
+    # Return all shards as healthy (pass-through).
     stack.enter_context(
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch"
             ".filter_healthy_temporal_providers",
-            return_value=(collections, []),
+            side_effect=lambda cols: (cols, []),
         )
     )
     stack.enter_context(
@@ -179,51 +184,10 @@ class TestChunkTypeForwarding:
             f"got kwargs={kwargs}"
         )
 
-    def test_chunk_type_reaches_query_temporal_multi_provider_path(self):
-        """chunk_type passed to execute_temporal_query_with_fusion reaches
-        service.query_temporal() on the multi-provider fusion code path."""
-        from code_indexer.services.temporal.temporal_fusion_dispatch import (
-            execute_temporal_query_with_fusion,
-        )
-
-        config = MagicMock()
-        vector_store = MagicMock()
-        vector_store.project_root = Path("/tmp/test-repo")
-        index_path = Path("/tmp/test-repo/.code-indexer/index")
-        collections = [
-            ("temporal-voyage_code_3", index_path),
-            ("temporal-openai_large", index_path),
-        ]
-
-        call_kwargs_captured = []
-
-        def fake_query_temporal(**kwargs):
-            call_kwargs_captured.append(kwargs)
-            return _make_fake_temporal_results()
-
-        mock_service = MagicMock()
-        mock_service.query_temporal.side_effect = fake_query_temporal
-
-        with ExitStack() as stack:
-            _enter_fusion_patches(stack, collections, mock_service)
-
-            execute_temporal_query_with_fusion(
-                config=config,
-                index_path=index_path,
-                vector_store=vector_store,
-                query_text="find auth code",
-                limit=10,
-                chunk_type="class",
-            )
-
-        assert len(call_kwargs_captured) >= 1, (
-            "service.query_temporal must be called at least once in multi-provider path"
-        )
-        for captured in call_kwargs_captured:
-            assert captured.get("chunk_type") == "class", (
-                f"chunk_type='class' must reach every service.query_temporal() call; "
-                f"got kwargs={captured}"
-            )
+    # Story #1291 AC9: the former "multi_provider_path" variant of this test
+    # is removed -- discovery now resolves to AT MOST ONE embedder (cross-
+    # embedder fusion is forbidden), so it became an exact duplicate of
+    # test_chunk_type_reaches_query_temporal_single_provider_path above.
 
 
 # ---------------------------------------------------------------------------

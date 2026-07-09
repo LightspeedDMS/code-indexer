@@ -1,35 +1,31 @@
 """
-Unit tests for Story #724 v2 verification pass — file-edit contract.
+Unit tests for Bug #1038: verification pass — sentinel removed, bool return, single attempt.
 
-v1 machinery (VerificationResult, fallback_reason, discovery_mode, safety guards,
-envelope parsing, 30s delay, --output-format json) has been replaced.
-v2 contract: Claude edits the temp file in-place, prints FILE_EDIT_COMPLETE sentinel,
-raises VerificationFailed after 2 failed attempts.
+Previous v2 contract (Story #724): raises VerificationFailed after 2 failed attempts,
+requires FILE_EDIT_COMPLETE as final line of stdout.
 
-Coverage: happy path, retry on subprocess exceptions, retry on postcondition failures,
-both-attempts-fail scenarios, re-seed invariant.
-CLI args coverage: see test_verification_pass_cli_args.py
+New contract (Bug #1038): best-effort, single attempt, returns bool.
+  - Returns True when dispatcher succeeds and file is readable + non-empty.
+  - Returns False when dispatcher fails or postconditions fail (never raises).
+  - No retry loop — exactly one attempt.
+  - No FILE_EDIT_COMPLETE sentinel check (removed).
+
+Coverage: happy path, dispatcher failure, empty file, single-attempt invariant.
 """
 
-import os
-import subprocess
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Any
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from code_indexer.global_repos.dependency_map_analyzer import (
     DependencyMapAnalyzer,
-    VerificationFailed,
     _VERIFICATION_SEMAPHORE_STATE,
 )
 
 _LOGGER = "code_indexer.global_repos.dependency_map_analyzer"
-_SENTINEL = "FILE_EDIT_COMPLETE"
-# Seconds to advance mtime after a simulated Claude edit to guarantee mtime-change detection
-_MTIME_ADVANCE_SECONDS = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +53,6 @@ class _VerifBase(TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    # -- config helpers --
-
     def _make_config(
         self, timeout: int = 60, max_concurrent: int = 2, max_turns: int = 30
     ) -> MagicMock:
@@ -68,67 +62,33 @@ class _VerifBase(TestCase):
         cfg.dependency_map_delta_max_turns = max_turns
         return cfg
 
-    # -- file helpers --
-
     def _make_temp_file(self, name: str, content: str) -> Path:
         p = self._tmp / name
         p.write_text(content)
         return p
 
-    def _write_edited(self, path: Path, content: str) -> None:
-        """Write content and advance mtime by _MTIME_ADVANCE_SECONDS via os.utime.
+    def _make_dispatcher_result(self, success: bool, output: str = "") -> Any:
+        """Build a mock dispatcher result."""
+        result = MagicMock()
+        result.success = success
+        result.output = output
+        result.error = "" if success else "simulated failure"
+        return result
 
-        Ensures the mtime-change postcondition is detectable even when two writes
-        occur within the same filesystem timestamp resolution window.
-        """
-        path.write_text(content)
-        stat = path.stat()
-        new_time = stat.st_mtime + _MTIME_ADVANCE_SECONDS
-        os.utime(str(path), (new_time, new_time))
+    def _run_with_dispatcher(self, temp_file: Path, dispatcher_result: Any) -> bool:
+        """Run invoke_verification_pass with dispatcher patched; return bool result."""
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = dispatcher_result
 
-    # -- subprocess result helpers --
-
-    def _ok(self, stdout: str = "") -> subprocess.CompletedProcess:
-        # Use >100 chars to avoid _invoke_claude_cli's "very short stdout" WARNING
-        if not stdout:
-            stdout = ("x" * 120) + f"\n{_SENTINEL}\n"
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=stdout, stderr=""
-        )
-
-    def _ok_no_sentinel(self) -> subprocess.CompletedProcess:
-        """Return success result whose stdout lacks the sentinel (for postcondition-fail tests)."""
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="x" * 120 + "\nno sentinel here\n", stderr=""
-        )
-
-    def _timeout(self) -> subprocess.TimeoutExpired:
-        return subprocess.TimeoutExpired(cmd=["claude"], timeout=60)
-
-    # -- execution helpers that absorb the repeated log/patch/invoke pattern --
-
-    def _run_with_logs(self, temp_file: Path, run_side_effect: Callable) -> list:
-        """Run invoke_verification_pass with subprocess.run patched; return log output lines."""
-        with self.assertLogs(_LOGGER, level="DEBUG") as cm:
-            with patch("subprocess.run", side_effect=run_side_effect):
-                self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
-        return cm.output
-
-    def _run_failing_with_logs(
-        self, temp_file: Path, run_side_effect: Callable
-    ) -> tuple:
-        """Same but expects VerificationFailed; returns (exception, log_output_lines)."""
-        with self.assertLogs(_LOGGER, level="DEBUG") as cm:
-            with self.assertRaises(VerificationFailed) as ctx:
-                with patch("subprocess.run", side_effect=run_side_effect):
-                    self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
-        return ctx.exception, cm.output
-
-    # -- assertion helpers --
-
-    def _warning_count(self, log_lines: list) -> int:
-        # assertLogs output format: "WARNING:logger.name:message"
-        return sum(1 for r in log_lines if r.startswith("WARNING:"))
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            result: bool = self._analyzer.invoke_verification_pass(
+                temp_file, [], self._cfg
+            )
+            return result
 
 
 # ---------------------------------------------------------------------------
@@ -137,236 +97,199 @@ class _VerifBase(TestCase):
 
 
 class TestHappyPath(_VerifBase):
-    """invoke_verification_pass returns normally when attempt 1 succeeds."""
+    """invoke_verification_pass returns True when dispatcher succeeds and file is non-empty."""
 
-    def test_happy_path_no_exception(self) -> None:
-        """Returns normally when subprocess edits file and emits sentinel."""
+    def test_happy_path_returns_true(self) -> None:
+        """Returns True when dispatcher reports success and file is readable and non-empty."""
         temp_file = self._make_temp_file("happy.md", "# Domain\n\nContent.\n")
+        dispatcher_result = self._make_dispatcher_result(
+            success=True, output="some output"
+        )
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertTrue(result)
 
-        def fake_run(cmd, **kwargs):
-            temp_file.write_text("# Domain\n\nVerified.\n")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 0)
-
-    def test_happy_path_subscriber_subprocess_called_once(self) -> None:
-        """subprocess.run called exactly once on the happy path."""
+    def test_happy_path_dispatcher_called_exactly_once(self) -> None:
+        """Dispatcher called exactly once — single attempt, no retry."""
         temp_file = self._make_temp_file("happy2.md", "# Domain\n\nContent.\n")
+        dispatcher_result = self._make_dispatcher_result(success=True, output="ok")
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = dispatcher_result
+
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+
+        self.assertEqual(mock_dispatcher.dispatch.call_count, 1)
+
+    def test_happy_path_no_sentinel_required(self) -> None:
+        """Returns True even when stdout lacks FILE_EDIT_COMPLETE — sentinel check removed."""
+        temp_file = self._make_temp_file("no_sentinel.md", "# Domain\n\nContent.\n")
+        # Output has no FILE_EDIT_COMPLETE at all — must still return True
+        dispatcher_result = self._make_dispatcher_result(
+            success=True, output="Just some trailing text without any sentinel"
+        )
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertTrue(result)
+
+    def test_happy_path_trailing_text_after_sentinel_does_not_fail(self) -> None:
+        """Returns True when Claude appends trailing text after FILE_EDIT_COMPLETE.
+
+        This is the root cause of Bug #1038: newer models append text after the sentinel,
+        but the result is still valid — the file content is the work product.
+        """
+        temp_file = self._make_temp_file("trailing.md", "# Domain\n\nContent.\n")
+        dispatcher_result = self._make_dispatcher_result(
+            success=True,
+            output="FILE_EDIT_COMPLETE\nTrailing noise from newer model\nMore trailing text",
+        )
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# TestDispatcherFailure
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherFailure(_VerifBase):
+    """invoke_verification_pass returns False (not raises) on dispatcher failure."""
+
+    def test_dispatcher_failure_returns_false(self) -> None:
+        """Returns False when dispatcher reports failure — no exception raised."""
+        temp_file = self._make_temp_file("fail.md", "# Domain\n\nContent.\n")
+        dispatcher_result = self._make_dispatcher_result(success=False)
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertFalse(result)
+
+    def test_dispatcher_failure_single_attempt_only(self) -> None:
+        """Dispatcher called exactly once even on failure — no retry loop."""
+        temp_file = self._make_temp_file("fail_once.md", "# Domain\n\nContent.\n")
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = self._make_dispatcher_result(
+            success=False
+        )
+
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+
+        self.assertEqual(mock_dispatcher.dispatch.call_count, 1)
+
+    def test_dispatcher_exception_returns_false(self) -> None:
+        """Returns False when dispatcher raises an exception — no propagation."""
+        temp_file = self._make_temp_file("exc.md", "# Domain\n\nContent.\n")
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.side_effect = RuntimeError("network error")
+
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            result = self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+        self.assertFalse(result)
+
+
+# ---------------------------------------------------------------------------
+# TestPostconditionChecks
+# ---------------------------------------------------------------------------
+
+
+class TestPostconditionChecks(_VerifBase):
+    """Postcondition checks: file readable and non-empty (sentinel check removed)."""
+
+    def test_empty_file_after_dispatch_returns_false(self) -> None:
+        """Returns False when dispatcher succeeds but leaves file empty/whitespace-only."""
+        temp_file = self._make_temp_file("empty.md", "# Domain\n\nContent.\n")
+
+        # Simulate dispatcher that empties the file
+        def _empty_file_dispatch(**kwargs: Any) -> Any:
+            temp_file.write_text("   \n\n\n", encoding="utf-8")
+            return self._make_dispatcher_result(success=True, output="done")
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.side_effect = _empty_file_dispatch
+
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            result = self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+        self.assertFalse(result)
+
+    def test_missing_sentinel_does_not_cause_false(self) -> None:
+        """Returns True when FILE_EDIT_COMPLETE is absent from stdout — sentinel check removed."""
+        temp_file = self._make_temp_file("no_sentinel_ok.md", "# Domain\n\nContent.\n")
+        dispatcher_result = self._make_dispatcher_result(
+            success=True, output="no sentinel here at all"
+        )
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertTrue(result)
+
+    def test_non_empty_file_with_no_sentinel_returns_true(self) -> None:
+        """Returns True: file has content and dispatcher succeeded, regardless of stdout."""
+        temp_file = self._make_temp_file("content_ok.md", "# Real content\n\nBody.\n")
+        dispatcher_result = self._make_dispatcher_result(
+            success=True, output="anything at all"
+        )
+        result = self._run_with_dispatcher(temp_file, dispatcher_result)
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# TestSingleAttemptInvariant
+# ---------------------------------------------------------------------------
+
+
+class TestSingleAttemptInvariant(_VerifBase):
+    """Single-attempt invariant: dispatcher called exactly once in all failure scenarios."""
+
+    def test_empty_file_does_not_trigger_retry(self) -> None:
+        """Dispatcher called exactly once even when file is empty — no retry."""
+        temp_file = self._make_temp_file("empty_no_retry.md", "# Content\n")
         call_count = [0]
 
-        def fake_run(cmd, **kwargs):
+        def _clear_and_dispatch(**kwargs: Any) -> Any:
             call_count[0] += 1
-            temp_file.write_text("# Domain\n\nVerified.\n")
-            return self._ok()
+            temp_file.write_text("", encoding="utf-8")
+            return self._make_dispatcher_result(success=True, output="")
 
-        self._run_with_logs(temp_file, fake_run)
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.side_effect = _clear_and_dispatch
+
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+
         self.assertEqual(call_count[0], 1)
 
-
-# ---------------------------------------------------------------------------
-# TestRetrySubprocessException
-# ---------------------------------------------------------------------------
-
-
-class TestRetrySubprocessException(_VerifBase):
-    """Attempt 1 raises subprocess exception; attempt 2 succeeds."""
-
-    def _make_first_fails_then_succeeds(self, temp_file: Path, exc) -> Callable:
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise exc
-            self._write_edited(temp_file, "# Domain\n\nVerified by attempt 2.\n")
-            return self._ok()
-
-        return fake_run
-
-    def test_timeout_first_then_success(self) -> None:
-        """TimeoutExpired on attempt 1; success on attempt 2; returns; exactly 1 WARNING."""
-        temp_file = self._make_temp_file("retry_timeout.md", "# Domain\n\nOriginal.\n")
-        logs = self._run_with_logs(
-            temp_file,
-            self._make_first_fails_then_succeeds(temp_file, self._timeout()),
+    def test_never_raises_verification_failed(self) -> None:
+        """invoke_verification_pass never raises — VerificationFailed class removed."""
+        temp_file = self._make_temp_file("no_raise.md", "# Content\n")
+        # All failure modes: dispatcher fails AND file is empty
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = self._make_dispatcher_result(
+            success=False
         )
-        self.assertEqual(self._warning_count(logs), 1)
 
-    def test_exit1_first_then_success(self) -> None:
-        """CalledProcessError on attempt 1; success on attempt 2; exactly 1 WARNING."""
-        temp_file = self._make_temp_file("retry_exit1.md", "# Domain\n\nOriginal.\n")
-        exc = subprocess.CalledProcessError(1, ["claude"], "", "auth error")
-        logs = self._run_with_logs(
-            temp_file,
-            self._make_first_fails_then_succeeds(temp_file, exc),
-        )
-        self.assertEqual(self._warning_count(logs), 1)
-
-
-# ---------------------------------------------------------------------------
-# TestRetryPostconditionFail
-# ---------------------------------------------------------------------------
-
-
-class TestRetryPostconditionFail(_VerifBase):
-    """Attempt 1 fails a postcondition check; attempt 2 succeeds."""
-
-    def test_missing_sentinel_first_then_success(self) -> None:
-        """Attempt 1 returns no sentinel; attempt 2 succeeds; exactly 1 WARNING."""
-        temp_file = self._make_temp_file("post_sentinel.md", "# Domain\n\nOriginal.\n")
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return self._ok_no_sentinel()
-            temp_file.write_text("# Domain\n\nVerified.\n")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 1)
-
-    def test_empty_file_first_then_success(self) -> None:
-        """Attempt 1 leaves the file empty/whitespace-only; attempt 2 writes real content; exactly 1 WARNING."""
-        temp_file = self._make_temp_file("post_empty.md", "# Domain\n\nOriginal.\n")
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # Attempt 1: sentinel present, file written as whitespace-only — fails "empty_file" check
-                temp_file.write_text("   \n\n\n", encoding="utf-8")
-                return self._ok()
-            # Attempt 2: real edit
-            temp_file.write_text("# Domain\n\nVerified.\n", encoding="utf-8")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 1)
-
-    def test_file_missing_first_then_success(self) -> None:
-        """Attempt 1 deletes the temp file (causes read-back to fail); attempt 2 succeeds; exactly 1 WARNING."""
-        temp_file = self._make_temp_file("post_missing.md", "# Domain\n\nOriginal.\n")
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # Attempt 1: delete the temp file so the postcondition read_text raises OSError
-                # invoke_verification_pass re-seeds at the top of attempt 2 so attempt 2 recreates it
-                temp_file.unlink(missing_ok=True)
-                return self._ok()
-            # Attempt 2: normal success — the re-seed at top of attempt 2 restores original content,
-            # then fake_run mutates it to "Verified" and returns _ok().
-            temp_file.write_text("# Domain\n\nVerified.\n", encoding="utf-8")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 1)
-
-    def test_sentinel_not_final_line_first_then_success(self) -> None:
-        """Attempt 1 stdout has FILE_EDIT_COMPLETE but followed by trailing content
-        (fails the 'last non-empty line equals sentinel' check); attempt 2 succeeds."""
-        temp_file = self._make_temp_file(
-            "post_sentinel_midline.md", "# Domain\n\nOriginal.\n"
-        )
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # Attempt 1: still edit the file, but stdout has sentinel mid-output
-                temp_file.write_text("# Domain\n\nVerified.\n", encoding="utf-8")
-                return subprocess.CompletedProcess(
-                    args=cmd,
-                    returncode=0,
-                    # Pad to >100 chars to avoid the "very short stdout" WARNING;
-                    # sentinel is present but NOT on the final non-empty line.
-                    stdout=("x" * 100)
-                    + "\nFILE_EDIT_COMPLETE\nTrailing noise after sentinel\n",
-                    stderr="",
+        with patch.object(
+            self._analyzer,
+            "_get_cached_dispatcher",
+            return_value=mock_dispatcher,
+        ):
+            try:
+                self._analyzer.invoke_verification_pass(temp_file, [], self._cfg)
+            except Exception as exc:
+                self.fail(
+                    f"invoke_verification_pass raised {type(exc).__name__}: {exc}"
                 )
-            # Attempt 2: clean success with sentinel as last non-empty line
-            temp_file.write_text("# Domain\n\nVerified2.\n", encoding="utf-8")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 1)
-
-
-# ---------------------------------------------------------------------------
-# TestBothAttemptsFail
-# ---------------------------------------------------------------------------
-
-
-class TestBothAttemptsFail(_VerifBase):
-    """Both attempts fail — VerificationFailed raised with exactly 2 WARNINGs."""
-
-    def test_both_timeout_raises_with_2_warnings(self) -> None:
-        """TimeoutExpired on both attempts raises VerificationFailed + 2 WARNINGs."""
-        temp_file = self._make_temp_file("both_timeout.md", "# Content.\n")
-
-        def fake_run(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
-
-        _, logs = self._run_failing_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 2)
-
-    def test_both_missing_sentinel_raises_with_2_warnings(self) -> None:
-        """Missing sentinel on both attempts raises VerificationFailed + 2 WARNINGs."""
-        temp_file = self._make_temp_file("both_sentinel.md", "# Content.\n")
-
-        def fake_run(cmd, **kwargs):
-            return self._ok_no_sentinel()
-
-        _, logs = self._run_failing_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 2)
-
-    def test_failure_message_contains_file_path(self) -> None:
-        """VerificationFailed message contains temp file path for debugging."""
-        temp_file = self._make_temp_file("fail_path.md", "# Content.\n")
-
-        def fake_run(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
-
-        exc, _ = self._run_failing_with_logs(temp_file, fake_run)
-        self.assertIn(str(temp_file), str(exc))
-
-
-# ---------------------------------------------------------------------------
-# TestReseed
-# ---------------------------------------------------------------------------
-
-
-class TestReseed(_VerifBase):
-    """Temp file is re-seeded from original_content before attempt 2."""
-
-    def test_reseed_before_attempt2(self) -> None:
-        """Attempt 1 mutates file then raises TimeoutExpired.
-
-        Before attempt 2 subprocess call, file content must equal original (re-seeded).
-        """
-        original = "# ORIGINAL CONTENT\n\nThis is the baseline.\n"
-        temp_file = self._make_temp_file("reseed.md", original)
-        content_before_attempt2: list = []
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                temp_file.write_text("# MUTATED BY ATTEMPT 1\n\nSomething else.\n")
-                raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
-            content_before_attempt2.append(temp_file.read_text())
-            temp_file.write_text("# VERIFIED\n\nAttempt 2.\n")
-            return self._ok()
-
-        self._run_with_logs(temp_file, fake_run)
-
-        self.assertEqual(len(content_before_attempt2), 1)
-        self.assertEqual(
-            content_before_attempt2[0],
-            original,
-            f"File NOT re-seeded before attempt 2. "
-            f"Got: {content_before_attempt2[0]!r}, want: {original!r}",
-        )

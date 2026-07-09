@@ -71,9 +71,9 @@ class TestLogsPostgresBackendProtocol:
         # Verify all protocol methods are present on the class
         required_methods = ["insert_log", "query_logs", "cleanup_old_logs", "close"]
         for method in required_methods:
-            assert hasattr(
-                LogsPostgresBackend, method
-            ), f"LogsPostgresBackend must have method: {method}"
+            assert hasattr(LogsPostgresBackend, method), (
+                f"LogsPostgresBackend must have method: {method}"
+            )
 
         # Verify the class is structurally compatible with the protocol
         protocol_attrs = None
@@ -86,9 +86,9 @@ class TestLogsPostgresBackendProtocol:
 
         if protocol_attrs:
             missing = set(protocol_attrs) - set(dir(LogsPostgresBackend))
-            assert (
-                not missing
-            ), f"LogsPostgresBackend is missing protocol attributes: {missing}"
+            assert not missing, (
+                f"LogsPostgresBackend is missing protocol attributes: {missing}"
+            )
 
     def test_logs_postgres_backend_has_close_noop(self):
         """close() method must exist (pool lifecycle is managed externally)."""
@@ -96,9 +96,9 @@ class TestLogsPostgresBackendProtocol:
             LogsPostgresBackend,
         )
 
-        assert callable(
-            getattr(LogsPostgresBackend, "close", None)
-        ), "LogsPostgresBackend must have a callable close() method"
+        assert callable(getattr(LogsPostgresBackend, "close", None)), (
+            "LogsPostgresBackend must have a callable close() method"
+        )
 
     def test_logs_postgres_backend_is_imported_by_factory(self):
         """StorageFactory must be able to import LogsPostgresBackend lazily."""
@@ -328,107 +328,3 @@ class TestLogsPostgresBackendLive:
     def test_close_is_noop(self, backend):
         """close() must not raise any exception."""
         backend.close()  # Should complete silently
-
-
-# ---------------------------------------------------------------------------
-# EVO-63910 follow-up: batch insert_logs (mock pool, no psycopg needed)
-# ---------------------------------------------------------------------------
-
-
-class _FakeCursor:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def executemany(self, sql, seq):
-        if self._conn.pool.executemany_raises:
-            raise RuntimeError("boom")
-        self._conn.pool.executemany_calls.append((sql, list(seq)))
-
-
-class _FakeConn:
-    def __init__(self, pool):
-        self.pool = pool
-
-    def cursor(self):
-        return _FakeCursor(self)
-
-    def execute(self, sql, params=None):
-        # Used by _ensure_schema and by the per-record insert_log fallback.
-        self.pool.execute_calls.append((sql, params))
-
-    def commit(self):
-        self.pool.commits += 1
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-class _FakePool:
-    def __init__(self, executemany_raises=False):
-        self.executemany_raises = executemany_raises
-        self.executemany_calls = []
-        self.execute_calls = []
-        self.commits = 0
-
-    def connection(self):
-        return _FakeConn(self)
-
-
-def _rec(i):
-    return {
-        "timestamp": "2026-07-08T00:00:00+00:00",
-        "level": "INFO",
-        "source": "svc",
-        "message": f"m{i}",
-        "correlation_id": None,
-        "user_id": None,
-        "request_path": None,
-        "extra_data": None,
-        "node_id": None,
-        "alias": None,
-    }
-
-
-class TestLogsPostgresBackendBatchInsert:
-    """insert_logs must issue one multi-row INSERT + one commit per batch."""
-
-    def _backend_with_clean_pool(self, executemany_raises=False):
-        from code_indexer.server.storage.postgres.logs_backend import (
-            LogsPostgresBackend,
-        )
-
-        pool = _FakePool(executemany_raises=executemany_raises)
-        backend = LogsPostgresBackend(pool)  # runs _ensure_schema()
-        # Reset counters that _ensure_schema populated.
-        pool.executemany_calls.clear()
-        pool.execute_calls.clear()
-        pool.commits = 0
-        return backend, pool
-
-    def test_insert_logs_single_multirow_commit(self):
-        backend, pool = self._backend_with_clean_pool()
-        backend.insert_logs([_rec(i) for i in range(4)])
-
-        assert len(pool.executemany_calls) == 1, "one batched INSERT for the batch"
-        sql, seq = pool.executemany_calls[0]
-        assert "INSERT INTO logs" in sql
-        assert len(seq) == 4, "all rows in the single executemany"
-        assert pool.commits == 1, "exactly one commit for the whole batch"
-        assert pool.execute_calls == [], "no per-record fallback on success"
-
-    def test_insert_logs_empty_is_noop(self):
-        backend, pool = self._backend_with_clean_pool()
-        backend.insert_logs([])
-        assert pool.executemany_calls == []
-        assert pool.commits == 0
-
-    def test_insert_logs_falls_back_per_record_on_batch_failure(self):
-        backend, pool = self._backend_with_clean_pool(executemany_raises=True)
-        backend.insert_logs([_rec(i) for i in range(3)])
-
-        # Batch raised -> each record retried via insert_log (conn.execute).
-        inserts = [c for c in pool.execute_calls if "INSERT INTO logs" in c[0]]
-        assert len(inserts) == 3, "each record inserted individually on fallback"

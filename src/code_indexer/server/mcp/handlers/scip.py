@@ -269,6 +269,27 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
         results_dicts = service.find_definition(
@@ -335,6 +356,27 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         # Story #659: Overfetch when reranking is requested so the reranker
         # has a larger candidate pool; truncate back to requested_limit after reranking.
@@ -426,6 +468,27 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
         results_dicts = service.get_dependencies(
@@ -489,6 +552,27 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "symbol parameter is required"}
             )
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
         results_dicts = service.get_dependents(
@@ -547,6 +631,27 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
@@ -628,6 +733,27 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         elif max_depth > 10:
             max_depth = 10
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
         all_chains = service.trace_callchain(
@@ -698,6 +824,27 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()

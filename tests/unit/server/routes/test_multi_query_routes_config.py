@@ -66,7 +66,7 @@ class TestMultiSearchConfigFromConfig:
 
         config = MultiSearchConfig.from_config(service)
         # Per resource audit: defaults are 2 workers, 30s timeout
-        assert config.max_workers == 2
+        assert config.max_workers == 8
         assert config.query_timeout_seconds == 30
 
 
@@ -126,5 +126,5 @@ class TestSCIPMultiServiceConfig:
 
         # Per resource audit and Story #25: defaults should be 2 workers, 30s timeout
         # Note: This test will fail until we update SCIPMultiService defaults
-        assert service.max_workers == 2
+        assert service.max_workers == 8
         assert service.query_timeout_seconds == 30

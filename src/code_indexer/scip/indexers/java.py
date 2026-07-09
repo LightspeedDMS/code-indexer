@@ -1,6 +1,5 @@
 """Java SCIP indexer using scip-java."""
 
-import os
 import subprocess
 import shutil
 import time
@@ -91,23 +90,8 @@ class JavaIndexer(SCIPIndexer):
             )
 
     def is_available(self) -> bool:
-        """Whether Java SCIP indexing can actually run here.
-
-        Requires BOTH Coursier (``cs``, which launches scip-java) AND a JVM on
-        PATH -- scip-java and the target project's build both need Java. The old
-        check only looked for ``cs``, so on an image with Coursier but no JDK it
-        reported available, got selected for Java/Kotlin repos, then failed at
-        ``cs launch`` and produced an empty index. Checking for Java too lets
-        the generator cleanly skip Java SCIP (honest "unavailable") instead of
-        attempting-and-failing.
-        """
-        if shutil.which("cs") is None:
-            return False
-        if shutil.which("java") is not None:
-            return True
-        # Fall back to JAVA_HOME/bin/java when java is not on PATH.
-        java_home = os.environ.get("JAVA_HOME")
-        return bool(java_home) and Path(java_home, "bin", "java").exists()
+        """Check if Coursier and scip-java are available."""
+        return shutil.which("cs") is not None
 
     def get_version(self) -> Optional[str]:
         """Get scip-java version."""

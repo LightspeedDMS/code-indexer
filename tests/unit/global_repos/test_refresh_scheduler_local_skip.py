@@ -10,7 +10,8 @@ These tests verify that local:// repos are excluded from automatic scheduler
 refresh submissions while git repos continue to be submitted normally.
 """
 
-import subprocess
+import shutil
+import time
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -330,14 +331,36 @@ class TestRefreshSchedulerVersionTimestamp:
 
         Regression guard: If this test fails, the timestamp generation bug has returned.
         """
-        import time as time_module
-
-        before = int(time_module.time())
+        before = int(time.time())
 
         # Setup source directory with a file (needed for _create_new_index to work)
         local_repo_dir = golden_repos_dir / "cidx-meta"
         local_repo_dir.mkdir()
         (local_repo_dir / "test.md").write_text("# test")
+
+        # Story #1034 C3: snapshot_manager now owns CoW clone and versioned path creation.
+        # The manager generates the v_<timestamp> path using int(time.time()).
+        # We inject a mock that records the path it generates so the test can verify
+        # the timestamp is correct (regression guard against datetime.utcnow() bug).
+        captured_version_path = []
+
+        def _mock_create_snapshot(repo_name, source_path_arg):
+            versioned_path = (
+                golden_repos_dir / ".versioned" / repo_name / f"v_{int(time.time())}"
+            )
+            versioned_path.mkdir(parents=True, exist_ok=True)
+            # Copy source files so Step 5 index validation can pass if needed
+            for item in local_repo_dir.iterdir():
+                dest = versioned_path / item.name
+                if item.is_dir():
+                    shutil.copytree(str(item), str(dest))
+                else:
+                    shutil.copy2(str(item), str(dest))
+            captured_version_path.append(str(versioned_path))
+            return str(versioned_path)
+
+        mock_sm = MagicMock()
+        mock_sm.create_snapshot.side_effect = _mock_create_snapshot
 
         scheduler = RefreshScheduler(
             golden_repos_dir=str(golden_repos_dir),
@@ -345,23 +368,8 @@ class TestRefreshSchedulerVersionTimestamp:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             registry=registry,
+            snapshot_manager=mock_sm,
         )
-
-        # Capture the version directory from subprocess.run cp command args.
-        # The cp command is: cp --reflink=auto -a <source> <dest>
-        # where <dest> is .versioned/<alias>/v_<timestamp>
-        captured_version_path = []
-        original_subprocess_run = subprocess.run
-
-        def capture_subprocess_run(cmd, *args, **kwargs):
-            if isinstance(cmd, list) and len(cmd) >= 4 and cmd[0] == "cp":
-                dest = cmd[-1]
-                if "/v_" in dest:
-                    captured_version_path.append(dest)
-            # Let cp actually run so mkdir + clone work, but mock cidx commands
-            if isinstance(cmd, list) and cmd[0] == "cidx":
-                return MagicMock(returncode=0, stdout="", stderr="")
-            return original_subprocess_run(cmd, *args, **kwargs)
 
         with patch(
             "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
@@ -371,7 +379,10 @@ class TestRefreshSchedulerVersionTimestamp:
                 "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
                 return_value=50,
             ):
-                with patch("subprocess.run", side_effect=capture_subprocess_run):
+                with patch(
+                    "subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr=""),
+                ):
                     try:
                         scheduler._create_new_index(
                             alias_name="cidx-meta-global",
@@ -380,10 +391,10 @@ class TestRefreshSchedulerVersionTimestamp:
                     except Exception:
                         pass  # cidx commands are mocked, alias swap may fail
 
-        after = int(time_module.time()) + 5  # 5 second tolerance
+        after = int(time.time()) + 5  # 5 second tolerance
 
         assert len(captured_version_path) > 0, (
-            "No versioned directory path was captured from cp command. "
+            "No versioned directory path was captured from snapshot_manager. "
             "_create_new_index() must create a v_TIMESTAMP directory."
         )
 

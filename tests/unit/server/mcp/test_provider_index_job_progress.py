@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.utils.env_assertions import assert_env_present
+
 
 @pytest.mark.slow
 class TestProviderIndexJobProgress:
@@ -138,7 +140,7 @@ class TestProviderIndexJobProgress:
         assert result["success"] is True
         assert "env" in captured_kwargs, "env must be passed to Popen"
         env = captured_kwargs["env"]
-        assert "CO_API_KEY" in env, f"CO_API_KEY missing from Popen env: {env}"
+        assert_env_present(env, "CO_API_KEY")
         assert env["CO_API_KEY"] == "my-cohere-key-12345"
 
     def test_no_timeout_passed_to_run_with_popen_progress(self, tmp_path):

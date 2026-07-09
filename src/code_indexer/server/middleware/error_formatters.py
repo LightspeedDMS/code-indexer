@@ -126,7 +126,9 @@ def create_validation_error_response(
 
         # Sanitize rejected value based on field name
         rejected_value = pydantic_error.get("input", "N/A")
-        sanitized_value = sanitizer.sanitize_field_value(field_path, rejected_value)
+        sanitized_value = _serialize_value_for_json(
+            sanitizer.sanitize_field_value(field_path, rejected_value)
+        )
 
         field_error = ValidationFieldError(
             field=field_path,

@@ -21,6 +21,7 @@ from code_indexer.server import app as app_module
 from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import is_internal_meta_repo
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +455,9 @@ def _apply_fts_payload_truncation(
     For FTS results with large code_snippet or match_text fields, replaces
     them with preview + cache_handle. Each field is cached independently.
 
+    Bug #1181: Batches all large-field stores into ONE store_batch() call per
+    field type per query to avoid N fsync'd PostgreSQL COMMITs per query.
+
     Args:
         results: List of FTS search result dicts with 'code_snippet' and/or
                  'match_text' fields
@@ -463,65 +467,87 @@ def _apply_fts_payload_truncation(
     """
     payload_cache = getattr(app_module.app.state, "payload_cache", None)
     if payload_cache is None:
-        # Cache not available, return results unchanged
         return results
 
     preview_size = payload_cache.config.preview_size_chars
 
-    for result_dict in results:
-        # Handle code_snippet field (AC1)
-        code_snippet = result_dict.get("code_snippet")
-        if code_snippet is not None:
-            try:
-                if len(code_snippet) > preview_size:
-                    # Large snippet: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(code_snippet)
-                    result_dict["snippet_preview"] = code_snippet[:preview_size]
-                    result_dict["snippet_cache_handle"] = cache_handle
-                    result_dict["snippet_has_more"] = True
-                    result_dict["snippet_total_size"] = len(code_snippet)
-                    del result_dict["code_snippet"]
-                else:
-                    # Small snippet: keep as-is, add metadata
-                    result_dict["snippet_cache_handle"] = None
-                    result_dict["snippet_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-024",
-                        f"Failed to truncate code_snippet: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                result_dict["snippet_cache_handle"] = None
-                result_dict["snippet_has_more"] = False
+    # --- code_snippet field (AC1) ---
+    snippet_large_indices: List[int] = []
+    snippet_large_contents: List[str] = []
 
-        # Handle match_text field (AC2)
-        match_text = result_dict.get("match_text")
-        if match_text is not None:
-            try:
-                if len(match_text) > preview_size:
-                    # Large match_text: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(match_text)
-                    result_dict["match_text_preview"] = match_text[:preview_size]
-                    result_dict["match_text_cache_handle"] = cache_handle
-                    result_dict["match_text_has_more"] = True
-                    result_dict["match_text_total_size"] = len(match_text)
-                    del result_dict["match_text"]
-                else:
-                    # Small match_text: keep as-is, add metadata
-                    result_dict["match_text_cache_handle"] = None
-                    result_dict["match_text_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-025",
-                        f"Failed to truncate match_text: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+    for i, result_dict in enumerate(results):
+        code_snippet = result_dict.get("code_snippet")
+        if code_snippet is None:
+            continue
+        if len(code_snippet) > preview_size:
+            snippet_large_indices.append(i)
+            snippet_large_contents.append(code_snippet)
+        else:
+            result_dict["snippet_cache_handle"] = None
+            result_dict["snippet_has_more"] = False
+
+    if snippet_large_contents:
+        try:
+            handles = payload_cache.store_batch(snippet_large_contents)
+            for idx, snippet, handle in zip(
+                snippet_large_indices, snippet_large_contents, handles
+            ):
+                result_dict = results[idx]
+                result_dict["snippet_preview"] = snippet[:preview_size]
+                result_dict["snippet_cache_handle"] = handle
+                result_dict["snippet_has_more"] = True
+                result_dict["snippet_total_size"] = len(snippet)
+                del result_dict["code_snippet"]
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-024",
+                    f"Failed to batch-store code_snippets in FTS truncation: {e}",
+                    extra={"correlation_id": get_correlation_id()},
                 )
-                result_dict["match_text_cache_handle"] = None
-                result_dict["match_text_has_more"] = False
+            )
+            for idx in snippet_large_indices:
+                results[idx]["snippet_cache_handle"] = None
+                results[idx]["snippet_has_more"] = False
+
+    # --- match_text field (AC2) ---
+    match_large_indices: List[int] = []
+    match_large_contents: List[str] = []
+
+    for i, result_dict in enumerate(results):
+        match_text = result_dict.get("match_text")
+        if match_text is None:
+            continue
+        if len(match_text) > preview_size:
+            match_large_indices.append(i)
+            match_large_contents.append(match_text)
+        else:
+            result_dict["match_text_cache_handle"] = None
+            result_dict["match_text_has_more"] = False
+
+    if match_large_contents:
+        try:
+            handles = payload_cache.store_batch(match_large_contents)
+            for idx, match_text, handle in zip(
+                match_large_indices, match_large_contents, handles
+            ):
+                result_dict = results[idx]
+                result_dict["match_text_preview"] = match_text[:preview_size]
+                result_dict["match_text_cache_handle"] = handle
+                result_dict["match_text_has_more"] = True
+                result_dict["match_text_total_size"] = len(match_text)
+                del result_dict["match_text"]
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-025",
+                    f"Failed to batch-store match_texts in FTS truncation: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            for idx in match_large_indices:
+                results[idx]["match_text_cache_handle"] = None
+                results[idx]["match_text_has_more"] = False
 
     return results
 
@@ -887,7 +913,6 @@ def _is_temporal_query(params: Dict[str, Any]) -> bool:
         "time_range",
         "time_range_all",
         "at_commit",
-        "include_removed",
         "chunk_type",
         "diff_type",
         "author",
@@ -1038,7 +1063,7 @@ def _enforce_repo_count_cap(aliases: List[str]) -> "Optional[CapBreach]":
 
 
 def _expand_wildcard_patterns(
-    patterns: List[str], user: "User"
+    patterns: List[str], user: "User", search_mode: str = "semantic"
 ) -> "Union[List[str], CapBreach]":
     """Expand wildcard patterns to matching repository aliases.
 
@@ -1049,9 +1074,23 @@ def _expand_wildcard_patterns(
     Bug #881 Phase 3: Returns CapBreach if a wildcard pattern matched more
     aliases than omni_wildcard_expansion_cap. Literal patterns bypass the cap.
 
+    Bug #1287 Defect B: when search_mode requires an FTS index ("fts" or
+    "hybrid"), matches produced by WILDCARD expansion exclude the internal
+    cidx-meta* bookkeeping repos (see is_internal_meta_repo) -- they are
+    never FTS-indexed by design and otherwise produce benign-but-noisy
+    per-repo WARNING/ERROR log lines on every such fan-out. This exclusion
+    applies ONLY to wildcard-matched aliases; an explicit LITERAL alias
+    (e.g. repository_alias=["cidx-meta-global"]) is untouched and still
+    fails loud downstream, mirroring the semantics in
+    semantic_query_manager.py's implicit fan-out. The default search_mode
+    ("semantic") keeps existing callers (e.g. _omni_regex_search) and
+    semantic/memory search over cidx-meta unaffected.
+
     Args:
         patterns: List of repo patterns (may include wildcards like '*-global')
         user: The authenticated user requesting the expansion.
+        search_mode: The effective search mode ("semantic", "fts", "hybrid",
+            "regex", ...). Only "fts"/"hybrid" trigger the meta-repo exclusion.
 
     Returns:
         Expanded list of unique repository aliases, or CapBreach on cap breach.
@@ -1089,6 +1128,11 @@ def _expand_wildcard_patterns(
         if _has_wildcard(pattern):
             spec = pathspec.PathSpec.from_lines("gitwildmatch", [pattern])
             matches = [repo for repo in available_repos if spec.match_file(repo)]
+            if search_mode in ("fts", "hybrid"):
+                # Bug #1287 Defect B (finding 2): exclude the internal
+                # cidx-meta* bookkeeping repo(s) from FTS/hybrid wildcard
+                # fan-out -- they have no FTS index by design.
+                matches = [repo for repo in matches if not is_internal_meta_repo(repo)]
             if matches:
                 # Bug #881 Phase 1: promoted from DEBUG to INFO
                 logger.info(
@@ -1109,8 +1153,15 @@ def _expand_wildcard_patterns(
                     )
                 )
         else:
-            # Literal pattern — never subject to expansion cap
-            expanded.append(pattern)
+            # Literal pattern — never subject to expansion cap.
+            # Bug #1119: if the literal does not match any global repo directly but
+            # its "-global" form exists, promote it.  This handles omni fan-out of
+            # bare repo names (e.g. "fastapi") when repos are stored as "fastapi-global".
+            _global_form = f"{pattern}-global"
+            if pattern not in available_repos and _global_form in available_repos:
+                expanded.append(_global_form)
+            else:
+                expanded.append(pattern)
 
     # Deduplicate while preserving order
     seen: set = set()

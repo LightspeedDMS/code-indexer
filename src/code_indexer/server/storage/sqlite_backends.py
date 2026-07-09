@@ -164,6 +164,59 @@ class GlobalReposSqliteBackend:
 
         return result
 
+    def list_due_repos(self, limit: int, now: float) -> list:
+        """
+        Return repos whose next_refresh is due (i.e. <= now), oldest-first, capped.
+
+        Bug #1063 Part 1: enables capped oldest-first due-query so the
+        RefreshScheduler never submits more than `limit` repos in one poll cycle.
+
+        Ordering uses CAST(next_refresh AS REAL) to ensure numeric comparison;
+        without the cast, TEXT column ordering is lexicographic and would produce
+        wrong results when timestamps differ in leading digit length.
+
+        Args:
+            limit: Maximum number of repos to return (0 = empty list).
+            now: Current Unix timestamp (float); repos with next_refresh <= now are due.
+
+        Returns:
+            List of repo dicts ordered by next_refresh ASC (oldest first).
+        """
+        if limit <= 0:
+            return []
+
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT alias_name, repo_name, repo_url, index_path, created_at,
+                      last_refresh, enable_temporal, temporal_options, enable_scip,
+                      next_refresh
+               FROM global_repos
+               WHERE next_refresh IS NOT NULL
+                 AND CAST(next_refresh AS REAL) <= ?
+               ORDER BY CAST(next_refresh AS REAL) ASC
+               LIMIT ?""",
+            (now, limit),
+        )
+
+        result = []
+        for row in cursor.fetchall():
+            alias = row[0]
+            result.append(
+                {
+                    "alias_name": alias,
+                    "repo_name": row[1],
+                    "repo_url": row[2],
+                    "index_path": row[3],
+                    "created_at": row[4],
+                    "last_refresh": row[5],
+                    "enable_temporal": bool(row[6]),
+                    "temporal_options": json.loads(row[7]) if row[7] else None,
+                    "enable_scip": bool(row[8]),
+                    "next_refresh": row[9],
+                }
+            )
+        return result
+
     def delete_repo(self, alias_name: str) -> bool:
         """
         Delete a repository by alias.
@@ -312,7 +365,14 @@ class UsersSqliteBackend:
         email: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> None:
-        """Create a new user."""
+        """Create a new user.
+
+        Raises:
+            sqlite3.IntegrityError: When a user with the same username already exists.
+                Callers must pre-check existence (e.g. get_user()) before calling this
+                method.  Race safety is provided by the outer bootstrap FileLock in
+                service_init.py, not by silent OR IGNORE tolerance.
+        """
         now = created_at if created_at else datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
@@ -399,20 +459,53 @@ class UsersSqliteBackend:
         key_hash: str,
         key_prefix: str,
         name: Optional[str] = None,
+        key_sha256: Optional[str] = None,
     ) -> None:
-        """Add an API key for a user."""
+        """Add an API key for a user.
+
+        key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+            (Bug #1144). None for legacy callers that don't supply it.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
             conn.execute(
                 """INSERT INTO user_api_keys
-                   (key_id, username, key_hash, key_prefix, name, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (key_id, username, key_hash, key_prefix, name, now),
+                   (key_id, username, key_hash, key_prefix, name, created_at, key_sha256)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (key_id, username, key_hash, key_prefix, name, now, key_sha256),
             )
             return None
 
         self._conn_manager.execute_atomic(operation)
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed SELECT — never scans all rows. Returns None when not found
+        (including legacy rows with NULL key_sha256).
+
+        Returns a dict with at minimum: key_id, username, key_hash.
+        NEVER cached — must be a live DB read so revocation takes effect immediately.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT key_id, username, key_hash, key_prefix, name, created_at
+               FROM user_api_keys
+               WHERE key_sha256 = ?""",
+            (sha256_hex,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "key_id": row[0],
+            "username": row[1],
+            "key_hash": row[2],
+            "key_prefix": row[3],
+            "name": row[4],
+            "created_at": row[5],
+        }
 
     def add_mcp_credential(
         self,
@@ -1121,6 +1214,52 @@ class CITokensSqliteBackend:
             }
         return result
 
+    def update_encrypted_token(self, platform: str, new_encrypted_token: str) -> None:
+        """Update the encrypted_token for a platform in-place (lazy re-encryption).
+
+        Used by CITokenManager when a fallback key decryption succeeds so the token
+        is re-encrypted with the canonical key for future reads (Story #999).
+
+        When no matching row is found for platform, logs a WARNING and returns without
+        raising (caller can continue safely; the token was likely already deleted).
+
+        Args:
+            platform: Platform key (e.g. "github", "gitlab"). Must be non-empty.
+            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
+
+        Raises:
+            ValueError: If platform or new_encrypted_token are None or empty.
+        """
+        if not platform:
+            raise ValueError("platform must be a non-empty string")
+        if not new_encrypted_token:
+            raise ValueError("new_encrypted_token must be a non-empty string")
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE ci_tokens SET encrypted_token = ? WHERE platform = ?",
+                (new_encrypted_token, platform),
+            )
+            return cursor.rowcount
+
+        rows_updated: int = self._conn_manager.execute_atomic(operation)
+        if rows_updated == 1:
+            logger.debug(
+                "Re-encrypted CI token for platform %s with canonical key", platform
+            )
+        elif rows_updated == 0:
+            logger.warning(
+                "update_encrypted_token: no ci_tokens row found for platform %r — "
+                "re-encryption skipped",
+                platform,
+            )
+        else:
+            logger.warning(
+                "update_encrypted_token: unexpected rowcount %d for platform %r",
+                rows_updated,
+                platform,
+            )
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -1454,6 +1593,7 @@ class SSHKeysSqliteBackend:
         email: Optional[str] = None,
         description: Optional[str] = None,
         is_imported: bool = False,
+        private_key: Optional[str] = None,
     ) -> None:
         """Create a new SSH key record."""
         now = datetime.now(timezone.utc).isoformat()
@@ -1461,7 +1601,18 @@ class SSHKeysSqliteBackend:
         def operation(conn):
             conn.execute(
                 """INSERT INTO ssh_keys (name, fingerprint, key_type, private_path, public_path,
-                   public_key, email, description, created_at, is_imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   public_key, email, description, created_at, is_imported,
+                   private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     fingerprint = excluded.fingerprint,
+                     key_type = excluded.key_type,
+                     private_path = excluded.private_path,
+                     public_path = excluded.public_path,
+                     public_key = excluded.public_key,
+                     email = excluded.email,
+                     description = excluded.description,
+                     is_imported = excluded.is_imported,
+                     private_key = excluded.private_key""",
                 (
                     name,
                     fingerprint,
@@ -1473,6 +1624,7 @@ class SSHKeysSqliteBackend:
                     description,
                     now,
                     is_imported,
+                    private_key,
                 ),
             )
             return None
@@ -1485,7 +1637,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys WHERE name = ?""",
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys WHERE name = ?""",
             (name,),
         )
         row = cursor.fetchone()
@@ -1505,6 +1658,7 @@ class SSHKeysSqliteBackend:
             "imported_at": row[9],
             "is_imported": bool(row[10]),
             "hosts": hosts,
+            "private_key": row[11],
         }
 
     def _get_hosts_for_key(self, conn: Any, key_name: str) -> list:
@@ -1556,7 +1710,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys"""
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys"""
         )
         results = []
         for row in cursor.fetchall():
@@ -1576,6 +1731,7 @@ class SSHKeysSqliteBackend:
                     "imported_at": row[9],
                     "is_imported": bool(row[10]),
                     "hosts": hosts,
+                    "private_key": row[11],
                 }
             )
         return results
@@ -1664,7 +1820,11 @@ class GoldenRepoMetadataSqliteBackend:
             temporal_options: Optional temporal indexing options (stored as JSON).
 
         Raises:
-            sqlite3.IntegrityError: If alias already exists.
+            sqlite3.IntegrityError: When a repo with the same alias already exists.
+                Callers must pre-check existence (e.g. repo_exists() or the in-memory
+                golden_repos dict) before calling this method.  Race safety is provided
+                by the outer bootstrap FileLock in service_init.py plus the callers'
+                own pre-checks, not by silent OR IGNORE tolerance.
         """
         temporal_json = json.dumps(temporal_options) if temporal_options else None
 
@@ -2427,6 +2587,7 @@ class BackgroundJobsSqliteBackend:
         metadata: Optional[Dict[str, Any]] = None,
         executing_node: Optional[str] = None,
         claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
     ) -> None:
         """Save a new background job."""
 
@@ -2437,8 +2598,8 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2470,12 +2631,105 @@ class BackgroundJobsSqliteBackend:
                     json.dumps(metadata) if metadata else None,
                     executing_node,
                     claimed_at,
+                    actor_username,
                 ),
             )
             return None
 
         self._conn_manager.execute_atomic(operation)
         logger.debug(f"Saved background job: {job_id}")
+
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT (no OR IGNORE).
+
+        Unlike save_job which uses INSERT OR IGNORE, this method uses a plain
+        INSERT so that sqlite3.IntegrityError is raised when
+        idx_active_job_per_repo is violated by a duplicate pending/running row
+        for the same (operation_type, repo_alias). The caller translates this
+        into DuplicateJobError.
+
+        Do NOT modify save_job — its INSERT OR IGNORE is intentional for other
+        callers that must survive duplicate inserts.
+
+        Raises:
+            sqlite3.IntegrityError: When idx_active_job_per_repo rejects the
+                INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+
+        def operation(conn):
+            conn.execute(
+                """INSERT INTO background_jobs
+                   (job_id, operation_type, status, created_at, started_at, completed_at,
+                    result, error, progress, username, is_admin, cancelled, repo_alias,
+                    resolution_attempts, claude_actions, failure_reason, extended_error,
+                    language_resolution_status, current_phase, phase_detail,
+                    progress_info, metadata, executing_node, claimed_at, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    job_id,
+                    operation_type,
+                    status,
+                    created_at,
+                    started_at,
+                    completed_at,
+                    json.dumps(result) if result else None,
+                    error,
+                    progress,
+                    username,
+                    1 if is_admin else 0,
+                    1 if cancelled else 0,
+                    repo_alias,
+                    resolution_attempts,
+                    json.dumps(claude_actions) if claude_actions else None,
+                    failure_reason,
+                    json.dumps(extended_error) if extended_error else None,
+                    (
+                        json.dumps(language_resolution_status)
+                        if language_resolution_status
+                        else None
+                    ),
+                    current_phase,
+                    phase_detail,
+                    json.dumps(progress_info)
+                    if isinstance(progress_info, dict)
+                    else progress_info,
+                    json.dumps(metadata) if metadata else None,
+                    executing_node,
+                    claimed_at,
+                    actor_username,
+                ),
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug(f"Atomic claim insert background job: {job_id}")
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job details by job ID."""
@@ -2485,7 +2739,7 @@ class BackgroundJobsSqliteBackend:
                       result, error, progress, username, is_admin, cancelled, repo_alias,
                       resolution_attempts, claude_actions, failure_reason, extended_error,
                       language_resolution_status, current_phase, phase_detail,
-                      progress_info, metadata, executing_node, claimed_at
+                      progress_info, metadata, executing_node, claimed_at, actor_username
                FROM background_jobs WHERE job_id = ?""",
             (job_id,),
         )
@@ -2521,6 +2775,8 @@ class BackgroundJobsSqliteBackend:
             "metadata": json.loads(row[21]) if len(row) > 21 and row[21] else None,
             "executing_node": row[22] if len(row) > 22 else None,
             "claimed_at": row[23] if len(row) > 23 else None,
+            # Story #1032 AC12: actor_username audit trail
+            "actor_username": row[24] if len(row) > 24 else None,
         }
 
     def update_job(self, job_id: str, **kwargs) -> None:
@@ -2565,6 +2821,25 @@ class BackgroundJobsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed. Called on startup."""
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = {"count": 0}
+
+        def operation(conn):
+            cur = conn.execute(
+                "UPDATE background_jobs SET status = 'failed', error = ?, "
+                "completed_at = ? WHERE status IN ('running', 'pending')",
+                (error, now_iso),
+            )
+            result["count"] = cur.rowcount
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        return result["count"]
+
     def list_jobs(
         self,
         username: Optional[str] = None,
@@ -2572,6 +2847,7 @@ class BackgroundJobsSqliteBackend:
         operation_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List background jobs with optional filtering and pagination."""
         conn = self._conn_manager.get_connection()
@@ -2580,7 +2856,7 @@ class BackgroundJobsSqliteBackend:
                           result, error, progress, username, is_admin, cancelled, repo_alias,
                           resolution_attempts, claude_actions, failure_reason, extended_error,
                           language_resolution_status, current_phase, phase_detail,
-                          progress_info, metadata
+                          progress_info, metadata, executing_node, claimed_at, actor_username
                    FROM background_jobs"""
 
         conditions = []
@@ -2595,6 +2871,12 @@ class BackgroundJobsSqliteBackend:
         if operation_type:
             conditions.append("operation_type = ?")
             params.append(operation_type)
+        if exclude_operation_types:
+            placeholders = ", ".join(["?"] * len(exclude_operation_types))
+            conditions.append(
+                f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+            )
+            params.extend(exclude_operation_types)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -2605,43 +2887,36 @@ class BackgroundJobsSqliteBackend:
         cursor = conn.execute(query, params)
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
-    def list_jobs_filtered(
-        self,
+    @staticmethod
+    def _build_jobs_filter_where(
         status: Optional[str] = None,
         operation_type: Optional[str] = None,
         search_text: Optional[str] = None,
+        username: Optional[str] = None,
         exclude_ids: Optional[set] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
     ) -> tuple:
-        """Return (list_of_job_dicts, total_count) with dynamic SQL WHERE filters.
+        """Build the WHERE clause and params list for background_jobs queries.
 
-        Story #271: Filtered jobs query with pagination support.
+        Returns (where_clause: str, params: List[Any]).  The where_clause is
+        either empty or starts with ' WHERE '.  Both list_jobs_filtered and
+        list_job_ids_filtered call this helper so the filter logic cannot drift
+        between the two methods.
 
         Args:
             status: Filter by exact status value (e.g. 'completed', 'failed')
             operation_type: Filter by exact operation_type value
             search_text: Case-insensitive LIKE match against repo_alias, username,
                          operation_type, and error columns
-            exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
-            limit: Maximum number of rows to return (None = no limit)
-            offset: Number of rows to skip for pagination (default 0)
-
-        Returns:
-            Tuple of (jobs: List[Dict], total_count: int) where total_count reflects
-            the full matching set ignoring limit/offset.
+            username: When set, scope results to this owner's jobs (H2 non-admin)
+            exclude_ids: Set of job_ids to exclude
         """
-        conn = self._conn_manager.get_connection()
-
-        base_select = """SELECT job_id, operation_type, status, created_at, started_at,
-                                completed_at, result, error, progress, username, is_admin,
-                                cancelled, repo_alias, resolution_attempts, claude_actions,
-                                failure_reason, extended_error, language_resolution_status,
-                                current_phase, phase_detail
-                         FROM background_jobs"""
-
         conditions: List[str] = []
         params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = ?")
+            params.append(username)
 
         if status:
             conditions.append("status = ?")
@@ -2671,6 +2946,54 @@ class BackgroundJobsSqliteBackend:
         if conditions:
             where_clause = " WHERE " + " AND ".join(conditions)
 
+        return where_clause, params
+
+    def list_jobs_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        username: Optional[str] = None,
+    ) -> tuple:
+        """Return (list_of_job_dicts, total_count) with dynamic SQL WHERE filters.
+
+        Story #271: Filtered jobs query with pagination support.
+
+        Args:
+            status: Filter by exact status value (e.g. 'completed', 'failed')
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
+            limit: Maximum number of rows to return (None = no limit)
+            offset: Number of rows to skip for pagination (default 0)
+            username: When set, scope results to this owner's jobs (H2: non-admin scope)
+
+        Returns:
+            Tuple of (jobs: List[Dict], total_count: int) where total_count reflects
+            the full matching set ignoring limit/offset.
+        """
+        conn = self._conn_manager.get_connection()
+
+        base_select = """SELECT job_id, operation_type, status, created_at, started_at,
+                                completed_at, result, error, progress, username, is_admin,
+                                cancelled, repo_alias, resolution_attempts, claude_actions,
+                                failure_reason, extended_error, language_resolution_status,
+                                current_phase, phase_detail, progress_info, metadata,
+                                executing_node, claimed_at, actor_username
+                         FROM background_jobs"""
+
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+            exclude_ids=exclude_ids,
+        )
+
         # Count query (no LIMIT/OFFSET) for accurate total
         count_query = f"SELECT COUNT(*) FROM background_jobs{where_clause}"
         count_cursor = conn.execute(count_query, params)
@@ -2688,6 +3011,52 @@ class BackgroundJobsSqliteBackend:
         jobs = [self._row_to_dict(row) for row in cursor.fetchall()]
 
         return jobs, total_count
+
+    # Safety cap for list_job_ids_filtered: worst-case upper bound.
+    # At 14k jobs/day with 30-day retention the table holds ~420k rows; a cap
+    # of 50,000 is an order-of-magnitude ceiling that keeps the query bounded.
+    _JOB_IDS_CAP = 50_000
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set:
+        """Return the set of job_ids matching the given filters.
+
+        Uses the same WHERE clause as list_jobs_filtered (via
+        _build_jobs_filter_where) so the two methods cannot drift.
+
+        A safety cap (default _JOB_IDS_CAP = 50,000) is applied as LIMIT so
+        this query is always bounded regardless of table size.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match (same columns as list_jobs_filtered)
+            username: When set, scope results to this owner's jobs
+            cap: Override the default safety cap (for testing)
+
+        Returns:
+            set[str] of matching job_ids.
+        """
+        conn = self._conn_manager.get_connection()
+        effective_cap = cap if cap is not None else self._JOB_IDS_CAP
+
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+        )
+
+        query = f"SELECT job_id FROM background_jobs{where_clause} ORDER BY created_at DESC LIMIT ?"
+        params_with_cap = list(params) + [effective_cap]
+        cursor = conn.execute(query, params_with_cap)
+        return {row[0] for row in cursor.fetchall()}
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
@@ -2795,6 +3164,35 @@ class BackgroundJobsSqliteBackend:
             logger.info(f"Cleaned up {count} orphaned jobs on server startup")
         return count
 
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering.
+        Called by JobTracker._find_blocking_active_job_id after a unique-index
+        violation to locate the blocking row without risking a pagination miss
+        (Bug #1220).
+
+        Args:
+            operation_type: Operation type to match exactly.
+            repo_alias: Repository alias to match exactly.
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT job_id FROM background_jobs "
+            "WHERE operation_type = ? AND repo_alias = ? "
+            "AND status IN ('pending', 'running') LIMIT 1",
+            (operation_type, repo_alias),
+        )
+        row = cursor.fetchone()
+        return str(row[0]) if row is not None else None
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -2901,6 +3299,54 @@ class GitCredentialsSqliteBackend:
         if deleted:
             logger.debug(f"Deleted git credential {credential_id} for user={username}")
         return deleted
+
+    def update_encrypted_token(
+        self, credential_id: str, new_encrypted_token: str
+    ) -> None:
+        """Update the encrypted_token for a credential in-place (lazy re-encryption).
+
+        Used by GitCredentialManager when a fallback key decryption succeeds so the
+        token is re-encrypted with the canonical key for all future reads (Story #999).
+
+        When no matching row is found, logs a WARNING and returns without raising
+        (the credential may have been deleted concurrently; caller can continue safely).
+
+        Args:
+            credential_id: Primary key of the credential row. Must be non-empty.
+            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
+
+        Raises:
+            ValueError: If credential_id or new_encrypted_token are None or empty.
+        """
+        if not credential_id:
+            raise ValueError("credential_id must be a non-empty string")
+        if not new_encrypted_token:
+            raise ValueError("new_encrypted_token must be a non-empty string")
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE user_git_credentials SET encrypted_token = ? WHERE credential_id = ?",
+                (new_encrypted_token, credential_id),
+            )
+            return cursor.rowcount
+
+        rows_updated: int = self._conn_manager.execute_atomic(operation)
+        if rows_updated == 1:
+            logger.debug(
+                "Re-encrypted git credential %s with canonical key", credential_id
+            )
+        elif rows_updated == 0:
+            logger.warning(
+                "update_encrypted_token: no user_git_credentials row found for "
+                "credential_id %r — re-encryption skipped",
+                credential_id,
+            )
+        else:
+            logger.warning(
+                "update_encrypted_token: unexpected rowcount %d for credential_id %r",
+                rows_updated,
+                credential_id,
+            )
 
     def get_credential_for_host(
         self, username: str, forge_host: str
@@ -3218,6 +3664,32 @@ class LogsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def insert_log_batch(self, items: List[Any]) -> None:
+        """Insert a batch of log records in ONE transaction via executemany.
+
+        Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
+
+        Args:
+            items: List of 10-tuples in column order:
+                (timestamp, level, source, message, correlation_id,
+                 user_id, request_path, extra_data, node_id, alias)
+        """
+        if not items:
+            return
+
+        def operation(conn: Any) -> None:
+            conn.executemany(
+                """
+                INSERT INTO logs
+                    (timestamp, level, source, message, correlation_id,
+                     user_id, request_path, extra_data, node_id, alias)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                items,
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
     def _build_query_conditions(
         self,
         level: Optional[str],
@@ -3381,10 +3853,16 @@ class ApiMetricsSqliteBackend:
         conn = self._conn_manager.get_connection()
         conn.execute("PRAGMA journal_mode=WAL")
 
-        self._ensure_schema()
+        self._ensure_legacy_api_metrics_schema()
+        self._ensure_buckets_schema()
 
-    def _ensure_schema(self) -> None:
-        """Create the api_metrics table and indexes if they do not already exist."""
+    def _ensure_legacy_api_metrics_schema(self) -> None:
+        """Create the legacy api_metrics table and indexes if they do not already exist.
+
+        This table is no longer written to by the current code, but MUST remain
+        present for rolling-restart backward compatibility: old nodes in a cluster
+        still write to it.  Never drop this table.
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -3414,7 +3892,6 @@ class ApiMetricsSqliteBackend:
             )
 
         self._conn_manager.execute_atomic(operation)
-        self._ensure_buckets_schema()
 
     # Valid values for bucket fields — used in upsert_bucket validation
     _VALID_GRANULARITIES = frozenset({"min1", "min5", "hour1", "day1"})
@@ -3544,6 +4021,101 @@ class ApiMetricsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def upsert_buckets_batch(
+        self,
+        events: Any,
+        node_id: str = "",
+    ) -> None:
+        """Upsert MANY bucket increments in ONE transaction (Story #1083).
+
+        The background metrics writer drains the whole queue and calls this once
+        per drain instead of one BEGIN EXCLUSIVE transaction per metric event,
+        collapsing ~4N DB-wide-exclusive transactions into 1.
+
+        Args:
+            events: Iterable of dicts, each ``{"username": str, "metric_type": str,
+                "buckets": {granularity: bucket_start_iso, ...}}`` — one per drained
+                metric event. The four-tier bucket map is precomputed by the caller.
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+
+        Raises:
+            ValueError: If any event fails the same field validation as
+                ``upsert_bucket`` (username, granularity, metric_type, bucket_start,
+                node_id).
+
+        Counts are preserved exactly: repeated (username, granularity, bucket_start,
+        metric_type, node_id) keys within the batch are coalesced into a single
+        ``count + N`` increment so the total equals the number of events.
+        """
+        if not isinstance(node_id, str):
+            raise ValueError(f"node_id must be a string, got {node_id!r}")
+        if node_id != "" and not node_id.strip():
+            raise ValueError(f"node_id must not be whitespace-only, got {node_id!r}")
+
+        # Coalesce identical bucket keys into a single +N increment. Validation
+        # mirrors upsert_bucket so the batch path rejects exactly what the single
+        # path would (no silent acceptance of bad input — MESSI #13).
+        coalesced: Dict[Tuple[str, str, str, str], int] = {}
+        for event in events:
+            username = event["username"]
+            metric_type = event["metric_type"]
+            buckets = event["buckets"]
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError(
+                    f"username must be a non-empty string, got {username!r}"
+                )
+            if metric_type not in self._VALID_METRIC_TYPES:
+                raise ValueError(
+                    f"Invalid metric_type {metric_type!r}. "
+                    f"Must be one of: {sorted(self._VALID_METRIC_TYPES)}"
+                )
+            for granularity, bucket_start in buckets.items():
+                if granularity not in self._VALID_GRANULARITIES:
+                    raise ValueError(
+                        f"Invalid granularity {granularity!r}. "
+                        f"Must be one of: {sorted(self._VALID_GRANULARITIES)}"
+                    )
+                try:
+                    datetime.fromisoformat(bucket_start)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"bucket_start must be a valid ISO 8601 datetime string, "
+                        f"got {bucket_start!r}"
+                    )
+                key = (username, granularity, bucket_start, metric_type)
+                coalesced[key] = coalesced.get(key, 0) + 1
+
+        if not coalesced:
+            return
+
+        def operation(conn: Any) -> None:
+            for (
+                username,
+                granularity,
+                bucket_start,
+                metric_type,
+            ), inc in coalesced.items():
+                conn.execute(
+                    """
+                    INSERT INTO api_metrics_buckets
+                        (username, granularity, bucket_start, metric_type, node_id, count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(username, granularity, bucket_start, metric_type, node_id)
+                    DO UPDATE SET count = count + ?
+                    """,
+                    (
+                        username,
+                        granularity,
+                        bucket_start,
+                        metric_type,
+                        node_id,
+                        inc,
+                        inc,
+                    ),
+                )
+
+        self._conn_manager.execute_atomic(operation)
+
     def cleanup_expired_buckets(self) -> None:
         """Delete expired bucket rows per granularity retention policy.
 
@@ -3564,83 +4136,6 @@ class ApiMetricsSqliteBackend:
                 )
 
         self._conn_manager.execute_atomic(operation)
-
-    def insert_metric(
-        self,
-        metric_type: str,
-        timestamp: Optional[str] = None,
-        node_id: Optional[str] = None,
-    ) -> None:
-        """Insert a single metric record.
-
-        Args:
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
-            timestamp: ISO 8601 timestamp. Uses current UTC time when None.
-            node_id: Optional cluster node identifier (NULL in standalone).
-        """
-        now = (
-            timestamp
-            if timestamp is not None
-            else datetime.now(timezone.utc).isoformat()
-        )
-
-        def operation(conn: Any) -> None:
-            conn.execute(
-                "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
-                (metric_type, now, node_id),
-            )
-
-        self._conn_manager.execute_atomic(operation)
-
-    def get_metrics(
-        self,
-        window_seconds: int = 3600,
-        node_id: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Return metric counts within the rolling window.
-
-        Args:
-            window_seconds: Time window in seconds (default 3600 = 1 hour).
-            node_id: When provided, filter to metrics from this node only.
-                     When None, aggregate across all nodes.
-
-        Returns:
-            Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-        ).isoformat()
-
-        conn = self._conn_manager.get_connection()
-        if node_id is not None:
-            rows = conn.execute(
-                """
-                SELECT metric_type, COUNT(*) as count
-                FROM api_metrics
-                WHERE timestamp >= ? AND node_id = ?
-                GROUP BY metric_type
-                """,
-                (cutoff, node_id),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT metric_type, COUNT(*) as count
-                FROM api_metrics
-                WHERE timestamp >= ?
-                GROUP BY metric_type
-                """,
-                (cutoff,),
-            ).fetchall()
-
-        counts = {row[0]: row[1] for row in rows}
-        return {
-            "semantic_searches": counts.get("semantic", 0),
-            "other_index_searches": counts.get("other_index", 0),
-            "regex_searches": counts.get("regex", 0),
-            "other_api_calls": counts.get("other_api", 0),
-        }
 
     # Seconds in 24 hours — identifies the period that uses 2-hour grouping
     _PERIOD_24H_SECONDS: int = 86400
@@ -3831,39 +4326,11 @@ class ApiMetricsSqliteBackend:
 
         return [(row[0], row[1], int(row[2])) for row in rows]
 
-    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
-        """Delete metric records older than max_age_seconds.
-
-        Args:
-            max_age_seconds: Records older than this many seconds are deleted
-                             (default 86400 = 24 hours).
-
-        Returns:
-            Number of rows deleted.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
-        ).isoformat()
-
-        def operation(conn: Any) -> int:
-            cursor = conn.execute(
-                "DELETE FROM api_metrics WHERE timestamp < ?",
-                (cutoff,),
-            )
-            return int(cursor.rowcount)
-
-        deleted: int = self._conn_manager.execute_atomic(operation)
-        if deleted:
-            logger.debug(
-                "ApiMetricsSqliteBackend: cleaned up %d old metric records", deleted
-            )
-        return deleted
-
     def reset(self) -> None:
-        """Delete all metric records (used for testing / manual resets)."""
+        """Delete all bucket data (used for testing / manual resets)."""
 
         def operation(conn: Any) -> None:
-            conn.execute("DELETE FROM api_metrics")
+            conn.execute("DELETE FROM api_metrics_buckets")
 
         self._conn_manager.execute_atomic(operation)
 
@@ -3948,6 +4415,50 @@ class PayloadCacheSqliteBackend:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (cache_handle, content, preview, now, ttl_seconds, node_id),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def store_batch(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE atomic transaction.
+
+        Bug #1181: Batch all per-query stores into a single commit to avoid
+        N fsync'd commits per query saturating the WAL write lock.
+
+        Signature unified with PayloadCachePostgresBackend.store_batch so the
+        facade (PayloadCache) can delegate to either backend identically.
+        The facade is the sole handle authority — it generates UUID4 handles
+        and passes them in via entries.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+                     Handles are pre-generated by the facade.
+            node_id: Optional cluster node identifier (NULL in standalone).
+
+        Returns:
+            None (handles are pre-provided by the caller).
+        """
+        if not entries:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (handle, content, preview, now, ttl_secs, node_id)
+            for handle, content, preview, ttl_secs in entries
+        ]
+
+        def operation(conn: Any) -> None:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO payload_cache
+                    (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
 
         self._conn_manager.execute_atomic(operation)
@@ -6258,3 +6769,291 @@ class HiddenDiscoveryReposSqliteBackend:
             (repo_identifier,),
         )
         return cursor.fetchone() is not None
+
+
+class QueryEmbeddingCacheSqliteBackend:
+    """SQLite backend for query-embedding cache storage (Story #1105).
+
+    Stores float32 little-endian embedding blobs keyed by
+    (cache_key, provider, model, dimension).  Uses a dedicated DB file
+    so large BLOB writes do not contend with main server state.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """Initialize backend and create table/index if absent.
+
+        Args:
+            db_path: Path to SQLite database file
+                     (e.g. ~/.cidx-server/data/query_embedding_cache.db).
+        """
+        import os
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+        # WAL mode must be set outside any transaction.
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the query_embedding_cache table and index if absent."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS query_embedding_cache (
+                    cache_key  TEXT    NOT NULL,
+                    provider   TEXT    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    dimension  INTEGER NOT NULL,
+                    embedding  BLOB    NOT NULL,
+                    created_at REAL    NOT NULL,
+                    last_used  REAL    NOT NULL,
+                    PRIMARY KEY (cache_key, provider, model, dimension)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_qec_last_used
+                ON query_embedding_cache (last_used)
+                """
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def lookup(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+    ) -> Optional[bytes]:
+        """Return the stored embedding bytes (float32 LE) or None on miss."""
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            """
+            SELECT embedding FROM query_embedding_cache
+            WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+            """,
+            (cache_key, provider, model, dimension),
+        ).fetchone()
+        if row is None:
+            return None
+        return bytes(row[0])
+
+    def upsert(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        embedding: bytes,
+        created_at: float,
+        last_used: float,
+    ) -> None:
+        """Insert or update the embedding row (upserts on composite PK conflict)."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT INTO query_embedding_cache
+                    (cache_key, provider, model, dimension, embedding, created_at, last_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (cache_key, provider, model, dimension) DO UPDATE SET
+                    embedding  = excluded.embedding,
+                    last_used  = excluded.last_used
+                """,
+                (
+                    cache_key,
+                    provider,
+                    model,
+                    dimension,
+                    embedding,
+                    created_at,
+                    last_used,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def touch_last_used(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        last_used: float,
+    ) -> None:
+        """Update last_used for an existing row."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                UPDATE query_embedding_cache
+                SET last_used = ?
+                WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+                """,
+                (last_used, cache_key, provider, model, dimension),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def touch_last_used_batch(
+        self,
+        items: List[Tuple[str, str, str, int, float]],
+    ) -> None:
+        """Update last_used for multiple rows in a single atomic transaction.
+
+        Bug #1181 Perf Fix #2: drains the async touch flusher's coalescing buffer
+        in one executemany call, avoiding per-hit WAL lock contention.
+
+        Args:
+            items: List of (cache_key, provider, model, dimension, last_used) tuples.
+                Empty list is a no-op.
+        """
+        if not items:
+            return
+
+        # Reorder to (last_used, cache_key, provider, model, dimension) for the UPDATE
+        params = [
+            (last_used, cache_key, provider, model, dimension)
+            for cache_key, provider, model, dimension, last_used in items
+        ]
+
+        def operation(conn: Any) -> None:
+            conn.executemany(
+                """
+                UPDATE query_embedding_cache
+                SET last_used = ?
+                WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+                """,
+                params,
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def prune_to_max(self, max_entries: int) -> int:
+        """Delete rows beyond max_entries ordered by last_used ASC (deterministic tie-break).
+
+        Pure primitive — prunes to exactly max_entries rows.  The >=100 safe floor
+        is enforced by the caller at config resolution
+        (QueryEmbeddingCache._resolve_max_entries).
+
+        Uses a rowid-based DELETE with OFFSET so the entire eviction is a single
+        atomic statement.  The secondary sort ensures deterministic eviction when
+        last_used values are identical:
+            ORDER BY last_used ASC, created_at ASC, cache_key ASC,
+                     provider ASC, model ASC, dimension ASC
+
+        Args:
+            max_entries: Maximum rows to retain.  Caller is responsible for
+                         applying any minimum floor before passing this value.
+
+        Returns:
+            Number of rows actually deleted (0 when already within cap).
+        """
+        result: List[int] = [0]
+
+        def operation(conn: Any) -> None:
+            total_row = conn.execute(
+                "SELECT COUNT(*) FROM query_embedding_cache"
+            ).fetchone()
+            total = total_row[0] if total_row else 0
+
+            excess = total - max_entries
+            if excess <= 0:
+                result[0] = 0
+                return
+
+            # Delete the oldest ``excess`` rows — the ones with the smallest
+            # last_used values.  Secondary sort columns break ties deterministically
+            # so the eviction set is stable across concurrent callers.
+            cursor = conn.execute(
+                """
+                DELETE FROM query_embedding_cache
+                WHERE rowid IN (
+                    SELECT rowid FROM query_embedding_cache
+                    ORDER BY last_used ASC,
+                             created_at ASC,
+                             cache_key ASC,
+                             provider ASC,
+                             model ASC,
+                             dimension ASC
+                    LIMIT :excess
+                )
+                """,
+                {"excess": excess},
+            )
+            result[0] = cursor.rowcount if cursor.rowcount is not None else 0
+
+        self._conn_manager.execute_atomic(operation)
+        return result[0]
+
+    def total_entries(self) -> int:
+        """Return the total number of rows in the cache table."""
+        conn = self._conn_manager.get_connection()
+        row = conn.execute("SELECT COUNT(*) FROM query_embedding_cache").fetchone()
+        return row[0] if row else 0
+
+    def select_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most-recently-used rows as metadata dicts (NO embedding vectors).
+
+        Story #1149: admin cache-sample readout.  Returns recent rows ordered by
+        last_used DESC so callers can verify key shape without direct DB access.
+        NEVER includes the embedding column — no vectors, no secrets.
+
+        Args:
+            limit: Maximum number of rows to return (default 10).
+
+        Returns:
+            List of dicts with keys: cache_key, provider, model, dimension, key_length.
+            key_length is len(cache_key) computed DB-side for efficiency.
+            Empty list on any backend error (fail-open).
+        """
+        try:
+            conn = self._conn_manager.get_connection()
+            rows = conn.execute(
+                """
+                SELECT cache_key, provider, model, dimension,
+                       LENGTH(cache_key) AS key_length
+                FROM query_embedding_cache
+                ORDER BY last_used DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "cache_key": row[0],
+                    "provider": row[1],
+                    "model": row[2],
+                    "dimension": row[3],
+                    "key_length": row[4],
+                }
+                for row in rows
+            ]
+        except Exception:
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: select_recent failed (fail-open)",
+                exc_info=True,
+            )
+            return []
+
+    def clear(self) -> None:
+        """Delete all rows from the cache table."""
+
+        def operation(conn: Any) -> None:
+            conn.execute("DELETE FROM query_embedding_cache")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def clear_all(self) -> None:
+        """Delete all rows from the cache table (AC3 named method).
+
+        Idempotent: clearing an already-empty table is a no-op success.
+        """
+        self.clear()

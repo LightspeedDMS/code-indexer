@@ -276,6 +276,98 @@ class TestSeedNewRepoFromServerConfig:
         assert result["file_extensions"] == ["rs"]
 
 
+class TestCascadeDefeatsDriftDetection:
+    """Tests documenting the race condition between cascade and drift detection (Bug #1012).
+
+    Test 1 documents the bug: cascade pre-empts drift detection, causing sync to return None.
+    Test 2 proves drift IS detected correctly when cascade is not called.
+    """
+
+    def setup_method(self):
+        """Setup temp dirs and config service."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_dir = tempfile.mkdtemp()
+        self.config_service = ConfigService(server_dir_path=self.temp_dir)
+        self.config_service.load_config()
+
+    def teardown_method(self):
+        """Clean up."""
+        reset_config_service()
+        for d in [self.temp_dir, self.repo_dir]:
+            if os.path.exists(d):
+                shutil.rmtree(d)
+
+    def _make_mock_manager(self, repos, paths):
+        """Helper: create mock golden repo manager."""
+        manager = MagicMock()
+        manager.list_golden_repos.return_value = repos
+        manager.get_actual_repo_path.side_effect = lambda alias: paths.get(alias, "")
+        return manager
+
+    def test_cascade_then_drift_returns_none_race_condition(self):
+        """Bug #1012: cascade writes new extensions to repo config, then drift
+        detection finds no difference and returns None — new file types are never
+        indexed. This test documents the race condition (cascade pre-empts drift).
+        The test PASSES (documents bug behavior), it is NOT expected to change.
+        """
+        # Repo starts with old extensions
+        _write_cidx_config(self.repo_dir, ["py", "js"])
+        # Server gets new extensions (simulating Web UI save)
+        server_exts = [".py", ".js", ".go", ".ts"]
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
+
+        repos = [{"alias": "repo1"}]
+        mock_manager = self._make_mock_manager(repos, {"repo1": self.repo_dir})
+
+        with patch(
+            "code_indexer.server.repositories.golden_repo_manager.get_golden_repo_manager",
+            return_value=mock_manager,
+        ):
+            # Cascade immediately writes new extensions to repo config
+            self.config_service.cascade_indexable_extensions_to_repos()
+
+        # Now drift detection: repo config already matches server (cascade pre-empted it)
+        result = self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
+
+        # BUG: cascade defeated drift detection — sync returns None, --reconcile never triggered
+        assert result is None, (
+            "Expected None: cascade wrote extensions first, drift detection finds no difference. "
+            "This is Bug #1012 — new file types are silently never indexed."
+        )
+
+    def test_drift_detected_without_cascade(self):
+        """Bug #1012 fix verification: when cascade does NOT pre-empt drift detection,
+        sync correctly returns ExtensionDrift with the new extensions. The scheduler
+        can then trigger --reconcile to index new file types.
+        """
+        from code_indexer.server.services.config_service import ExtensionDrift
+
+        # Repo starts with old extensions
+        _write_cidx_config(self.repo_dir, ["py", "js"])
+        # Server gets new extensions (simulating Web UI save)
+        server_exts = [".py", ".js", ".go", ".ts"]
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
+
+        # No cascade call — drift detection runs directly on next refresh cycle
+        result = self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
+
+        # Drift IS detected: returns ExtensionDrift with the new extensions
+        assert isinstance(result, ExtensionDrift), (
+            f"Expected ExtensionDrift but got {result!r}. "
+            "Without cascade, drift detection correctly identifies the difference."
+        )
+        assert result.added == {"go", "ts"}, (
+            f"Expected added={{'go', 'ts'}} but got {result.added!r}"
+        )
+        assert result.removed == set(), (
+            f"Expected removed=set() but got {result.removed!r}"
+        )
+
+
 class TestRefreshSyncCorrectsDrift:
     """Tests for sync_repo_extensions_if_drifted() (AC7)."""
 

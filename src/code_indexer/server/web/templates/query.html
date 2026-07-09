@@ -157,12 +157,7 @@
                 <input type="text" id="at_commit" name="at_commit"
                     placeholder="commit hash or ref"
                     value="{{ at_commit or '' }}">
-
-                <label class="checkbox-label">
-                    <input type="checkbox" name="include_removed" value="true"
-                        {% if include_removed %}checked{% endif %}>
-                    Include removed files
-                </label>
+                <small class="field-hint">Scopes results to commits at or before this ref.</small>
             </fieldset>
 
             <!-- SCIP Query Options (shown only when SCIP mode selected) -->

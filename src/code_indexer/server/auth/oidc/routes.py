@@ -48,6 +48,16 @@ async def sso_callback(code: str, state: str, request: Request):
     else:
         callback_url = str(request.url_for("sso_callback"))
 
+    # Ensure provider is initialized on this worker (lazy-init for fresh workers
+    # that handle the callback without having served a login request first).
+    try:
+        await oidc_manager.ensure_provider_initialized()
+    except Exception as _exc:
+        raise HTTPException(
+            status_code=503,
+            detail="SSO provider is currently unavailable",
+        ) from _exc
+
     # Use appropriate code_verifier based on flow type
     code_verifier = state_data.get("oidc_code_verifier") or state_data.get(
         "code_verifier"

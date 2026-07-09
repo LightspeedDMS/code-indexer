@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,7 +41,8 @@ def _assert_ok_jsonrpc(resp, label: str) -> dict:
     )
     if resp.status_code != HTTP_OK:
         pytest.skip(f"{label}: HTTP {resp.status_code} (4xx is acceptable for E2E)")
-    body = resp.json()
+    # resp.json() returns Any; the JSON-RPC response is always a dict object.
+    body = cast(dict[Any, Any], resp.json())
     assert FIELD_JSONRPC in body, f"{label}: missing 'jsonrpc' in response"
     assert FIELD_RESULT in body or FIELD_ERROR in body, (
         f"{label}: neither 'result' nor 'error' in JSON-RPC body"
@@ -56,7 +58,8 @@ def _get_result_content(body: dict) -> dict:
         return {}
     text = content[0].get("text", "")
     try:
-        return json.loads(text)
+        # json.loads returns Any; MCP handler always returns a JSON object here.
+        return cast(dict[Any, Any], json.loads(text))
     except (json.JSONDecodeError, TypeError):
         return {"_raw": text}
 
@@ -122,9 +125,7 @@ class TestS987Guides:
         self, test_client: TestClient, auth_headers: dict
     ):
         """cidx_quick_reference() with no params returns full listing."""
-        resp = call_mcp_tool(
-            test_client, "cidx_quick_reference", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "cidx_quick_reference", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "quick_ref_no_params")
         inner = _get_result_content(body)
         assert inner.get("success") is True
@@ -133,9 +134,7 @@ class TestS987Guides:
         self, test_client: TestClient, auth_headers: dict
     ):
         """first_time_user_guide references repository_status, not global_repo_status."""
-        resp = call_mcp_tool(
-            test_client, "first_time_user_guide", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "first_time_user_guide", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "first_time_guide")
         raw_text = json.dumps(body)
         assert "repository_status" in raw_text, (
@@ -149,9 +148,7 @@ class TestS987Guides:
         self, test_client: TestClient, auth_headers: dict
     ):
         """get_tool_categories returns tools; descriptions should be compact."""
-        resp = call_mcp_tool(
-            test_client, "get_tool_categories", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "get_tool_categories", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "tool_categories")
         inner = _get_result_content(body)
         assert inner.get("success") is True
@@ -282,9 +279,7 @@ class TestS990RepositoryStatus:
         self, test_client: TestClient, auth_headers: dict
     ):
         """repository_status with no alias returns clean error."""
-        resp = call_mcp_tool(
-            test_client, "repository_status", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "repository_status", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "repo_status_no_alias")
         inner = _get_result_content(body)
         assert inner.get("success") is False
@@ -378,9 +373,7 @@ class TestS991CICD:
         self, test_client: TestClient, auth_headers: dict
     ):
         """ci_list_runs with no repository_alias returns clean error."""
-        resp = call_mcp_tool(
-            test_client, "ci_list_runs", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "ci_list_runs", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "ci_list_runs_no_alias")
         inner = _get_result_content(body)
         assert inner.get("success") is False
@@ -428,14 +421,10 @@ class TestS991CICD:
         self, test_client: TestClient, auth_headers: dict
     ):
         """ci_get_run with no params returns clean error."""
-        resp = call_mcp_tool(
-            test_client, "ci_get_run", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "ci_get_run", {}, auth_headers)
         _assert_no_500(resp, "ci_get_run_no_params")
 
-    def test_ci_get_run_nonexistent(
-        self, test_client: TestClient, auth_headers: dict
-    ):
+    def test_ci_get_run_nonexistent(self, test_client: TestClient, auth_headers: dict):
         """ci_get_run with unknown alias returns clean error."""
         resp = call_mcp_tool(
             test_client,
@@ -560,9 +549,7 @@ class TestS992SSHKeys:
         self, test_client: TestClient, auth_headers: dict
     ):
         """manage_ssh_key with no action returns clean error."""
-        resp = call_mcp_tool(
-            test_client, "manage_ssh_key", {}, auth_headers
-        )
+        resp = call_mcp_tool(test_client, "manage_ssh_key", {}, auth_headers)
         body = _assert_ok_jsonrpc(resp, "ssh_missing_action")
         inner = _get_result_content(body)
         assert inner.get("success") is False
@@ -582,10 +569,24 @@ class TestS992GroupMembers:
         )
         _assert_no_500(resp_create, "grp_create")
 
+        # manage_group_members uses _validate_group_id which expects a numeric
+        # group_id (int as string), not the group name.  create_group returns the
+        # numeric id in the "group_id" field; use it when the group was created.
+        # When group_manager is not configured, create_group returns success=False
+        # and group_id is absent — fall back to the name so the handler at least
+        # routes to the inner handler and returns its own "not configured" error.
+        create_inner = (
+            _get_result_content(resp_create.json())
+            if resp_create.status_code == HTTP_OK
+            else {}
+        )
+        numeric_group_id = create_inner.get("group_id")
+        group_id_arg = str(numeric_group_id) if numeric_group_id is not None else grp
+
         resp_add = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "add", "group_id": grp, "user_id": "admin"},
+            {"action": "add", "group_id": group_id_arg, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_add, "grp_add_member")
@@ -601,14 +602,12 @@ class TestS992GroupMembers:
         resp_rm = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "remove", "group_id": grp, "user_id": "admin"},
+            {"action": "remove", "group_id": group_id_arg, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_rm, "grp_remove_member")
 
-        call_mcp_tool(
-            test_client, "delete_group", {"group_name": grp}, auth_headers
-        )
+        call_mcp_tool(test_client, "delete_group", {"group_name": grp}, auth_headers)
 
     def test_manage_group_members_invalid_action(
         self, test_client: TestClient, auth_headers: dict
@@ -648,9 +647,7 @@ class TestS992GroupRepos:
         """Create group, add repo, remove repo, delete group."""
         grp = f"e2e_repo_grp_{uuid.uuid4().hex[:6]}"
 
-        call_mcp_tool(
-            test_client, "create_group", {"name": grp}, auth_headers
-        )
+        call_mcp_tool(test_client, "create_group", {"name": grp}, auth_headers)
 
         resp_add = call_mcp_tool(
             test_client,
@@ -668,9 +665,7 @@ class TestS992GroupRepos:
         )
         _assert_no_500(resp_rm, "grp_remove_repo")
 
-        call_mcp_tool(
-            test_client, "delete_group", {"group_name": grp}, auth_headers
-        )
+        call_mcp_tool(test_client, "delete_group", {"group_name": grp}, auth_headers)
 
     def test_manage_group_repos_invalid_action(
         self, test_client: TestClient, auth_headers: dict

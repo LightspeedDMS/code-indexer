@@ -6,6 +6,7 @@ feature parity and eliminate code duplication.
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -36,18 +37,84 @@ class GlobalRepoOperations:
         Args:
             golden_repos_dir: Path to golden repos directory
         """
-        # Lazy import to avoid circular dependency (Story #713)
-        from code_indexer.server.utils.registry_factory import (
-            get_server_global_registry,
-        )
-
         self.golden_repos_dir = Path(golden_repos_dir)
 
         # Ensure directory structure exists
         self.golden_repos_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize GlobalRegistry for accessing repo data (Story #713 - SQLite backend)
-        self.registry = get_server_global_registry(str(self.golden_repos_dir))
+        # Do NOT resolve the backend registry here — app.state.backend_registry
+        # is not yet populated at construction time during server startup.
+        # Resolution is deferred to the `registry` property (accessed at request
+        # time, when backend_registry is guaranteed to be set).
+        self._registry = None  # cache; None means "not yet resolved"
+        self._registry_lock = threading.Lock()
+
+    def _resolve_registry_backend(self):
+        """
+        Inspect app.state to determine the postgres backend object (if any).
+
+        Bug #1308 remediation item #4: delegates to the shared
+        resolve_backend_registry_state() helper (registry_factory.py) so
+        RefreshScheduler and GlobalActivator use the EXACT SAME resolution
+        logic instead of re-implementing the app.state introspection a
+        third time. That helper also fixes item #5: it uses a
+        sys.modules.get() lookup instead of a real import, so CLI usage of
+        GlobalRepoOperations (cli.py) never pays the cost of building the
+        whole FastAPI app just to discover "not in server mode, use SQLite".
+
+        Returns:
+            Tuple of (backend, postgres_mode_without_backend):
+            - backend: the postgres global_repos backend, or None for SQLite/CLI mode
+            - postgres_mode_without_backend: True when storage_mode=postgres but
+              backend_registry is not yet set on app.state (transient startup window)
+        """
+        from code_indexer.server.utils.registry_factory import (
+            resolve_backend_registry_state,
+        )
+
+        return resolve_backend_registry_state(caller_name="GlobalRepoOperations")
+
+    @property
+    def registry(self):
+        """
+        Lazily resolve the GlobalRegistry or PostgresGlobalRegistryAdapter.
+
+        Defers resolution to request time so that app.state.backend_registry
+        is guaranteed to be set in postgres/cluster mode.  In SQLite/CLI mode
+        falls back without warning.  Result is cached after first successful
+        resolution.  In postgres mode with backend not yet available, result is
+        NOT cached so the next request re-checks.
+
+        Double-checked locking (check, lock, re-check) prevents concurrent
+        threads from constructing duplicate instances in cacheable paths.  The
+        lock also serializes concurrent callers in the postgres-without-backend
+        transient window, though sequential re-accesses may each rebuild the
+        fallback until backend_registry is populated (intentional: cheap and
+        stateless).
+        """
+        if self._registry is not None:
+            return self._registry
+
+        with self._registry_lock:
+            # Re-check after acquiring the lock (double-checked locking).
+            if self._registry is not None:
+                return self._registry
+
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+            )
+
+            backend, postgres_mode_without_backend = self._resolve_registry_backend()
+            resolved = get_server_global_registry(
+                str(self.golden_repos_dir), backend=backend
+            )
+
+            # Cache unless in postgres mode without a backend yet.
+            if not postgres_mode_without_backend:
+                self._registry = resolved
+
+            return resolved
 
     def list_repos(self, filters: Optional[Dict] = None) -> List[Dict[str, Any]]:
         """
@@ -124,6 +191,13 @@ class GlobalRepoOperations:
             "enable_temporal": repo.get(
                 "enable_temporal", False
             ),  # Default to False for legacy repos
+            # Bug #1204: next_refresh and enable_scip are in the already-loaded record
+            # (both SQLite and PG backends SELECT these columns in get_repo/get_global_repo).
+            # No extra DB query — values come directly from the record fetched above.
+            "next_refresh": repo.get("next_refresh"),  # None when not scheduled
+            "enable_scip": repo.get(
+                "enable_scip", False
+            ),  # Default False for legacy repos
         }
 
     def get_config(self) -> Dict[str, Any]:

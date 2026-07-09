@@ -42,12 +42,16 @@ def test_chunk_type_filter_with_realistic_data():
 
     # Create realistic search results matching FilesystemVectorStore output
     # This is what the vector store returns: list of dicts with id, score, payload, chunk_text
+    # Story #1290 AC12: every chunk carries type="commit_chunk" + is_head --
+    # the old distinct "commit_message"/"commit_diff" `type` values no longer
+    # exist. chunk_type="commit_message" now maps onto is_head=True.
     semantic_results = [
         {
             "id": "test:commit:abc123:0",
             "score": 0.9,
             "payload": {
-                "type": "commit_message",  # This should match the filter
+                "type": "commit_chunk",
+                "is_head": True,  # head chunk -- matches chunk_type=commit_message
                 "commit_hash": "abc123",
                 "commit_timestamp": 1704153600,  # 2024-01-02 00:00:00 UTC
                 "commit_date": "2024-01-02",
@@ -58,18 +62,18 @@ def test_chunk_type_filter_with_realistic_data():
             "chunk_text": "Add exception logging infrastructure",
         },
         {
-            "id": "test:diff:def456:file.py:0",
+            "id": "test:commit:def456:1",
             "score": 0.85,
             "payload": {
-                "type": "commit_diff",  # This should NOT match the filter
-                "diff_type": "modified",
+                "type": "commit_chunk",
+                "is_head": False,  # non-head diff chunk -- must NOT match
                 "commit_hash": "def456",
                 "commit_timestamp": 1704240000,  # 2024-01-03 00:00:00 UTC
                 "commit_date": "2024-01-03",
                 "author_name": "Test User",
                 "author_email": "test@example.com",
-                "path": "file.py",
-                "chunk_index": 0,
+                "primary_path": "file.py",
+                "chunk_index": 1,
             },
             "chunk_text": "def authenticate():",
         },
@@ -83,16 +87,17 @@ def test_chunk_type_filter_with_realistic_data():
         chunk_type="commit_message",  # Filter to commit_message only
     )
 
-    # ASSERTION: Should return exactly 1 result (the commit_message)
+    # ASSERTION: Should return exactly 1 result (the head chunk)
     # Bug would cause this to return 0 results
     assert len(filtered_results) == 1, (
         f"Expected 1 commit_message result but got {len(filtered_results)} results. "
         f"Bug: chunk_type filter not working correctly."
     )
 
-    # VERIFICATION: The result should be the commit_message
-    assert filtered_results[0].metadata["type"] == "commit_message", (
-        f"Expected type='commit_message' but got type='{filtered_results[0].metadata['type']}'"
+    # VERIFICATION: The result should be the head chunk
+    assert filtered_results[0].metadata["is_head"] is True, (
+        f"Expected is_head=True but got is_head="
+        f"{filtered_results[0].metadata['is_head']}"
     )
     assert "exception logging" in filtered_results[0].content.lower(), (
         f"Expected commit message content but got: {filtered_results[0].content}"

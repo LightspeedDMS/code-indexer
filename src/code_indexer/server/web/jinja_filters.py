@@ -32,16 +32,22 @@ def relative_time(timestamp_str: str) -> str:
         "Jan 25, 14:30"
     """
     try:
-        # Parse ISO format timestamp
-        # Handle both +00:00 and Z suffix for UTC
-        if timestamp_str.endswith("Z"):
-            timestamp_str = timestamp_str[:-1] + "+00:00"
+        # PG returns native datetime objects; SQLite returns strings.
+        if isinstance(timestamp_str, datetime):
+            timestamp_dt = timestamp_str
+            if timestamp_dt.tzinfo is None:
+                timestamp_dt = timestamp_dt.replace(tzinfo=timezone.utc)
+        else:
+            # Parse ISO format timestamp
+            # Handle both +00:00 and Z suffix for UTC
+            if timestamp_str.endswith("Z"):
+                timestamp_str = timestamp_str[:-1] + "+00:00"
 
-        timestamp_dt = datetime.fromisoformat(timestamp_str)
+            timestamp_dt = datetime.fromisoformat(timestamp_str)
 
-        # Ensure timezone-aware comparison
-        if timestamp_dt.tzinfo is None:
-            timestamp_dt = timestamp_dt.replace(tzinfo=timezone.utc)
+            # Ensure timezone-aware comparison
+            if timestamp_dt.tzinfo is None:
+                timestamp_dt = timestamp_dt.replace(tzinfo=timezone.utc)
 
         now = datetime.now(timezone.utc)
         delta = now - timestamp_dt

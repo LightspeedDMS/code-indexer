@@ -59,9 +59,6 @@ ALL_PARAMETERS = {
     "time_range",
     "time_range_all",
     "at_commit",
-    "include_removed",
-    "show_evolution",
-    "evolution_limit",
     # Temporal filtering parameters (Phase 3)
     "diff_type",
     "author",
@@ -69,14 +66,17 @@ ALL_PARAMETERS = {
     # Omni-search parameters (Story #521)
     "aggregation_mode",
     "exclude_patterns",
+    # Reranker parameters (Bug #1209: added to REST for CLI+REST+MCP parity)
+    "rerank_query",
+    "rerank_instruction",
+    # Temporal embedder override (Story #1291 AC7/AC8: added to REST/MCP for
+    # CLI+REST+MCP parity -- code-review Finding 2)
+    "temporal_embedder",
 }
 
 # CLI-specific: subset of parameters (some temporal params are API-only)
 CLI_EXPECTED_PARAMETERS = ALL_PARAMETERS - {
     "at_commit",  # API-only: not exposed in CLI
-    "include_removed",  # API-only: not exposed in CLI
-    "show_evolution",  # API-only: not exposed in CLI
-    "evolution_limit",  # API-only: not exposed in CLI
     "aggregation_mode",  # API-only: omni-search aggregation mode
     "exclude_patterns",  # API-only: omni-search repository exclusion
 }
@@ -175,19 +175,21 @@ class TestQueryParameterParity:
     def test_total_parameter_count(self):
         """Verify total number of expected query parameters."""
         # Should have exactly 26 query parameters (excluding repository_alias, async_query)
-        # Updated from 24 to 26 after adding omni-search parameters (aggregation_mode, exclude_patterns)
+        # Updated from 29 to 26 after Bug #1301 retired include_removed,
+        # show_evolution, and evolution_limit (permanent no-ops on the
+        # per-commit temporal index -- removed entirely, not implemented).
         assert len(ALL_PARAMETERS) == 26, (
             f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
         )
 
-        # CLI should have 20 parameters (subset of all parameters)
-        # Updated from 19 to 20: file_extensions now exposed in CLI (Story #653)
-        assert len(CLI_EXPECTED_PARAMETERS) == 20, (
-            f"Expected 20 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        # CLI should have 23 parameters (subset of all parameters)
+        # Unaffected by Bug #1301 -- the 3 retired params were already CLI-excluded.
+        assert len(CLI_EXPECTED_PARAMETERS) == 23, (
+            f"Expected 23 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
         )
 
         # REST/MCP should have all 26 parameters
-        # Updated from 24 to 26 after adding omni-search parameters
+        # Updated from 29 to 26 after Bug #1301 retirement.
         assert len(API_EXPECTED_PARAMETERS) == 26, (
             f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
         )
@@ -256,6 +258,8 @@ class TestQueryParameterParity:
         normalized_expected.add(
             "rerank_instruction"
         )  # Story #653: reranker instruction
+        # temporal_embedder is in ALL_PARAMETERS (CLI+REST+MCP, Story #1291) --
+        # no CLI-specific exception needed.
 
         extra = cli_params - normalized_expected
 
@@ -269,6 +273,9 @@ class TestQueryParameterParity:
         normalized_expected = API_EXPECTED_PARAMETERS.copy()
         normalized_expected.discard("query")
         normalized_expected.add("query_text")
+        # Story #1108: per-request server query-embedding-cache shortcut.
+        # REST/MCP-only control (no CLI equivalent — the CLI has no server cache).
+        normalized_expected.add("no_embedding_cache_shortcut")
 
         extra = rest_params - normalized_expected
 
@@ -286,13 +293,15 @@ class TestQueryParameterParity:
         # MCP-only parameters (not in REST, but intentionally MCP-only)
         # response_format: Story #582 - omni-search result grouping (flat vs grouped)
         normalized_expected.add("response_format")
-        # Story #653: reranker parameters exposed in MCP (REST parity pending)
-        normalized_expected.add("rerank_query")
-        normalized_expected.add("rerank_instruction")
         # Story #653: provider selection and fusion strategy (MCP-only for now)
         normalized_expected.add("preferred_provider")
         normalized_expected.add("query_strategy")
         normalized_expected.add("score_fusion")
+        # Story #1108: per-request server query-embedding-cache shortcut (REST + MCP).
+        normalized_expected.add("no_embedding_cache_shortcut")
+        # NOTE: rerank_query and rerank_instruction were MCP-only before Bug #1209;
+        # they are now in API_EXPECTED_PARAMETERS (CLI+REST+MCP parity) and need no
+        # special exception here.
 
         extra = mcp_params - normalized_expected
 
@@ -305,12 +314,11 @@ class TestQueryParameterParity:
 
         # MCP-only parameters that are intentionally not in REST
         # response_format: Story #582 - omni-search result grouping
-        # rerank_query, rerank_instruction: Story #653 - reranker (REST parity pending)
         # preferred_provider, query_strategy, score_fusion: Story #653 - provider/fusion (MCP-only)
+        # NOTE: rerank_query and rerank_instruction were MCP-only before Bug #1209;
+        # they are now full parity params (CLI+REST+MCP) and no longer listed here.
         mcp_only_params = {
             "response_format",
-            "rerank_query",
-            "rerank_instruction",
             "preferred_provider",
             "query_strategy",
             "score_fusion",
@@ -420,9 +428,6 @@ class TestQueryParameterParity:
         all_temporal_params = {
             "time_range",
             "at_commit",
-            "include_removed",
-            "show_evolution",
-            "evolution_limit",
         }
 
         # CLI only has time_range (others are API-only)

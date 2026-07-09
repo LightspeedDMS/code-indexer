@@ -45,13 +45,9 @@ API_TIMEOUT_SECONDS = 30.0
 # Timeout for SSH connectivity checks (seconds) - Story S5 AC6
 SSH_TIMEOUT_SECONDS = 60.0
 
-# Timeout for Claude CLI feedback generation (seconds) - Story S7
-CLAUDE_CLI_TIMEOUT_SECONDS = 30.0
-
 # Cache TTL by category (per epic spec)
 DEFAULT_CACHE_TTL = timedelta(minutes=10)  # General diagnostics
 API_CACHE_TTL = timedelta(minutes=5)  # External API validations (AC8)
-FEEDBACK_CACHE_TTL = timedelta(hours=1)  # Claude feedback cache (Story S7 AC6)
 
 # HNSW index validation constants (Bug #147)
 DEFAULT_HNSW_MAX_ELEMENTS = (
@@ -163,8 +159,6 @@ class DiagnosticsService:
         self._running = False
         self._running_categories: set = set()
         self.__lock: Optional[asyncio.Lock] = None
-        # Feedback cache: cache_key -> (timestamp, feedback_text)
-        self._feedback_cache: Dict[str, Tuple[datetime, str]] = {}
         self._backend = storage_backend
 
         # Database path for persistence
@@ -2113,107 +2107,3 @@ class DiagnosticsService:
                 f"Unexpected error checking database: {str(e)}",
                 {"error_type": type(e).__name__},
             )
-
-    async def get_actionable_feedback(self, result: DiagnosticResult) -> Optional[str]:
-        """
-        Get Claude-generated troubleshooting guidance for failed diagnostic.
-
-        Only generates feedback for ERROR status diagnostics. Uses 1-hour cache
-        to avoid redundant Claude calls for the same error.
-
-        Args:
-            result: DiagnosticResult with ERROR status
-
-        Returns:
-            Troubleshooting guidance string, or None if not ERROR status
-        """
-        # Only generate feedback for ERROR status (AC7)
-        if result.status != DiagnosticStatus.ERROR:
-            return None
-
-        # Check cache (AC6: 1-hour TTL)
-        cache_key = f"{result.name}:{result.message}"
-        if cache_key in self._feedback_cache:
-            cached_time, cached_feedback = self._feedback_cache[cache_key]
-            if datetime.now() - cached_time < FEEDBACK_CACHE_TTL:
-                return cached_feedback
-
-        # Load prompt template (AC1, AC2)
-        template = self._load_prompt_template("diagnostic_troubleshooting.txt")
-
-        # Format prompt with diagnostic details (AC5)
-        prompt = template.format(
-            diagnostic_name=result.name,
-            diagnostic_status=result.status.value,
-            diagnostic_message=result.message,
-            diagnostic_details=json.dumps(result.details),
-        )
-
-        # Get feedback from Claude (AC4)
-        feedback = await self._execute_claude_prompt(prompt)
-
-        # Cache result (AC6)
-        self._feedback_cache[cache_key] = (datetime.now(), feedback)
-
-        return feedback
-
-    def _load_prompt_template(self, template_name: str) -> str:
-        """
-        Load prompt template from feedback/prompts/ directory.
-
-        Args:
-            template_name: Name of template file (e.g., "diagnostic_troubleshooting.txt")
-
-        Returns:
-            Template content as string
-
-        Raises:
-            FileNotFoundError: If template file doesn't exist
-        """
-        template_path = (
-            Path(__file__).parent.parent / "feedback" / "prompts" / template_name
-        )
-        if not template_path.exists():
-            raise FileNotFoundError(f"Prompt template not found: {template_path}")
-        return template_path.read_text()
-
-    async def _execute_claude_prompt(self, prompt_text: str) -> str:
-        """
-        Execute Claude CLI with provided prompt text.
-
-        Args:
-            prompt_text: Prompt to send to Claude
-
-        Returns:
-            Claude's response text, or error message if execution fails
-        """
-        try:
-            # Execute Claude CLI (similar to SCIP self-healing approach)
-            process = await asyncio.wait_for(
-                asyncio.create_subprocess_exec(
-                    "claude",
-                    "--output-format",
-                    "text",
-                    "--prompt",
-                    prompt_text,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                ),
-                timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=CLAUDE_CLI_TIMEOUT_SECONDS
-            )
-
-            if process.returncode == 0:
-                return stdout.decode("utf-8", errors="replace").strip()
-            else:
-                return f"Error generating feedback: Claude CLI returned exit code {process.returncode}"
-
-        except asyncio.TimeoutError:
-            return f"Error generating feedback: Claude CLI timed out after {CLAUDE_CLI_TIMEOUT_SECONDS} seconds"
-        except FileNotFoundError:
-            return "Error generating feedback: Claude CLI not found or not available"
-        except Exception as e:
-            return f"Error generating feedback: {str(e)}"

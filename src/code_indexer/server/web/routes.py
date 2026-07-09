@@ -7,18 +7,23 @@ Provides admin web interface routes for CIDX server administration.
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import html
 import json
 import logging
 import os
 import re as _re
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
 from urllib.parse import quote, urlparse
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from fastapi import (
@@ -59,6 +64,9 @@ UNASSIGNED_CATEGORY_PRIORITY = (
 # Discovery enrichment limit (Story #754): max clone_urls per enrich request
 MAX_ENRICH_CLONE_URLS = 50
 
+# Story #1157: Result cache for background discovery jobs.
+# Maps job_id -> result_holder dict. Consumed read-once via .pop().
+
 # Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
 # outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
 # so the Python-level watchdog always outlives the shell kill budget.
@@ -78,21 +86,39 @@ RESTART_REQUIRED_FIELDS = [
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
+    "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
+    "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
 ]
 
 
 def _get_token_manager() -> CITokenManager:
-    """Create CITokenManager using shared factory (Bug #639)."""
+    """Create CITokenManager using shared factory (Bug #639, Finding 2 — Story #999)."""
     from ..services.config_service import get_config_service
     from ..services.ci_token_manager import create_token_manager
 
     config_service = get_config_service()
+    config = config_service.get_config()
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
+    storage_mode = config.storage_mode
+
+    storage_backend = None
+    if storage_mode == "postgres":
+        if not config.postgres_dsn:
+            raise ValueError(
+                "_get_token_manager: storage_mode is 'postgres' but postgres_dsn is not configured"
+            )
+        from ..storage.postgres.connection_pool import ConnectionPool
+        from ..storage.postgres.ci_tokens_backend import CITokensPostgresBackend
+
+        pool = ConnectionPool(config.postgres_dsn, name="ci-tokens")
+        storage_backend = CITokensPostgresBackend(pool)
 
     return create_token_manager(
         server_dir=str(server_dir),
         db_path=str(db_path),
+        storage_backend=storage_backend,
+        storage_mode=storage_mode,
     )
 
 
@@ -198,6 +224,12 @@ _VALID_CONFIG_SECTIONS = (
     "cidx_meta_backup",
     # Story #997 - Pace-maker pacing-only enforcement
     "pace_maker",
+    # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
+    "query_embedding_cache",
+    # Story #1159 - Search event log data retention config
+    "search_event_log",
+    # Issue #1160 - Export retention config
+    "export",
 )
 
 
@@ -336,12 +368,60 @@ def get_csrf_token_from_cookie(request: Request) -> Optional[str]:
 # See login_router below for unified login implementation
 
 
+def _extract_jti_from_request(request: Request) -> "Optional[str]":
+    """Extract the JWT jti claim from an incoming request.
+
+    Checks the Authorization: Bearer <token> header first, then falls back
+    to the CIDX_SESSION_COOKIE cookie.  Returns None (never raises) when:
+      - no token is present
+      - the token is malformed or expired (expected at logout time)
+      - jwt_manager is not initialized
+      - any unexpected error occurs (logged at DEBUG)
+    """
+    from ..auth.dependencies import CIDX_SESSION_COOKIE
+    from ..auth import dependencies as _deps
+    from ..auth.jwt_manager import TokenExpiredError, InvalidTokenError
+
+    try:
+        _jm = _deps.jwt_manager
+        if _jm is None:
+            return None
+
+        # Try Authorization header first (REST/MCP clients)
+        token: Optional[str] = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer ") :]
+
+        # Fall back to session cookie (Web UI)
+        if not token:
+            token = request.cookies.get(CIDX_SESSION_COOKIE)
+
+        if not token:
+            return None
+
+        payload = _jm.validate_token(token)
+        return payload.get("jti")
+
+    except (TokenExpiredError, InvalidTokenError):
+        # Expected: token is expired or malformed; jti cannot be extracted.
+        # This is normal — the client's token may already be invalid.
+        return None
+    except Exception:
+        logger.debug(
+            "_extract_jti_from_request: unexpected error extracting jti",
+            exc_info=True,
+        )
+        return None
+
+
 @web_router.get("/logout")
 def logout(request: Request):
     """
     Logout and clear session.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -358,6 +438,24 @@ def logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(
@@ -576,7 +674,7 @@ def dashboard_stats_partial(
         request: HTTP request
         time_filter: Time filter for job stats ("24h", "7d", "30d")
         recent_filter: Time filter for recent activity ("24h", "7d", "30d")
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -603,6 +701,12 @@ def dashboard_stats_partial(
         api_metrics_backend=_api_metrics_backend,
     )
 
+    # AC1: Compute active deactivations count for the dashboard tile
+    _job_manager = _get_background_job_manager()
+    active_deactivations = (
+        _job_manager.count_active_deactivations() if _job_manager else 0
+    )
+
     return templates.TemplateResponse(
         "partials/dashboard_stats.html",
         {
@@ -614,6 +718,7 @@ def dashboard_stats_partial(
             "time_filter": time_filter,
             "recent_filter": recent_filter,
             "api_filter": api_filter,
+            "active_deactivations": active_deactivations,
         },
     )
 
@@ -711,7 +816,7 @@ def dashboard_api_metrics_partial(
 
     Args:
         request: HTTP request
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -721,7 +826,7 @@ def dashboard_api_metrics_partial(
         return HTMLResponse(content="", status_code=401)
 
     # Story #503 AC1: Use backend_registry.api_metrics for cluster-wide aggregation.
-    # In cluster (postgres) mode get_metrics(node_id=None) aggregates all nodes.
+    # In cluster (postgres) mode get_metrics_bucketed(node_id=None) aggregates all nodes.
     # In standalone mode the SQLite backend reads the local data — identical behaviour.
     backend_registry = getattr(request.app.state, "backend_registry", None)
     api_metrics_backend = (
@@ -775,6 +880,165 @@ def dashboard_api_metrics_partial(
     )
 
 
+@web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
+def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400):
+    """Story #1109 (S5) / Story #1294: Query-embedding cache metrics partial.
+
+    Returns an HTML fragment showing total cached entries plus windowed,
+    cluster-aggregated cache statistics for the selected time window. Every
+    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT) and
+    On-Mode Hit Rate (Issue #1257, request-denominated from search_event_log)
+    is sourced from WindowedCacheMetrics — a GROUP BY (cache_mode, provider)
+    aggregation over the durable, phantom-free `search_embed_event` table
+    (Story #1293), computed for `[now - cache_window, now)`. This replaces
+    the old in-memory QueryEmbeddingCacheMetrics/CoalescerRegistry per-node,
+    volatile tallies (Story #1294) — the numbers are now durable, windowed,
+    and aggregated across every cluster node by construction (the backend
+    reads the shared store, never a per-node counter).
+
+    Args:
+        request: HTTP request.
+        cache_window: Time window in seconds for the windowed cache metrics
+            (default 86400 == 24h), mirroring the api_filter convention.
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    import types
+
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    # total_entries: reuse the same helper used by the config-page readout so the
+    # dashboard and the config page always show the same live count. Cache
+    # Entries is current cache STATE, not an event — it is NEVER windowed.
+    total_entries = _get_qec_total_entries()
+
+    # Story #1294: WindowedCacheMetrics — durable, windowed, cluster-aggregated.
+    # Fail-open: any error (writer absent, backend raises) falls back to
+    # empty_windowed_result() so the dashboard never breaks (AC5).
+    from code_indexer.server.services.windowed_cache_metrics import (
+        empty_windowed_result,
+    )
+
+    to_ts = time.time()
+    from_ts = to_ts - cache_window
+    see_writer = getattr(request.app.state, "search_embed_event_writer", None)
+    see_backend = see_writer.backend if see_writer is not None else None
+    if see_backend is not None:
+        try:
+            windowed = see_backend.get_windowed_metrics(from_ts, to_ts)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_windowed_metrics failed: %s",
+                _exc,
+            )
+            windowed = empty_windowed_result()
+    else:
+        windowed = empty_windowed_result()
+
+    overall = windowed.overall
+    shadow_agg = windowed.by_cache_mode.get("shadow")
+    if shadow_agg is None:
+        from code_indexer.server.services.windowed_cache_metrics import (
+            CacheMetricsAggregate,
+        )
+
+        shadow_agg = CacheMetricsAggregate()
+
+    shadow_hits = shadow_agg.hits
+    shadow_requests = shadow_agg.hits + shadow_agg.misses
+    shadow_cosine_p50 = shadow_agg.shadow_cosine_p50
+    shadow_cosine_p05 = shadow_agg.shadow_cosine_p05
+    shadow_cosine_min = shadow_agg.shadow_cosine_min
+    shadow_cosine_histogram = shadow_agg.shadow_cosine_histogram
+
+    long_key = overall.long_key
+    audit_total = overall.audit_count
+    audit_overlap_avg = overall.audit_avg if overall.audit_count > 0 else None
+
+    coalescer_texts_coalesced = overall.texts_coalesced
+    coalescer_batches_dispatched = overall.batches
+    coalescer_dedup_savings = overall.dedup
+    coalescer_provider_embed_calls = overall.provider_embed_calls
+
+    # Issue #1257: On-Mode Hit Rate must be REQUEST-denominated (one row per
+    # user request in search_event_log), NOT operation-denominated. This is
+    # UNCHANGED by Story #1294 — it stays sourced from search_event_log's
+    # get_hit_rate_counts, which aggregates REQUESTS (rows), matching the
+    # analytics denominator. Fail-open: on_hits/on_requests stay at 0 when
+    # the writer is not wired or the query fails.
+    on_hits = 0
+    on_requests = 0
+    sel_writer = getattr(request.app.state, "search_event_log_writer", None)
+    sel_backend = sel_writer.backend if sel_writer is not None else None
+    if sel_backend is not None:
+        try:
+            _on_counts = sel_backend.get_hit_rate_counts("on")
+            on_hits = _on_counts.get("hits", 0)
+            on_requests = _on_counts.get("requests", 0)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_hit_rate_counts failed: %s",
+                _exc,
+            )
+
+    cache_metrics = types.SimpleNamespace(
+        total_entries=total_entries,
+        shadow_hits=shadow_hits,
+        shadow_requests=shadow_requests,
+        on_hits=on_hits,
+        on_requests=on_requests,
+        shadow_cosine_p50=shadow_cosine_p50,
+        shadow_cosine_histogram=shadow_cosine_histogram,
+        shadow_cosine_min=shadow_cosine_min,
+        shadow_cosine_p05=shadow_cosine_p05,
+        audit_total=audit_total,
+        audit_overlap_avg=audit_overlap_avg,
+        long_key=long_key,
+        # Story #1146 dedup counters — now windowed (Story #1294), not
+        # per-node in-memory coalescer tallies.
+        coalescer_texts_coalesced=coalescer_texts_coalesced,
+        coalescer_batches_dispatched=coalescer_batches_dispatched,
+        coalescer_dedup_savings=coalescer_dedup_savings,
+        coalescer_provider_embed_calls=coalescer_provider_embed_calls,
+    )
+
+    # Resolve the current node identifier — retained for any node-scoped UX
+    # elsewhere on the page; the cache-metrics cards themselves are no longer
+    # per-node (Story #1294 made them cluster-aggregated).
+    node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
+
+    # Story #1152: precompute log10-scaled bar percentages in Python so the
+    # template never needs the nonexistent Jinja `log` filter (which causes a
+    # 500 on any populated histogram bucket).
+    # histogram_bars is a list of dicts: {lo, hi, count, bar_pct (0-100 int)}.
+    # bar_pct is log10(count+1) normalised to the max bucket's log10 value.
+    # Empty histogram or all-zero counts -> all bar_pct=0 (no division).
+    import math
+
+    histogram_bars: List[Dict[str, Any]] = []
+    if shadow_cosine_histogram:
+        bars_log = [math.log10(c + 1) for (_, _, c) in shadow_cosine_histogram]
+        max_bar = max(bars_log) if bars_log else 0.0
+        for (lo, hi, count), blog in zip(shadow_cosine_histogram, bars_log):
+            bar_pct = round(100 * blog / max_bar) if max_bar > 0 else 0
+            histogram_bars.append(
+                {"lo": lo, "hi": hi, "count": count, "bar_pct": bar_pct}
+            )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_cache_metrics.html",
+        {
+            "request": request,
+            "cache_metrics": cache_metrics,
+            "node_id": node_id,
+            "histogram_bars": histogram_bars,
+            "cache_window": cache_window,
+        },
+    )
+
+
 @web_router.get("/partials/dashboard-langfuse", response_class=HTMLResponse)
 def dashboard_langfuse_partial(request: Request):
     """
@@ -801,6 +1065,56 @@ def dashboard_langfuse_partial(request: Request):
             "langfuse": langfuse_data,
         },
     )
+
+
+@web_router.get("/admin/cache-sample")
+def admin_cache_sample(
+    request: Request,
+    limit: int = Query(
+        20,
+        ge=1,
+        le=200,
+        description="Number of recent cache rows to return (default 20, max 200).",
+    ),
+):
+    """Story #1149: Admin cache-sample readout.
+
+    Returns the most-recently-used rows from the query-embedding cache as
+    metadata-only tuples: (cache_key, provider, model, dimension, key_length).
+    NEVER returns embedding vectors or any secret material.
+
+    This endpoint enables cluster E2E verification of the key shape (including
+    the 's:<config-digest>:' prefix) without requiring direct database access.
+
+    Requires admin session.  Returns JSON.
+
+    Args:
+        request: HTTP request.
+        limit: Number of recent rows to return (1-200, default 20).
+
+    Returns:
+        JSON: {"rows": [...], "count": int}  where each row is a dict with
+        keys: cache_key, provider, model, dimension, key_length.
+    """
+    from fastapi.responses import JSONResponse
+
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+
+    rows = []
+    try:
+        from code_indexer.server.services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is not None:
+            backend = cache._backend  # type: ignore[attr-defined]
+            if hasattr(backend, "select_recent"):
+                rows = backend.select_recent(limit=limit)
+    except Exception as exc:
+        logger.warning("admin_cache_sample: failed to fetch rows (fail-open): %s", exc)
+
+    return JSONResponse(content={"rows": rows, "count": len(rows)})
 
 
 @web_router.get("/partials/dashboard-api-per-user", response_class=HTMLResponse)
@@ -1048,14 +1362,56 @@ def _create_users_page_response(
     return response
 
 
+_USERS_PAGE_SUCCESS_MESSAGES = {
+    "user_deleted": "User '{u}' deleted successfully",
+    "user_created": "User '{u}' created successfully",
+    "role_updated": "Role for '{u}' updated successfully",
+    "email_updated": "Email for '{u}' updated successfully",
+    "password_changed": "Password for '{u}' changed successfully",
+}
+
+_USERS_PAGE_ERROR_MESSAGES = {
+    "invalid_csrf": "Invalid CSRF token",
+    "cannot_delete_self": "Cannot delete your own account",
+    "user_manager_unavailable": "User manager not available",
+    "passwords_mismatch": "Passwords do not match",
+    "invalid_role": "Invalid role",
+    "cannot_demote_self": "Cannot demote your own admin account",
+    "sso_password_change_denied": "Cannot change password for SSO users. Authentication is managed by the identity provider.",
+    "user_not_found": "User not found",
+    "operation_failed": "Operation failed. Check input and try again.",
+}
+
+
+def _resolve_users_page_messages(
+    success: Optional[str], error: Optional[str], u: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Whitelist-map PRG query params to user-facing success/error messages."""
+    success_message: Optional[str] = None
+    error_message: Optional[str] = None
+    if success and success in _USERS_PAGE_SUCCESS_MESSAGES:
+        success_message = _USERS_PAGE_SUCCESS_MESSAGES[success].format(u=u or "")
+    if error and error in _USERS_PAGE_ERROR_MESSAGES:
+        error_message = _USERS_PAGE_ERROR_MESSAGES[error]
+    return success_message, error_message
+
+
 @web_router.get("/users", response_class=HTMLResponse)
-def users_page(request: Request):
+def users_page(
+    request: Request,
+    success: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    u: Optional[str] = Query(None),
+):
     """Users management page - list all users with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
 
-    return _create_users_page_response(request, session)
+    success_message, error_message = _resolve_users_page_messages(success, error, u)
+    return _create_users_page_response(
+        request, session, success_message=success_message, error_message=error_message
+    )
 
 
 @web_router.post(
@@ -1071,36 +1427,34 @@ def create_user(
     role: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Create a new user."""
+    """Create a new user (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Validate password match
     if new_password != confirm_password:
-        return _create_users_page_response(
-            request, session, error_message="Passwords do not match"
+        return RedirectResponse(
+            url="/admin/users?error=passwords_mismatch", status_code=303
         )
 
     # Validate role
     try:
         role_enum = UserRole(role)
     except ValueError:
-        return _create_users_page_response(
-            request, session, error_message=f"Invalid role: {role}"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_role", status_code=303)
 
     # Create user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1138,13 +1492,14 @@ def create_user(
                 )
             )
 
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"User '{new_username}' created successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=user_created&u={quote(new_username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1158,47 +1513,46 @@ def update_user_role(
     role: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Update a user's role."""
+    """Update a user's role (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Prevent demoting self
     if username == session.username and role != "admin":
-        return _create_users_page_response(
-            request, session, error_message="Cannot demote your own admin account"
+        return RedirectResponse(
+            url="/admin/users?error=cannot_demote_self", status_code=303
         )
 
     # Validate role
     try:
         role_enum = UserRole(role)
     except ValueError:
-        return _create_users_page_response(
-            request, session, error_message=f"Invalid role: {role}"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_role", status_code=303)
 
     # Update user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
         user_manager.update_user_role(username, role_enum)
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"User '{username}' role updated successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1213,46 +1567,46 @@ def change_user_password(
     confirm_password: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Change a user's password (admin only)."""
+    """Change a user's password (admin only). PRG: redirects to /admin/users."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Validate password match
     if new_password != confirm_password:
-        return _create_users_page_response(
-            request, session, error_message="Passwords do not match"
+        return RedirectResponse(
+            url="/admin/users?error=passwords_mismatch", status_code=303
         )
 
     # Change password
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
         user_manager.change_password(username, new_password)
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"Password for '{username}' changed successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=password_changed&u={quote(username, safe='')}",
+            status_code=303,
         )
     except SSOPasswordChangeError:
         # Bug #68: SSO users cannot change passwords locally
-        return _create_users_page_response(
-            request,
-            session,
-            error_message="Cannot change password for SSO users. Authentication is managed by the identity provider.",
+        return RedirectResponse(
+            url="/admin/users?error=sso_password_change_denied",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1266,22 +1620,22 @@ def update_user_email(
     new_email: str = Form(""),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Update a user's email (admin only). Empty string clears the email."""
+    """Update a user's email (admin only). Empty clears. PRG: redirects to /admin/users."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Update email
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1291,13 +1645,14 @@ def update_user_email(
             username, new_email=email_value if email_value else None
         )
 
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"Email for '{username}' updated successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=email_updated&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1310,28 +1665,28 @@ async def delete_user(
     username: str,
     csrf_token: Optional[str] = Form(None),
 ):
-    """Delete a user."""
+    """Delete a user (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Prevent deleting self
     if username == session.username:
-        return _create_users_page_response(
-            request, session, error_message="Cannot delete your own account"
+        return RedirectResponse(
+            url="/admin/users?error=cannot_delete_self", status_code=303
         )
 
     # Delete user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1365,11 +1720,12 @@ async def delete_user(
                 )
             )
 
-        return _create_users_page_response(
-            request, session, success_message=f"User '{username}' deleted successfully"
+        return RedirectResponse(
+            url=f"/admin/users?success=user_deleted&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
 
 @web_router.get(
@@ -1426,19 +1782,50 @@ def users_list_partial(request: Request):
 # ==============================================================================
 
 
+def _safe_ts_slice(val: Optional[Union[str, "datetime"]], end: int) -> Optional[str]:
+    """Safely slice a timestamp that may be str or datetime (PG vs SQLite compat).
+
+    PG returns native datetime objects for timestamp columns; SQLite returns strings.
+
+    Args:
+        val: Timestamp value — str, datetime, or None.
+        end: Number of characters to keep (must be >= 0).
+
+    Returns:
+        Sliced string, or None when val is None.
+    """
+    if end < 0:
+        raise ValueError(f"_safe_ts_slice: end must be >= 0, got {end!r}")
+    if val is None:
+        return None
+    from datetime import datetime
+
+    if isinstance(val, datetime):
+        return val.isoformat()[:end]
+    return str(val)[:end]
+
+
 def _format_datetime_display(
-    iso_string: Optional[str], fmt: str = "%Y-%m-%d %H:%M"
+    iso_string: Optional[Union[str, "datetime"]], fmt: str = "%Y-%m-%d %H:%M"
 ) -> str:
-    """Format ISO datetime string for display."""
+    """Format ISO datetime string or datetime object for display.
+
+    Accepts both str (SQLite) and datetime (PG native type).
+    """
     if not iso_string:
         return "N/A"
     try:
         from datetime import datetime
 
+        if isinstance(iso_string, datetime):
+            return iso_string.strftime(fmt)
         dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
         return dt.strftime(fmt)
-    except (ValueError, AttributeError):
-        return iso_string
+    except (ValueError, AttributeError) as exc:
+        logger.debug(
+            "_format_datetime_display: could not parse %r — %s", iso_string, exc
+        )
+        return str(iso_string)
 
 
 def _get_group_manager():
@@ -2307,7 +2694,12 @@ def _get_golden_repo_branch_service():
         return None
 
 
-def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
+def generate_unique_alias(
+    repo_name: str,
+    golden_repo_manager,
+    *,
+    existing_aliases: Optional[Set[str]] = None,
+) -> str:
     """
     Generate unique alias from repository name.
 
@@ -2320,6 +2712,10 @@ def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     Args:
         repo_name: Repository name (may include path components like org/project)
         golden_repo_manager: GoldenRepoManager instance to check for conflicts
+        existing_aliases: Optional pre-built set of existing aliases. When
+            provided, list_golden_repos() is NOT called — callers that process
+            many repos in a loop should hoist that call once and pass the result
+            here (Story #1092: batch-create fast path).
 
     Returns:
         Unique alias string (lowercase, special chars replaced with dashes)
@@ -2342,16 +2738,20 @@ def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     if not base_alias:
         base_alias = "repo"
 
-    # Check for conflicts with existing golden repos
-    existing_repos = golden_repo_manager.list_golden_repos()
-    existing_aliases = {r["alias"] for r in existing_repos}
+    # Use pre-built set when provided (Story #1092: avoid N × list_golden_repos
+    # calls in batch operations), otherwise fall back to the live query.
+    if existing_aliases is None:
+        existing_repos = golden_repo_manager.list_golden_repos()
+        alias_set: Set[str] = {r["alias"] for r in existing_repos}
+    else:
+        alias_set = existing_aliases
 
-    if base_alias not in existing_aliases:
+    if base_alias not in alias_set:
         return base_alias
 
     # Add numeric suffix
     suffix = 2
-    while f"{base_alias}-{suffix}" in existing_aliases:
+    while f"{base_alias}-{suffix}" in alias_set:
         suffix += 1
 
     return f"{base_alias}-{suffix}"
@@ -2389,17 +2789,32 @@ def _batch_create_repos(
     """
     results = []
 
+    # Story #1092: Hoist the alias-conflict check to a single call before the
+    # loop so that a batch of N repos pays O(1) DB reads instead of O(N).
+    existing_repos = golden_repo_manager.list_golden_repos()
+    existing_aliases_set: Set[str] = {r["alias"] for r in existing_repos}
+
     for repo_data in repos:
         try:
-            # Generate unique alias from repo name
-            alias = generate_unique_alias(repo_data["alias"], golden_repo_manager)
+            # Generate unique alias from repo name using the pre-built set so
+            # we don't call list_golden_repos() once per repo (Story #1092).
+            alias = generate_unique_alias(
+                repo_data["alias"],
+                golden_repo_manager,
+                existing_aliases=existing_aliases_set,
+            )
+            # Register the newly chosen alias so later iterations in this batch
+            # don't collide with it.
+            existing_aliases_set.add(alias)
 
-            # Create golden repo
+            # Create golden repo — skip per-repo git network validation so
+            # the endpoint returns immediately with all job IDs (Story #1092).
             job_id = golden_repo_manager.add_golden_repo(
                 repo_url=repo_data["clone_url"],
                 alias=alias,
                 default_branch=repo_data.get("branch") or None,
                 submitter_username=submitter_username,
+                skip_pre_flight_git_validation=True,
             )
 
             results.append(
@@ -2480,7 +2895,9 @@ def _resolve_alias_metadata(
                     if index_path and ".versioned" in index_path:
                         version = Path(index_path).name
                     raw_refresh = alias_data.get("last_refresh", "")
-                    last_refresh = raw_refresh[:19] if raw_refresh else None
+                    last_refresh = (
+                        _safe_ts_slice(raw_refresh, 19) if raw_refresh else None
+                    )
                 except Exception as e:
                     logger.warning(
                         format_error_log(
@@ -2622,9 +3039,7 @@ def _get_golden_repos_list(backend_registry=None):
         for repo in repos:
             if "status" not in repo:
                 repo["status"] = "ready"
-            repo["last_indexed"] = (
-                repo["created_at"][:10] if repo.get("created_at") else None
-            )
+            repo["last_indexed"] = _safe_ts_slice(repo.get("created_at"), 10)
             alias = repo.get("alias", "")
             g_alias, g_queryable, version, last_refresh, index_path = (
                 _resolve_alias_metadata(alias, global_repos, aliases_dir)
@@ -3482,7 +3897,7 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
         global_repos = {}
     if "status" not in repo:
         repo["status"] = "ready"
-    repo["last_indexed"] = repo["created_at"][:10] if repo.get("created_at") else None
+    repo["last_indexed"] = _safe_ts_slice(repo.get("created_at"), 10)
     g_alias, g_queryable, version, last_refresh, index_path = _resolve_alias_metadata(
         alias, global_repos, aliases_dir
     )
@@ -3677,7 +4092,6 @@ def _get_all_activated_repos() -> list:
                         repo["temporal_status"] = {
                             "error": str(e),
                             "format": "error",
-                            "file_count": 0,
                             "needs_reindex": False,
                             "message": f"Unable to determine temporal index status: {str(e)}",
                         }
@@ -3764,6 +4178,39 @@ def _paginate_repos(repos: list, page: int = 1, per_page: int = 25) -> tuple:
     return paginated, total_pages, page
 
 
+def _build_deactivating_map() -> dict:
+    """Build a {(username, user_alias): job_id} map for in-flight deactivations.
+
+    AC2: Used by the repos page to render the 'Deactivating...' badge per row.
+    Returns an empty dict when the job manager is unavailable or no active jobs exist.
+    """
+    result: dict = {}
+    job_manager = _get_background_job_manager()
+    if not job_manager:
+        return result
+    try:
+        jobs_data = job_manager.list_jobs(
+            username="",
+            is_admin=True,
+            status_filter=None,
+            limit=500,
+            offset=0,
+        )
+        for job in jobs_data.get("jobs", []):
+            if job.get("operation_type") != "deactivate_repository":
+                continue
+            if job.get("status") not in ("pending", "running"):
+                continue
+            username = job.get("username", "")
+            repo_alias = job.get("repo_alias") or ""
+            if username and repo_alias:
+                result[(username, repo_alias)] = job["job_id"]
+    except Exception as e:
+        # H3: Log at ERROR (not WARNING) with exc_info so traceback is captured
+        logger.error("Failed to build deactivating_map: %s", e, exc_info=True)
+    return result
+
+
 def _create_repos_page_response(
     request: Request,
     session: SessionData,
@@ -3790,6 +4237,9 @@ def _create_repos_page_response(
     # Paginate
     paginated_repos, total_pages, current_page = _paginate_repos(filtered_repos, page)
 
+    # AC2: Build deactivating map for per-row badge rendering
+    deactivating_map = _build_deactivating_map()
+
     response = templates.TemplateResponse(
         "repos.html",
         {
@@ -3808,6 +4258,7 @@ def _create_repos_page_response(
             "total_pages": total_pages,
             "success_message": success_message,
             "error_message": error_message,
+            "deactivating_map": deactivating_map,
         },
     )
 
@@ -3911,7 +4362,7 @@ def repo_details(
 
     try:
         manager = _get_activated_repo_manager()
-        repo = manager.get_repository(username, user_alias)
+        repo = manager.get_repository(username, user_alias, touch=False)
 
         if not repo:
             raise HTTPException(
@@ -3979,11 +4430,13 @@ def deactivate_repo(
         job_id = manager.deactivate_repository(
             username=username,
             user_alias=user_alias,
+            actor_username=session.username,  # AC12: attribute to admin who clicked
         )
+        job_link = f'<a href="/admin/jobs?search_text={job_id}">{job_id}</a>'
         return _create_repos_page_response(
             request,
             session,
-            success_message=f"Repository '{user_alias}' deactivation job submitted (Job ID: {job_id})",
+            success_message=f"Repository '{html.escape(user_alias)}' deactivation job submitted (Job ID: {job_link})",
         )
     except Exception as e:
         error_msg = str(e)
@@ -4110,17 +4563,13 @@ def _apply_job_filters(
     return result
 
 
-# Upper bound for the "fetch all" call when merging with JobTracker results.
-# Job counts are bounded by retention policy (typically < 10 000 at any time).
-_MAX_JOBS_FOR_MERGE = 10_000
-
-
 def _get_all_jobs(
     status_filter: Optional[str] = None,
     type_filter: Optional[str] = None,
     search: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    is_admin: bool = False,  # H1: changed from True — callers pass is_admin explicitly
 ):
     """
     Get all jobs with filters and pagination.
@@ -4131,14 +4580,29 @@ def _get_all_jobs(
     Bug #736: Also merges in JobTracker-only jobs (e.g. dependency_map_full /
     dependency_map_delta) that are not tracked by BackgroundJobManager.
     When a JobTracker instance is available:
-    1. Fetch all matching BG jobs (large page to avoid pre-pagination).
+    1. Fetch the BG page window for the current page from the BG manager.
     2. Fetch and filter all JobTracker jobs with the same criteria.
-    3. Deduplicate by job_id (BG manager record wins for shared IDs).
-    4. Re-paginate the merged list and recompute total_count / total_pages.
+    3. Deduplicate: for each tracker job, check if the BG manager knows about
+       it via a targeted per-ID existence check (bounded by tracker set size,
+       typically < 20 jobs).  BG manager record wins for shared IDs.
+    4. Compute total_count = bg_total + len(tracker-only extras).
+    5. Paginate: use a unified global ordering (BG jobs first, then extras).
+       For pages straddling the BG/extras boundary, combine the partial BG
+       page with extra slots filled from the extras list.
+
+    AC11: is_admin parameter — when True (callers must opt-in explicitly,
+    default is False), bypasses per-user scoping so admin sees all users'
+    jobs. The /jobs page route passes True because it is admin-only.
 
     Returns jobs from both tracking systems with consistent filtering and
     pagination.
     """
+    from code_indexer.server.repositories.background_jobs import (
+        MAX_PAGE_SIZE,
+    )
+
+    page_size = min(page_size, MAX_PAGE_SIZE)
+
     job_manager = _get_background_job_manager()
     if not job_manager:
         return [], 0, 1
@@ -4152,31 +4616,90 @@ def _get_all_jobs(
             search_text=search,
             page=page,
             page_size=page_size,
+            is_admin=is_admin,
         )
 
-    # Fetch all matching BG jobs (un-paginated) so we can merge before slicing.
-    all_bg_jobs, _bg_total, _bg_pages = job_manager.get_jobs_for_display(
+    # Step 1: fetch the BG page window for the requested page.
+    # get_jobs_for_display() uses COUNT(*) for bg_total — exact, no side-effects.
+    bg_page_jobs, bg_total, bg_total_pages = job_manager.get_jobs_for_display(
         status_filter=status_filter,
         type_filter=type_filter,
         search_text=search,
-        page=1,
-        page_size=_MAX_JOBS_FOR_MERGE,
+        page=page,
+        page_size=page_size,
+        is_admin=is_admin,
     )
 
-    seen_ids = {j["job_id"] for j in all_bg_jobs}
+    # Step 2: fetch tracker jobs (small bounded set — recent dep_map jobs only).
     tracker_jobs = _apply_job_filters(
         job_tracker.get_recent_jobs(),
         status_filter,
         type_filter,
         search,
     )
-    extra_jobs = [j for j in tracker_jobs if j["job_id"] not in seen_ids]
 
-    merged = list(all_bg_jobs) + extra_jobs
-    total_count = len(merged)
+    # Step 3: deduplicate — exclude tracker jobs whose job_id appears in ANY BG
+    # row, not just the current page.  Building only the current page's id set
+    # causes cross-page duplicates: a tracker job whose id is a BG job on page 1
+    # would appear again as an "extra" on page 2.
+    #
+    # Fix: one bounded id-only query via list_display_job_ids() returns the full
+    # set of matching job_ids in a SINGLE DB round-trip, regardless of how many
+    # pages the result set spans.  At 14k jobs/day × 30-day retention the table
+    # holds ~420k rows; list_display_job_ids applies a 50,000-row safety cap.
+    # This is O(1) queries — never O(bg_total_pages).
+    #
+    # username=None here because _get_all_jobs is called from the admin /jobs
+    # route with is_admin=True, so the dedup id set must span all users.  The
+    # username passed to get_jobs_for_display above is already scoped via
+    # is_admin, ensuring the page window and id set use the same effective scope.
+    #
+    # We do NOT use job_manager.get_job_status() per tracker job because that
+    # method also finds tracker-only rows stored in background_jobs and would
+    # wrongly exclude them (Bug #736 / Bug #1063 context).
+    bg_id_set = job_manager.list_display_job_ids(
+        status_filter=status_filter,
+        type_filter=type_filter,
+        search_text=search,
+        username=None,
+    )
+    # Union with active/in-memory ids from the current page (bg_page_jobs may
+    # include jobs that are still in memory and not yet in the DB id set).
+    all_bg_display_ids: set = bg_id_set | {j["job_id"] for j in bg_page_jobs}
+
+    extra_jobs = [j for j in tracker_jobs if j["job_id"] not in all_bg_display_ids]
+
+    # Step 4: compute total and total_pages using the unified global ordering.
+    total_count = bg_total + len(extra_jobs)
     total_pages = max(1, (total_count + page_size - 1) // page_size)
-    offset = (page - 1) * page_size
-    paginated = merged[offset : offset + page_size]
+
+    # Step 5: paginate using unified global offset/length.
+    # Global ordering: BG jobs occupy positions 0..bg_total-1;
+    # tracker-only extras occupy positions bg_total..total_count-1.
+    #
+    # For the requested page:
+    #   global_start = (page-1) * page_size
+    #   global_end   = global_start + page_size
+    #
+    # BG contribution to this page:  positions global_start..min(global_end, bg_total)-1
+    #   → already returned by bg_page_jobs (exact window from get_jobs_for_display)
+    #
+    # Extras contribution to this page: positions max(0, global_start-bg_total)
+    #   ..max(0, global_end-bg_total)-1 within the extras list.
+    #
+    # This handles three cases correctly:
+    #   (a) Page is entirely within BG range: extras slice is empty → use bg_page_jobs.
+    #   (b) Page straddles BG/extras boundary: bg_page_jobs is partial; fill remaining
+    #       slots from extras[0:remaining].
+    #   (c) Page is entirely in extras range: bg_page_jobs is empty; slice extras.
+    global_start = (page - 1) * page_size
+    global_end = global_start + page_size
+
+    extras_start = max(0, global_start - bg_total)
+    extras_end = max(0, global_end - bg_total)
+    extras_slice = extra_jobs[extras_start:extras_end]
+
+    paginated = list(bg_page_jobs) + extras_slice
 
     return paginated, total_count, total_pages
 
@@ -4227,12 +4750,13 @@ def _create_jobs_page_response(
     # Generate CSRF token
     csrf_token = generate_csrf_token()
 
-    # Get jobs
+    # Get jobs (H1: explicit admin scope — /jobs page is admin-only)
     jobs, total_count, total_pages = _get_all_jobs(
         status_filter=status_filter,
         type_filter=type_filter,
         search=search,
         page=page,
+        is_admin=True,
     )
 
     response = templates.TemplateResponse(
@@ -4301,12 +4825,13 @@ def jobs_list_partial(
         # Fallback: generate new token if cookie missing/invalid
         csrf_token = generate_csrf_token()
 
-    # Get jobs
+    # Get jobs (H1: explicit admin scope — /jobs page is admin-only)
     jobs, total_count, total_pages = _get_all_jobs(
         status_filter=status_filter,
         type_filter=job_type,
         search=search,
         page=page,
+        is_admin=True,
     )
 
     response = templates.TemplateResponse(
@@ -4492,7 +5017,6 @@ def _create_query_page_response(
     time_range_all: bool = False,
     time_range: str = "",
     at_commit: str = "",
-    include_removed: bool = False,
     case_sensitive: bool = False,
     fuzzy: bool = False,
     regex: bool = False,
@@ -4529,7 +5053,6 @@ def _create_query_page_response(
             "time_range_all": time_range_all,
             "time_range": time_range,
             "at_commit": at_commit,
-            "include_removed": include_removed,
             "case_sensitive": case_sensitive,
             "fuzzy": fuzzy,
             "regex": regex,
@@ -4566,7 +5089,6 @@ def query_submit(
     time_range_all: bool = Form(False),
     time_range: str = Form(""),
     at_commit: str = Form(""),
-    include_removed: bool = Form(False),
     case_sensitive: bool = Form(False),
     fuzzy: bool = Form(False),
     regex: bool = Form(False),
@@ -4594,7 +5116,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -4618,7 +5139,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -4641,7 +5161,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -4977,7 +5496,6 @@ def query_submit(
                     time_range=time_range if time_range else None,
                     time_range_all=time_range_all,
                     at_commit=at_commit if at_commit else None,
-                    include_removed=include_removed,
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
                     regex=regex,
@@ -5025,7 +5543,6 @@ def query_submit(
         time_range_all=time_range_all,
         time_range=time_range,
         at_commit=at_commit,
-        include_removed=include_removed,
         case_sensitive=case_sensitive,
         fuzzy=fuzzy,
         regex=regex,
@@ -5265,7 +5782,6 @@ def query_results_partial_post(
     time_range_all: bool = Form(False),
     time_range: str = Form(""),
     at_commit: str = Form(""),
-    include_removed: bool = Form(False),
     case_sensitive: bool = Form(False),
     fuzzy: bool = Form(False),
     regex: bool = Form(False),
@@ -5448,7 +5964,6 @@ def query_results_partial_post(
                     time_range=time_range if time_range else None,
                     time_range_all=time_range_all,
                     at_commit=at_commit if at_commit else None,
-                    include_removed=include_removed,
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
                     regex=regex,
@@ -5599,6 +6114,28 @@ async def _reload_oidc_configuration():
     )
 
 
+def _get_qec_total_entries() -> int:
+    """Return the live total row count from the QueryEmbeddingCache, or 0.
+
+    Used by _get_current_config to surface the total-cached-entries readout in
+    the Web UI config page (Story #1107 S3 finding B3).  Fail-open: returns 0
+    when the cache is not wired (CLI / pre-lifespan) or on any backend error.
+    """
+    try:
+        from ..services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is None:
+            return 0
+        return int(cache.total_entries())
+    except Exception:
+        logger.warning(
+            "query_embedding_cache: failed to read total_entries for Web UI (fail-open)",
+            exc_info=True,
+        )
+        return 0
+
+
 def _get_current_config() -> dict:
     """Get current configuration from ConfigService (persisted to ~/.cidx-server/config.json)."""
     from ..services.config_service import get_config_service
@@ -5634,6 +6171,8 @@ def _get_current_config() -> dict:
         LifecycleAnalysisConfig,
         # Story #844 - Codex CLI integration configuration
         CodexIntegrationConfig,
+        # Story #1107 S3 - Query embedding cache configuration
+        QueryEmbeddingCacheConfig,
     )
     from dataclasses import asdict
 
@@ -5722,9 +6261,9 @@ def _get_current_config() -> dict:
             "dependency_map_enabled": False,
             "dependency_map_interval_hours": 168,
             "dependency_map_pass_timeout_seconds": 600,
-            "dependency_map_pass1_max_turns": 50,
-            "dependency_map_pass2_max_turns": 60,
-            "dependency_map_delta_max_turns": 30,
+            "dependency_map_pass1_max_turns": 0,
+            "dependency_map_pass2_max_turns": 0,
+            "dependency_map_delta_max_turns": 0,
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": False,
             "fact_check_timeout_seconds": 600,
@@ -5754,13 +6293,13 @@ def _get_current_config() -> dict:
                 "dependency_map_pass_timeout_seconds", 600
             ),
             "dependency_map_pass1_max_turns": claude_cli_raw.get(
-                "dependency_map_pass1_max_turns", 50
+                "dependency_map_pass1_max_turns", 0
             ),
             "dependency_map_pass2_max_turns": claude_cli_raw.get(
-                "dependency_map_pass2_max_turns", 60
+                "dependency_map_pass2_max_turns", 0
             ),
             "dependency_map_delta_max_turns": claude_cli_raw.get(
-                "dependency_map_delta_max_turns", 30
+                "dependency_map_delta_max_turns", 0
             ),
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": claude_cli_raw.get(
@@ -5850,6 +6389,14 @@ def _get_current_config() -> dict:
         "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
+        # Story #1107 S3: Query embedding cache configuration
+        # total_cached_entries is injected as a live read-only readout (B3).
+        "query_embedding_cache": {
+            **settings.get(
+                "query_embedding_cache", asdict(QueryEmbeddingCacheConfig())
+            ),
+            "total_cached_entries": _get_qec_total_entries(),
+        },
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
@@ -5861,6 +6408,25 @@ def _get_current_config() -> dict:
         "cidx_meta_backup": settings.get(
             "cidx_meta_backup", {"enabled": False, "remote_url": ""}
         ),
+        # Bug #1179: search_event_log section was missing, causing Jinja
+        # UndefinedError (HTTP 500) on every admin Config page render.
+        # Both fields are rendered inside the same <details id="section-search_event_log">
+        # block (template lines 2440/2445/2464/2471), so they are merged here
+        # into one dict under the "search_event_log" key.
+        # search_event_log_retention_days comes from settings["search_event_log"]
+        # (Issue #1159); export_retention_days comes from settings["export"]
+        # (Issue #1160).
+        "search_event_log": {
+            **settings.get(
+                "search_event_log",
+                {"search_event_log_retention_days": 90},
+            ),
+            **{
+                "export_retention_days": settings.get("export", {}).get(
+                    "export_retention_days", 30
+                )
+            },
+        },
     }
 
 
@@ -5887,8 +6453,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if workers is not None:
             try:
                 workers_int = int(workers)
-                if workers_int < 1:
-                    return "Workers must be a positive number"
+                if workers_int < 1 or workers_int > 64:
+                    return "Workers must be between 1 and 64"
             except (ValueError, TypeError):
                 return "Workers must be a valid number"
 
@@ -5966,6 +6532,18 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
+        # Validate memory governor swap-in threshold (Bug #1225)
+        swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
+        if swap_threshold is not None:
+            try:
+                val_int = int(swap_threshold)
+                if val_int < 0:
+                    return "Memory Governor Swap Pswpin Red Threshold must be a non-negative integer"
+            except (ValueError, TypeError):
+                return (
+                    "Memory Governor Swap Pswpin Red Threshold must be a valid integer"
+                )
+
     elif section == "timeouts":
         # Validate timeout values (must be positive integers)
         for field in [
@@ -6025,6 +6603,72 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch size must be a positive number"
             except (ValueError, TypeError):
                 return "Batch size must be a valid number"
+
+        # Story #1158 - AC1: Embedding API parallelism (required when present, range 1-32)
+        _PARALLEL_MIN = 1
+        _PARALLEL_MAX = 32
+        for field_name in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            if field_name not in data:
+                continue
+            raw = data[field_name]
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                label = field_name.replace("_", " ").title()
+                return f"{label} is required"
+            try:
+                val_int = int(raw)
+                if val_int < _PARALLEL_MIN or val_int > _PARALLEL_MAX:
+                    label = field_name.replace("_", " ").title()
+                    return (
+                        f"{label} must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                    )
+            except (ValueError, TypeError):
+                label = field_name.replace("_", " ").title()
+                return f"{label} must be a valid number"
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional, range 1-32 when provided)
+        if "temporal_parallel_requests" in data:
+            temporal_raw = data["temporal_parallel_requests"]
+            if temporal_raw is not None and not (
+                isinstance(temporal_raw, str) and temporal_raw.strip() == ""
+            ):
+                try:
+                    temporal_int = int(temporal_raw)
+                    if temporal_int < _PARALLEL_MIN or temporal_int > _PARALLEL_MAX:
+                        return f"Temporal Parallel Requests must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                except (ValueError, TypeError):
+                    return "Temporal Parallel Requests must be a valid number"
+
+        # Story #1290: per-commit temporal embedder registry.
+        _submitted_embedders: Optional[List[str]] = None
+        if "temporal_embedders" in data:
+            raw_embedders = data["temporal_embedders"]
+            _submitted_embedders = [
+                v.strip() for v in str(raw_embedders).split(",") if v.strip()
+            ]
+            if not _submitted_embedders:
+                return "Temporal Embedders must not be empty"
+
+        if "temporal_active_embedder" in data:
+            active_raw = str(data["temporal_active_embedder"]).strip()
+            if not active_raw:
+                return "Temporal Active Embedder must not be empty"
+            if (
+                _submitted_embedders is not None
+                and active_raw not in _submitted_embedders
+            ):
+                return (
+                    "Temporal Active Embedder must be one of the Temporal "
+                    "Embedders submitted"
+                )
+
+        if "temporal_aggregation_chunk_chars" in data:
+            chunk_raw = data["temporal_aggregation_chunk_chars"]
+            try:
+                chunk_int = int(chunk_raw)
+                if chunk_int <= 0:
+                    return "Temporal Aggregation Chunk Size must be a positive number"
+            except (ValueError, TypeError):
+                return "Temporal Aggregation Chunk Size must be a valid number"
 
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:
@@ -6179,24 +6823,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             MIN_SCIP_CALLCHAIN_LIMIT,
             MAX_SCIP_CALLCHAIN_LIMIT,
         )
-
-        indexing_timeout = data.get("indexing_timeout_seconds")
-        if indexing_timeout is not None:
-            try:
-                timeout_int = int(indexing_timeout)
-                if timeout_int < 60:
-                    return "Indexing Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "Indexing Timeout must be a valid number"
-
-        scip_timeout = data.get("scip_generation_timeout_seconds")
-        if scip_timeout is not None:
-            try:
-                timeout_int = int(scip_timeout)
-                if timeout_int < 60:
-                    return "SCIP Generation Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "SCIP Generation Timeout must be a valid number"
 
         stale_threshold = data.get("temporal_stale_threshold_days")
         if stale_threshold is not None:
@@ -6819,6 +7445,84 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     f"({min_outer}s)"
                 )
 
+    elif section == "query_embedding_cache":
+        # Story #1107 S3: Query embedding cache runtime config validation.
+        _QEC_VALID_MODES = {"off", "shadow", "on"}
+
+        for mode_field in (
+            "query_embedding_cache_voyage_mode",
+            "query_embedding_cache_cohere_mode",
+        ):
+            mode_val = data.get(mode_field)
+            if mode_val is not None:
+                if str(mode_val) not in _QEC_VALID_MODES:
+                    return (
+                        f"{mode_field} must be one of: "
+                        f"{', '.join(sorted(_QEC_VALID_MODES))}"
+                    )
+
+        for rate_field in (
+            "query_embedding_cache_voyage_audit_sample_rate",
+            "query_embedding_cache_cohere_audit_sample_rate",
+        ):
+            rate_val = data.get(rate_field)
+            if rate_val is not None:
+                try:
+                    rate_float = float(rate_val)
+                except (ValueError, TypeError):
+                    return f"{rate_field} must be a valid float"
+                if rate_float < 0.0 or rate_float > 1.0:
+                    return f"{rate_field} must be between 0.0 and 1.0"
+
+        max_entries_val = data.get("query_embedding_cache_max_entries")
+        if max_entries_val is not None:
+            try:
+                max_entries_int = int(max_entries_val)
+            except (ValueError, TypeError):
+                return "query_embedding_cache_max_entries must be a valid integer"
+            if max_entries_int < 100:
+                return (
+                    "query_embedding_cache_max_entries must be at least 100 "
+                    "(the minimum safe cap)"
+                )
+
+        for anchor_field in (
+            "query_embedding_cache_voyage_anchor_tokens",
+            "query_embedding_cache_cohere_anchor_tokens",
+        ):
+            anchor_val = data.get(anchor_field)
+            # Empty string or None means "inherit global" — accepted as a valid reset.
+            if anchor_val is None or anchor_val == "":
+                continue
+            try:
+                anchor_int = int(anchor_val)
+            except (ValueError, TypeError):
+                return f"{anchor_field} must be a valid integer"
+            if anchor_int < 0:
+                return f"{anchor_field} must be >= 0"
+
+    elif section == "search_event_log":
+        # Story #1159: Search event log data retention configuration.
+        retention_days_val = data.get("search_event_log_retention_days")
+        if retention_days_val is not None:
+            try:
+                retention_days_int = int(retention_days_val)
+            except (ValueError, TypeError):
+                return "search_event_log_retention_days must be a valid integer"
+            if retention_days_int < 1 or retention_days_int > 3650:
+                return "search_event_log_retention_days must be between 1 and 3650"
+
+    elif section == "export":
+        # Issue #1160: Export file retention configuration.
+        export_days_val = data.get("export_retention_days")
+        if export_days_val is not None:
+            try:
+                export_days_int = int(export_days_val)
+            except (ValueError, TypeError):
+                return "export_retention_days must be a valid integer"
+            if export_days_int < 1 or export_days_int > 3650:
+                return "export_retention_days must be between 1 and 3650"
+
     return None
 
 
@@ -7021,6 +7725,27 @@ def auto_discovery_page(request: Request):
     return response
 
 
+@web_router.get("/analytics-export", response_class=HTMLResponse)
+def analytics_export_page(request: Request):
+    """Query Analytics Export page — filter and export search event data to Excel."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    response = templates.TemplateResponse(
+        "analytics_export.html",
+        {
+            "request": request,
+            "current_page": "analytics-export",
+            "show_nav": True,
+            "csrf_token": csrf_token,
+        },
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
 def _load_hidden_ids(show_hidden: bool):
     """Load hidden discovery repo identifiers (Story #719)."""
     try:
@@ -7090,6 +7815,126 @@ def discovery_all(
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@web_router.post(
+    "/api/discovery/{platform}/start",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def discovery_start(
+    request: Request,
+    platform: str,
+):
+    """Start a background discovery job for the given platform (Story #1157).
+
+    Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
+    Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    provider, err = _resolve_provider(request, platform)
+    if err is not None:
+        return err
+    if not provider.is_configured():
+        return JSONResponse(
+            {"error": f"{platform.capitalize()} token not configured"}, status_code=422
+        )
+
+    bgm = _get_background_job_manager()
+    if bgm is None:
+        return JSONResponse(
+            {"error": "Background job manager unavailable"}, status_code=503
+        )
+
+    from code_indexer.server.repositories.background_jobs import JobStatus
+
+    op_type = f"{platform}_discovery"
+
+    # Manual dedup: repo_alias=None bypasses BGM atomic DB gate
+    with bgm._lock:
+        for job in bgm.jobs.values():
+            if job.operation_type == op_type and job.status in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            ):
+                return JSONResponse({"job_id": job.job_id, "existing": True})
+
+    indexed_urls = provider._get_indexed_canonical_urls()
+    _, all_hidden = _load_hidden_ids(show_hidden=False)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    job_id_holder: dict = {}
+
+    def _worker(progress_callback=None):  # type: ignore[misc]
+        result = provider.discover_all_repositories(
+            indexed_urls=indexed_urls,
+            hidden_identifiers=all_hidden,
+            progress_callback=progress_callback,
+        )
+        jid = job_id_holder.get("job_id")
+        if jid and payload_cache is not None:
+            payload_cache.store_with_key(f"discovery:{jid}", json.dumps(result))
+        return {
+            "total_source": result["total_source"],
+            "total_unregistered": result["total_unregistered"],
+            "result_ready": True,
+        }
+
+    job_id = bgm.submit_job(
+        op_type,
+        _worker,
+        submitter_username=session.username,
+        repo_alias=None,
+    )
+    job_id_holder["job_id"] = job_id
+    return JSONResponse({"job_id": job_id, "existing": False})
+
+
+@web_router.get("/api/discovery/{platform}/result/{job_id}")
+async def discovery_result(
+    request: Request,
+    platform: str,
+    job_id: str,
+):
+    """Return the full discovery result for a completed job (Story #1157).
+
+    Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
+    Auth required.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return JSONResponse({"error": "Payload cache unavailable"}, status_code=503)
+
+    cache_key = f"discovery:{job_id}"
+    if not payload_cache.has_key(cache_key):
+        return JSONResponse({"error": "Result not found or expired"}, status_code=404)
+
+    # Accumulate all pages — PayloadCache.retrieve() returns one page at a time
+    chunks: list = []
+    page = 0
+    try:
+        while True:
+            cache_result = payload_cache.retrieve(cache_key, page=page)
+            chunks.append(cache_result.content)
+            if not cache_result.has_more:
+                break
+            page += 1
+    except Exception:
+        logger.error(
+            "Failed to retrieve discovery result for %s", cache_key, exc_info=True
+        )
+        return JSONResponse(
+            {"error": "Failed to retrieve discovery result"}, status_code=500
+        )
+
+    data = json.loads("".join(chunks))
+    return JSONResponse(data)
 
 
 @web_router.post(
@@ -7866,6 +8711,71 @@ async def update_cidx_meta_backup_config(
         )
 
 
+# NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
+# caught by the parameterized route. FastAPI matches routes in order of definition.
+@web_router.post(
+    "/config/query-embedding-cache/clear",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_query_embedding_cache_table(
+    request: Request,
+):
+    """Truncate the query_embedding_cache table and return the updated count display (Story #1156).
+
+    Admin-only action: deletes all rows from the persisted query embedding cache
+    via the active backend (SQLite or PostgreSQL) and resets the in-process count
+    memo to 0.  Returns an HTML fragment suitable for HTMX outerHTML swap of
+    #display-query_embedding_cache so the count refreshes immediately to 0.
+
+    Clearing an already-empty cache is a no-op success (AC7).
+    Works in both solo (SQLite) and cluster (PostgreSQL) modes (AC6).
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    # HTMX sends CSRF token as X-CSRF-Token header (consistent with other HTMX
+    # endpoints in this file, e.g. the GitHub/GitLab API key delete handlers).
+    csrf_from_header = request.headers.get("X-CSRF-Token")
+    if not validate_login_csrf_token(request, csrf_from_header):
+        return HTMLResponse(content="Invalid CSRF token", status_code=403)
+
+    try:
+        from ..services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is not None:
+            cache.clear_all()
+        # Re-read the live count (should be 0 after clear_all).
+        new_count = _get_qec_total_entries()
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-046", f"Failed to clear query embedding cache: {e}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return HTMLResponse(
+            content=f"Failed to clear query embedding cache: {e}", status_code=500
+        )
+
+    # Return an HTML fragment that replaces #display-query_embedding_cache.
+    # This is the minimal display div so HTMX outerHTML swap refreshes the count.
+    config = _get_current_config()
+    # Inject the freshly cleared count so the template sees 0 immediately.
+    config["query_embedding_cache"]["total_cached_entries"] = new_count
+    csrf_token_new = generate_csrf_token()
+    return templates.TemplateResponse(
+        "partials/qec_display.html",
+        {
+            "request": request,
+            "config": config,
+            "csrf_token": csrf_token_new,
+        },
+    )
+
+
 @web_router.post(
     "/config/{section}",
     response_class=HTMLResponse,
@@ -7960,9 +8870,57 @@ async def update_config_section(
                 success_message=f"{section.title()} configuration saved successfully",
             )
 
-        # Update all settings without validating (batch update)
+        # Story #1195 AC2: Read pre-change host/port BEFORE any mutation (Opus nit).
+        # This snapshot is the authoritative "what was persisted" value so the
+        # guardrail compares the incoming form value against the ORIGINAL, not an
+        # already-mutated in-memory config.
+        _pre_change_config = config_service.get_config()
+
+        # Story #1195 AC2: Server-side host/port confirmation guardrail.
+        # Client-side modal is UX-only; a direct POST bypasses it, so enforcement
+        # MUST be server-side.  HAProxy and firewall are bound to the existing
+        # host/port — a silent change would sever cluster connectivity.
+        # Guardrail fires ONLY when host or port TRULY differs from the persisted
+        # value AND the explicit confirm flag is absent from the form submission.
+        if section == "server":
+            _incoming_host = str(data.get("host", _pre_change_config.host))
+            _incoming_port_raw = data.get("port", str(_pre_change_config.port))
+            try:
+                _incoming_port = int(str(_incoming_port_raw))
+            except (ValueError, TypeError):
+                _incoming_port = _pre_change_config.port
+            _host_changed = _incoming_host != _pre_change_config.host
+            _port_changed = _incoming_port != _pre_change_config.port
+            _confirm_flag = bool(data.get("confirm_host_port_change", ""))
+            if (_host_changed or _port_changed) and not _confirm_flag:
+                return _create_config_page_response(
+                    request,
+                    session,
+                    error_message=(
+                        "Changing host or port requires explicit confirmation — "
+                        "HAProxy backend and firewall port-lock warning. "
+                        "Please confirm the change via the confirmation dialog."
+                    ),
+                )
+
+        # Strip the confirm flag from data before passing to update_setting
+        # (it is a UI-only field, not a config key).
+        data.pop("confirm_host_port_change", None)
+
+        # Update all settings without validating (batch update).
+        # Bug #1180: the search_event_log UI section renders two fields that
+        # belong to different config categories:
+        #   - search_event_log_retention_days -> category "search_event_log"
+        #   - export_retention_days           -> category "export"
+        # Without this override, every key is sent under the URL section name,
+        # causing _update_search_event_log_setting to raise ValueError on
+        # export_retention_days.
+        _section_key_category_overrides: dict = {}
+        if section == "search_event_log":
+            _section_key_category_overrides = {"export_retention_days": "export"}
         for key, value in data.items():
-            config_service.update_setting(section, key, value, skip_validation=True)
+            category = _section_key_category_overrides.get(key, section)
+            config_service.update_setting(category, key, value, skip_validation=True)
 
         # Validate configuration
         config = config_service.get_config()
@@ -8000,13 +8958,6 @@ async def update_config_section(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},
         )
-
-        # Story #223: Cascade indexing extensions to all golden repos after save
-        if section == "indexing":
-            try:
-                config_service.cascade_indexable_extensions_to_repos()
-            except Exception as e:
-                logger.warning("Extension cascade failed: %s", e)
 
         return _create_config_page_response(
             request,
@@ -8418,11 +9369,20 @@ def _create_admin_git_credentials_page_response(
 ) -> HTMLResponse:
     """Create admin git credentials page response."""
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
-    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    db_path = str(server_dir / "data" / "cidx_server.db")
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8451,11 +9411,20 @@ def admin_git_credentials_list_partial(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
-    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    db_path = str(server_dir / "data" / "cidx_server.db")
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8479,7 +9448,7 @@ async def admin_git_credentials_add(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -8495,10 +9464,18 @@ async def admin_git_credentials_add(request: Request):
             )
 
         config_service = get_config_service()
-        db_path = str(
-            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        server_dir = config_service.config_manager.server_dir
+        db_path = str(server_dir / "data" / "cidx_server.db")
+        # cast: load_config() is Optional[ServerConfig] but is always non-None when
+        # the server is running; a raise here would be swallowed by except Exception.
+        from code_indexer.server.config.server_config import ServerConfig as _SC
+
+        storage_mode = cast(
+            _SC, config_service.config_manager.load_config()
+        ).storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager = GitCredentialManager(db_path)
 
         result = await manager.configure_credential(
             username=session.username,
@@ -8528,14 +9505,22 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     try:
         config_service = get_config_service()
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
         manager.delete_credential(session.username, credential_id)
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
@@ -8705,11 +9690,20 @@ def _create_user_git_credentials_page_response(
 ) -> HTMLResponse:
     """Create user git credentials page response."""
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8738,11 +9732,20 @@ def user_git_credentials_list_partial(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8763,7 +9766,7 @@ async def user_git_credentials_add(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -8782,7 +9785,15 @@ async def user_git_credentials_add(request: Request):
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
 
         result = await manager.configure_credential(
             username=session.username,
@@ -8809,14 +9820,22 @@ def user_git_credentials_delete(request: Request, credential_id: str):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     try:
         config_service = get_config_service()
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
         manager.delete_credential(session.username, credential_id)
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
@@ -8833,6 +9852,7 @@ def user_logout(request: Request):
     Logout and clear session for user portal.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -8849,6 +9869,24 @@ def user_logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "user_logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "user_logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(
@@ -10313,6 +11351,14 @@ async def trigger_manual_scan(
 
     logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
 
+    # Derive self-monitoring backend from registry (Bug #1140).
+    # Mirrors the lifespan.py wiring so manual scans write to PG in cluster
+    # mode instead of node-local SQLite.
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        backend_registry.self_monitoring if backend_registry is not None else None
+    )
+
     # Create service instance with current configuration (Bug #87)
     logger.debug(
         "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
@@ -10328,6 +11374,7 @@ async def trigger_manual_scan(
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
         server_name=server_name,
+        storage_backend=_sm_backend,
     )
 
     # Trigger the scan
@@ -10533,7 +11580,34 @@ def restart_server(request: Request) -> JSONResponse:
     username = session.username
     logger.info(f"Server restart requested by {username}")
 
-    # Schedule delayed restart on background thread
+    # Story #1200 AC7: branch on cluster vs solo mode.
+    #
+    # Cluster (PG pool present): bump launch_restart_generation only.
+    # The bumping node does NOT synchronously write restart.signal here — its
+    # own check_pending_launch_restart() poll (running every interval) detects
+    # target > applied and signals itself (MAJOR-M3 / FIX-2).  All other nodes
+    # are signalled by their own poll loops independently.
+    #
+    # Solo: retain the existing single-node restart path (materialize + signal /
+    # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+    config_svc = get_config_service()
+    if config_svc._pool is not None:
+        # Cluster mode: bump generation, let per-poll check handle restart.signal
+        config_svc.bump_launch_restart_generation()
+        with _restart_lock:
+            _restart_in_progress = False
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": (
+                    "Cluster restart requested: generation bumped. "
+                    "All nodes will restart via the auto-updater."
+                )
+            },
+        )
+
+    # Solo mode: materialize launch config then schedule single-node restart
+    config_svc.materialize_launch_config()
     _schedule_delayed_restart(delay=2)
 
     # Return 202 Accepted immediately

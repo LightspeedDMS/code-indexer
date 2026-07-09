@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
@@ -254,6 +254,56 @@ class PayloadCache:
         self._conn_manager.execute_atomic(_do_insert)
 
         return handle
+
+    def store_batch(self, contents: List[str]) -> List[str]:
+        """Store multiple content strings and return their handles in order.
+
+        Bug #1181: Batch all per-query stores into ONE transaction/commit to avoid
+        N fsync'd commits per query saturating the PostgreSQL WAL write lock.
+
+        Args:
+            contents: List of content strings to cache.
+
+        Returns:
+            List of UUID4 handles in the same order as contents.
+            Empty list if contents is empty.
+        """
+        if not contents:
+            return []
+
+        preview_size = self.config.preview_size_chars
+        ttl = self.config.cache_ttl_seconds
+        handles = [str(uuid.uuid4()) for _ in contents]
+
+        if self._backend is not None:
+            # Server mode (PG cluster OR solo SQLite server via BackendRegistry):
+            # build (handle, content, preview, ttl) tuples and delegate to
+            # backend.store_batch() — ONE transaction/commit. The facade is the
+            # sole handle authority; the backend accepts pre-built handles.
+            entries = [(h, c, c[:preview_size], ttl) for h, c in zip(handles, contents)]
+            self._backend.store_batch(entries)
+            return handles
+
+        # CLI/daemon mode: no backend, use this facade's own _conn_manager
+        # (legacy per-facade SQLite schema: handle, content, created_at, total_size).
+        # This path does NOT call the backend — it owns its own connection directly.
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+
+        now = time.time()
+        rows = [(h, c, now, len(c)) for h, c in zip(handles, contents)]
+
+        def _do_batch_insert(conn: sqlite3.Connection) -> None:
+            conn.executemany(
+                """
+                INSERT INTO payload_cache (handle, content, created_at, total_size)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        self._conn_manager.execute_atomic(_do_batch_insert)
+        return handles
 
     def store_with_key(self, key: str, content: str) -> None:
         """Store content with explicit key.

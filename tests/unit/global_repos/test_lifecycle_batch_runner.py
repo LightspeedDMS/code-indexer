@@ -16,7 +16,7 @@ parameters (golden_repos_dir, log) to stay readable per test.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
@@ -96,6 +96,10 @@ class _StubScheduler:
     """
     Configurable stub: acquire_sequence controls per-call results.
     If the sequence is exhausted, acquire_default is used.
+
+    acquire_by_key overrides acquire_sequence for deterministic
+    alias-keyed results — required when jitter randomises execution
+    order across concurrent workers (Bug #1056).
     """
 
     def __init__(
@@ -103,16 +107,21 @@ class _StubScheduler:
         log: _EventLog,
         acquire_default: bool = True,
         acquire_sequence: Optional[List[bool]] = None,
+        acquire_by_key: Optional[Dict[str, bool]] = None,
     ) -> None:
         self._log = log
         self._acquire_default = acquire_default
         self._acquire_sequence = list(acquire_sequence) if acquire_sequence else []
+        self._acquire_by_key: Dict[str, bool] = acquire_by_key or {}
         self.acquire_calls: List[tuple] = []
         self.release_calls: List[tuple] = []
 
     def acquire_write_lock(self, key: str, owner_name: str) -> bool:
         self.acquire_calls.append((key, owner_name))
-        if self._acquire_sequence:
+        # acquire_by_key takes precedence — alias-keyed, order-independent.
+        if key in self._acquire_by_key:
+            result = self._acquire_by_key[key]
+        elif self._acquire_sequence:
             result = self._acquire_sequence.pop(0)
         else:
             result = self._acquire_default
@@ -135,19 +144,27 @@ def _make_runner(
     log: _EventLog,
     acquire_default: bool = True,
     acquire_sequence: Optional[List[bool]] = None,
+    acquire_by_key: Optional[Dict[str, bool]] = None,
     sub_batch_size_override: Optional[int] = None,
+    invoker: Optional[Callable[..., UnifiedResult]] = None,
 ) -> tuple:
     """
     Build a LifecycleBatchRunner with stub dependencies sharing the given log.
     Returns (runner, scheduler, job_tracker, debouncer).
+
+    acquire_by_key: alias-keyed lock results for deterministic behaviour
+    under jitter (Bug #1056).  Takes precedence over acquire_sequence.
     """
     scheduler = _StubScheduler(
-        log=log, acquire_default=acquire_default, acquire_sequence=acquire_sequence
+        log=log,
+        acquire_default=acquire_default,
+        acquire_sequence=acquire_sequence,
+        acquire_by_key=acquire_by_key,
     )
     job_tracker = _StubJobTracker(log=log)
     debouncer = _StubDebouncer(log=log)
 
-    def _noop_invoker(alias: str, repo_path: Path) -> UnifiedResult:
+    def _noop_invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
         return _VALID_RESULT
 
     runner = LifecycleBatchRunner(
@@ -155,7 +172,7 @@ def _make_runner(
         job_tracker=job_tracker,
         refresh_scheduler=scheduler,
         debouncer=debouncer,
-        claude_cli_invoker=_noop_invoker,
+        claude_cli_invoker=invoker or _noop_invoker,
         concurrency=DEFAULT_CONCURRENCY,
         ttl_seconds=DEFAULT_TTL_SECONDS,
         estimated_seconds_per_repo=DEFAULT_EST_SECS,
@@ -293,7 +310,8 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     """
     After the Bug #876 per-alias lock fix: a lock failure for ONE alias inside
     _process_one_repo is treated as a per-repo exception — logged at ERROR
-    level and swallowed — so the batch completes and complete_job IS called.
+    level and surfaced without aborting other aliases — so the batch completes
+    and complete_job IS called.
 
     acquire_sequence: x→True, y→False (lock fails), z→True.
     Sub-batch size 2: first batch [x, y], second batch [z].
@@ -308,19 +326,25 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     for alias in aliases:
         (golden_repos_dir / alias).mkdir(exist_ok=True)
     log = _EventLog()
+    # Use acquire_by_key so lock results are alias-keyed, not call-order-dependent.
+    # Bug #1056 jitter randomises worker execution order; acquire_sequence would
+    # flap depending on which thread runs first.
     runner, scheduler, job_tracker, debouncer = _make_runner(
         golden_repos_dir,
         log,
-        acquire_sequence=[True, False, True],
+        acquire_by_key={"lifecycle:x": True, "lifecycle:y": False, "lifecycle:z": True},
         sub_batch_size_override=FORCED_SUB_BATCH_SIZE,
     )
 
-    # Must NOT raise — per-repo lock failures are swallowed by _run_sub_batch
-    runner.run(aliases, parent_job_id="job-4")
+    # Must NOT raise — partial per-repo lock failures are surfaced but non-aborting.
+    failed = runner.run(aliases, parent_job_id="job-4")
 
     assert len(job_tracker.complete_calls) == 1, (
         "complete_job must fire despite per-alias lock failure"
     )
+    assert failed.keys() == {"y"}
+    assert "LifecycleLockUnavailableError" in failed["y"]
+    assert job_tracker.complete_calls[0]["result"]["failed_aliases"] == ["y"]
     assert debouncer.signal_count == 1, (
         "Debouncer must fire despite per-alias lock failure"
     )
@@ -338,7 +362,41 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# 6. LifecycleBatchRunner emits current schema version in written .md
+# 6. Single-alias total failure
+# ---------------------------------------------------------------------------
+
+
+def test_run_fails_job_when_single_alias_invoker_raises(
+    golden_repos_dir: Path,
+) -> None:
+    """A one-alias run with an invoker failure fails the parent job."""
+    alias = "parse-broken"
+    (golden_repos_dir / alias).mkdir(exist_ok=True)
+    log = _EventLog()
+
+    def _failing_invoker(
+        _alias: str, _repo_path: Path, **_kwargs: object
+    ) -> UnifiedResult:
+        raise RuntimeError("simulated UnifiedResponseParseError: malformed frontmatter")
+
+    runner, _, job_tracker, _ = _make_runner(
+        golden_repos_dir,
+        log,
+        invoker=_failing_invoker,
+    )
+
+    failed = runner.run([alias], parent_job_id="job-single-fail")
+
+    assert alias in failed
+    assert "simulated UnifiedResponseParseError" in failed[alias]
+    assert len(job_tracker.fail_calls) == 1
+    assert job_tracker.fail_calls[0]["job_id"] == "job-single-fail"
+    assert len(job_tracker.complete_calls) == 0
+    assert not (golden_repos_dir / "cidx-meta" / f"{alias}.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# 7. LifecycleBatchRunner emits current schema version in written .md
 # ---------------------------------------------------------------------------
 
 

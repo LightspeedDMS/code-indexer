@@ -2,11 +2,10 @@
 Description Refresh Scheduler (Story #190).
 
 Manages periodic description regeneration for golden repositories using
-hash-based bucket scheduling with jitter to distribute load evenly.
+uniform-random scheduling across the full interval to distribute load evenly.
 """
 
 import concurrent.futures
-import hashlib
 import json
 import logging
 import random
@@ -15,19 +14,14 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
-from code_indexer.server.services.dep_map_dispatcher_factory import (
-    build_dep_map_dispatcher,
-)
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
-
-if TYPE_CHECKING:
-    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +40,11 @@ PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 # Description body length threshold for the startup backfill sweep.
 # Aliases whose cidx-meta body (stripped) is at or below this limit are
 # considered terse and queued for regeneration via LifecycleBatchRunner.
-TERSE_DESCRIPTION_MAX_CHARS = 500
+# Bug #1064: lowered from 500 to 200. At 500 the detector re-flagged
+# legitimately-concise small-repo descriptions (300-500 chars) on every
+# startup, causing an infinite regeneration loop. At 200 (barely a sentence)
+# only genuine stubs or failed generations are queued for regeneration.
+TERSE_DESCRIPTION_MAX_CHARS = 200
 
 
 def _build_claude_env() -> dict:
@@ -111,8 +109,8 @@ class DescriptionRefreshScheduler:
     """
     Scheduler for periodic repository description refresh.
 
-    Implements hash-based bucket scheduling with jitter to distribute
-    refresh jobs evenly across time intervals, preventing thundering herd.
+    Implements uniform-random scheduling across the full interval to distribute
+    refresh jobs evenly across time, preventing thundering herd.
     """
 
     def __init__(
@@ -199,18 +197,21 @@ class DescriptionRefreshScheduler:
             self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Bug #953: per-repo consecutive prompt-failure counter.
-        # Incremented each time _get_refresh_prompt() returns None.
+        # Bug #953: per-repo consecutive refresh-failure counter.
         # Reset to 0 by on_refresh_complete(success=True).
         # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
         # quarantined (not rescheduled) and one ERROR log is emitted.
         self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
-        # Bug #984: track which repos have already had "missing description or
-        # last_analyzed" WARNING emitted in the current scheduler instance lifetime.
-        # Subsequent passes for the same repo downgrade the log to DEBUG so the
-        # warning fires at most once per repo (re-armed after a successful refresh).
-        self._warned_missing_desc: set = set()
-        self._backfill_in_progress = threading.Event()
+        # Bug #1096 review fix: on-disk commit fingerprint recorded at failure time.
+        # Quarantine auto-clear compares the CURRENT on-disk fingerprint to this value.
+        # Using has_changes_since_last_run for the clear decision is wrong because
+        # last_known_commit stays NULL for repos that never succeeded, making
+        # has_changes always return True — defeating quarantine for the worst case.
+        self._failure_commit: Dict[str, Optional[str]] = {}
+        # Story #1062: two separate events replacing the old single _backfill_in_progress.
+        # Each async path sets/clears its OWN event so one finishing does not clear the other.
+        self._lifecycle_backfill_running = threading.Event()
+        self._description_backfill_running = threading.Event()
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
         # Canonical default comes from ClaudeIntegrationConfig to avoid duplication.
@@ -244,15 +245,14 @@ class DescriptionRefreshScheduler:
             config.claude_integration_config.description_refresh_interval_hours
         )
 
-        # Calculate number of buckets (one per hour in interval)
-        buckets = interval_hours
-
         logger.info(
-            f"Description refresh scheduler started (interval: {interval_hours}h, {buckets} buckets)"
+            f"Description refresh scheduler started "
+            f"(interval: {interval_hours}h, uniform random across full interval)"
         )
 
         self._migrate_global_suffix_filenames()
         self.reconcile_orphan_tracking()
+        self._reconcile_stale_next_run_rows()
         self.reconcile_broken_lifecycle_metadata()
         self.reconcile_terse_descriptions()
 
@@ -277,10 +277,14 @@ class DescriptionRefreshScheduler:
         self, alias: str, interval_hours: Optional[int] = None
     ) -> str:
         """
-        Calculate next run time using hash-based bucket scheduling with jitter.
+        Calculate next run time using uniform random across the full interval.
+
+        Distributes refreshes evenly across the entire interval window so that
+        no thundering herd forms — not at steady-state, and not on first-enable
+        (when _reconcile_stale_next_run_rows re-slots all stale rows).
 
         Args:
-            alias: Repository alias (used for consistent bucketing)
+            alias: Repository alias (kept for API/log-line compatibility; unused in body)
             interval_hours: Interval in hours (defaults to config value)
 
         Returns:
@@ -289,24 +293,127 @@ class DescriptionRefreshScheduler:
         if interval_hours is None:
             interval_hours = self._get_interval_hours()
 
-        # Hash-based bucket assignment (deterministic for same alias)
-        bucket = int(hashlib.md5(alias.encode()).hexdigest(), 16) % interval_hours
+        offset_seconds = random.uniform(0, interval_hours * 3600)
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+        ).isoformat()
 
-        # Calculate next hour boundary
+    def _reconcile_stale_next_run_rows(self) -> int:
+        """One-shot sweep: recompute next_run for tracking rows that are NULL or in the past.
+
+        Called from start() AFTER reconcile_orphan_tracking() so orphan rows are
+        already gone before we iterate.  Rows with a valid FUTURE next_run are
+        preserved unchanged — this avoids disturbing repos that were already
+        spread across the interval by a previous start cycle.
+
+        Returns the number of rows recomputed. Self-defensive: any exception in the
+        sweep is logged and swallowed so scheduler startup cannot be blocked.
+        """
+        recomputed = 0
+        try:
+            rows = self._tracking_backend.get_all_tracking()
+        except Exception:
+            logger.error(
+                "Stale next_run reconciliation: get_all_tracking failed",
+                exc_info=True,
+            )
+            return 0
+
         now = datetime.now(timezone.utc)
-        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-        # Base time = next_hour + bucket offset
-        base_time = next_hour + timedelta(hours=bucket)
+        for row in rows:
+            alias = row.get("repo_alias")
+            if not alias:
+                continue
+            next_run = row.get("next_run")
+            # Recompute if NULL or already past (tz-aware comparison to avoid
+            # lexicographic-compare footgun with Postgres TIMESTAMPTZ in cluster mode).
+            if next_run is None:
+                is_stale = True
+            else:
+                try:
+                    next_run_dt = datetime.fromisoformat(str(next_run))
+                    if next_run_dt.tzinfo is None:
+                        next_run_dt = next_run_dt.replace(tzinfo=timezone.utc)
+                    is_stale = next_run_dt <= now
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Stale next_run reconciliation: unparseable next_run=%r for %s, recomputing",
+                        next_run,
+                        alias,
+                    )
+                    is_stale = True
+            if is_stale:
+                try:
+                    new_next_run = self.calculate_next_run(alias)
+                    self._tracking_backend.upsert_tracking(
+                        repo_alias=alias,
+                        next_run=new_next_run,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    recomputed += 1
+                except Exception:
+                    logger.error(
+                        "Stale next_run reconciliation: upsert failed for %s",
+                        alias,
+                        exc_info=True,
+                    )
 
-        # Add jitter (0-30% of bucket size = 0-18 minutes for 1-hour buckets)
-        jitter_seconds = random.uniform(0, 3600 * 0.3)
+        logger.info(
+            "Stale next_run reconciliation: recomputed %d rows (uniform random across interval)",
+            recomputed,
+        )
+        return recomputed
 
-        final_time = base_time + timedelta(seconds=jitter_seconds)
+    def _read_current_fingerprint(self, repo_path: str) -> Optional[str]:
+        """
+        Read the on-disk commit (or files_processed) fingerprint from the repo's
+        metadata file — the SAME source has_changes_since_last_run reads.
 
-        logger.debug(f"Repo {alias} assigned to bucket {bucket}/{interval_hours}")
+        Returns the fingerprint string, or None when no metadata file exists or
+        the metadata cannot be parsed.  The returned value is suitable for stable
+        equality comparison: same string → same code state; different string →
+        code has changed.
 
-        return final_time.isoformat()
+        Used by:
+        - on_refresh_complete failure branch (record fingerprint at failure time)
+        - _run_loop_single_pass quarantine gate (compare current vs failure fingerprint)
+
+        Extracting this helper removes the triple-read of metadata that previously
+        existed across these three call sites (Messi Rule #4 anti-duplication).
+        """
+        metadata_dir = Path(repo_path) / ".code-indexer"
+        metadata_path = metadata_dir / "metadata.json"
+
+        if not metadata_path.exists():
+            provider_files = sorted(metadata_dir.glob("metadata-*.json"))
+            if provider_files:
+                metadata_path = provider_files[0]
+            else:
+                return None
+
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            if "current_commit" in metadata:
+                return str(metadata["current_commit"])
+
+            if "files_processed" in metadata:
+                # Use files_processed + indexed_at as a combined fingerprint for
+                # non-git repos so that any re-index is detectable.
+                files = metadata["files_processed"]
+                indexed_at = metadata.get("indexed_at", "")
+                return f"{files}:{indexed_at}"
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to read metadata fingerprint from {repo_path}: {e}",
+                exc_info=True,
+            )
+            return None
 
     def has_changes_since_last_run(
         self, repo_path: str, tracking_record: Dict[str, Any]
@@ -341,6 +448,18 @@ class DescriptionRefreshScheduler:
             if "current_commit" in metadata:
                 last_known_commit = tracking_record.get("last_known_commit")
                 current_commit = metadata["current_commit"]
+
+                # #1094 (reverts #1093 Fix A): a NULL last_known_commit means we
+                # have no commit marker yet, so a refresh MUST fire — it is the
+                # signal the marker still needs establishing.  When an existing
+                # .md is present the refresh REFINES it (and stamps last_analyzed)
+                # rather than skipping; either way we must not suppress it here.
+                if last_known_commit is None:
+                    logger.debug(
+                        f"Changes detected in {repo_path}: no last_known_commit "
+                        f"marker — refresh needed to establish it"
+                    )
+                    return True
 
                 if last_known_commit == current_commit:
                     logger.debug(
@@ -661,6 +780,9 @@ class DescriptionRefreshScheduler:
     def _run_description_backfill_async(self, aliases: List[str]) -> None:
         """Background worker: run LifecycleBatchRunner on terse-description aliases.
 
+        Story #1062: uses _description_backfill_running (not the removed _backfill_in_progress)
+        and drives BackfillJournalService for NFS-shared observability.
+
         Generates a UUID job_id, registers it with JobTracker (operation_type
         'description_backfill', username 'system'), then invokes
         LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
@@ -670,7 +792,17 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
-        self._backfill_in_progress.set()
+        self._description_backfill_running.set()
+
+        # Story #1062: per-namespace NFS journal under {golden_repos_dir}/.scratch/
+        journal_svc = self._init_backfill_journal("description")
+        try:
+            journal_svc.start(total=len(aliases))
+        except Exception as exc:
+            logger.warning(
+                "Description backfill: journal start failed (degraded): %s", exc
+            )
+
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -682,7 +814,7 @@ class DescriptionRefreshScheduler:
             import uuid
 
             job_id = str(uuid.uuid4())
-            self._job_tracker.register_job(
+            self._job_tracker.register_job_if_no_conflict(
                 job_id=job_id,
                 operation_type="description_backfill",
                 username="system",
@@ -693,6 +825,21 @@ class DescriptionRefreshScheduler:
                 },
             )
 
+            def _journal_cb(alias: str, outcome: str) -> None:
+                try:
+                    success = not outcome.startswith("failed")
+                    reason = (
+                        outcome[len("failed: ") :]
+                        if outcome.startswith("failed: ")
+                        else None
+                    )
+                    journal_svc.update_alias(alias, success=success, reason=reason)
+                except Exception as cb_exc:
+                    logger.debug(
+                        "Description backfill: journal_cb failed (non-fatal): %s",
+                        cb_exc,
+                    )
+
             runner = LifecycleBatchRunner(
                 golden_repos_dir=self._golden_repos_dir,
                 job_tracker=self._job_tracker,
@@ -701,19 +848,78 @@ class DescriptionRefreshScheduler:
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
                 concurrency=self._get_lifecycle_concurrency(),
+                journal_callback=_journal_cb,
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
                 "Description backfill async: completed regeneration for %d aliases",
                 len(aliases),
             )
+        except DuplicateJobError as dup:
+            logger.info(
+                "Description backfill: duplicate job already active — skipping "
+                "(existing_job_id=%s)",
+                dup.existing_job_id,
+            )
+            return
         except Exception:
             logger.error(
                 "Description backfill async: regeneration thread failed",
                 exc_info=True,
             )
         finally:
-            self._backfill_in_progress.clear()
+            try:
+                journal_svc.complete()
+            except Exception as exc:
+                logger.debug(
+                    "Description backfill: journal complete failed (non-fatal): %s", exc
+                )
+            self._description_backfill_running.clear()
+
+    _VALID_BACKFILL_NAMESPACES = frozenset({"lifecycle", "description"})
+
+    def _init_backfill_journal(self, namespace: str):
+        """Return a BackfillJournalService for *namespace* pointing to the shared NFS scratch dir.
+
+        Journal path: {golden_repos_dir}/.scratch/{namespace}-backfill-journal/
+        Mirrors the dep-map precedent: Bug #1041.
+
+        Namespace must be one of {"lifecycle", "description"} — validated before path
+        construction to prevent directory traversal or injection.
+
+        When golden_repos_dir is None/invalid (e.g. early startup), falls back to a path
+        under tempfile.gettempdir() so the caller never raises. The BackfillJournalService
+        init() failure-swallow contract (Scenario 6) then handles any NFS-gone errors
+        without aborting the backfill.
+        """
+        from code_indexer.server.services.backfill_journal_service import (
+            BackfillJournalService,
+        )
+        import tempfile
+
+        if namespace not in self._VALID_BACKFILL_NAMESPACES:
+            raise ValueError(
+                f"Invalid backfill namespace {namespace!r}. "
+                f"Must be one of {sorted(self._VALID_BACKFILL_NAMESPACES)}"
+            )
+
+        try:
+            grd = self._golden_repos_dir
+            if grd is None:
+                raise AttributeError("golden_repos_dir is None")
+            journal_dir = Path(grd) / ".scratch" / f"{namespace}-backfill-journal"
+        except (TypeError, AttributeError):
+            # golden_repos_dir is None or non-path — degrade to a temp-dir fallback
+            journal_dir = (
+                Path(tempfile.gettempdir()) / f"cidx-{namespace}-backfill-journal"
+            )
+            logger.warning(
+                "%s backfill: golden_repos_dir not set — journal will use fallback path %s",
+                namespace.capitalize(),
+                journal_dir,
+            )
+
+        return BackfillJournalService(namespace=namespace, journal_dir=journal_dir)
 
     def _check_lifecycle_backfill_wiring(self) -> bool:
         """Return True if all five lifecycle collaborators are wired; log WARNING and
@@ -794,6 +1000,9 @@ class DescriptionRefreshScheduler:
     def _run_lifecycle_backfill_async(self, aliases: List[str]) -> None:
         """Background worker: run LifecycleBatchRunner on broken aliases.
 
+        Story #1062: uses _lifecycle_backfill_running (not the removed _backfill_in_progress)
+        and drives BackfillJournalService for NFS-shared observability.
+
         Generates a UUID job_id, registers it with JobTracker (operation_type
         'lifecycle_backfill', username 'system'), then invokes
         LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
@@ -803,7 +1012,17 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
-        self._backfill_in_progress.set()
+        self._lifecycle_backfill_running.set()
+
+        # Story #1062: per-namespace NFS journal under {golden_repos_dir}/.scratch/
+        journal_svc = self._init_backfill_journal("lifecycle")
+        try:
+            journal_svc.start(total=len(aliases))
+        except Exception as exc:
+            logger.warning(
+                "Lifecycle backfill: journal start failed (degraded): %s", exc
+            )
+
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -815,13 +1034,27 @@ class DescriptionRefreshScheduler:
             import uuid
 
             job_id = str(uuid.uuid4())
-            self._job_tracker.register_job(
+            self._job_tracker.register_job_if_no_conflict(
                 job_id=job_id,
                 operation_type="lifecycle_backfill",
                 username="system",
                 repo_alias="server",
                 metadata={"total": len(aliases), "source": "startup_backfill"},
             )
+
+            def _journal_cb(alias: str, outcome: str) -> None:
+                try:
+                    success = not outcome.startswith("failed")
+                    reason = (
+                        outcome[len("failed: ") :]
+                        if outcome.startswith("failed: ")
+                        else None
+                    )
+                    journal_svc.update_alias(alias, success=success, reason=reason)
+                except Exception as cb_exc:
+                    logger.debug(
+                        "Lifecycle backfill: journal_cb failed (non-fatal): %s", cb_exc
+                    )
 
             runner = LifecycleBatchRunner(
                 golden_repos_dir=self._golden_repos_dir,
@@ -831,19 +1064,33 @@ class DescriptionRefreshScheduler:
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
                 concurrency=self._get_lifecycle_concurrency(),
+                journal_callback=_journal_cb,
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
                 "Lifecycle backfill async: completed repair for %d aliases",
                 len(aliases),
             )
+        except DuplicateJobError as dup:
+            logger.info(
+                "Lifecycle backfill: duplicate job already active — skipping "
+                "(existing_job_id=%s)",
+                dup.existing_job_id,
+            )
+            return
         except Exception:
             logger.error(
                 "Lifecycle backfill async: repair thread failed",
                 exc_info=True,
             )
         finally:
-            self._backfill_in_progress.clear()
+            try:
+                journal_svc.complete()
+            except Exception as exc:
+                logger.debug(
+                    "Lifecycle backfill: journal complete failed (non-fatal): %s", exc
+                )
+            self._lifecycle_backfill_running.clear()
 
     def on_refresh_complete(
         self,
@@ -873,6 +1120,15 @@ class DescriptionRefreshScheduler:
         metadata_path = Path(repo_path) / ".code-indexer" / "metadata.json"
         change_markers = {}
 
+        if not metadata_path.exists():
+            # Bug #1093 Fix B: golden repos use metadata-{provider}.json, not metadata.json.
+            # Mirror the same fallback already used in has_changes_since_last_run (lines ~390-394).
+            provider_files = sorted(
+                (Path(repo_path) / ".code-indexer").glob("metadata-*.json")
+            )
+            if provider_files:
+                metadata_path = provider_files[0]
+
         if metadata_path.exists():
             try:
                 with open(metadata_path) as f:
@@ -898,8 +1154,8 @@ class DescriptionRefreshScheduler:
         if success:
             # Bug #953: reset circuit-breaker counter on any successful refresh.
             self._prompt_failure_counts[repo_alias] = 0
-            # Bug #984: re-arm warning so future legitimate failures warn again.
-            self._warned_missing_desc.discard(repo_alias)
+            # Keep failure-commit dict in sync: clear stale fingerprint on success.
+            self._failure_commit.pop(repo_alias, None)
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -921,6 +1177,23 @@ class DescriptionRefreshScheduler:
                 updated_at=now,
             )
             logger.warning(f"Description refresh failed for {repo_alias}: {error_msg}")
+            # Bug #1096 review fix: record the on-disk commit fingerprint at failure
+            # time so the quarantine gate can detect a GENUINE commit transition,
+            # independent of last_known_commit being NULL (which stays NULL forever
+            # for repos that never succeed).
+            self._failure_commit[repo_alias] = self._read_current_fingerprint(repo_path)
+            # Bug #1096: increment circuit-breaker counter on each prompt failure.
+            self._prompt_failure_counts[repo_alias] += 1
+            if (
+                self._prompt_failure_counts[repo_alias]
+                == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+            ):
+                logger.error(
+                    "Repo %s has reached prompt failure quarantine threshold (%d consecutive "
+                    "failures). Quarantining until a new commit is detected or a success occurs.",
+                    repo_alias,
+                    PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                )
 
         # Update unified job tracker if configured (Story #313, AC2, AC7, AC8)
         if job_id is not None and self._job_tracker is not None:
@@ -971,7 +1244,11 @@ class DescriptionRefreshScheduler:
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
         """
-        if self._backfill_in_progress.is_set():
+        # Story #1062: guard checks BOTH separate events — skip if EITHER backfill is running.
+        if (
+            self._lifecycle_backfill_running.is_set()
+            or self._description_backfill_running.is_set()
+        ):
             logger.debug("Description refresh pass skipped: backfill in progress")
             return
 
@@ -987,19 +1264,53 @@ class DescriptionRefreshScheduler:
             if self._claude_cli_manager:
                 logger.info(f"Submitting description refresh for {alias}")
 
-                # Bug #984: check quarantine state BEFORE calling _get_refresh_prompt()
-                # so that already-quarantined repos never trigger the warning inside it.
+                # Bug #984: check quarantine state FIRST, before dispatching any
+                # refresh work through the LifecycleBatchRunner path, so that
+                # already-quarantined repos are skipped without further processing.
                 if (
                     self._prompt_failure_counts[alias]
                     >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
                 ):
-                    logger.debug(
-                        "Repo %s is quarantined (failure count %d >= %d), skipping",
-                        alias,
-                        self._prompt_failure_counts[alias],
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    continue
+                    # Bug #1096 review fix: auto-clear ONLY on a genuine commit
+                    # TRANSITION — compare the CURRENT on-disk fingerprint against
+                    # the fingerprint recorded at failure time (_failure_commit).
+                    #
+                    # Using has_changes_since_last_run here is wrong: it returns True
+                    # when last_known_commit is None (the #1094 revert), but
+                    # last_known_commit stays NULL forever for repos that never
+                    # succeed.  That causes the auto-clear to fire every cycle,
+                    # defeating quarantine for the worst case (persistently broken
+                    # repos — the exact money-burn #1096 exists to stop).
+                    #
+                    # Invariant: quarantine HOLDS while the on-disk commit is
+                    # unchanged; clears ONLY when the fingerprint genuinely changes.
+                    current_fp = self._read_current_fingerprint(clone_path)
+                    # Auto-clear ONLY when a failure fingerprint was actually
+                    # recorded AND the on-disk commit has genuinely changed.
+                    # If no failure fingerprint was recorded (key absent from
+                    # _failure_commit), quarantine holds — conservative default.
+                    failure_fp = self._failure_commit.get(alias)
+                    if alias in self._failure_commit and current_fp != failure_fp:
+                        logger.info(
+                            "Repo %s was quarantined but commit has changed "
+                            "(%r -> %r) — resetting failure counter and retrying",
+                            alias,
+                            failure_fp,
+                            current_fp,
+                        )
+                        self._prompt_failure_counts[alias] = 0
+                        self._failure_commit.pop(alias, None)
+                        # Fall through to normal dispatch below
+                    else:
+                        logger.debug(
+                            "Repo %s is quarantined (failure count %d >= %d, "
+                            "commit unchanged: %r), skipping",
+                            alias,
+                            self._prompt_failure_counts[alias],
+                            PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                            current_fp,
+                        )
+                        continue
 
                 if not self.has_changes_since_last_run(clone_path, repo):
                     now = datetime.now(timezone.utc).isoformat()
@@ -1010,46 +1321,13 @@ class DescriptionRefreshScheduler:
                     )
                     continue
 
-                # Get refresh prompt using RepoAnalyzer
-                prompt = self._get_refresh_prompt(alias, clone_path)
-                if prompt is None:
-                    # If the .md file doesn't exist, this is NOT a prompt-generation
-                    # failure — the repo simply hasn't been analyzed yet.  Skip it
-                    # without incrementing the failure counter so it doesn't get
-                    # quarantined for a missing file.
-                    if self._meta_dir and not (self._meta_dir / f"{alias}.md").exists():
-                        now = datetime.now(timezone.utc).isoformat()
-                        self._tracking_backend.upsert_tracking(
-                            repo_alias=alias,
-                            next_run=self.calculate_next_run(alias),
-                            updated_at=now,
-                        )
-                        continue
-                    # Bug #953: circuit-breaker — count consecutive prompt failures.
-                    self._prompt_failure_counts[alias] += 1
-                    failure_count = self._prompt_failure_counts[alias]
-                    if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                        # Log exactly once at the quarantine boundary; subsequent
-                        # passes are silently skipped to avoid log spam.
-                        if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                            logger.error(
-                                "Repo %s entered quarantine after %d consecutive "
-                                "prompt-generation failures — will not reschedule until "
-                                "a successful refresh resets the counter.",
-                                alias,
-                                failure_count,
-                            )
-                        # Do NOT call upsert_tracking — leave next_run stale so the
-                        # repo stays quarantined until the counter is reset externally.
-                        continue
-                    logger.warning(
-                        "Cannot refresh %s: failed to generate prompt, rescheduling"
-                        " (failure %d/%d)",
-                        alias,
-                        failure_count,
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
+                # Lightweight existence gate: skip repos that have never been
+                # analyzed (no .md yet) without spending a Claude invocation.
+                # The refresh itself (refine-existing vs create-from-scratch) is
+                # decided downstream by LifecycleBatchRunner._process_one_repo.
+                if not self._has_existing_description(alias):
+                    # No description yet — repo hasn't been analyzed.  Skip without
+                    # incrementing the failure counter (not a prompt-generation failure).
                     now = datetime.now(timezone.utc).isoformat()
                     self._tracking_backend.upsert_tracking(
                         repo_alias=alias,
@@ -1066,17 +1344,34 @@ class DescriptionRefreshScheduler:
                     updated_at=now,
                 )
 
-                # Register job in unified tracker before spawning thread (AC2, Story #313)
+                # Register job in unified tracker before spawning thread (AC2, Story #313).
+                # Story #1162: use register_job_if_no_conflict so the DB partial unique
+                # index idx_active_job_per_repo acts as a cluster-atomic gate: the first
+                # worker to claim the repo wins; subsequent workers receive DuplicateJobError
+                # and skip dispatch.  This prevents N-worker cost multiplication under
+                # uvicorn --workers N without any in-process lock or shared dict.
+                #
+                # ACCEPTED LIMITATION: _prompt_failure_counts and _failure_commit
+                # (quarantine / circuit-breaker counters) remain per-process dicts.
+                # Cross-worker quarantine-counter consistency is intentionally out of scope
+                # because the DB dedup gate already prevents duplicate concurrent dispatch;
+                # quarantine is defense-in-depth back-off, not the primary cost control.
                 tracked_job_id: Optional[str] = None
                 if self._job_tracker is not None:
                     try:
                         tracked_job_id = f"desc-refresh-{alias}-{uuid.uuid4().hex[:8]}"
-                        self._job_tracker.register_job(
+                        self._job_tracker.register_job_if_no_conflict(
                             tracked_job_id,
                             "description_refresh",
                             username="system",
                             repo_alias=alias,
                         )
+                    except DuplicateJobError:
+                        logger.debug(
+                            f"description_refresh already claimed for {alias} "
+                            f"by another worker; skipping"
+                        )
+                        continue
                     except Exception as e:
                         logger.warning(
                             f"JobTracker registration failed for {alias}: {e}"
@@ -1179,7 +1474,9 @@ class DescriptionRefreshScheduler:
             claude_cli_invoker=self._lifecycle_invoker,
             concurrency=self._get_lifecycle_concurrency(),
         )
-        runner.run([alias], parent_job_id=job_id)
+        failed = runner.run([alias], parent_job_id=job_id)
+        if alias in failed:
+            raise RuntimeError(failed[alias])
 
     def _get_interval_hours(self) -> int:
         """Get refresh interval from config."""
@@ -1199,258 +1496,23 @@ class DescriptionRefreshScheduler:
 
         return ClaudeIntegrationConfig().max_concurrent_claude_cli  # type: ignore[no-any-return]
 
-    def _read_existing_description(
-        self, repo_alias: str
-    ) -> Optional[Dict[str, Optional[str]]]:
+    def _has_existing_description(self, alias: str) -> bool:
         """
-        Read existing .md file from cidx-meta and extract description and last_analyzed.
+        Lightweight check: does a non-empty .md file exist for *alias* in _meta_dir?
 
-        Args:
-            repo_alias: Repository alias
+        Used by _run_loop_single_pass to skip repos that have not been analyzed
+        yet (no description generated), without any Claude invocation.
 
         Returns:
-            Dict with 'description' and 'last_analyzed' keys, or None if file not found
+            True if _meta_dir is set and {alias}.md exists and is non-empty.
+            False in all other cases (no meta_dir, file absent, file empty/whitespace).
         """
         if not self._meta_dir:
-            logger.warning("Meta directory not set, cannot read existing description")
-            return None
-
-        # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
-        md_file = self._meta_dir / f"{repo_alias}.md"
-        if not md_file.exists():
-            logger.debug(f"No .md file found for {repo_alias}, cannot refresh")
-            return None
-
-        try:
-            content = md_file.read_text()
-
-            # Parse YAML frontmatter to extract last_analyzed
-            # Format: ---\nfield: value\n---\n<body>
-            frontmatter_match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
-            if not frontmatter_match:
-                logger.warning(f"No YAML frontmatter found in {md_file}")
-                return {"description": content, "last_analyzed": None}
-
-            frontmatter_text = frontmatter_match.group(1)
-            _body = frontmatter_match.group(2)
-
-            # Extract last_analyzed from frontmatter
-            last_analyzed = None
-            for line in frontmatter_text.split("\n"):
-                if line.startswith("last_analyzed:"):
-                    last_analyzed = line.split(":", 1)[1].strip()
-                    break
-
-            return {"description": content, "last_analyzed": last_analyzed}
-
-        except Exception as e:
-            logger.error(
-                f"Failed to read existing description for {repo_alias}: {e}",
-                exc_info=True,
-            )
-            return None
-
-    def _validate_refresh_inputs(
-        self, repo_alias: str, repo_path: str
-    ) -> Optional[Path]:
-        """Validate refresh inputs; return resolved repo Path or None on failure."""
-        if not repo_alias or not isinstance(repo_alias, str):
-            logger.warning("_get_refresh_prompt: repo_alias must be a non-empty string")
-            return None
-        if not repo_path or not isinstance(repo_path, str):
-            logger.warning("_get_refresh_prompt: repo_path must be a non-empty string")
-            return None
-        resolved = Path(repo_path).resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            logger.warning(
-                "_get_refresh_prompt: repo_path does not resolve to a directory: %s",
-                repo_path,
-            )
-            return None
-        return resolved
-
-    def _stage_and_build_prompt(
-        self, description: str, last_analyzed: str, repo_path_obj: Path
-    ) -> Optional[str]:
-        """
-        Stage *description* to a temp file and build a file-reference refresh prompt.
-
-        Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
-        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns the prompt.
-        Cleans up the temp dir on any error; on success the dir persists for the CLI
-        subprocess (caller is responsible for cleanup after the CLI call).
-        """
-        import shutil
-        import tempfile
-        from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
-
-        tmp_dir_str = tempfile.mkdtemp(dir=repo_path_obj)
-        try:
-            temp_file = Path(tmp_dir_str) / "existing_desc.md"
-            temp_file.write_text(description, encoding="utf-8")
-            analyzer = RepoAnalyzer(str(repo_path_obj))
-            return cast(
-                Optional[str],
-                analyzer.get_prompt(
-                    mode="refresh",
-                    last_analyzed=last_analyzed,
-                    temp_file_path=temp_file,
-                ),
-            )
-        except Exception as e:
-            shutil.rmtree(tmp_dir_str, ignore_errors=True)
-            logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
-            return None
-
-    def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
-        """Get refresh prompt staging the existing description to a temp file."""
-        repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
-        if repo_path_obj is None:
-            return None
-        desc_data = self._read_existing_description(repo_alias)
-        if not desc_data:
-            if repo_alias not in self._warned_missing_desc:
-                logger.warning(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed",
-                    repo_alias,
-                )
-                self._warned_missing_desc.add(repo_alias)
-            else:
-                logger.debug(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed (suppressed repeat)",
-                    repo_alias,
-                )
-            return None
-        return self._stage_and_build_prompt(
-            desc_data.get("description") or "",
-            desc_data["last_analyzed"] or "",
-            repo_path_obj,
-        )
-
-    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
-        """
-        Build a CliDispatcher from *config* (Story #847).
-
-        Delegates to build_dep_map_dispatcher (the single source of truth for
-        CliDispatcher construction — Bug #936 consolidation), forwarding
-        analysis_model and the per-scheduler soft-timeout constant.
-
-        Args:
-            config: ServerConfig returned by config_manager.load_config().
-
-        Returns:
-            A fully initialised CliDispatcher.
-        """
-        return build_dep_map_dispatcher(
-            config,
-            analysis_model=self._analysis_model,
-            claude_soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
-        )
-
-    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
-        """
-        Invoke the CLI dispatcher with the given prompt (Story #847).
-
-        Uses the injected CliDispatcher when available; otherwise builds one
-        from the current ServerConfig on each call.  Logs an INFO record when
-        failover fired so operators can see which CLI handled the job.
-
-        Args:
-            repo_path: Path to repository (used as subprocess cwd).
-            prompt: Prompt to send to the CLI.
-
-        Returns:
-            Tuple of (success: bool, result: str) where result is the output
-            or error message — identical shape to the pre-wiring behaviour.
-        """
-        if self._cli_dispatcher is not None:
-            dispatcher = self._cli_dispatcher
-        else:
-            config = (
-                self._config_manager.load_config() if self._config_manager else None
-            )
-            dispatcher = self._build_cli_dispatcher(config)
-
-        result = dispatcher.dispatch(
-            flow="description_refresh",
-            cwd=repo_path,
-            prompt=prompt,
-            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
-        )
-
-        if result.was_failover:
-            logger.info(
-                "CLI failover fired: cli_used=%s was_failover=True",
-                result.cli_used,
-            )
-
-        if not result.success:
-            return False, result.error
-
-        # Validate output quality (detect error messages masquerading as content)
-        if not self._validate_cli_output(result.output):
-            error_msg = (
-                f"CLI output appears to be an error message"
-                f" (length={len(result.output)}): {result.output[:200]}"
-            )
-            logger.warning(error_msg)
-            return False, error_msg
-
-        return True, result.output
-
-    def _validate_cli_output(self, output: str) -> bool:
-        """
-        Validate that Claude CLI output is a real description, not an error message.
-
-        Args:
-            output: Cleaned output from Claude CLI
-
-        Returns:
-            True if output looks like a valid description, False if it appears to be an error
-        """
-        # Empty or very short output is invalid
-        if not output or len(output) < 100:
-            output_len = len(output) if output else 0
-            logger.warning(
-                f"CLI output too short ({output_len} chars), likely an error"
-            )
             return False
-
-        # Infrastructure error patterns — always checked.
-        # These strings can never appear in valid YAML description content.
-        infrastructure_errors = [
-            "Invalid API key",
-            "Fix external API key",
-            "cannot be launched inside another",
-            "Nested sessions share runtime",
-            "CLAUDECODE environment variable",
-            "Authentication failed",
-        ]
-
-        output_lower = output.lower()
-        for pattern in infrastructure_errors:
-            if pattern.lower() in output_lower:
-                logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                return False
-
-        # Content-ambiguous patterns — only checked when output lacks YAML frontmatter.
-        # Valid descriptions always start with "---" (YAML frontmatter).
-        # Real API errors (rate limit, quota exceeded, Error:) arrive as plain text
-        # without frontmatter.  When frontmatter IS present the output is a real
-        # description even if it mentions these terms as domain concepts (Bug #382).
-        has_frontmatter = output.startswith("---")
-        if not has_frontmatter:
-            content_ambiguous_errors = [
-                "rate limit",
-                "quota exceeded",
-                "Error:",
-            ]
-            for pattern in content_ambiguous_errors:
-                if pattern.lower() in output_lower:
-                    logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                    return False
-
-        return True
+        md_file = self._meta_dir / f"{alias}.md"
+        if not md_file.exists():
+            return False
+        return bool(md_file.read_text(encoding="utf-8", errors="replace").strip())
 
     def _update_description_file(self, repo_alias: str, content: str) -> None:
         """DEPRECATED: Use atomic_write_description() or write_meta_md() instead."""

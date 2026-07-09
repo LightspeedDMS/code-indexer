@@ -91,6 +91,19 @@ class CITokensPostgresBackend:
             }
         return result
 
+    def update_encrypted_token(self, platform: str, new_encrypted_token: str) -> None:
+        """Update encrypted token for lazy re-encryption (Story #999).
+
+        Args:
+            platform: Platform identifier (e.g. "github", "gitlab").
+            new_encrypted_token: New ciphertext produced by the canonical key.
+        """
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE ci_tokens SET encrypted_token = %s WHERE platform = %s",
+                (new_encrypted_token, platform),
+            )
+
     def close(self) -> None:
         """Close the connection pool."""
         self._pool.close()

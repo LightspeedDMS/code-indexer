@@ -15,7 +15,7 @@
         {% if logs %}
         {% for log in logs %}
         <tr>
-            <td>{{ log.timestamp[:19] if log.timestamp else 'N/A' }}</td>
+            <td>{{ (log.timestamp|string)[:19] if log.timestamp else 'N/A' }}</td>
             <td class="level-cell">
                 {% if log.level == 'DEBUG' %}
                 <span class="level-indicator level-debug">DEBUG</span>

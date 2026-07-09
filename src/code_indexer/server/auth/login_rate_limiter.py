@@ -194,11 +194,14 @@ class LoginRateLimiter:
         assert self._pool is not None
         now = time.time()
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT locked_until FROM login_lockouts "
-                "WHERE username = %s AND locked_until > %s",
-                (username, now),
-            ).fetchone()
+            from psycopg.rows import tuple_row
+
+            with conn.cursor(row_factory=tuple_row) as cur:
+                row = cur.execute(
+                    "SELECT locked_until FROM login_lockouts "
+                    "WHERE username = %s AND locked_until > %s",
+                    (username, now),
+                ).fetchone()
         if row is None:
             return False, 0
         locked_until = row[0]
@@ -209,6 +212,8 @@ class LoginRateLimiter:
         assert self._pool is not None
         now = time.time()
         with self._pool.connection() as conn:
+            from psycopg.rows import tuple_row
+
             # Insert failure record
             conn.execute(
                 "INSERT INTO login_failures (username, failed_at) VALUES (%s, %s)",
@@ -216,11 +221,12 @@ class LoginRateLimiter:
             )
             # Count failures in sliding window
             cutoff = now - self._window_seconds
-            row = conn.execute(
-                "SELECT COUNT(*) FROM login_failures "
-                "WHERE username = %s AND failed_at > %s",
-                (username, cutoff),
-            ).fetchone()
+            with conn.cursor(row_factory=tuple_row) as cur:
+                row = cur.execute(
+                    "SELECT COUNT(*) FROM login_failures "
+                    "WHERE username = %s AND failed_at > %s",
+                    (username, cutoff),
+                ).fetchone()
             failure_count = row[0]
             # Check if lockout threshold reached
             if failure_count >= self._max_attempts:

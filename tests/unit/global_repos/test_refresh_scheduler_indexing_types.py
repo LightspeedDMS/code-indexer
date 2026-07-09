@@ -16,6 +16,7 @@ Acceptance criteria covered here:
 """
 
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -62,13 +63,45 @@ def registry(golden_repos_dir):
 
 
 @pytest.fixture
-def scheduler(golden_repos_dir, config_mgr, query_tracker, cleanup_manager, registry):
+def mock_snapshot_manager(golden_repos_dir):
+    """Mock snapshot_manager that replicates cp --reflink=auto via shutil.copytree."""
+    mgr = MagicMock()
+
+    def _create_snapshot(repo_name, source_path):
+        versioned_path = (
+            golden_repos_dir / ".versioned" / repo_name / f"v_{int(time.time())}"
+        )
+        versioned_path.mkdir(parents=True, exist_ok=True)
+        for item in Path(source_path).iterdir():
+            dest = versioned_path / item.name
+            if item.is_dir():
+                shutil.copytree(str(item), str(dest))
+            else:
+                shutil.copy2(str(item), str(dest))
+        # Simulate source was already indexed: index dir must exist in clone
+        (versioned_path / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+        return str(versioned_path)
+
+    mgr.create_snapshot.side_effect = _create_snapshot
+    return mgr
+
+
+@pytest.fixture
+def scheduler(
+    golden_repos_dir,
+    config_mgr,
+    query_tracker,
+    cleanup_manager,
+    registry,
+    mock_snapshot_manager,
+):
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
         config_source=config_mgr,
         query_tracker=query_tracker,
         cleanup_manager=cleanup_manager,
         registry=registry,
+        snapshot_manager=mock_snapshot_manager,
     )
 
 

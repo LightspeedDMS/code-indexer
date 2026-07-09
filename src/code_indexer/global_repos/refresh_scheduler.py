@@ -5,6 +5,7 @@ Orchestrates the complete refresh cycle: timer triggers git pull,
 change detection, index creation, alias swap, and cleanup scheduling.
 """
 
+import json
 import logging
 import os
 import random
@@ -33,12 +34,21 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
-from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
+from code_indexer.server.storage.shared.nfs_visibility import (
+    _configured_visibility_timeout,
+    wait_for_nfs_visibility,
+)
+from code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
     from code_indexer.server.services.job_tracker import JobTracker
+    from code_indexer.server.storage.shared.snapshot_manager import (
+        VersionedSnapshotManager,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +56,35 @@ logger = logging.getLogger(__name__)
 # a local repo and is completely excluded from the scheduled auto-refresh cycle.
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
+
+
+def has_files_with_extensions(
+    repo_path: str, extensions: set, exclude_dirs: set
+) -> bool:
+    """Return True as soon as a file with a matching extension is found (short-circuit).
+
+    Walks the directory tree rooted at repo_path. Directories listed in exclude_dirs
+    or whose names start with '.' are pruned and never descended into.
+
+    Args:
+        repo_path: Root directory to scan.
+        extensions: Set of bare extension names to match (without leading dots, e.g. 'py').
+        exclude_dirs: Set of directory names to skip (e.g. {'.git', 'node_modules'}).
+
+    Returns:
+        True if any file with a matching extension is found, False otherwise.
+    """
+    if not extensions:
+        return False
+    for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
+        dirnames[:] = [
+            d for d in dirnames if d not in exclude_dirs and not d.startswith(".")
+        ]
+        for filename in filenames:
+            ext = os.path.splitext(filename)[1].lstrip(".")
+            if ext in extensions:
+                return True
+    return False
 
 
 def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
@@ -139,6 +178,7 @@ class RefreshScheduler:
         background_job_manager: Optional["BackgroundJobManager"] = None,
         registry: Optional["GlobalRegistry"] = None,  # type: ignore[name-defined]  # noqa: F821
         job_tracker: Optional["JobTracker"] = None,
+        snapshot_manager: Optional["VersionedSnapshotManager"] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -154,6 +194,8 @@ class RefreshScheduler:
             job_tracker: Optional JobTracker for drain-status visibility (Bug #935). When provided,
                 each in-flight _execute_refresh call registers itself so drain-status sees it.
                 When None (CLI mode), no registration occurs.
+            snapshot_manager: Optional VersionedSnapshotManager for CoW snapshot coordination
+                (Commit 1 injection point — stored, used in later commits).
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -162,25 +204,33 @@ class RefreshScheduler:
         self.resource_config = resource_config
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
+        self._snapshot_manager = snapshot_manager
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
 
-        # Use injected registry if provided (testing), otherwise create SQLite backend (production)
-        if registry is not None:
-            self.registry = registry
-        else:
-            # Lazy import to avoid circular dependency (Story #713)
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
-
-            self.registry = get_server_global_registry(str(self.golden_repos_dir))
+        # Registry resolution (Bug #1308): an explicitly injected registry
+        # (testing) is cached immediately. Otherwise resolution is DEFERRED
+        # to the `registry` property below instead of eagerly binding a
+        # per-node SQLite GlobalRegistry here. Eager construction-time
+        # binding split-brained cluster refresh against the shared
+        # PostgreSQL registry that the read/list path already used, because
+        # app.state.backend_registry is not guaranteed to be populated yet
+        # at construction time during server startup.
+        self._registry = registry
+        self._registry_lock = threading.Lock()
 
         # Thread management
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()  # Event-based signaling for efficient stop
+
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback on every
+        # per-repo _submit_refresh_job() failure during a PG outage. This is
+        # SEPARATE from the Bug #735 outer circuit breaker (whole-iteration
+        # failures) below — that one is untouched.
+        self._db_throttle = DbOutageThrottle(service_name="RefreshScheduler")
 
         # Per-repo locking for concurrent refresh serialization
         self._repo_locks: dict[str, threading.Lock] = {}
@@ -200,6 +250,206 @@ class RefreshScheduler:
         # since transient counters are ephemeral by nature.
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
+
+    def _get_registry_lock(self) -> threading.Lock:
+        """
+        Return the registry resolution lock, creating it lazily if absent.
+
+        Some tests construct RefreshScheduler via `object.__new__(RefreshScheduler)`
+        / `RefreshScheduler.__new__(...)` to build a lightweight instance without
+        running __init__ (deliberate pattern used across
+        tests/unit/golden_repos/), so `_registry_lock` may not exist as an
+        instance attribute yet. Falling back to getattr()+lazy-create here
+        (instead of assuming __init__ always ran) preserves that pattern while
+        keeping Bug #1308's deferred resolution.
+        """
+        lock = getattr(self, "_registry_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._registry_lock = lock
+        return lock
+
+    @property
+    def registry(self) -> Any:
+        """
+        Lazily resolve the GlobalRegistry / PostgresGlobalRegistryAdapter.
+
+        Bug #1308: mirrors GlobalRepoOperations.registry (shared_operations.py)
+        -- an explicitly injected registry (test double) is returned as-is;
+        otherwise resolution is deferred to first access (not __init__) so
+        app.state.backend_registry is guaranteed to be populated in
+        postgres/cluster mode. Falls back to the per-node SQLite
+        GlobalRegistry in solo/CLI mode (no app.state), preserving existing
+        behavior byte-for-byte. Result is cached after first successful
+        resolution; in postgres mode with backend not yet available, the
+        result is NOT cached so the next access re-checks.
+
+        Uses getattr(self, "_registry", None) rather than assuming __init__
+        ran, so instances built via object.__new__(RefreshScheduler) (a
+        deliberate lightweight-construction pattern used by several existing
+        tests) don't raise AttributeError before _registry is ever set.
+        Likewise, `golden_repos_dir` is read via getattr() rather than direct
+        attribute access: in postgres/cluster mode the resolved backend makes
+        golden_repos_dir irrelevant, so a bare uninitialized instance must
+        still resolve cleanly in that mode. Only when no backend is available
+        AND golden_repos_dir was never set do we raise -- with a clear,
+        explicit RuntimeError instead of the incidental AttributeError that
+        used to leak out of self.golden_repos_dir.
+        """
+        existing = getattr(self, "_registry", None)
+        if existing is not None:
+            return existing
+
+        with self._get_registry_lock():
+            existing = getattr(self, "_registry", None)
+            if existing is not None:
+                return existing
+
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+                resolve_backend_registry_state,
+            )
+
+            backend, postgres_mode_without_backend = resolve_backend_registry_state(
+                caller_name="RefreshScheduler"
+            )
+            golden_repos_dir = getattr(self, "golden_repos_dir", None)
+            if backend is None and golden_repos_dir is None:
+                raise RuntimeError(
+                    "RefreshScheduler.registry accessed before initialization: "
+                    "no golden_repos_dir and no cluster backend available"
+                )
+            resolved = get_server_global_registry(
+                str(golden_repos_dir) if golden_repos_dir is not None else "",
+                backend=backend,
+            )
+
+            if not postgres_mode_without_backend:
+                self._registry = resolved
+
+            return resolved
+
+    @registry.setter
+    def registry(self, value: Any) -> None:
+        """Allow explicit (re-)injection, e.g. by tests that set `.registry` post-construction."""
+        with self._get_registry_lock():
+            self._registry = value
+
+    def _is_versioned_snapshot(self, path: str) -> bool:
+        """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
+
+        Delegates to the wired :class:`VersionedSnapshotManager` facade (which
+        knows the backend mount point and recognizes both canonical and legacy
+        cow-daemon shapes). When no snapshot_manager is wired (e.g. unit tests in
+        pure-local mode), falls back to the module-level canonical predicate,
+        which still recognizes the local ``.versioned`` layout.
+        """
+        if self._snapshot_manager is not None:
+            return bool(self._snapshot_manager.is_versioned_snapshot(path))
+        from code_indexer.server.storage.shared.snapshot_paths import (
+            is_versioned_snapshot,
+        )
+
+        return bool(is_versioned_snapshot(path))
+
+    #: Fallback keep-last-N when the configured value is missing or invalid.
+    _DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST = 3
+
+    def _retention_keep_last(self) -> int:
+        """Return the configured keep-last-N, falling back to the safe default.
+
+        A value < 1 would schedule EVERY snapshot for deletion (including the
+        live one once it ages out), so non-positive / unreadable values fall back
+        to :attr:`_DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST`.
+        """
+        try:
+            keep = int(get_config_service().get_config().snapshot_retention_keep_last)
+        except Exception:
+            return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
+        if keep < 1:
+            return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
+        return keep
+
+    def _latest_versioned_timestamp(self, alias_name: str) -> Optional[int]:
+        """Return the newest snapshot timestamp for *alias_name*, or None (Bug #1084 A7).
+
+        Uses the discovery API (:meth:`VersionedSnapshotManager.list_snapshots`)
+        when a snapshot_manager is wired — this is backend-correct on cow-daemon
+        where snapshots live under the NFS mount, NOT under
+        ``golden_repos_dir/.versioned``. When no snapshot_manager is wired (unit
+        tests / pure-local), falls back to globbing the local ``.versioned``
+        directory so existing local behavior is preserved.
+        """
+        if self._snapshot_manager is not None:
+            try:
+                snaps = self._snapshot_manager.list_snapshots(alias_name)
+            except Exception as exc:
+                logger.warning(
+                    f"_latest_versioned_timestamp: discovery failed for "
+                    f"{alias_name} (non-fatal): {type(exc).__name__}: {exc}"
+                )
+                return None
+            if not snaps:
+                return None
+            # snaps sorted ascending by ts; last is newest.
+            return int(snaps[-1][1])
+
+        # Local fallback: glob golden_repos_dir/.versioned/{repo}/v_*.
+        repo_name = alias_name.removesuffix("-global")
+        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+        if not versioned_base.exists():
+            return None
+        timestamps = []
+        for d in versioned_base.iterdir():
+            if d.is_dir() and d.name.startswith("v_"):
+                try:
+                    timestamps.append(int(d.name[2:]))
+                except (ValueError, IndexError):
+                    continue
+        return max(timestamps) if timestamps else None
+
+    def _enforce_retention(self, alias_name: str, current_target: str) -> None:
+        """Schedule deletion of superseded snapshots beyond keep-last-N (Bug #1084 A6).
+
+        After a successful swap, lists snapshots via the discovery API and
+        schedules (through the refcount-gated CleanupManager) every snapshot
+        EXCEPT: the N newest, the current alias ``target_path``, and the alias
+        ``previous_path``. Enabled on local + cow-daemon; on ONTAP the discovery
+        API returns ``[]`` so this is naturally inert. Non-fatal: any failure is
+        logged and swallowed so a refresh never fails on retention.
+        """
+        if self._snapshot_manager is None:
+            return
+        try:
+            keep_last = self._retention_keep_last()
+            snapshots = self._snapshot_manager.list_snapshots(alias_name)
+            if len(snapshots) <= keep_last:
+                return
+
+            # Force-keep set: current target + previous_path (rollback) + N newest.
+            protected: set = set()
+            if current_target:
+                protected.add(current_target)
+            previous_path = self.alias_manager.get_previous_path(alias_name)
+            if previous_path:
+                protected.add(previous_path)
+            # snapshots are sorted ascending by ts; the last keep_last are newest.
+            for path, _ts in snapshots[-keep_last:]:
+                protected.add(path)
+
+            for path, _ts in snapshots:
+                if path not in protected:
+                    logger.info(
+                        f"[retention] Scheduling cleanup of superseded snapshot "
+                        f"{path} (keep_last={keep_last}) for {alias_name}"
+                    )
+                    self.cleanup_manager.schedule_cleanup(path)
+        except Exception as exc:
+            logger.warning(
+                f"[retention] keep-last-N enforcement failed for {alias_name} "
+                f"(non-fatal): {type(exc).__name__}: {exc}"
+            )
 
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
@@ -262,6 +512,40 @@ class RefreshScheduler:
         """
         max_jitter = refresh_interval_seconds * self.JITTER_PERCENTAGE
         return random.uniform(-max_jitter, max_jitter)
+
+    def _count_active_refresh_jobs(self) -> int:
+        """Return the number of active (PENDING/RUNNING) refresh jobs.
+
+        Bug #1063 Part 1: delegates to BackgroundJobManager.count_active_refresh_jobs()
+        when a manager is configured; returns 0 in CLI mode (no manager).
+        """
+        if self.background_job_manager is None:
+            return 0
+        return int(self.background_job_manager.count_active_refresh_jobs())
+
+    def _get_refresh_budget(self) -> int:
+        """Compute how many refresh jobs can be submitted this poll cycle.
+
+        Bug #1063 Part 1: refresh budget = max_concurrent_refresh_jobs - active.
+        When no BackgroundJobManager is configured (CLI mode), returns a large
+        sentinel (all due repos can be submitted — CLI runs them synchronously).
+
+        Returns:
+            Non-negative integer: 0 means budget exhausted, >0 means slots available.
+        """
+        if self.background_job_manager is None:
+            # CLI mode: no concurrency gate — return a large cap so list_due_repos
+            # returns all due repos (same behaviour as before the fix).
+            return 10_000
+
+        # Retrieve max_concurrent_refresh_jobs from the manager's config
+        refresh_limit = getattr(
+            self.background_job_manager._background_jobs_config,
+            "max_concurrent_refresh_jobs",
+            max(1, self.background_job_manager.max_concurrent_jobs // 2),
+        )
+        active = self._count_active_refresh_jobs()
+        return int(max(0, refresh_limit - active))
 
     def _calculate_poll_interval(self, refresh_interval_seconds: int) -> float:
         """
@@ -863,66 +1147,80 @@ class RefreshScheduler:
                 if unscheduled:
                     self._assign_initial_spread(unscheduled, refresh_interval)
 
-                # Re-read to get freshly assigned next_refresh values
-                if unscheduled:
-                    repos = self.registry.list_global_repos()
-                    git_repos = [
-                        r
-                        for r in repos
-                        if r.get("alias_name")
-                        and _is_git_repo_url(r.get("repo_url", ""))
-                    ]
+                # Bug #1063 Part 1: capped oldest-first due-query.
+                # Compute how many refresh slots are free this cycle.
+                # max_concurrent_refresh_jobs defaults to max(1, max_bg_jobs // 2).
+                refresh_budget = self._get_refresh_budget()
+                if refresh_budget <= 0:
+                    logger.debug(
+                        "Refresh budget exhausted this cycle "
+                        f"(active={self._count_active_refresh_jobs()}); "
+                        "skipping submission pass."
+                    )
+                    # Still fall through to the per-repo loop below (will be empty)
 
-                # Check each repo individually against its next_refresh timestamp
                 now = time.time()
-                for repo in git_repos:
+                # list_due_repos returns oldest-first, capped at budget.
+                # Repos still unscheduled (NULL next_refresh) are excluded here —
+                # they were just given future timestamps by _assign_initial_spread.
+                due_repos = self.registry.list_due_repos(limit=refresh_budget, now=now)
+
+                for repo in due_repos:
                     if not self._running:
                         break
 
                     alias_name = repo.get("alias_name")
-                    next_refresh_str = repo.get("next_refresh")
 
-                    if next_refresh_str is None:
-                        # Still unscheduled after spread assignment — skip
+                    # Skip non-git repos (list_due_repos returns all repo types)
+                    if not _is_git_repo_url(repo.get("repo_url", "")):
                         continue
 
-                    try:
-                        next_refresh = float(next_refresh_str)
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            f"Invalid next_refresh value for {alias_name}: "
-                            f"{next_refresh_str!r} — skipping"
-                        )
-                        continue
-
-                    if now < next_refresh:
-                        continue  # Not due yet
-
-                    # Repo is due for refresh — submit job
+                    # Repo is due for refresh — submit job.
+                    # Bug #1066: track whether a generic (non-DuplicateJobError)
+                    # exception occurred so we can skip next_refresh advancement.
+                    # Advancing on a transient failure would silently skip one full
+                    # refresh cycle; leaving next_refresh unchanged lets the scheduler
+                    # retry on the very next poll.
+                    _submit_failed = False
                     try:
                         self._submit_refresh_job(alias_name)
+                        self._db_throttle.on_db_success(logger)
                     except DuplicateJobError:
                         # Job already running for this repo — expected when prior refresh
                         # is still in flight (possibly extended by a verification pass).
+                        # Advance next_refresh so we don't re-submit immediately after
+                        # the in-flight job completes.
                         logger.info(
                             f"Refresh skipped for {alias_name}: prior refresh still running "
                             f"(possibly extended by verification pass)"
                         )
                     except Exception as e:
-                        logger.error(
-                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
-                            exc_info=True,
-                        )
+                        # Transient failure — do NOT advance next_refresh.
+                        # The repo remains overdue and will be retried on the next poll.
+                        _submit_failed = True
+                        # Bug #1249: a connectivity error (e.g. PoolTimeout from
+                        # job_tracker._atomic_insert_or_raise during a PG outage)
+                        # is throttled (single ERROR transition, DEBUG
+                        # follow-ups); anything else still logs normally.
+                        if not self._db_throttle.on_db_error(e, logger):
+                            logger.error(
+                                f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                                exc_info=True,
+                            )
 
-                    # Story #284 AC1: back-propagate next_refresh with jitter
-                    jitter = self._calculate_jitter(refresh_interval)
-                    new_next_refresh = now + refresh_interval + jitter
-                    try:
-                        self.registry.update_next_refresh(alias_name, new_next_refresh)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to persist next_refresh for {alias_name}: {e}"
-                        )
+                    # Story #284 AC1: back-propagate next_refresh with jitter.
+                    # Bug #1066: skip advancement when submit raised a generic exception.
+                    if not _submit_failed:
+                        jitter = self._calculate_jitter(refresh_interval)
+                        new_next_refresh = now + refresh_interval + jitter
+                        try:
+                            self.registry.update_next_refresh(
+                                alias_name, new_next_refresh
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to persist next_refresh for {alias_name}: {e}"
+                            )
 
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0
@@ -945,8 +1243,12 @@ class RefreshScheduler:
                     return
                 continue
 
-            # Short poll interval instead of full refresh_interval wait
-            poll_interval = self._calculate_poll_interval(refresh_interval)
+            # Short poll interval instead of full refresh_interval wait.
+            # Bug #1249: during a per-repo DB outage, back off the overall
+            # poll cadence too (capped) instead of hammering every tick.
+            poll_interval = self._db_throttle.next_wait_seconds(
+                self._calculate_poll_interval(refresh_interval)
+            )
             self._stop_event.wait(timeout=poll_interval)
 
         logger.debug("Refresh scheduler loop exited")
@@ -1107,6 +1409,9 @@ class RefreshScheduler:
                         f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
                     )
                     sync_failure: Optional[str] = None
+                    # Initialized here so _check_extension_drift can set it before
+                    # any early-return exit in the local/git branching below.
+                    force_reconcile = False
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -1131,6 +1436,45 @@ class RefreshScheduler:
                                 "alias": alias_name,
                                 "message": "Not yet initialized, skipped",
                             }
+
+                        # Bug #1253: Self-heal a .code-indexer/ directory that exists but
+                        # has no valid config.json. golden_repo_manager.register_local_repo()
+                        # runs `cidx init` exactly ONCE per alias at first registration; if
+                        # that init fails partway through (e.g. the directory gets created by
+                        # ConfigManager.save_with_documentation()'s mkdir() but config.json
+                        # never gets written, or config.json is later truncated/corrupted by
+                        # a concurrent writer), the CalledProcessError is only logged --
+                        # registration "continues" and the broken golden repo is registered
+                        # anyway. Because registration never retries, the repo is then stuck
+                        # forever: code_indexer_dir.exists() is True so the guard above never
+                        # fires, yet `cidx index` fails the SAME way on every scheduled cycle
+                        # with "Command 'index' is not available in no configuration found".
+                        # Observed as 231 recurring failures for langfuse_Claude_Code_*-global
+                        # repos on staging. Repair by re-running `cidx init` before indexing
+                        # instead of failing identically forever.
+                        config_json_path = code_indexer_dir / "config.json"
+                        if not self._is_local_config_valid(config_json_path):
+                            logger.warning(
+                                f"Local repo {alias_name} has .code-indexer/ but no valid "
+                                f"config.json at {config_json_path} (likely a partial "
+                                f"'cidx init' during registration -- Bug #1253). "
+                                f"Attempting self-heal via 'cidx init' before indexing."
+                            )
+                            if not self._repair_uninitialized_local_repo(
+                                source_path, alias_name
+                            ):
+                                return {
+                                    "success": False,
+                                    "alias": alias_name,
+                                    "message": (
+                                        "Local repo config invalid and repair via "
+                                        "cidx init failed"
+                                    ),
+                                }
+                            logger.info(
+                                f"Self-healed .code-indexer/ config for local repo "
+                                f"{alias_name}; proceeding with refresh"
+                            )
 
                         # Story #227: Skip CoW clone if an external writer holds the write lock.
                         # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
@@ -1237,14 +1581,18 @@ class RefreshScheduler:
                             )
 
                             if not has_changes:
-                                logger.info(
-                                    f"No changes detected for local repo {alias_name}, skipping refresh"
+                                force_reconcile = self._check_extension_drift(
+                                    source_path, alias_name
                                 )
-                                return {
-                                    "success": True,
-                                    "alias": alias_name,
-                                    "message": "No changes detected",
-                                }
+                                if not force_reconcile:
+                                    logger.info(
+                                        f"No changes detected for local repo {alias_name}, skipping refresh"
+                                    )
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "No changes detected",
+                                    }
 
                             logger.info(
                                 f"Changes detected in local repo {alias_name}, creating new index"
@@ -1440,19 +1788,29 @@ class RefreshScheduler:
                                     self._reset_fetch_failures(alias_name)
 
                                     if not has_changes:
-                                        logger.info(
-                                            f"No changes detected for {alias_name}, skipping refresh"
+                                        # Check drift before early return: config may have
+                                        # changed even when the repo has no new commits.
+                                        # source_path is set here (same as line 1491) so
+                                        # _check_extension_drift can scan the right directory.
+                                        source_path = master_path
+                                        force_reconcile = self._check_extension_drift(
+                                            source_path, alias_name
                                         )
-                                        return {
-                                            "success": True,
-                                            "alias": alias_name,
-                                            "message": "No changes detected",
-                                        }
-
-                                    logger.info(
-                                        f"Pulling latest changes for {alias_name} into master: {master_path}"
-                                    )
-                                    updater.update()
+                                        if not force_reconcile:
+                                            logger.info(
+                                                f"No changes detected for {alias_name}, skipping refresh"
+                                            )
+                                            return {
+                                                "success": True,
+                                                "alias": alias_name,
+                                                "message": "No changes detected",
+                                            }
+                                        # Drift detected — skip git pull but proceed to indexing.
+                                    else:
+                                        logger.info(
+                                            f"Pulling latest changes for {alias_name} into master: {master_path}"
+                                        )
+                                        updater.update()
                                 except GitFetchError as e:
                                     self._handle_fetch_error(
                                         alias_name, repo_url, master_path, e
@@ -1461,15 +1819,14 @@ class RefreshScheduler:
 
                             source_path = master_path
 
-                    # Story #223 AC7: Sync file extensions from server config before indexing
-                    try:
-                        config_service = get_config_service()
-                        config_service.sync_repo_extensions_if_drifted(source_path)
-                    except Exception as e:
-                        logger.warning(
-                            "Could not sync extensions before index for %s: %s",
-                            alias_name,
-                            e,
+                    # Story #223 AC7 / Story #1001: Sync file extensions from server config
+                    # before indexing.  _check_extension_drift() may have already been called
+                    # in the no-changes early-return path above (to detect drift before skipping).
+                    # Guard here avoids a second call (sync_repo_extensions_if_drifted is one-shot:
+                    # it writes config on the first call and returns None on subsequent calls).
+                    if not force_reconcile:
+                        force_reconcile = self._check_extension_drift(
+                            source_path, alias_name
                         )
 
                     # Index source first, then create versioned snapshot (Story #229)
@@ -1478,6 +1835,7 @@ class RefreshScheduler:
                         alias_name=alias_name,
                         source_path=source_path,
                         progress_callback=progress_callback,
+                        force_reconcile=force_reconcile,
                     )
                     new_index_path = self._create_snapshot(
                         alias_name=alias_name, source_path=source_path
@@ -1521,11 +1879,18 @@ class RefreshScheduler:
                             )
                         )
 
-                    # Story #236 Fix 1: Only schedule cleanup for versioned snapshots.
-                    # Never schedule cleanup for the master golden repo (golden-repos/{alias}/).
-                    # On first refresh, current_target IS the master golden repo — scheduling it
-                    # for cleanup would permanently destroy the master.
-                    if ".versioned" in current_target:
+                    # Story #236 Fix 1 + Bug #1084 Phase A4: Only schedule cleanup
+                    # for versioned snapshots, never for the master golden repo
+                    # (golden-repos/{repo}/). On first refresh current_target IS the
+                    # master — scheduling it would permanently destroy it. The
+                    # canonical predicate recognizes local AND cow-daemon (canonical
+                    # + legacy) snapshot shapes; the explicit master_path comparison
+                    # makes the Story #236 master-guard backend-independent.
+                    if (
+                        current_target
+                        and self._is_versioned_snapshot(current_target)
+                        and current_target != master_path
+                    ):
                         logger.info(
                             f"Scheduling cleanup of old versioned snapshot: {current_target}"
                         )
@@ -1534,6 +1899,12 @@ class RefreshScheduler:
                         logger.info(
                             f"Preserving master golden repo (not scheduling cleanup): {current_target}"
                         )
+
+                    # Bug #1084 Phase A6: keep-last-N retention (defense in depth).
+                    # Schedule deletion (through the same refcount-gated
+                    # CleanupManager) of all but the N newest snapshots, never the
+                    # current target or previous_path. Inert on ONTAP (discovery []).
+                    self._enforce_retention(alias_name, new_index_path)
 
                     # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
@@ -1587,7 +1958,11 @@ class RefreshScheduler:
                     self._job_tracker.complete_job(_tracker_job_id)
 
     def _index_source(
-        self, alias_name: str, source_path: str, progress_callback=None
+        self,
+        alias_name: str,
+        source_path: str,
+        progress_callback=None,
+        force_reconcile: bool = False,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -1604,6 +1979,9 @@ class RefreshScheduler:
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
             source_path: Path to the golden repo source directory
+            force_reconcile: When True, forces --reconcile regardless of metadata status.
+                Story #1001: set by _execute_refresh() when extension drift is detected
+                and matching files exist in the repo.
 
         Raises:
             RuntimeError: If any indexing step fails or times out
@@ -1612,7 +1990,8 @@ class RefreshScheduler:
         # Bug #467: No timeout — let indexing run to completion.
         # Check if previous indexing was interrupted — use --reconcile to recover.
         # --reconcile compares content IDs against existing vectors, skips unchanged
-        # files. Only used when needed (interrupted state), otherwise normal incremental.
+        # files. Only used when needed (interrupted state or extension drift), otherwise
+        # normal incremental.
         needs_reconcile = False
         metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
         if metadata_path.exists():
@@ -1628,8 +2007,15 @@ class RefreshScheduler:
                         f"Previous indexing interrupted (status={meta_status}), "
                         f"using --reconcile for crash recovery on {alias_name}"
                     )
-            except Exception:
-                pass  # If metadata unreadable, proceed with normal indexing
+            except Exception as _meta_err:
+                logger.warning(
+                    "Could not read metadata.json for %s, proceeding without --reconcile: %s",
+                    alias_name,
+                    _meta_err,
+                )
+
+        # Story #1001: OR with force_reconcile from extension-drift detection.
+        needs_reconcile = needs_reconcile or force_reconcile
 
         if needs_reconcile:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
@@ -1722,21 +2108,44 @@ class RefreshScheduler:
         _popen_stdout: list = []
         _popen_stderr: list = []
 
-        def _run_popen_c(command: list, phase_name: str, error_label: str) -> None:
-            """Run command with Popen progress, re-raising as RuntimeError on failure."""
+        def _run_popen_c(
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
+        ) -> None:
+            """Run command with Popen progress, re-raising as RuntimeError on failure.
+
+            Bug #1313 round-3: env is forwarded to run_with_popen_progress so
+            the temporal (--index-commits) child subprocess can be handed
+            CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
+            temporal call site below. Bug #1325: the semantic/FTS call site
+            now always passes an explicit sanitized env (never relies on this
+            default), so this None default only matters for a hypothetical
+            future caller.
+            """
             _popen_stdout.clear()
             _popen_stderr.clear()
+            # Bug #1313 round-3 regression guard: only pass the env= kwarg
+            # when it is not None, so callers that intentionally pass None
+            # (e.g. temporal in sqlite mode, to stay byte-unchanged) do not
+            # have that None overwritten here -- several pre-existing tests
+            # mock run_with_popen_progress with a strict (non-**kwargs)
+            # signature that does not accept an env kwarg at all.
+            _popen_kwargs: dict = dict(
+                command=command,
+                phase_name=phase_name,
+                allocator=allocator,
+                progress_callback=progress_callback,
+                all_stdout=_popen_stdout,
+                all_stderr=_popen_stderr,
+                cwd=str(source_path),
+                error_label=error_label,
+            )
+            if env is not None:
+                _popen_kwargs["env"] = env
             try:
-                run_with_popen_progress(
-                    command=command,
-                    phase_name=phase_name,
-                    allocator=allocator,
-                    progress_callback=progress_callback,
-                    all_stdout=_popen_stdout,
-                    all_stderr=_popen_stderr,
-                    cwd=str(source_path),
-                    error_label=error_label,
-                )
+                run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 error_msg = str(e)
                 # SIGTERM check — returncode -15 is in the error message from popen
@@ -1759,7 +2168,10 @@ class RefreshScheduler:
         # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
         # at DEBUG and never interrupt indexing.
         def _run_popen_c_with_telemetry(
-            command: list, phase_name: str, error_label: str
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
         ) -> None:
             try:
                 from code_indexer.server.services.config_seeding import (
@@ -1772,7 +2184,9 @@ class RefreshScheduler:
                     "Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc
                 )
             try:
-                _run_popen_c(command, phase_name=phase_name, error_label=error_label)
+                _run_popen_c(
+                    command, phase_name=phase_name, error_label=error_label, env=env
+                )
             finally:
                 try:
                     from code_indexer.services.provider_health_bridge import (
@@ -1787,6 +2201,11 @@ class RefreshScheduler:
                     )
 
         # Execute Step 1: cidx index --fts (semantic + FTS, Popen for real progress)
+        # Bug #1325 (code-review follow-up): pass a sanitized env with an
+        # absolutized PYTHONPATH -- otherwise a relative PYTHONPATH inherited
+        # from the server process re-anchors into source_path once the
+        # child's cwd changes, letting a src/-layout package in source_path
+        # shadow an installed cidx dependency.
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
@@ -1794,11 +2213,36 @@ class RefreshScheduler:
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
+            env=build_cidx_subprocess_env(),
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
         # Execute Step 2: temporal indexing (if enabled)
         if temporal_command is not None:
+            # Bug #1313 round-3: in postgres/cluster mode, hand the child
+            # subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs the
+            # PostgreSQL temporal-metadata backend instead of silently
+            # falling back to SQLite-on-NFS. sqlite/solo mode (or a failed
+            # bootstrap read) yields env=None -- byte-unchanged existing
+            # behavior. ONLY this temporal call site is postgres-aware; the
+            # semantic call above is untouched.
+            #
+            # Bug #1325: when postgres mode DOES produce a temporal env dict,
+            # run it through build_cidx_subprocess_env() too so its PYTHONPATH
+            # (inherited from the server process) is absolutized, while
+            # PRESERVING CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (Bug #1313). sqlite
+            # mode keeps env=None, byte-unchanged.
+            from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                build_temporal_child_env,
+            )
+
+            _temporal_env = build_temporal_child_env(get_config_service().get_config())
+            _temporal_env = (
+                build_cidx_subprocess_env(_temporal_env)
+                if _temporal_env is not None
+                else None
+            )
+
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -1806,6 +2250,7 @@ class RefreshScheduler:
                 temporal_command,
                 phase_name="temporal",
                 error_label=f"temporal indexing on source for {alias_name}",
+                env=_temporal_env,
             )
             logger.info("cidx index (temporal) on source completed successfully")
 
@@ -1822,9 +2267,6 @@ class RefreshScheduler:
                     phase="scip",
                     detail="SCIP: generating code intelligence index...",
                 )
-            # Bug #730: apply SCIP generation timeout.  ScipConfig is the canonical
-            # source of truth for this value (default defined in its dataclass).
-            scip_timeout = ScipConfig().scip_generation_timeout_seconds
             try:
                 subprocess.run(
                     scip_command,
@@ -1832,7 +2274,7 @@ class RefreshScheduler:
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=scip_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 logger.info("cidx scip generate on source completed successfully")
                 if progress_callback is not None:
@@ -1841,14 +2283,6 @@ class RefreshScheduler:
                         phase="scip",
                         detail="SCIP: complete",
                     )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"SCIP indexing on source timed out after {scip_timeout}s for {alias_name}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx scip generate timed out after {scip_timeout}s: {e}"
-                ) from e
             except subprocess.CalledProcessError as e:
                 if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
                     logger.warning(
@@ -1896,62 +2330,53 @@ class RefreshScheduler:
         # Use resource_config defaults when none supplied — ServerResourceConfig
         # is the single source of truth for both default and operator-tuned values.
         cfg = self.resource_config or ServerResourceConfig()
-        cow_timeout = cfg.cow_clone_timeout
         git_update_timeout = cfg.git_update_index_timeout
         git_restore_timeout = cfg.git_restore_timeout
         cidx_fix_timeout = cfg.cidx_fix_config_timeout
 
-        # Generate version timestamp (use time.time() for correct UTC epoch;
-        # datetime.utcnow().timestamp() is wrong on non-UTC servers due to
-        # naive datetime timezone interpretation)
-        timestamp = int(time.time())
-        version = f"v_{timestamp}"
-
         repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-        versioned_path = versioned_base / version
 
-        logger.info(f"Creating versioned snapshot at: {versioned_path}")
+        # versioned_path is set inside the try block by snapshot_manager.create_snapshot().
+        # Initialize to None so the cleanup except block can guard against None safely.
+        versioned_path: Optional[Path] = None
+
+        logger.info(f"Creating versioned snapshot for: {alias_name}")
 
         try:
-            # Step 1: Create versioned directory structure
-            versioned_base.mkdir(parents=True, exist_ok=True)
+            # Story #1034 Commit 3: Route CoW clone through VersionedSnapshotManager
+            # (and through CoW Daemon HTTP API in cluster mode). Eliminates NFS-cp
+            # fallback that caused 600s timeouts on langfuse repos.
+            if self._snapshot_manager is None:
+                raise RuntimeError(
+                    "RefreshScheduler invoked without snapshot_manager — wiring bug in lifespan.py. "
+                    "Story #1034 Commit 3 requires snapshot_manager injection. Fail-loud per Codex B4."
+                )
 
-            # Step 2: Perform CoW clone
-            # NOTE: tantivy_index is NOT deleted — indexes were built on source
-            # and are correct. The CoW clone inherits them directly.
-            logger.info(f"CoW cloning from {source_path} to {versioned_path}")
+            logger.info(f"CoW cloning via snapshot_manager: source={source_path}")
             try:
-                subprocess.run(
-                    [
-                        "cp",
-                        "--reflink=auto",
-                        "-a",
-                        str(source_path),
-                        str(versioned_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=cow_timeout,
-                    check=True,
+                versioned_path = Path(
+                    self._snapshot_manager.create_snapshot(repo_name, str(source_path))
                 )
-                logger.info("CoW clone completed successfully")
-            except subprocess.CalledProcessError as e:
+                logger.info(f"CoW clone completed successfully: {versioned_path}")
+            except Exception as e:
                 logger.error(
-                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"CoW clone failed for {alias_name} via snapshot_manager: {type(e).__name__}: {e}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"CoW clone failed for {alias_name} via snapshot_manager: {type(e).__name__}: {e}"
                 )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}"
-                )
+
+            # Bug #1084 defense-in-depth: confirm the freshly created snapshot is
+            # visible on THIS node before any subprocess.run(cwd=versioned_path).
+            # The clone backend already waits at its create boundary, but a future
+            # non-cow backend or a very slow NFS could still expose the
+            # read-after-create dcache race that ENOENTs the git restore /
+            # cidx fix-config steps below. Idempotent and fast when already
+            # visible; raises (anti-fallback) if it never appears.
+            wait_for_nfs_visibility(
+                str(versioned_path), timeout=_configured_visibility_timeout()
+            )
 
             # Step 3: Fix git status on clone (only if .git exists) — non-fatal
             git_dir = versioned_path / ".git"
@@ -1998,6 +2423,7 @@ class RefreshScheduler:
                     cwd=str(versioned_path),
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=cidx_fix_timeout,
                     check=True,
                 )
@@ -2036,7 +2462,7 @@ class RefreshScheduler:
                 f"Failed to create snapshot for {alias_name}, cleaning up: {type(e).__name__}: {e}",
                 exc_info=True,
             )
-            if versioned_path.exists():
+            if versioned_path is not None and versioned_path.exists():
                 try:
                     shutil.rmtree(versioned_path)
                     logger.info(f"Cleaned up partial snapshot at: {versioned_path}")
@@ -2075,6 +2501,78 @@ class RefreshScheduler:
         self._index_source(alias_name=alias_name, source_path=source_path)
         return self._create_snapshot(alias_name=alias_name, source_path=source_path)
 
+    def _is_local_config_valid(self, config_json_path: Path) -> bool:
+        """
+        Check whether a local repo's .code-indexer/config.json is present and
+        parseable (Bug #1253).
+
+        Mirrors CommandModeDetector._validate_local_config()'s leniency: any
+        valid JSON file is accepted (mode detection does not require specific
+        fields). A missing file or invalid JSON means `cidx index` would fail
+        mode validation with "no configuration found".
+
+        Args:
+            config_json_path: Path to the candidate .code-indexer/config.json
+
+        Returns:
+            True if the file exists and contains valid JSON, False otherwise.
+        """
+        if not config_json_path.exists():
+            return False
+        try:
+            with open(config_json_path) as f:
+                json.load(f)
+            return True
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug(f"Invalid local config at {config_json_path}: {e}")
+            return False
+
+    def _repair_uninitialized_local_repo(
+        self, source_path: str, alias_name: str
+    ) -> bool:
+        """
+        Self-heal a local repo whose .code-indexer/ directory exists but has
+        no valid config.json (Bug #1253), by re-running the same `cidx init`
+        invocation used at registration time (golden_repo_manager.py
+        register_local_repo()).
+
+        `--force` is required here (unlike first-time registration) because
+        the .code-indexer/ directory already exists; init refuses to touch an
+        existing config.json without it. This is safe: FilesystemBackend's
+        initialize() only does `vectors_dir.mkdir(parents=True, exist_ok=True)`
+        and never deletes existing index data, so any already-indexed content
+        under .code-indexer/index/ survives the repair.
+
+        Args:
+            source_path: Path to the local repo directory (cwd for `cidx init`)
+            alias_name: Global alias name, for logging only
+
+        Returns:
+            True if the repair subprocess succeeded, False otherwise.
+        """
+        try:
+            subprocess.run(
+                ["cidx", "init", "--no-override-file", "--force"],
+                cwd=source_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=build_cidx_subprocess_env(),
+                timeout=60,
+            )
+            return True
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+        ) as e:
+            stderr = getattr(e, "stderr", None) or str(e)
+            logger.error(
+                f"Failed to repair uninitialized local repo {alias_name} via "
+                f"'cidx init' at {source_path}: {stderr}"
+            )
+            return False
+
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """
         Detect changes in a local (non-git) repository using file mtime comparison.
@@ -2099,40 +2597,20 @@ class RefreshScheduler:
         Returns:
             True if changes detected or first version needed, False otherwise
         """
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+        # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
+        # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
+        # NFS mount, so the old glob always missed -> always "first version" ->
+        # spurious re-index + snapshot every cycle.
+        latest_timestamp = self._latest_versioned_timestamp(alias_name)
 
-        # Find all v_* versioned directories
-        if not versioned_base.exists():
+        if latest_timestamp is None:
             logger.debug(
-                f"No .versioned/{repo_name}/ dir found — treating as first version"
+                f"No versioned snapshot found for {alias_name} — treating as first version"
             )
             return True
-
-        version_dirs = [
-            d
-            for d in versioned_base.iterdir()
-            if d.is_dir() and d.name.startswith("v_")
-        ]
-
-        if not version_dirs:
-            logger.debug(
-                f"No v_* dirs in .versioned/{repo_name}/ — treating as first version"
-            )
-            return True
-
-        # Extract timestamp from directory name (v_TIMESTAMP)
-        def parse_timestamp(d: Path) -> int:
-            try:
-                return int(d.name[2:])  # strip "v_" prefix
-            except (ValueError, IndexError):
-                return 0
-
-        latest_version_dir = max(version_dirs, key=parse_timestamp)
-        latest_timestamp = parse_timestamp(latest_version_dir)
 
         logger.debug(
-            f"Latest versioned dir: {latest_version_dir.name} (timestamp={latest_timestamp})"
+            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
         )
 
         # Walk source_path, skip hidden dirs and files
@@ -2165,6 +2643,59 @@ class RefreshScheduler:
             f"vs latest_version={latest_timestamp} -> changes={has_changes}"
         )
         return has_changes
+
+    def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
+        """Check for extension drift and return True if --reconcile is needed.
+
+        Calls sync_repo_extensions_if_drifted() on the config service.  If drift
+        is detected AND matching files exist in source_path, returns True so the
+        caller can trigger a reconcile index run.
+
+        This helper is intentionally one-shot safe: sync_repo_extensions_if_drifted()
+        writes the updated config on the first call and returns None on subsequent
+        calls within the same refresh cycle, so calling this helper both before
+        an early-return and again at the shared drift-check site is harmless.
+
+        Args:
+            source_path: Absolute path to the live repo directory.
+            alias_name: Global alias name used only for logging.
+
+        Returns:
+            True if drift detected and matching files found, False otherwise.
+        """
+        try:
+            config_service = get_config_service()
+            drift = config_service.sync_repo_extensions_if_drifted(source_path)
+            if drift is not None and (drift.added or drift.removed):
+                drifted_exts = drift.added | drift.removed
+                _exclude = {
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    ".code-indexer",
+                    ".versioned",
+                }
+                if has_files_with_extensions(source_path, drifted_exts, _exclude):
+                    logger.info(
+                        "Extension drift detected (%d added, %d removed) "
+                        "and matching files found for %s -- triggering reconcile",
+                        len(drift.added),
+                        len(drift.removed),
+                        alias_name,
+                    )
+                    return True
+                logger.info(
+                    "Extension drift detected for %s but no matching files "
+                    "found -- using normal incremental index",
+                    alias_name,
+                )
+        except Exception as e:
+            logger.warning(
+                "Could not sync extensions before index for %s: %s",
+                alias_name,
+                e,
+            )
+        return False
 
     def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
         """
@@ -2262,45 +2793,34 @@ class RefreshScheduler:
         Returns:
             True if restoration succeeded, False on any error
         """
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-
-        if not versioned_base.exists():
+        # Bug #1084 Phase A7 (Defect E): locate the newest snapshot via the
+        # discovery API instead of globbing golden_repos_dir/.versioned, so a lost
+        # master can be restored on cow-daemon (snapshots live under the NFS mount)
+        # and local alike. cp --reflink=auto reads over the NFS mount fine.
+        if self._snapshot_manager is None:
             logger.warning(
-                f"Reconciliation: {alias_name} has no master and no versioned dir"
+                f"Reconciliation: {alias_name} restore needs snapshot_manager (unwired)"
             )
             return False
 
-        version_dirs = [
-            d
-            for d in versioned_base.iterdir()
-            if d.is_dir() and d.name.startswith("v_")
-        ]
-
-        if not version_dirs:
+        latest_version = self._snapshot_manager.latest_snapshot(alias_name)
+        if not latest_version:
             logger.warning(
-                f"Reconciliation: {alias_name} has no v_* snapshots to restore from"
+                f"Reconciliation: {alias_name} has no snapshot to restore from"
             )
             return False
 
-        def _parse_ts(d: Path) -> int:
-            try:
-                return int(d.name[2:])
-            except (ValueError, IndexError):
-                return 0
-
-        latest_version = max(version_dirs, key=_parse_ts)
         logger.info(
             f"Reconciliation: restoring {alias_name} master from {latest_version} via reverse CoW"
         )
 
+        cow_timeout = 600
         try:
-            subprocess.run(
-                ["cp", "--reflink=auto", "-a", str(latest_version), str(master_path)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=True,
+            self._snapshot_manager._clone_backend.create_clone_at_path(
+                str(latest_version),
+                str(master_path),
+                preserve_attrs=True,
+                timeout=cow_timeout,
             )
         except Exception as e:
             logger.error(
@@ -2317,6 +2837,7 @@ class RefreshScheduler:
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=60,
                 check=False,
             )

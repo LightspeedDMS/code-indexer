@@ -10,10 +10,11 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import json
 import logging
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
 
+from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
@@ -21,9 +22,27 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
-from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
+from ..auto_update.deployment_executor import (
+    APPLIED_LAUNCH_CONFIG_PATH,
+    LAUNCH_CONFIG_PATH,
+    RESTART_SIGNAL_PATH,
+    read_execstart_flags,
+)
+from .db_outage_throttle import DbOutageThrottle
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtensionDrift:
+    """Describes which file extensions were added or removed relative to server config.
+
+    Returned by sync_repo_extensions_if_drifted() when drift is detected.
+    Both sets contain bare extension names without leading dots (e.g. 'py', 'jsonl').
+    """
+
+    added: Set[str] = field(default_factory=set)
+    removed: Set[str] = field(default_factory=set)
 
 
 def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
@@ -53,13 +72,19 @@ class ElevationManagerProtocol(Protocol):
 # Story #578: Keys that must stay in local config.json (chicken-and-egg: needed
 # before PG pool exists).  Everything else is "runtime" and lives in PG in
 # cluster mode.
+#
+# Story #1197: host, port, workers, log_level are moved to runtime config so
+# they can be shared cluster-wide via the runtime DB row.  They are removed
+# from BOOTSTRAP_KEYS here.  Story #1197 also kept a one-release transition
+# allow-list (TRANSITION_PRESERVE_KEYS) so the four keys survived the
+# first-boot strip and every subsequent save_config() call, giving old nodes
+# in a rolling upgrade a config.json fallback.  Story #1196 (next-release
+# cleanup) has removed that allow-list entirely -- the operator confirmed all
+# cluster nodes are on the new release, so the runtime DB / launch.json /
+# applied_launch.json are now the sole source for these four settings.
 BOOTSTRAP_KEYS = frozenset(
     {
         "server_dir",
-        "host",
-        "port",
-        "workers",
-        "log_level",
         "storage_mode",
         "postgres_dsn",
         "ontap",
@@ -75,13 +100,21 @@ BOOTSTRAP_KEYS = frozenset(
         "fault_injection_nonprod_ack",  # Story #746
         "server_threadpool_size",  # startup threadpool config
         "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
-        "admission_control_config",  # C7 - bootstrap (read once at app-wiring startup)
-        "query_vector_cache_config",  # fork interim - bootstrap (read once at app-wiring startup)
+        "mcp_dispatch_pool_size",  # Story #1009 - asyncio default executor size
+        "query_executor_pool_size",  # perf - shared query executor size (created at startup, pre-DB)
+        "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
+        "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
+        "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
+        "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"
 UPDATER_WEB_UI = "web-ui"
 UPDATER_SEED = "config-seed"
+
+# Story #1200 FIX-6: number of consecutive pending-restart polls before emitting
+# a rate-limited WARNING (approx 5 min at 30s poll interval).
+PENDING_RESTART_WARN_THRESHOLD = 10
 
 # Bug #875: minimum bounds for new claude_cli settings
 _MIN_FACT_CHECK_TIMEOUT_SECONDS = 60
@@ -109,15 +142,26 @@ class ConfigService:
     with validation. All changes persist to ~/.cidx-server/config.json.
     """
 
-    def __init__(self, server_dir_path: Optional[str] = None):
+    def __init__(
+        self,
+        server_dir_path: Optional[str] = None,
+        config_manager: Optional["ServerConfigManager"] = None,
+    ):
         """
         Initialize the configuration service.
 
         Args:
             server_dir_path: Optional path to server directory.
                            Defaults to ~/.cidx-server
+            config_manager: Optional pre-built ServerConfigManager instance.
+                          When provided, server_dir_path is ignored for config
+                          loading (but still used for ClaudeDelegationManager).
+                          Primarily useful for unit tests.
         """
-        self.config_manager = ServerConfigManager(server_dir_path)
+        if config_manager is not None:
+            self.config_manager = config_manager
+        else:
+            self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
         self._delegation_manager = ClaudeDelegationManager(server_dir_path)
         # Story #578: Unified DB for runtime config (SQLite or PG)
@@ -127,6 +171,13 @@ class ConfigService:
         self._reload_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._on_change_callbacks: List[Any] = []
+        # Story #1200 FIX-6: consecutive pending-restart poll counter + rate-limit flag
+        self._pending_restart_poll_count: int = 0
+        self._pending_restart_warned: bool = False
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        # Shared across both try/except blocks in start_config_reload's poll loop.
+        self._db_throttle = DbOutageThrottle(service_name="ConfigService")
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -155,6 +206,7 @@ class ConfigService:
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
+            self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
             runtime_dict = self._extract_runtime_dict(config)
             if runtime_dict:
                 self._save_runtime_to_sqlite(runtime_dict)
@@ -184,12 +236,36 @@ class ConfigService:
         self._stop_event.clear()
 
         def _poll_loop() -> None:
-            while not self._stop_event.wait(timeout=interval_seconds):
+            while not self._stop_event.wait(
+                timeout=self._db_throttle.next_wait_seconds(interval_seconds)
+            ):
                 try:
                     if self.check_config_update():
                         logger.info("ConfigService: reloaded config from PG")
-                except Exception:
-                    logger.exception("ConfigService: config reload poll failed")
+                    self._db_throttle.on_db_success(logger)
+                except Exception as exc:
+                    # Bug #1249: a connectivity error is throttled (single
+                    # ERROR transition, DEBUG follow-ups); anything else
+                    # still logs normally every time.
+                    if not self._db_throttle.on_db_error(exc, logger):
+                        logger.exception("ConfigService: config reload poll failed")
+                # Story #1200 AC3 CRITICAL-C1: check_pending_launch_restart fires
+                # on EVERY interval, independent of whether the version changed.
+                # NOT a callback — callbacks only fire on version-diff edge.
+                try:
+                    self.check_pending_launch_restart()
+                    # NOTE: no on_db_success() here — check_pending_launch_restart()
+                    # already swallows its own DB-read failures internally at
+                    # DEBUG (see _read_raw_launch_snapshot) and never raises a
+                    # connectivity exception. Calling on_db_success() here would
+                    # always fire regardless of real DB health and incorrectly
+                    # reset the outage counter set by check_config_update's
+                    # failure in the same tick (Bug #1249 wiring correctness).
+                except Exception as exc:
+                    if not self._db_throttle.on_db_error(exc, logger):
+                        logger.exception(
+                            "ConfigService: check_pending_launch_restart poll failed"
+                        )
 
         self._reload_thread = threading.Thread(
             target=_poll_loop, daemon=True, name="config-reload"
@@ -243,6 +319,7 @@ class ConfigService:
         else:
             self._config = config
 
+        assert self._config is not None  # All branches above set self._config
         return self._config
 
     def get_config(self) -> ServerConfig:
@@ -327,6 +404,15 @@ class ConfigService:
                 "payload_max_fetch_size_chars": config.cache_config.payload_max_fetch_size_chars,
                 "payload_cache_ttl_seconds": config.cache_config.payload_cache_ttl_seconds,
                 "payload_cleanup_interval_seconds": config.cache_config.payload_cleanup_interval_seconds,
+                # Story #1213 Story 2: memory-governor runtime knobs
+                "memory_governor_enabled": config.cache_config.memory_governor_enabled,
+                "memory_governor_yellow_pct": config.cache_config.memory_governor_yellow_pct,
+                "memory_governor_red_pct": config.cache_config.memory_governor_red_pct,
+                "memory_governor_hysteresis_pct": config.cache_config.memory_governor_hysteresis_pct,
+                "memory_governor_red_min_dwell_seconds": config.cache_config.memory_governor_red_min_dwell_seconds,
+                "memory_governor_sample_interval_seconds": config.cache_config.memory_governor_sample_interval_seconds,
+                "memory_governor_swap_forces_red": config.cache_config.memory_governor_swap_forces_red,
+                "memory_governor_rss_inflation_factor": config.cache_config.memory_governor_rss_inflation_factor,
             },
             # Git operation timeouts
             "timeouts": {
@@ -512,8 +598,6 @@ class ConfigService:
                 "cpu_sustained_threshold_percent": config.health_config.cpu_sustained_threshold_percent,
             },
             "scip": {
-                "indexing_timeout_seconds": config.scip_config.indexing_timeout_seconds,
-                "scip_generation_timeout_seconds": config.scip_config.scip_generation_timeout_seconds,
                 "temporal_stale_threshold_days": config.scip_config.temporal_stale_threshold_days,
                 # P3 settings (AC31-AC34)
                 "scip_reference_limit": config.scip_config.scip_reference_limit,
@@ -600,6 +684,38 @@ class ConfigService:
                     if config.indexing_config is not None
                     else []
                 ),
+                # Story #1158: parallel requests display wiring
+                "voyage_ai_parallel_requests": (
+                    config.indexing_config.voyage_ai_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "cohere_parallel_requests": (
+                    config.indexing_config.cohere_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "temporal_parallel_requests": (
+                    config.indexing_config.temporal_parallel_requests
+                    if config.indexing_config is not None
+                    else None
+                ),
+                # Story #1290: per-commit temporal embedder config display wiring
+                "temporal_embedders": (
+                    config.indexing_config.temporal_embedders
+                    if config.indexing_config is not None
+                    else ["voyage-context-4"]
+                ),
+                "temporal_active_embedder": (
+                    config.indexing_config.temporal_active_embedder
+                    if config.indexing_config is not None
+                    else "voyage-context-4"
+                ),
+                "temporal_aggregation_chunk_chars": (
+                    config.indexing_config.temporal_aggregation_chunk_chars
+                    if config.indexing_config is not None
+                    else 4096
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -630,6 +746,14 @@ class ConfigService:
                     else ""
                 ),
             },
+            # Issue #1159 — Search event log settings
+            "search_event_log": {
+                "search_event_log_retention_days": config.search_event_log_retention_days,
+            },
+            # Issue #1160 — Export retention settings
+            "export": {
+                "export_retention_days": config.export_retention_days,
+            },
         }
 
         # Reranking settings (Story #652)
@@ -650,6 +774,21 @@ class ConfigService:
             "memory_cohere_min_score": mem_cfg.memory_cohere_min_score,
             "memory_retrieval_k_multiplier": mem_cfg.memory_retrieval_k_multiplier,
             "memory_retrieval_max_body_chars": mem_cfg.memory_retrieval_max_body_chars,
+        }
+
+        # Query embedding cache settings (Story #1107 S3)
+        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
+
+        qec_cfg = config.query_embedding_cache_config or QueryEmbeddingCacheConfig()
+        settings["query_embedding_cache"] = {
+            "query_embedding_cache_enabled": qec_cfg.query_embedding_cache_enabled,
+            "query_embedding_cache_max_entries": qec_cfg.query_embedding_cache_max_entries,
+            "query_embedding_cache_voyage_mode": qec_cfg.query_embedding_cache_voyage_mode,
+            "query_embedding_cache_voyage_anchor_tokens": qec_cfg.query_embedding_cache_voyage_anchor_tokens,
+            "query_embedding_cache_voyage_audit_sample_rate": qec_cfg.query_embedding_cache_voyage_audit_sample_rate,
+            "query_embedding_cache_cohere_mode": qec_cfg.query_embedding_cache_cohere_mode,
+            "query_embedding_cache_cohere_anchor_tokens": qec_cfg.query_embedding_cache_cohere_anchor_tokens,
+            "query_embedding_cache_cohere_audit_sample_rate": qec_cfg.query_embedding_cache_cohere_audit_sample_rate,
         }
 
         # Story #885 Phase 5a: Lifecycle analysis timeout configuration (A7a)
@@ -797,6 +936,15 @@ class ConfigService:
             self._update_cidx_meta_backup_setting(config, key, value)
         elif category == "pace_maker":
             self._update_pace_maker_setting(config, key, value)
+        # Story #1107 S3 - Query embedding cache runtime configuration
+        elif category == "query_embedding_cache":
+            self._update_query_embedding_cache_setting(config, key, value)
+        # Issue #1159 - Search event log retention
+        elif category == "search_event_log":
+            self._update_search_event_log_setting(config, key, value)
+        # Issue #1160 - Export retention
+        elif category == "export":
+            self._update_export_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -838,6 +986,19 @@ class ConfigService:
         # Story #22 - Configurable service display name
         elif key == "service_display_name":
             config.service_display_name = str(value)
+        # Story #1079 Phase E - embedding coalescer runtime settings. Tunable via
+        # the existing config-update path (no separate HTML widget — mirrors how
+        # query_provider_max_concurrency is a top-level runtime field). The kill
+        # switch (coalesce_enabled=False) and caps hot-reload because the helper /
+        # registry read them live.
+        elif key == "coalesce_enabled":
+            config.coalesce_enabled = _parse_bool(value)
+        elif key == "coalesce_max_batch_size":
+            config.coalesce_max_batch_size = int(value)
+        elif key == "coalesce_k_min":
+            config.coalesce_k_min = int(value)
+        elif key == "coalesce_k_max":
+            config.coalesce_k_max = int(value)
         else:
             raise ValueError(f"Unknown server setting: {key}")
 
@@ -868,6 +1029,60 @@ class ConfigService:
             cache.payload_cache_ttl_seconds = int(value)
         elif key == "payload_cleanup_interval_seconds":
             cache.payload_cleanup_interval_seconds = int(value)
+        # Story #1213 Story 2: Memory-governor runtime knobs (hot-reload).
+        elif key == "memory_governor_enabled":
+            cache.memory_governor_enabled = _parse_bool(value)
+        elif key == "memory_governor_yellow_pct":
+            new_yellow = float(value)
+            if new_yellow <= 0:
+                raise ValueError(
+                    f"memory_governor_yellow_pct must be > 0, got {new_yellow}"
+                )
+            if new_yellow >= cache.memory_governor_red_pct:
+                raise ValueError(
+                    f"memory_governor_yellow_pct ({new_yellow}) must be less than "
+                    f"memory_governor_red_pct ({cache.memory_governor_red_pct})"
+                )
+            cache.memory_governor_yellow_pct = new_yellow
+        elif key == "memory_governor_red_pct":
+            new_red = float(value)
+            if new_red > 100.0:
+                raise ValueError(
+                    f"memory_governor_red_pct must be <= 100, got {new_red}"
+                )
+            if cache.memory_governor_yellow_pct >= new_red:
+                raise ValueError(
+                    f"memory_governor_red_pct ({new_red}) must be greater than "
+                    f"memory_governor_yellow_pct ({cache.memory_governor_yellow_pct})"
+                )
+            cache.memory_governor_red_pct = new_red
+        elif key == "memory_governor_hysteresis_pct":
+            new_hyst = float(value)
+            yellow = cache.memory_governor_yellow_pct
+            red = cache.memory_governor_red_pct
+            max_allowed = min(yellow, 100.0 - red)
+            if new_hyst >= max_allowed:
+                raise ValueError(
+                    f"memory_governor_hysteresis_pct ({new_hyst}) must be < "
+                    f"min(yellow={yellow}, 100-red={100.0 - red}) = {max_allowed}"
+                )
+            cache.memory_governor_hysteresis_pct = new_hyst
+        elif key == "memory_governor_red_min_dwell_seconds":
+            cache.memory_governor_red_min_dwell_seconds = int(value)
+        elif key == "memory_governor_sample_interval_seconds":
+            cache.memory_governor_sample_interval_seconds = float(value)
+        elif key == "memory_governor_swap_forces_red":
+            cache.memory_governor_swap_forces_red = _parse_bool(value)
+        elif key == "memory_governor_rss_inflation_factor":
+            cache.memory_governor_rss_inflation_factor = float(value)
+        elif key == "memory_governor_swap_pswpin_red_threshold":
+            new_thr = int(value)
+            if new_thr < 0:
+                raise ValueError(
+                    f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
+                    f"(non-negative), got {new_thr}"
+                )
+            cache.memory_governor_swap_pswpin_red_threshold = new_thr
         else:
             raise ValueError(f"Unknown cache setting: {key}")
 
@@ -1193,9 +1408,9 @@ class ConfigService:
         elif key == "dependency_map_pass1_max_turns":
             claude_config.dependency_map_pass1_max_turns = max(0, int(value))
         elif key == "dependency_map_pass2_max_turns":
-            claude_config.dependency_map_pass2_max_turns = max(5, int(value))
+            claude_config.dependency_map_pass2_max_turns = max(0, int(value))
         elif key == "dependency_map_delta_max_turns":
-            claude_config.dependency_map_delta_max_turns = max(5, int(value))
+            claude_config.dependency_map_delta_max_turns = max(0, int(value))
         elif key == "refinement_enabled":
             claude_config.refinement_enabled = value in ["true", True, "True"]
         elif key == "refinement_interval_hours":
@@ -1438,6 +1653,55 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown memory_retrieval setting: {key}")
 
+    def _update_query_embedding_cache_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a query embedding cache configuration setting (Story #1107 S3)."""
+        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
+
+        if config.query_embedding_cache_config is None:
+            config.query_embedding_cache_config = QueryEmbeddingCacheConfig()
+        qec = config.query_embedding_cache_config
+
+        if key == "query_embedding_cache_enabled":
+            qec.query_embedding_cache_enabled = _parse_bool(value)
+        elif key == "query_embedding_cache_max_entries":
+            qec.query_embedding_cache_max_entries = int(value)
+        elif key == "query_embedding_cache_voyage_mode":
+            _valid_modes = {"off", "shadow", "on"}
+            str_val = str(value)
+            if str_val not in _valid_modes:
+                raise ValueError(
+                    f"Invalid voyage mode '{value}': must be one of {sorted(_valid_modes)}"
+                )
+            qec.query_embedding_cache_voyage_mode = str_val
+        elif key == "query_embedding_cache_voyage_anchor_tokens":
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_voyage_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_voyage_anchor_tokens = int(value)
+        elif key == "query_embedding_cache_voyage_audit_sample_rate":
+            qec.query_embedding_cache_voyage_audit_sample_rate = float(value)
+        elif key == "query_embedding_cache_cohere_mode":
+            _valid_modes = {"off", "shadow", "on"}
+            str_val = str(value)
+            if str_val not in _valid_modes:
+                raise ValueError(
+                    f"Invalid cohere mode '{value}': must be one of {sorted(_valid_modes)}"
+                )
+            qec.query_embedding_cache_cohere_mode = str_val
+        elif key == "query_embedding_cache_cohere_anchor_tokens":
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_cohere_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_cohere_anchor_tokens = int(value)
+        elif key == "query_embedding_cache_cohere_audit_sample_rate":
+            qec.query_embedding_cache_cohere_audit_sample_rate = float(value)
+        else:
+            raise ValueError(f"Unknown query_embedding_cache setting: {key}")
+
     def _update_lifecycle_analysis_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -1529,6 +1793,42 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown pace_maker setting: {key}")
 
+    def _update_search_event_log_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update search event log runtime settings (Issue #1159).
+
+        Validation rules:
+        - search_event_log_retention_days: integer in [1, 3650].
+        """
+        if key == "search_event_log_retention_days":
+            days = int(value)
+            if not (1 <= days <= 3650):
+                raise ValueError(
+                    f"search_event_log_retention_days must be between 1 and 3650, got {days}."
+                )
+            config.search_event_log_retention_days = days
+        else:
+            raise ValueError(f"Unknown search_event_log setting: {key}")
+
+    def _update_export_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update export runtime settings (Issue #1160).
+
+        Validation rules:
+        - export_retention_days: integer in [1, 3650].
+        """
+        if key == "export_retention_days":
+            days = int(value)
+            if not (1 <= days <= 3650):
+                raise ValueError(
+                    f"export_retention_days must be between 1 and 3650, got {days}."
+                )
+            config.export_retention_days = days
+        else:
+            raise ValueError(f"Unknown export setting: {key}")
+
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -1593,11 +1893,7 @@ class ConfigService:
         """Update a SCIP setting (Story #3 - Phase 2)."""
         scip = config.scip_config
         assert scip is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "indexing_timeout_seconds":
-            scip.indexing_timeout_seconds = int(value)
-        elif key == "scip_generation_timeout_seconds":
-            scip.scip_generation_timeout_seconds = int(value)
-        elif key == "temporal_stale_threshold_days":
+        if key == "temporal_stale_threshold_days":
             scip.temporal_stale_threshold_days = int(value)
         # P3 settings (AC31-AC34)
         elif key == "scip_reference_limit":
@@ -1783,6 +2079,21 @@ class ConfigService:
             xray.xray_timeout_seconds = int(value)
         elif key == "xray_worker_threads":
             xray.xray_worker_threads = int(value)
+            try:
+                from code_indexer.server.mcp.handlers.xray import (
+                    _get_xray_cell_limiter as _gcl,
+                )
+
+                _cl = _gcl()
+                if _cl is not None:
+                    _cl.set_limit(int(value))
+            except Exception as exc:
+                logger.warning(
+                    "Failed to live-reload xray cell limiter for "
+                    "xray_worker_threads=%s: %s",
+                    value,
+                    exc,
+                )
         else:
             raise ValueError(f"Unknown xray setting: {key}")
 
@@ -1839,8 +2150,18 @@ class ConfigService:
         Raises:
             ValueError: If key is not recognized
         """
-        if key != "indexable_extensions":
-            raise ValueError(f"Unknown indexing setting: {key}")
+        # Story #1158: Bounds for parallel_requests fields (embedding + temporal).
+        _MIN_PARALLEL = 1
+        _MAX_PARALLEL = 32
+
+        def _clamp_parallel(raw: Any, field_name: str) -> int:
+            """Parse raw value and clamp to [_MIN_PARALLEL, _MAX_PARALLEL]."""
+            try:
+                return max(_MIN_PARALLEL, min(_MAX_PARALLEL, int(raw)))
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid value for {field_name}: must be a valid integer"
+                )
 
         config = self.get_config()
         indexing = config.indexing_config
@@ -1849,6 +2170,93 @@ class ConfigService:
 
             indexing = IndexingConfig()
             config.indexing_config = indexing
+
+        # Story #1158 - AC1: Embedding API parallelism (required, clamped [1, 32])
+        if key in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            setattr(indexing, key, _clamp_parallel(value, key))
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.%s to %d",
+                key,
+                getattr(indexing, key),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional: None or clamped [1, 32])
+        if key == "temporal_parallel_requests":
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                indexing.temporal_parallel_requests = None
+            else:
+                indexing.temporal_parallel_requests = _clamp_parallel(value, key)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_parallel_requests to %s",
+                indexing.temporal_parallel_requests,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1290: per-commit temporal embedder registry (Web UI Config
+        # Screen exposure of TemporalConfig.embedders/active_embedder/
+        # aggregation_chunk_chars -- seeded into repo config.json by
+        # config_seeding.py, no environment variables).
+        if key == "temporal_embedders":
+            if isinstance(value, list):
+                embedders = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                embedders = [v.strip() for v in str(value).split(",") if v.strip()]
+            if not embedders:
+                raise ValueError("temporal_embedders must not be empty")
+            indexing.temporal_embedders = embedders
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_embedders to %s",
+                indexing.temporal_embedders,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_active_embedder":
+            active = str(value).strip()
+            if not active:
+                raise ValueError("temporal_active_embedder must not be empty")
+            if active not in indexing.temporal_embedders:
+                raise ValueError(
+                    f"temporal_active_embedder {active!r} must be a member of "
+                    f"temporal_embedders {indexing.temporal_embedders!r}"
+                )
+            indexing.temporal_active_embedder = active
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_active_embedder to %s",
+                indexing.temporal_active_embedder,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_aggregation_chunk_chars":
+            try:
+                chars = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a valid integer"
+                )
+            if chars <= 0:
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a positive integer"
+                )
+            indexing.temporal_aggregation_chunk_chars = chars
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_aggregation_chunk_chars to %d",
+                indexing.temporal_aggregation_chunk_chars,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key != "indexable_extensions":
+            raise ValueError(f"Unknown indexing setting: {key}")
 
         if isinstance(value, list):
             parsed_list: List[str] = list(value)
@@ -1940,37 +2348,55 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not seed extensions for %s: %s", repo_path, e)
 
-    def sync_repo_extensions_if_drifted(self, repo_path: str) -> None:
+    def sync_repo_extensions_if_drifted(
+        self, repo_path: str
+    ) -> Optional[ExtensionDrift]:
         """
         Sync repo config if extensions drifted from server config (Story #223 - AC7).
 
         Called before refresh indexing. No-op if already in sync or config missing.
+        Returns ExtensionDrift describing which extensions were added/removed when drift
+        is detected, or None when already in sync or when repo config is absent/unreadable.
 
         Args:
             repo_path: Filesystem path to the repository
+
+        Returns:
+            ExtensionDrift with added/removed sets if drift was detected, None otherwise.
         """
         config = self.get_config()
         if config.indexing_config is None:
-            return
+            return None
         server_exts = config.indexing_config.indexable_extensions
-        cli_exts_sorted = sorted([ext.lstrip(".") for ext in server_exts])
+        server_exts_bare: Set[str] = {ext.lstrip(".") for ext in server_exts}
+        cli_exts_sorted = sorted(server_exts_bare)
 
         cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
         if not cidx_config_path.exists():
-            return
+            return None
 
         try:
             with open(cidx_config_path, "r") as f:
                 repo_config = json.load(f)
-            current_exts = sorted(repo_config.get("file_extensions", []))
-            if current_exts == cli_exts_sorted:
-                return  # Already in sync, do not rewrite
+            current_exts_bare: Set[str] = set(repo_config.get("file_extensions", []))
+            current_exts_sorted = sorted(current_exts_bare)
+            if current_exts_sorted == cli_exts_sorted:
+                return None  # Already in sync, do not rewrite
+            added = server_exts_bare - current_exts_bare
+            removed = current_exts_bare - server_exts_bare
             repo_config["file_extensions"] = [ext.lstrip(".") for ext in server_exts]
             with open(cidx_config_path, "w") as f:
                 json.dump(repo_config, f, indent=2)
-            logger.info("Synced drifted file_extensions for %s", repo_path)
+            logger.info(
+                "Synced drifted file_extensions for %s (%d added, %d removed)",
+                repo_path,
+                len(added),
+                len(removed),
+            )
+            return ExtensionDrift(added=added, removed=removed)
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
+            return None
 
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).
@@ -1982,11 +2408,11 @@ class ConfigService:
         from psycopg.rows import dict_row
 
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                ("runtime",),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    ("runtime",),
+                ).fetchone()
         if row and row["version"] != self._db_config_version:
             self._load_runtime_from_pg()
             # Fire change callbacks so services can react (Bug #586)
@@ -1997,6 +2423,364 @@ class ConfigService:
                     logger.exception("Config change callback failed")
             return True
         return False
+
+    def _read_raw_launch_generation(self) -> int:
+        """Read launch_restart_generation from raw runtime row (COALESCE 0).
+
+        Story #1198 AC1: Story 4 adds launch_restart_generation to the runtime
+        row.  Until then every row returns 0 via this COALESCE fallback.
+        Logs DEBUG when the fallback is taken due to an exception.
+        """
+        import sqlite3 as _sqlite3
+
+        try:
+            if self._pool is not None:
+                # Cluster mode: read from shared PG row (MUST be first — in
+                # cluster mode _sqlite_db_path is also set by initialize_runtime_db,
+                # so checking SQLite first would silently return the per-node
+                # local value instead of the shared generation.  Every other DB
+                # method in this class uses _pool-first order.)
+                from psycopg.rows import dict_row
+
+                with self._pool.connection() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        row = cur.execute(
+                            "SELECT config_json FROM server_config WHERE config_key = %s",
+                            (CONFIG_KEY_RUNTIME,),
+                        ).fetchone()
+                if row:
+                    raw = row["config_json"]
+                    data: dict = json.loads(raw) if isinstance(raw, str) else raw
+                    return int(data.get("launch_restart_generation", 0))
+            elif self._sqlite_db_path and Path(self._sqlite_db_path).exists():
+                with _sqlite3.connect(self._sqlite_db_path) as conn:
+                    row = conn.execute(
+                        "SELECT config_json FROM server_config WHERE config_key = ?",
+                        (CONFIG_KEY_RUNTIME,),
+                    ).fetchone()
+                if row:
+                    data = json.loads(row[0])
+                    return int(data.get("launch_restart_generation", 0))
+        except Exception:
+            logger.debug(
+                "ConfigService._read_raw_launch_generation: DB read failed; "
+                "defaulting launch_restart_generation to 0",
+                exc_info=True,
+            )
+        return 0
+
+    def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
+        """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
+
+        Bug #1232 correct fix layer: called ONLY at first-boot centralization
+        (initialize_runtime_db / _seed_runtime_to_pg), NOT in materialize_launch_config.
+
+        Precedence — gap-fill only, never overrides explicit config.json values:
+          1. key present in config.json  → leave config value unchanged (operator intent).
+          2. key absent from config.json → fill from live ExecStart when available.
+          3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
+
+        Mutates the passed config object AND self._config so that the subsequent
+        _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
+        (which re-reads via get_config()) both see the corrected values.
+        """
+        raw_config: dict = {}
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            if config_path.exists():
+                raw_config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
+                exc,
+            )
+            return
+
+        execstart = read_execstart_flags()
+
+        for key in ("host", "port", "workers"):
+            if key in raw_config:
+                # Explicit operator value in config.json — leave as-is.
+                continue
+            exec_val = execstart.get(key)
+            if exec_val is not None:
+                # Gap-fill from ExecStart (key absent from config.json).
+                setattr(config, key, exec_val)
+            else:
+                # Neither config.json nor ExecStart — keep ServerConfig default.
+                logger.warning(
+                    "ConfigService: launch key '%s' absent from config.json and "
+                    "live ExecStart; seeding runtime DB with ServerConfig default "
+                    "%r (Bug #1232)",
+                    key,
+                    getattr(config, key),
+                )
+
+        # Publish mutated config so _extract_runtime_dict and
+        # _strip_config_file_to_bootstrap (which calls get_config()) both see
+        # the corrected values.
+        self._config = config
+
+    def materialize_launch_config(self) -> bool:
+        """Write launch.json with current target launch parameters.
+
+        Story #1198 AC1: Materializes {workers, log_level, host, port,
+        target_restart_generation} to LAUNCH_CONFIG_PATH atomically via
+        tempfile + os.replace.  Does NOT write applied_launch.json.
+
+        Bug #1232: host/port/workers come directly from the desired state
+        (self._config), which reflects the admin's intent. Gap-filling from the
+        live ExecStart happens ONLY at first-boot seed via
+        _backfill_launch_keys_from_execstart(), NOT here — so admin changes via
+        the Web UI are always honored.
+
+        Returns:
+            True on success, False on any failure (fail-soft — never raises).
+        """
+        import os
+        import tempfile
+
+        try:
+            config = self.get_config()
+            target_generation = self._read_raw_launch_generation()
+            payload = {
+                "workers": config.workers,
+                "log_level": config.log_level,
+                "host": config.host,
+                "port": config.port,
+                "target_restart_generation": target_generation,
+            }
+            launch_path = LAUNCH_CONFIG_PATH
+            launch_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=launch_path.parent, prefix=".launch_tmp_"
+            )
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(payload, fh)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            os.replace(tmp_path, launch_path)
+            return True
+        except Exception:
+            logger.warning(
+                "ConfigService: failed to materialize launch.json",
+                exc_info=True,
+            )
+            return False
+
+    def _read_raw_launch_snapshot(self) -> Optional[dict]:
+        """Read host/port/workers/log_level + launch_restart_generation from raw row.
+
+        Story #1200 AC1/AC3: returns all five launch fields in one SELECT so
+        both the per-poll generation check and any startup read share the same
+        helper.  COALESCE 0 for absent generation.  Returns None when no DB is
+        configured or the row does not exist.
+        """
+        import sqlite3 as _sqlite3
+
+        try:
+            if self._pool is not None:
+                from psycopg.rows import dict_row
+
+                with self._pool.connection() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        row = cur.execute(
+                            "SELECT config_json FROM server_config"
+                            " WHERE config_key = %s",
+                            (CONFIG_KEY_RUNTIME,),
+                        ).fetchone()
+                if row is None:
+                    return None
+                raw = row["config_json"]
+                data: dict = json.loads(raw) if isinstance(raw, str) else raw
+            elif self._sqlite_db_path and Path(self._sqlite_db_path).exists():
+                with _sqlite3.connect(self._sqlite_db_path) as conn:
+                    row = conn.execute(
+                        "SELECT config_json FROM server_config WHERE config_key = ?",
+                        (CONFIG_KEY_RUNTIME,),
+                    ).fetchone()
+                if row is None:
+                    return None
+                data = json.loads(row[0])
+            else:
+                return None
+        except Exception:
+            logger.debug(
+                "ConfigService._read_raw_launch_snapshot: DB read failed",
+                exc_info=True,
+            )
+            return None
+
+        return {
+            "workers": data.get("workers"),
+            "log_level": data.get("log_level"),
+            "host": data.get("host"),
+            "port": data.get("port"),
+            "launch_restart_generation": int(
+                data.get("launch_restart_generation") or 0
+            ),
+        }
+
+    def bump_launch_restart_generation(self) -> None:
+        """Atomically increment launch_restart_generation in the DB row (+ version).
+
+        Story #1200 AC1: single SQL statement — no asdict() round-trip.
+        MAJOR-M3: does NOT advance self._db_config_version so the bumping node's
+        next poll detects the new version and self-signals via
+        check_pending_launch_restart().
+
+        SQLite path exists for unit-test modeling only (real solo route never bumps;
+        see AC7/FIX-5).
+        """
+        import sqlite3 as _sqlite3
+
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE server_config SET "
+                    "config_json = jsonb_set("
+                    "  config_json,"
+                    "  '{launch_restart_generation}',"
+                    "  (COALESCE((config_json->>'launch_restart_generation')::int, 0)"
+                    "   + 1)::text::jsonb"
+                    "),"
+                    "version = version + 1 "
+                    "WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                )
+                conn.commit()
+            # MAJOR-M3: do NOT read back and update self._db_config_version here.
+            logger.info(
+                "ConfigService: bumped launch_restart_generation in PG "
+                "(cluster-wide restart requested)"
+            )
+            return
+
+        if self._sqlite_db_path and Path(self._sqlite_db_path).exists():
+            with _sqlite3.connect(self._sqlite_db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT config_json FROM server_config WHERE config_key = ?",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
+                if row is not None:
+                    data = json.loads(row[0])
+                    data["launch_restart_generation"] = (
+                        int(data.get("launch_restart_generation") or 0) + 1
+                    )
+                    conn.execute(
+                        "UPDATE server_config "
+                        "SET config_json = ?, version = version + 1 "
+                        "WHERE config_key = ?",
+                        (json.dumps(data), CONFIG_KEY_RUNTIME),
+                    )
+                conn.commit()
+            # MAJOR-M3: do NOT update self._db_config_version.
+            logger.info("ConfigService: bumped launch_restart_generation in SQLite")
+
+    def check_pending_launch_restart(self) -> None:
+        """Per-poll check: if target generation > applied, materialize then signal.
+
+        Story #1200 AC3: called on EVERY poll interval independent of version
+        changes (CRITICAL-C1).  NOT a callback — registered callbacks only fire
+        on version-diff edge events.
+
+        Cluster-only when a PG pool exists (mirrors existing poll gate).
+        SQLite path included so unit tests can exercise the logic without PG.
+
+        Logic:
+          1. Read target generation from raw DB snapshot.
+          2. Read applied_restart_generation from APPLIED_LAUNCH_CONFIG_PATH
+             (written by auto-updater post-restart, Story #1199).
+          3. If target > applied (PENDING):
+             a. Materialize launch.json (Story #1198).
+             b. Only if materialize succeeded, write RESTART_SIGNAL_PATH.
+             c. Increment consecutive pending counter; emit ONE rate-limited
+                WARNING after PENDING_RESTART_WARN_THRESHOLD polls (FIX-6).
+          4. If applied >= target (converged): reset counter + rate-limit flag.
+
+        Does NOT write applied_launch.json (that is the auto-updater's job).
+        """
+        from datetime import datetime as _datetime
+
+        snapshot = self._read_raw_launch_snapshot()
+        if snapshot is None:
+            return
+
+        target = snapshot["launch_restart_generation"]
+
+        # Read applied generation from applied_launch.json (COALESCE 0 on absent)
+        applied = 0
+        try:
+            if APPLIED_LAUNCH_CONFIG_PATH.exists():
+                raw = json.loads(APPLIED_LAUNCH_CONFIG_PATH.read_text())
+                applied = int(raw.get("applied_restart_generation") or 0)
+        except Exception:
+            logger.debug(
+                "ConfigService: could not read applied_launch.json; "
+                "treating applied generation as 0",
+                exc_info=True,
+            )
+
+        if target <= applied:
+            # Converged — reset FIX-6 tracking
+            self._pending_restart_poll_count = 0
+            self._pending_restart_warned = False
+            return
+
+        # PENDING: target > applied
+        self._pending_restart_poll_count += 1
+
+        # FIX-6: emit one rate-limited WARNING after threshold consecutive polls
+        if (
+            self._pending_restart_poll_count > PENDING_RESTART_WARN_THRESHOLD
+            and not self._pending_restart_warned
+        ):
+            logger.warning(
+                "ConfigService: launch_restart_generation target=%d > applied=%d "
+                "for %d consecutive polls — node has not yet been restarted by "
+                "the auto-updater; check cidx-auto-update service status.",
+                target,
+                applied,
+                self._pending_restart_poll_count,
+            )
+            self._pending_restart_warned = True
+
+        # AC3: materialize FIRST; only signal if materialize succeeded
+        ok = self.materialize_launch_config()
+        if not ok:
+            logger.warning(
+                "ConfigService: materialize_launch_config() failed; "
+                "skipping RESTART_SIGNAL_PATH write (will retry next poll)"
+            )
+            return
+
+        try:
+            signal_data = {
+                "timestamp": _datetime.now().isoformat(),
+                "reason": "launch_restart_generation",
+                "target_restart_generation": target,
+                "applied_restart_generation": applied,
+            }
+            RESTART_SIGNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            RESTART_SIGNAL_PATH.write_text(json.dumps(signal_data))
+            logger.info(
+                "ConfigService: wrote RESTART_SIGNAL_PATH "
+                "(target_generation=%d, applied_generation=%d)",
+                target,
+                applied,
+            )
+        except Exception:
+            logger.warning(
+                "ConfigService: failed to write RESTART_SIGNAL_PATH",
+                exc_info=True,
+            )
 
     @staticmethod
     def _extract_runtime_dict(config: "ServerConfig") -> dict:
@@ -2011,36 +2795,56 @@ class ConfigService:
         return {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
 
     def _save_runtime_to_pg(self, config: "ServerConfig") -> None:
-        """Save runtime config to PostgreSQL."""
+        """Save runtime config to PG (AC2: preserves launch_restart_generation).
+
+        AC2 race-safe: launch_restart_generation is preserved via a single atomic
+        UPDATE using jsonb_set(), which reads the CURRENT row's generation value
+        inside the same statement.  This eliminates the lost-update race that a
+        separate SELECT -> Python patch -> UPDATE sequence would have under
+        PostgreSQL READ COMMITTED isolation.
+
+        Only launch_restart_generation is re-injected from the current row — all
+        other keys come from the new runtime_dict derived from the dataclass, so
+        intentionally dropped keys are NOT resurrected.
+        """
         assert self._pool is not None
         from psycopg.rows import dict_row
 
         runtime_dict = self._extract_runtime_dict(config)
-
+        # runtime_dict intentionally excludes launch_restart_generation (not a
+        # dataclass field), so jsonb_set below re-injects it from the current row.
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            conn.execute(
-                "UPDATE server_config SET config_json = %s, "
-                "version = version + 1, updated_at = CURRENT_TIMESTAMP, "
-                "updated_by = %s WHERE config_key = %s",
-                (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
-            )
-            conn.commit()
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
-            if row:
-                self._db_config_version = row["version"]
-            else:
-                logger.error(
-                    "Runtime config row missing from server_config after update"
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "UPDATE server_config"
+                    " SET config_json = jsonb_set("
+                    "         %s::jsonb,"
+                    "         '{launch_restart_generation}',"
+                    "         to_jsonb(COALESCE("
+                    "             (config_json->>'launch_restart_generation')::int,"
+                    "             0"
+                    "         ))"
+                    "     ),"
+                    "     version = version + 1,"
+                    "     updated_at = CURRENT_TIMESTAMP,"
+                    "     updated_by = %s"
+                    " WHERE config_key = %s",
+                    (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
                 )
+                conn.commit()
+                version_row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
+            if version_row:
+                self._db_config_version = version_row["version"]
+        self.materialize_launch_config()  # AC3: re-materialize after PG save
 
     def _seed_runtime_to_pg(self) -> None:
         """Seed PG server_config table from current config (first boot)."""
         assert self._pool is not None
         config = self.get_config()
+        self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
 
         from psycopg.rows import dict_row
@@ -2055,11 +2859,11 @@ class ConfigService:
             conn.commit()
             # Finding 4 fix: SELECT actual version -- INSERT may have been a
             # no-op if another node already seeded, so version could be > 1.
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
             assert row is not None, (
                 "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             )
@@ -2080,11 +2884,11 @@ class ConfigService:
         from psycopg.rows import dict_row
 
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT config_json, version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT config_json, version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
 
         if row is None:
             self._seed_runtime_to_pg()
@@ -2100,15 +2904,23 @@ class ConfigService:
         self._merge_runtime_config(runtime_dict, base_config=base_config)
 
     def _strip_config_file_to_bootstrap(self) -> None:
-        """Strip config.json to bootstrap-only keys, backing up original."""
+        """Strip config.json to bootstrap-only keys, backing up original.
+
+        Story #1196 (next-release cleanup): the Story #1197 AC3 transition
+        allow-list (TRANSITION_PRESERVE_KEYS) has been removed, so the strip
+        set is once again simply (all keys) − BOOTSTRAP_KEYS.  The four launch
+        keys (host/port/workers/log_level) no longer survive this strip -- the
+        runtime DB / launch.json / applied_launch.json are the sole source now
+        that all cluster nodes are confirmed on the new release.
+        """
         import shutil
 
         config = self.get_config()
         full_dict = asdict(config)
 
-        # Check if already stripped
-        non_bootstrap = [k for k in full_dict if k not in BOOTSTRAP_KEYS]
-        if not non_bootstrap:
+        # Check if already stripped (nothing left to strip beyond bootstrap keys)
+        non_kept = [k for k in full_dict if k not in BOOTSTRAP_KEYS]
+        if not non_kept:
             return
 
         # Create backup (only once)
@@ -2119,41 +2931,57 @@ class ConfigService:
             shutil.copy2(self.config_manager.config_file_path, str(backup_file))
             logger.info("ConfigService: backed up config.json to %s", backup_file)
 
-        # Write bootstrap-only
-        bootstrap_dict = self._extract_bootstrap_dict(config)
-        self.config_manager.save_config_dict(bootstrap_dict)
+        # Write bootstrap keys only.
+        kept_dict = {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
+        self.config_manager.save_config_dict(kept_dict)
         logger.info(
             "ConfigService: stripped config.json to %d bootstrap keys",
-            len(bootstrap_dict),
+            len(kept_dict),
         )
 
     def _save_runtime_to_sqlite(self, runtime_dict: dict) -> None:
-        """Save runtime config to local SQLite server_config table."""
+        """Save runtime config to SQLite (AC2: preserves launch_restart_generation).
+
+        SQLite uses BEGIN IMMEDIATE which serialises the transaction, so the
+        SELECT-then-UPDATE here is safe against concurrent writes on the same
+        node (SQLite is single-writer).  The PG path uses an atomic jsonb_set
+        UPDATE instead; see _save_runtime_to_pg.
+        """
         import sqlite3
 
         assert self._sqlite_db_path is not None
         conn = sqlite3.connect(self._sqlite_db_path)
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_row = conn.execute(
+                "SELECT config_json FROM server_config WHERE config_key = ?",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+            current_config = json.loads(existing_row[0]) if existing_row else {}
+            generation = int(current_config.get("launch_restart_generation") or 0)
+            preserved_dict = dict(runtime_dict)
+            preserved_dict["launch_restart_generation"] = generation
             conn.execute(
-                "INSERT INTO server_config "
-                "(config_key, config_json, version, updated_by) "
-                "VALUES (?, ?, 1, ?) "
-                "ON CONFLICT(config_key) DO UPDATE SET "
-                "config_json = excluded.config_json, "
-                "version = server_config.version + 1, "
-                "updated_at = datetime('now'), "
-                "updated_by = excluded.updated_by",
-                (CONFIG_KEY_RUNTIME, json.dumps(runtime_dict), UPDATER_WEB_UI),
+                "INSERT INTO server_config"
+                "    (config_key, config_json, version, updated_by)"
+                "    VALUES (?, ?, 1, ?)"
+                "    ON CONFLICT(config_key) DO UPDATE SET"
+                "        config_json = excluded.config_json,"
+                "        version = server_config.version + 1,"
+                "        updated_at = datetime('now'),"
+                "        updated_by = excluded.updated_by",
+                (CONFIG_KEY_RUNTIME, json.dumps(preserved_dict), UPDATER_WEB_UI),
             )
             conn.commit()
             row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = ?",
+                "SELECT version FROM server_config WHERE config_key=?",
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
             if row:
                 self._db_config_version = row[0]
         finally:
             conn.close()
+        self.materialize_launch_config()
 
     def _load_runtime_from_sqlite(self) -> Optional[dict]:
         """Load runtime config from local SQLite server_config table."""
@@ -2221,20 +3049,31 @@ class ConfigService:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.
 
         Priority: PG pool > SQLite > full file (legacy).
+
+        Story #1196 (next-release cleanup): the Story #1197 AC6 transition
+        write-path inclusion (_extract_bootstrap_dict_with_transition) has been
+        removed -- config.json writes use plain _extract_bootstrap_dict() again,
+        so the four launch keys (host/port/workers/log_level) are no longer
+        written to config.json on a settings-save.
         """
         runtime_dict = self._extract_runtime_dict(config)
 
+        # Story #1198 CRITICAL-2 fix: update the cache BEFORE the save calls so
+        # that materialize_launch_config() (called inside _save_runtime_to_pg /
+        # _save_runtime_to_sqlite) reads the NEW config via get_config(), not the
+        # stale cached value from before this save.
+        self._config = config
+
         if self._pool is not None:
             self._save_runtime_to_pg(config)
-            bootstrap_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(bootstrap_dict)
+            file_dict = self._extract_bootstrap_dict(config)
+            self.config_manager.save_config_dict(file_dict)
         elif self._sqlite_db_path is not None:
             self._save_runtime_to_sqlite(runtime_dict)
-            bootstrap_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(bootstrap_dict)
+            file_dict = self._extract_bootstrap_dict(config)
+            self.config_manager.save_config_dict(file_dict)
         else:
             self.config_manager.save_config(config)
-        self._config = config
 
 
 # Global service instance
@@ -2247,6 +3086,18 @@ def get_config_service() -> ConfigService:
     if _config_service is None:
         _config_service = ConfigService()
     return _config_service
+
+
+def set_config_service(svc: ConfigService) -> None:
+    """
+    Inject an existing ConfigService as the global singleton.
+
+    Intended for integration tests that need the real singleton wired to a
+    specific server directory without process-level mocking.  Always pair
+    with a ``reset_config_service()`` call in teardown.
+    """
+    global _config_service
+    _config_service = svc
 
 
 def reset_config_service() -> None:

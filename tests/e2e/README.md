@@ -32,7 +32,7 @@ The following are explicitly excluded from this E2E suite:
 
 ## Architecture
 
-The suite is organized into 4 phases that mirror increasing integration depth:
+The suite is organized into 6 phases that mirror increasing integration depth:
 
 ```
 tests/e2e/
@@ -43,6 +43,8 @@ tests/e2e/
     cli_daemon/                # Phase 2: cidx CLI with daemon running
     server/                    # Phase 3: server via FastAPI TestClient
     cli_remote/                # Phase 4: CLI against live uvicorn subprocess
+    phase5_resiliency/         # Phase 5: fault-injection resiliency tests
+    pg_parity/                 # Phase 6: PostgreSQL/cluster parity (ephemeral initdb)
 ```
 
 ### Phase descriptions
@@ -53,20 +55,32 @@ tests/e2e/
 
 **Phase 3 — Server In-Process** (`server/`): Uses FastAPI `TestClient` to call server endpoints directly in the same process. Fast, no subprocess overhead. Covers MCP JSON-RPC, REST API, authentication, golden repo management, and background jobs.
 
-**Phase 4 — CLI Remote** (`cli_remote/`): Starts a real uvicorn subprocess on port `E2E_SERVER_PORT`, waits for health check, runs CLI commands that talk to it over HTTP, then shuts the server down. Tests the full network path.
+**Phase 4 — CLI Remote** (`cli_remote/`): Starts a real uvicorn subprocess on port `E2E_SERVER_PORT`, waits for readiness (health + authenticated login), runs CLI commands that talk to it over HTTP, then shuts the server down. Tests the full network path.
+
+**Phase 5 — Resiliency** (`phase5_resiliency/`): Starts a real uvicorn subprocess with fault injection enabled (both VoyageAI and Cohere providers), exercises provider failure scenarios, and verifies the server recovers correctly. Requires both `E2E_VOYAGE_API_KEY` and `CO_API_KEY`.
+
+**Phase 6 — PostgreSQL Parity** (`pg_parity/`): Provisions an ephemeral PostgreSQL cluster via `initdb` + `pg_ctl` over a UNIX socket, points a fresh `config.json` at it (`storage_mode=postgres`, psycopg v3), and runs the server functional subset (login, golden add, activate, query, refresh, deactivate, delete) against a live PG-backed uvicorn. The server boot proves migrations apply (fail-fast). LOUD-skips if `initdb`/`pg_ctl` is absent. Requires `VOYAGE_API_KEY`.
 
 ### Orchestration script
 
-`e2e-automation.sh` at the repository root runs all 4 phases sequentially:
+`e2e-automation.sh` at the repository root runs all 6 phases sequentially:
 
 1. Clones seed repositories to a persistent cache (`~/.tmp/cidx-e2e-seed-repos/`)
 2. Copies fresh working copies for this run (`~/.tmp/cidx-e2e-work/`)
 3. Runs Phase 1 and Phase 2 via pytest (no server needed)
 4. Runs Phase 3 via pytest (TestClient, no subprocess)
-5. Starts uvicorn subprocess, waits for health, runs Phase 4, stops server
-6. Reports overall pass/fail and exits with code 0 (all pass) or 1 (any fail)
+5. Starts uvicorn subprocess, waits for readiness (health + auth), runs Phase 4, stops server
+6. Starts fault-injection uvicorn subprocess, runs Phase 5, stops server
+7. Prints a consolidated SKIP SUMMARY listing every skipped test and reason
+8. Reports overall pass/fail and exits with code 0 (all pass) or 1 (any fail)
 
 The script stops at the first failing phase when running all phases, so failures surface immediately rather than cascading.
+
+### Skip summary and CI hard-fail policy
+
+The harness collects all pytest skip reasons across phases and prints a LOUD consolidated SKIP SUMMARY at the end of every run. No skipped coverage is silently presented as passing.
+
+Shared skip-guard helpers in `helpers.py` (`require_voyage_key`, `require_cohere_key`, `require_xray_cli`, `require_postgres`) produce specific, named skip reasons. When the env var `CIDX_E2E_REQUIRE_ALL=true` is set, these guards hard-fail (raise RuntimeError) instead of skipping, ensuring missing prerequisites fail the CI build rather than silently reducing coverage.
 
 ### Seed repositories
 
@@ -111,7 +125,7 @@ cp .e2e-automation.template .e2e-automation
 
 ## Running Tests
 
-### Full suite (all 4 phases)
+### Full suite (all 6 phases)
 
 ```bash
 ./e2e-automation.sh
@@ -123,7 +137,9 @@ cp .e2e-automation.template .e2e-automation
 ./e2e-automation.sh --phase 1   # CLI standalone
 ./e2e-automation.sh --phase 2   # CLI daemon
 ./e2e-automation.sh --phase 3   # Server in-process
-./e2e-automation.sh --phase 4   # CLI remote (starts/stops server)
+./e2e-automation.sh --phase 4   # CLI remote (starts/stops live server)
+./e2e-automation.sh --phase 5   # Resiliency (fault-injection server, requires CO_API_KEY)
+./e2e-automation.sh --phase 6   # PostgreSQL parity (ephemeral initdb cluster, requires initdb/pg_ctl)
 ```
 
 ### Manual pytest run (development)

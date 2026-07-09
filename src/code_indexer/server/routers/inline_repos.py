@@ -78,6 +78,7 @@ from ..models.api_models import (
 from ..models.repository_discovery import RepositoryDiscoveryResponse
 
 from ..auth import dependencies
+from ..auth.user_manager import UserRole
 from ..app_helpers import (
     _execute_repository_sync,
 )
@@ -137,6 +138,40 @@ def register_repo_routes(
                     if filter.lower() in repo["user_alias"].lower():
                         filtered_repos.append(repo)
                 repos = filtered_repos
+
+            # AC4: Build per-repo deactivation_job lookup from in-flight jobs.
+            # Limit chosen to cover all typical activated repo counts per server.
+            _DEACT_JOB_LOOKUP_LIMIT = 500
+            deact_map: dict = {}
+            try:
+                is_admin = current_user.role == UserRole.ADMIN
+                jobs_result = background_job_manager.list_jobs(
+                    username=current_user.username,
+                    is_admin=is_admin,
+                    status_filter=None,
+                    limit=_DEACT_JOB_LOOKUP_LIMIT,
+                    offset=0,
+                )
+                for job in jobs_result.get("jobs", []):
+                    if job.get("operation_type") != "deactivate_repository":
+                        continue
+                    if job.get("status") not in ("pending", "running"):
+                        continue
+                    repo_alias = job.get("repo_alias") or ""
+                    if repo_alias:
+                        deact_map[repo_alias] = {
+                            "job_id": job["job_id"],
+                            "status": job["status"],
+                        }
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch deactivation jobs for repo listing: %s", e
+                )
+                # deact_map remains empty; deactivation_job fields degrade to None
+
+            # Annotate each repo with its in-flight deactivation job (or None)
+            for repo in repos:
+                repo["deactivation_job"] = deact_map.get(repo.get("user_alias", ""))
 
             # Return wrapped in RepositoryListResponse for consistency
             return RepositoryListResponse(
@@ -322,6 +357,7 @@ def register_repo_routes(
             job_id = activated_repo_manager.deactivate_repository(
                 username=current_user.username,
                 user_alias=user_alias,
+                actor_username=current_user.username,  # AC12: same as owner for REST self-service
             )
 
             return JobResponse(
@@ -425,9 +461,13 @@ def register_repo_routes(
                 if job_status["started_at"] and job_status["status"] == "running":
                     from datetime import datetime, timezone
 
-                    started = datetime.fromisoformat(
-                        job_status["started_at"].replace("Z", "+00:00")
-                    )
+                    started_at_raw = job_status["started_at"]
+                    if isinstance(started_at_raw, datetime):
+                        started = started_at_raw
+                    else:
+                        started = datetime.fromisoformat(
+                            started_at_raw.replace("Z", "+00:00")
+                        )
                     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
 
                     # Estimate total time based on progress (typical activation: 30-120 seconds)
@@ -1231,9 +1271,12 @@ def register_repo_routes(
                 try:
                     activation_date_str = repo.get("activated_at")
                     if activation_date_str:
-                        activation_date = datetime.fromisoformat(
-                            activation_date_str.replace("Z", "+00:00")
-                        )
+                        if isinstance(activation_date_str, datetime):
+                            activation_date = activation_date_str
+                        else:
+                            activation_date = datetime.fromisoformat(
+                                activation_date_str.replace("Z", "+00:00")
+                            )
                         if activation_date > datetime.now(timezone.utc) - timedelta(
                             days=7
                         ):
@@ -1268,9 +1311,12 @@ def register_repo_routes(
                 try:
                     last_sync_str = repo.get("last_accessed")
                     if last_sync_str:
-                        last_sync = datetime.fromisoformat(
-                            last_sync_str.replace("Z", "+00:00")
-                        )
+                        if isinstance(last_sync_str, datetime):
+                            last_sync = last_sync_str
+                        else:
+                            last_sync = datetime.fromisoformat(
+                                last_sync_str.replace("Z", "+00:00")
+                            )
                         if last_sync > datetime.now(timezone.utc) - timedelta(days=7):
                             sync_status = (
                                 "success"

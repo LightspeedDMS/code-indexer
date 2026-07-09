@@ -175,12 +175,12 @@ class DelegationJobTracker:
             from psycopg.rows import dict_row
 
             with self._pool.connection() as conn:
-                conn.row_factory = dict_row
-                row = conn.execute(
-                    "SELECT * FROM delegation_job_results "
-                    "WHERE job_id = %s AND status != 'pending'",
-                    (job_id,),
-                ).fetchone()
+                with conn.cursor(row_factory=dict_row) as cur:
+                    row = cur.execute(
+                        "SELECT * FROM delegation_job_results "
+                        "WHERE job_id = %s AND status != 'pending'",
+                        (job_id,),
+                    ).fetchone()
         elif self._sqlite_db_path:
             import sqlite3
 

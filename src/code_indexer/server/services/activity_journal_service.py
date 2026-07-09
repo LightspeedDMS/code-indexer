@@ -131,6 +131,35 @@ class ActivityJournalService:
             logger.debug(f"ActivityJournal get_content failed (non-fatal): {e}")
             return "", offset
 
+    @staticmethod
+    def get_content_from_path(journal_path: Path, offset: int = 0) -> Tuple[str, int]:
+        """Read journal content from an explicit path, without requiring init().
+
+        Used by non-running cluster nodes to read the shared journal file.
+
+        Args:
+            journal_path: Absolute path to the journal file to read.
+            offset: Byte position to start reading from (0 = full content).
+
+        Returns:
+            Tuple of (new_content, new_offset). Returns ('', 0) if file does
+            not exist; returns ('', offset) if offset >= file size.
+        """
+        try:
+            if not journal_path.exists():
+                return "", 0
+            file_size = journal_path.stat().st_size
+            if file_size <= offset:
+                return "", offset
+            with open(journal_path, "rb") as f:
+                f.seek(offset)
+                raw = f.read()
+            content = raw.decode("utf-8", errors="replace")
+            return content, file_size
+        except Exception as e:
+            logger.debug(f"get_content_from_path failed (non-fatal): {e}")
+            return "", offset
+
     def clear(self) -> None:
         """
         Truncate the journal and deactivate the service.

@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 mcp_router = APIRouter()
 
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+LATEST_PROTOCOL_VERSION = "2025-06-18"
+
 # Security scheme for bearer token authentication (auto_error=False for optional auth)
 security = HTTPBearer(auto_error=False)
 
@@ -46,6 +49,51 @@ _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 # Finding 3.5 (v10.4.4): deactivate_repository passes user_alias which is NOT
 # a golden alias, causing false "Access denied" for the rightful owner.
 _OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
+
+# Timeout in seconds for sync tool handlers executed via run_in_executor.
+# Bug #1008: git_blame on repos with deep history can block indefinitely.
+HANDLER_TIMEOUT_SECONDS = 60
+
+# Extended timeout for exit_write_mode (Issue #1190).
+# exit_write_mode runs _execute_refresh() which invokes Claude-CLI conflict
+# resolution. The inner budget (_DEFAULT_CONFLICT_TIMEOUT in conflict_resolver.py)
+# is 600s. We add 120s headroom for surrounding git fetch/rebase/index/push work.
+#
+# COUPLING: tests/e2e/helpers.py CONFLICT_RESOLUTION_TIMEOUT = 600.0 is the
+# matching E2E HTTP-client cap. If the inner conflict budget is ever raised,
+# WRITE_MODE_HANDLER_TIMEOUT_SECONDS AND that client cap must move together.
+WRITE_MODE_HANDLER_TIMEOUT_SECONDS = 720
+
+# Extended timeout for search_code (Bug #1319).
+# Temporal search_code queries (query embed + HNSW over many quarterly shards +
+# hydration + reranking) legitimately take ~13-20s, and the tail intermittently
+# exceeds the 60s default under concurrent load even though recall is correct
+# once the query completes. 180s is a bounded-but-larger safety cap, not an
+# unbounded wait.
+SEARCH_HANDLER_TIMEOUT_SECONDS = 180
+
+# Per-tool timeout overrides for sync handlers that legitimately need more than
+# HANDLER_TIMEOUT_SECONDS. All other tools keep the 60s default (Bug #1008).
+_HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
+    "exit_write_mode": WRITE_MODE_HANDLER_TIMEOUT_SECONDS,
+    "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
+}
+
+
+def _resolve_handler_timeout(tool_name: str) -> int:
+    """Return the effective timeout in seconds for a given tool's sync handler.
+
+    Returns the per-tool override from _HANDLER_TIMEOUT_OVERRIDES if one exists,
+    otherwise returns HANDLER_TIMEOUT_SECONDS (60s default, Bug #1008).
+
+    Args:
+        tool_name: The MCP tool name being dispatched.
+
+    Returns:
+        Timeout in seconds to use with asyncio.wait_for.
+    """
+    return _HANDLER_TIMEOUT_OVERRIDES.get(tool_name, HANDLER_TIMEOUT_SECONDS)
+
 
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
     api_metrics_service,
@@ -171,6 +219,7 @@ async def _invoke_handler(
     is_async: bool,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
+    timeout_seconds: float = HANDLER_TIMEOUT_SECONDS,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -187,6 +236,10 @@ async def _invoke_handler(
             Only elevation_key is used for session_key injection; session_id
             is intentionally never used as an elevation key per CLAUDE.md
             invariant (session_key = JWT jti Bearer OR cidx_session cookie).
+        timeout_seconds: Timeout in seconds for sync handlers executed via
+            run_in_executor. Defaults to HANDLER_TIMEOUT_SECONDS (60s).
+            Typed as float because asyncio.wait_for accepts Optional[float].
+            Use _resolve_handler_timeout(tool_name) to get per-tool overrides.
 
     Returns:
         Handler result
@@ -214,7 +267,16 @@ async def _invoke_handler(
     else:
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, arguments, user, **extra_kwargs)
-        return await loop.run_in_executor(None, bound)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, bound),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Tool execution timed out after {timeout_seconds} seconds",
+            }
 
 
 def _validate_acting_users(value: Any) -> None:
@@ -594,6 +656,11 @@ async def handle_tools_call(
     sig = inspect.signature(handler)
     is_async = asyncio.iscoroutinefunction(handler)
 
+    # Issue #1190: Resolve per-tool timeout so exit_write_mode gets enough
+    # headroom for Claude-CLI conflict resolution (600s budget + 120s buffer).
+    # All other tools keep the 60s default (Bug #1008 protection unchanged).
+    handler_timeout = _resolve_handler_timeout(tool_name)
+
     # Determine if we should intercept this tool call with span logging
     # Exclude tracing tools to avoid recursion
     should_intercept = tool_name not in {"start_trace", "end_trace"}
@@ -619,6 +686,7 @@ async def handle_tools_call(
                 is_async,
                 session_id=session_id,
                 elevation_key=elevation_key,
+                timeout_seconds=handler_timeout,
             )
 
         # Execute through span interceptor
@@ -649,6 +717,7 @@ async def handle_tools_call(
             is_async,
             session_id=session_id,
             elevation_key=elevation_key,
+            timeout_seconds=handler_timeout,
         )
 
     # Bug #350: Protocol-level API metrics tracking.
@@ -693,7 +762,7 @@ async def process_jsonrpc_request(
     # Route to appropriate handler
     try:
         if method == "initialize":
-            # MCP protocol handshake
+            # MCP protocol handshake with version negotiation.
             # TODO: Verify full MCP 2025-06-18 compatibility
             # - 2025-06-18 removed JSON-RPC batching support (breaking change)
             # - Added structured JSON tool output (structuredContent)
@@ -701,10 +770,16 @@ async def process_jsonrpc_request(
             # - Server-initiated user input via elicitation/create requests
             # Current implementation status: Updated version only, features pending audit
             # Story #22: Use configured service_display_name, fallback to "Neo"
+            client_version = params.get("protocolVersion")
+            negotiated_version = (
+                client_version
+                if client_version in SUPPORTED_PROTOCOL_VERSIONS
+                else LATEST_PROTOCOL_VERSION
+            )
             config = get_config_service().get_config()
             display_name = config.service_display_name or "Neo"
-            result = {
-                "protocolVersion": "2025-06-18",
+            result: Dict[str, Any] = {
+                "protocolVersion": negotiated_version,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": display_name, "version": __version__},
             }
@@ -779,12 +854,12 @@ async def process_batch_request(
     return responses
 
 
-@mcp_router.post("/mcp")
+@mcp_router.post("/mcp", response_model=None)
 async def mcp_endpoint(
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user_for_mcp),
-) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]], Response]:
     """
     MCP JSON-RPC 2.0 endpoint.
 
@@ -844,9 +919,15 @@ async def mcp_endpoint(
             body, current_user, session_id=session_id, elevation_key=elevation_key
         )
     elif isinstance(body, dict):
-        return await process_jsonrpc_request(
+        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+        # Still process internally for side effects (e.g. notifications/initialized state).
+        is_notification = "id" not in body
+        jsonrpc_result = await process_jsonrpc_request(
             body, current_user, session_id=session_id, elevation_key=elevation_key
         )
+        if is_notification:
+            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+        return jsonrpc_result
     else:
         return create_jsonrpc_error(
             -32600, "Invalid Request: body must be object or array", None
@@ -1040,11 +1121,17 @@ async def process_public_jsonrpc_request(
     try:
         if method == "initialize":
             # Story #22: Use configured service_display_name, fallback to "Neo"
+            client_version = params.get("protocolVersion")
+            negotiated_version = (
+                client_version
+                if client_version in SUPPORTED_PROTOCOL_VERSIONS
+                else LATEST_PROTOCOL_VERSION
+            )
             config = get_config_service().get_config()
             display_name = config.service_display_name or "Neo"
             return create_jsonrpc_response(
                 {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": negotiated_version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": display_name, "version": __version__},
                 },
@@ -1134,10 +1221,10 @@ async def unauthenticated_sse_generator():
         yield {"event": "ping", "data": "unauthenticated"}
 
 
-@mcp_router.post("/mcp-public")
+@mcp_router.post("/mcp-public", response_model=None)
 async def mcp_public_endpoint(
     request: Request, response: Response
-) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]], Response]:
     """Public MCP endpoint (no OAuth challenge)."""
     session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
@@ -1179,7 +1266,10 @@ async def mcp_public_endpoint(
             for req in body
         ]
     elif isinstance(body, dict):
-        return await process_public_jsonrpc_request(
+        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+        # Still process internally for side effects.
+        is_notification = "id" not in body
+        jsonrpc_result = await process_public_jsonrpc_request(
             body,
             user,
             request,
@@ -1187,6 +1277,9 @@ async def mcp_public_endpoint(
             session_id=session_id,
             elevation_key=elevation_key,
         )
+        if is_notification:
+            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+        return jsonrpc_result
     else:
         return create_jsonrpc_error(
             -32600, "Invalid Request: body must be object or array", None

@@ -18,6 +18,9 @@ import sys
 import os
 import pwd
 import shutil
+import tarfile
+import tempfile
+import platform
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -43,11 +46,31 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Default is the Linux standard /etc/systemd/system.
 SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
 
+# Bug #1320 Part B: fixed, documented installation location of the co-located
+# CoW Storage Daemon's own config file. This is a stable install-location
+# constant (not an environment-specific storage value) — used ONLY to
+# auto-detect cow_daemon.daemon_storage_path (the `base_path` field) on the
+# daemon-HOST node. Overridable via env var for testing only, mirroring the
+# SYSTEMD_UNIT_DIR pattern above.
+COW_DAEMON_HOST_CONFIG_PATH = Path(
+    os.environ.get(
+        "CIDX_COW_DAEMON_HOST_CONFIG_PATH", "/etc/cow-storage-daemon/config.json"
+    )
+)
+
 # Self-restart mechanism constants
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
 AUTO_UPDATE_STATUS_FILE = _cidx_data_dir / "auto-update-status.json"
-SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
+# Timeout for ALL systemd/sudo control-plane operations: daemon-reload,
+# systemctl restart, sudoers cat/tee/chmod/rm/visudo, unit-file read/write.
+# 120s (not the previous 30s/10s) because the FIRST auto-update deploy on a
+# freshly-built host compiles hnswlib and installs rustup/ripgrep/Claude-CLI/
+# pace-maker -- CPU-heavy work that transiently starves systemd/sudo
+# (pam_systemd blocks on a busy PID 1). A tighter timeout here raised
+# subprocess.TimeoutExpired, which a broad `except Exception` swallowed,
+# silently skipping real config steps (DEPLOY-GENERAL-034, -056).
+SYSTEMD_OP_TIMEOUT_SECONDS = 120
 
 # Story #355: Signal-based server restart via auto-updater
 # Server writes this file to request a restart; auto-updater detects and executes it.
@@ -56,6 +79,32 @@ RESTART_SIGNAL_PATH = _cidx_data_dir / "restart.signal"
 # Signals older than this threshold (seconds) are treated as stale (from a previous crash)
 # and deleted without triggering a restart. Set to 2x the typical poll interval.
 RESTART_SIGNAL_STALENESS_THRESHOLD = 120
+
+# Story #1198 MAJOR-M2: launch.json written by ConfigService.materialize_launch_config()
+# to capture the TARGET launch parameters (workers, log_level, host, port,
+# target_restart_generation).  The auto-updater reads this file before restarting
+# uvicorn so that the restarted process picks up any pending config changes.
+LAUNCH_CONFIG_PATH = _cidx_data_dir / "launch.json"
+# applied_launch.json written by the auto-updater AFTER it has applied a launch
+# config (started uvicorn with the values from launch.json).  Consumers such as
+# applied_worker_count.py read this to determine the APPLIED (running) count.
+APPLIED_LAUNCH_CONFIG_PATH = _cidx_data_dir / "applied_launch.json"
+
+
+# Canonical server defaults mirroring ServerConfig field declarations (config_manager.py).
+# Used by _resolve_launch_values so defaults stay centralized; never hardcode these inline.
+def _get_server_config_defaults() -> tuple:
+    """Return (host, port, workers) defaults from ServerConfig field declarations."""
+    from code_indexer.server.utils.config_manager import ServerConfig as _SC
+    import dataclasses as _dc
+
+    _fields = {f.name: f.default for f in _dc.fields(_SC)}
+    return _fields["host"], _fields["port"], _fields["workers"]
+
+
+_LAUNCH_DEFAULT_HOST, _LAUNCH_DEFAULT_PORT, _LAUNCH_DEFAULT_WORKERS = (
+    _get_server_config_defaults()
+)
 
 # Hnswlib fallback constants (Bug #160)
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
@@ -68,11 +117,70 @@ CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global insta
 # Story #845: Codex CLI install timeout constants
 CODEX_CLI_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
 CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10  # Quick binary probe after install
+# Claude CLI install constants (same pattern as CODEX_CLI_INSTALL_TIMEOUT_SECONDS above)
+CLAUDE_INSTALL_URL = "https://claude.ai/install.sh"
+CLAUDE_INSTALL_TIMEOUT_SECONDS = (
+    300  # curl + sh pipeline; generous budget matches Codex
+)
+
+# scip-python install constants (same pattern as CODEX_CLI_INSTALL_TIMEOUT_SECONDS
+# above). scip-python (npm package @sourcegraph/scip-python) is the SCIP indexer
+# binary for Python projects (src/code_indexer/scip/indexers/python.py); without
+# it, SCIP indexing fails with "[Errno 2] No such file or directory: 'scip-python'".
+SCIP_PYTHON_PACKAGE = "@sourcegraph/scip-python"
+SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
+
 # Story #997: Pace-maker install/update constants
 PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
 PACE_MAKER_GIT_TIMEOUT = 60
 PACE_MAKER_INSTALL_TIMEOUT = 120
 PACE_MAKER_CMD_TIMEOUT = 10
+
+# Step 15: FHS-mandated standard system PATH components for Linux (POSIX).
+# These directories are identical across all supported distributions (RHEL, Ubuntu, Debian).
+# Mirrors the convention used for /usr/bin/systemctl elsewhere in this file.
+SYSTEMD_DEFAULT_PATH_SUFFIX = "/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+
+# Step 16: Story #1024 - Rust toolchain + xray-cli build constants
+# M5: Two-step install: curl downloads the installer, sh runs it via stdin (no shell=True).
+RUSTUP_INSTALLER_URL = "https://sh.rustup.rs"
+RUSTUP_CURL_ARGS = [
+    "curl",
+    "--proto",
+    "=https",
+    "--tlsv1.2",
+    "-sSf",
+    RUSTUP_INSTALLER_URL,
+]
+RUSTUP_SH_ARGS = ["sh", "-s", "--", "-y", "--default-toolchain", "stable"]
+RUSTUP_INSTALL_TIMEOUT_SECONDS = 300  # curl + sh pipeline; generous budget
+RUSTUP_CMD_TIMEOUT_SECONDS = 30  # rustup default stable; quick
+CARGO_BUILD_TIMEOUT_SECONDS = 600  # 10 min for first-time xray-cli build
+RUSTC_VERSION_TIMEOUT_SECONDS = 10  # quick binary probe
+
+# System-wide Rust installation directory — accessible by all OS users.
+# The auto-updater runs as root but cidx-server runs as code-indexer;
+# /root/.cargo is unreachable (0550), so we install to /opt/rust.
+RUST_SYSTEM_DIR = Path("/opt/rust")
+
+# BUG #1318: Node.js toolchain provisioning constants. Node.js/npm is not
+# installed on any server node, so ensure_scip_python() and the Codex CLI
+# install both fail with "npm not available on PATH". Fix: provision a
+# pinned Node.js LTS release to a system-wide dir the SAME way Rust is
+# provisioned to RUST_SYSTEM_DIR (/opt/rust) — a static official tarball
+# (not a distro package, avoiding dnf/apt version drift) installed to a
+# dir reachable by both the (often root) auto-updater and the code-indexer
+# service user running cidx-server's child index subprocesses.
+NODEJS_VERSION = "22.11.0"  # current LTS ("Jod") at time of writing
+NODEJS_DIST_URL = (
+    f"https://nodejs.org/dist/v{NODEJS_VERSION}/node-v{NODEJS_VERSION}-linux-x64.tar.xz"
+)
+NODEJS_INSTALL_DIR = Path("/opt/node")
+NODEJS_INSTALL_TIMEOUT_SECONDS = 300  # curl download + tar extract; generous budget
+NODEJS_VERSION_PROBE_TIMEOUT_SECONDS = 10  # quick binary probe
+
+# Maximum bytes of subprocess stderr captured in warning log messages.
+MAX_ERROR_SNIPPET_LENGTH = 200
 
 
 class DeploymentExecutor:
@@ -897,6 +1005,74 @@ class DeploymentExecutor:
             )
             return False
 
+    def _pip_supports_break_system_packages(
+        self, python_path: str, use_sudo: bool = False
+    ) -> bool:
+        """Return True if the pip that will run the install supports --break-system-packages.
+
+        The flag was introduced in pip 23.0.1.  On stock Rocky 9 the system pip
+        is 21.3.1, which rejects the flag with "no such option", causing the
+        hnswlib build step to fail (Bug #1234).
+
+        IMPORTANT (live-VM fix): the probe MUST use the same privilege context as
+        the install.  Both build_custom_hnswlib and pip_install run their installs
+        via ``sudo python3 -m pip install ...``.  On Rocky 9 the non-sudo user pip
+        may be 26.x (probe would return True) while the sudo/system pip is 21.3.1
+        (should return False).  Pass ``use_sudo=True`` when the corresponding
+        install command starts with ``sudo``.
+
+        Args:
+            python_path: Path to the Python interpreter whose pip to probe.
+            use_sudo: When True, prefix the pip --version probe with ``sudo`` so
+                      the probe resolves the same pip binary the install will use.
+
+        Returns:
+            True if pip version >= 23.0.1, False otherwise or on any error.
+            Conservatively returns False on any parse/subprocess failure so that
+            the flag is silently omitted rather than breaking the install.
+        """
+        try:
+            cmd = (["sudo"] if use_sudo else []) + [
+                python_path,
+                "-m",
+                "pip",
+                "--version",
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return False
+
+            # Output format: "pip X.Y.Z from /path (python N.M)"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2 or parts[0] != "pip":
+                return False
+
+            raw_version = parts[1]
+            # Parse major.minor.patch (or major.minor) — ignore pre/post suffixes
+            version_parts = raw_version.split(".")
+            major = int(version_parts[0])
+            minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+            patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+
+            # Minimum version that supports --break-system-packages: 23.0.1
+            if major > 23:
+                return True
+            if major == 23:
+                if minor > 0:
+                    return True
+                if minor == 0 and patch >= 1:
+                    return True
+            return False
+
+        except Exception:
+            # Swallow all errors — conservatively omit the flag
+            return False
+
     def _ensure_build_dependencies(self) -> bool:
         """Ensure C++ build dependencies are installed for compiling hnswlib.
 
@@ -968,6 +1144,210 @@ class DeploymentExecutor:
         )
         return False
 
+    def _deploy_tmpdir(self) -> str:
+        """Return a writable temp directory for deploy pip installs under sudo + PrivateTmp.
+
+        Bug #1243: Under systemd PrivateTmp=yes, pip's tempfile.gettempdir() finds no
+        usable temp dir (private /tmp isolated from sudo context, /var/tmp also isolated,
+        CWD / not writable, no TMPDIR env var set by the service unit).  This causes
+        FileNotFoundError: No usable temporary directory found in ['/tmp', '/var/tmp',
+        '/usr/tmp', '/'] on every pip build attempt, dead-looping the auto-updater.
+
+        Solution: use a path under _cidx_data_dir (.deploy-tmp) which is NOT under /tmp
+        and therefore unaffected by PrivateTmp isolation.  Pass it to pip via sudo `env`
+        (the POSIX env utility): sudo's env_reset strips inherited env vars but does NOT
+        strip env vars injected by a child `env` command, so `sudo env TMPDIR=<path> pip`
+        receives a writable TMPDIR regardless of the PrivateTmp setting.
+
+        Returns:
+            Absolute path string to the deploy temp directory (created if absent).
+        """
+        deploy_tmp = _cidx_data_dir / ".deploy-tmp"
+        deploy_tmp.mkdir(parents=True, exist_ok=True)
+        return str(deploy_tmp)
+
+    def _is_user_install(self, python_path: str) -> bool:
+        """Return True if pip can install code-indexer WITHOUT sudo (user install).
+
+        Bug #1245 (v11.10.0 fix was INCOMPLETE -- proven on the live staging
+        cluster): the original probe recognized a user install ONLY when
+        code_indexer.__file__ contained the substring "/.local/". Staging
+        nodes run an EDITABLE install at a jsbattig-owned path such as
+        /home/jsbattig/code-indexer/src/code_indexer/__init__.py -- which
+        has NO "/.local/" segment at all. The substring-only probe returned
+        False there -> use_sudo=True -> sudo's root pip targeted
+        /root/.local and /root/.cache/pip/wheels, both READ-ONLY on the
+        immutable host -> fatal "Pip install failed" -> the auto-updater
+        dead-looped forever, even though the auto-updater's OWN process user
+        (jsbattig, non-root) already owns and can write the install dir.
+
+        Re-fix: key on WRITABILITY instead of the "/.local/" substring. pip
+        (editable `-e .` plus dependency wheel builds such as hnswlib)
+        writes the install directory itself, the user pip cache, and the
+        user site-packages. If the CURRENT process user can already write
+        the install directory, sudo is not merely unnecessary -- it is
+        actively WRONG: it escalates to root and points pip at root's
+        separate (often read-only) cache/site-packages instead.
+        os.access(W_OK) correctly classifies every layout that matters: an
+        editable-home install (writable -> no sudo), a ~/.local install
+        (writable -> no sudo; the "/.local/" substring is also kept as a
+        fast-path signal so a probe that can list the file but not stat its
+        parent still classifies correctly), a genuine root-owned system
+        install (not writable as the service user -> sudo), and the
+        auto-updater running as root itself (writable -> sudo not needed,
+        already root).
+
+        Conservative: returns False (use sudo) on any subprocess failure,
+        empty probe output, or writability-check error. Each conservative
+        branch is DEBUG-logged for operator visibility into why sudo was
+        chosen.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if code_indexer.__file__ is under ~/.local/ OR its
+            containing directory is writable by the current process user
+            (user install, no sudo). False otherwise, or on any probe/check
+            failure (system install, use sudo).
+        """
+        try:
+            result = subprocess.run(
+                [
+                    python_path,
+                    "-c",
+                    "import code_indexer; print(code_indexer.__file__)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                logger.debug(
+                    f"_is_user_install probe failed (rc={result.returncode}): "
+                    f"{result.stderr.strip()}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            install_path = result.stdout.strip()
+            if not install_path:
+                logger.debug(
+                    "_is_user_install probe returned empty output; "
+                    "conservatively treating as system install",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install probe raised an exception: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if "/.local/" in install_path:
+            return True
+
+        try:
+            install_dir = Path(install_path).resolve().parent
+            return os.access(install_dir, os.W_OK)
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install writability check failed for {install_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _hnswlib_importable(self, python_path: str) -> bool:
+        """Return True if hnswlib can be imported by the server python.
+
+        Bug #1245: Used to (a) skip an unnecessary rebuild and (b) demote a
+        failed rebuild to WARNING when the existing module still works.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if `import hnswlib` succeeds (rc=0), False otherwise.
+        """
+        try:
+            result = subprocess.run(
+                [python_path, "-c", "import hnswlib"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _get_hnswlib_submodule_commit(self) -> Optional[str]:
+        """Return the current hnswlib submodule commit hash from git, or None if unavailable.
+
+        Bug #1245: Used to detect whether the submodule has changed since the last
+        successful build, so an up-to-date importable hnswlib can skip the rebuild.
+
+        Returns:
+            The commit hash string, or None on any failure.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "-s", "third_party/hnswlib"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            # Output format: "<mode> <hash> <stage>\t<path>"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2:
+                return None
+            return parts[1]
+        except Exception:
+            return None
+
+    def _get_last_built_hnswlib_commit(self) -> Optional[str]:
+        """Return the commit hash recorded from the last successful hnswlib build.
+
+        Bug #1245: Persisted to _cidx_data_dir/hnswlib-last-built-commit so that
+        the rebuild-skip check survives process restarts.
+
+        Returns:
+            The stored commit hash string, or None if absent/unreadable.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            if not path.exists():
+                return None
+            value = path.read_text().strip()
+            return value if value else None
+        except Exception:
+            return None
+
+    def _save_last_built_hnswlib_commit(self, commit: str) -> None:
+        """Persist the commit hash of a successful hnswlib build for future skip checks.
+
+        Bug #1245: Written atomically after build_custom_hnswlib() succeeds so the
+        next deploy can compare against it to skip an unchanged rebuild.
+
+        Args:
+            commit: The hnswlib submodule commit hash to record.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(commit)
+            logger.debug(
+                f"Saved hnswlib last-built commit: {commit[:8]}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not save hnswlib built-commit marker: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
         """Build and install custom hnswlib from specified path or default submodule.
 
@@ -1006,23 +1386,77 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+            # Bug #1245: Skip rebuild when hnswlib is already importable and the
+            # submodule commit is unchanged since the last successful build.
+            current_commit = self._get_hnswlib_submodule_commit()
+            last_built_commit = self._get_last_built_hnswlib_commit()
+            if self._hnswlib_importable(python_path):
+                if current_commit is not None and current_commit == last_built_commit:
+                    logger.info(
+                        f"hnswlib already importable and submodule commit unchanged "
+                        f"({current_commit[:8]}); skipping rebuild",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
 
-            # Install pybind11 first - required because setup.py imports it at module level
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            pybind_result = subprocess.run(
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.  sudo's env_reset strips
+            # inherited env vars but does NOT strip vars set by a child `env` command, so
+            # `sudo env TMPDIR=<dir> python3 -m pip install ...` receives a usable TMPDIR.
+            tmpdir = self._deploy_tmpdir()
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
+            break_sys_pkg = self._pip_supports_break_system_packages(
+                python_path, use_sudo=use_sudo
+            )
+
+            # Install pybind11 first - required because setup.py imports it at module level.
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pybind11_cmd = (
                 [
                     "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
                     python_path,
                     "-m",
                     "pip",
                     "install",
-                    "--break-system-packages",
-                    "pybind11",
-                ],
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
+            if break_sys_pkg:
+                pybind11_cmd.append("--break-system-packages")
+            pybind11_cmd.append("pybind11")
+            pybind_result = subprocess.run(
+                pybind11_cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                pybind_result.returncode != 0
+                and "--break-system-packages" in pybind11_cmd
+                and "no such option" in pybind_result.stderr
+            ):
+                logger.warning(
+                    "pybind11 install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pybind11_cmd if c != "--break-system-packages"]
+                pybind_result = subprocess.run(
+                    retry_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
 
             if pybind_result.returncode != 0:
                 logger.error(
@@ -1038,26 +1472,65 @@ class DeploymentExecutor:
                 "pybind11 installed successfully",
                 extra={"correlation_id": get_correlation_id()},
             )
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            result = subprocess.run(
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            hnswlib_cmd = (
                 [
                     "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
                     python_path,
                     "-m",
                     "pip",
                     "install",
-                    "--break-system-packages",
-                    "--force-reinstall",
-                    "--no-deps",
-                    ".",
-                ],
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
+            if break_sys_pkg:
+                hnswlib_cmd.append("--break-system-packages")
+            hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
+            result = subprocess.run(
+                hnswlib_cmd,
                 cwd=hnswlib_path,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for compilation
             )
 
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in hnswlib_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "hnswlib install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in hnswlib_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=hnswlib_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+
             if result.returncode != 0:
+                # Bug #1245: Non-fatal when hnswlib is still importable (existing module works).
+                # Only hard-fail when hnswlib genuinely cannot be imported.
+                if self._hnswlib_importable(python_path):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-042",
+                            f"Custom hnswlib build failed but hnswlib is still importable; "
+                            f"continuing deploy: "
+                            f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return True
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-042",
@@ -1071,6 +1544,9 @@ class DeploymentExecutor:
                 "Custom hnswlib build and install successful",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #1245: Record successful build commit for future skip checks.
+            if current_commit:
+                self._save_last_built_hnswlib_commit(current_commit)
             return True
 
         except subprocess.TimeoutExpired:
@@ -1167,7 +1643,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1217,7 +1693,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1236,6 +1712,64 @@ class DeploymentExecutor:
             )
             return None
 
+    def _run_systemd_op_with_retry(
+        self,
+        cmd: list,
+        *,
+        input: Optional[str] = None,
+        timeout: int = SYSTEMD_OP_TIMEOUT_SECONDS,
+        max_attempts: int = 3,
+        retry_delay_seconds: float = 5.0,
+    ) -> subprocess.CompletedProcess:
+        """Run a systemd/sudo control-plane subprocess with retry-on-timeout.
+
+        On a freshly-built host, the FIRST auto-update deploy is CPU-heavy
+        (hnswlib compile, rustup/ripgrep/Claude-CLI/pace-maker install) and
+        transiently starves systemd/sudo (pam_systemd blocks on a busy PID 1).
+        A single 30s/10s timeout could raise subprocess.TimeoutExpired even
+        though the operation would have succeeded moments later. This helper
+        retries ONLY on subprocess.TimeoutExpired -- a completed process with
+        ANY returncode (including nonzero) is returned immediately on the
+        first attempt that does not raise; nonzero returncode is a real
+        failure, not a transient one, so it is never retried.
+
+        Args:
+            cmd: Command argv list to execute.
+            input: Optional stdin text (e.g. for `sudo tee`).
+            timeout: Per-attempt timeout in seconds.
+            max_attempts: Maximum number of attempts before giving up.
+            retry_delay_seconds: Seconds to sleep between attempts.
+
+        Returns:
+            The subprocess.CompletedProcess from the first attempt that does
+            not raise subprocess.TimeoutExpired.
+
+        Raises:
+            subprocess.TimeoutExpired: If every attempt times out.
+        """
+        last_timeout_error: Optional[subprocess.TimeoutExpired] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return subprocess.run(
+                    cmd,
+                    input=input,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as e:
+                last_timeout_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"systemd/sudo op timed out after {timeout}s "
+                        f"(attempt {attempt}/{max_attempts}), retrying: {cmd}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    time.sleep(retry_delay_seconds)
+
+        assert last_timeout_error is not None
+        raise last_timeout_error
+
     def _write_service_file_and_reload(self, service_path: Path, content: str) -> bool:
         """Write systemd service file via sudo tee and reload daemon.
 
@@ -1248,12 +1782,9 @@ class DeploymentExecutor:
         """
         try:
             # Write via sudo tee
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(service_path)],
                 input=content,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -1267,11 +1798,8 @@ class DeploymentExecutor:
                 return False
 
             # Reload systemd
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "systemctl", "daemon-reload"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -1632,22 +2160,57 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            result = subprocess.run(
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.
+            tmpdir = self._deploy_tmpdir()
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pip_cmd = (
                 [
                     "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
                     python_path,
                     "-m",
                     "pip",
                     "install",
-                    "--break-system-packages",
-                    "-e",
-                    ".",
-                ],
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
+            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
+                pip_cmd.append("--break-system-packages")
+            pip_cmd.extend(["-e", "."])
+            result = subprocess.run(
+                pip_cmd,
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in pip_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "pip install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                )
 
             if result.returncode != 0:
                 logger.error(
@@ -1761,94 +2324,302 @@ class DeploymentExecutor:
             )
             return False
 
-    def _ensure_workers_config(self) -> bool:
-        """Ensure systemd service has --workers 1 configured.
+    def _read_launch_source(self, mode: str) -> Optional[dict]:
+        """Read launch config JSON for the given mode.
 
-        Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
-        Multiple workers duplicate caches and break cursor-based pagination.
+        Story #1196 (next-release cleanup): the config.json rung is removed
+        from BOTH modes.
 
-        Returns:
-            True if config is correct or was updated, False on error
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (falls
+                through directly to ServerConfig defaults; APPLY's job is to
+                apply the TARGET).
+        DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH. Both the MISSING and CORRUPT cases
+            return None so the caller PRESERVES the live ExecStart unchanged — a routine
+            code deploy must never rewrite the live unit from a stale config. The live
+            ExecStart is the confirmed running state (e.g. --host 0.0.0.0 bound so HAProxy
+            on another host can reach this node); falling through to ServerConfig
+            defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
+            ServerConfig default), dropping the node off the load balancer (a confirmed
+            production-outage path). A present+valid applied_launch.json is used normally.
         """
-        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
-
-        try:
-            if not service_path.exists():
-                logger.warning(
-                    format_error_log(
-                        "DEPLOY-GENERAL-017",
-                        f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                return True  # Not an error if service doesn't exist yet
-
-            content = service_path.read_text()
-
-            # Check if --workers is already configured
-            if "--workers" in content:
+        source_path = (
+            LAUNCH_CONFIG_PATH if mode == "APPLY" else APPLIED_LAUNCH_CONFIG_PATH
+        )
+        if not source_path.exists():
+            if mode == "DEPLOY":
+                # DEPLOY + missing applied_launch.json: preserve the live ExecStart.
+                # The live unit IS the confirmed running state (e.g. --host 0.0.0.0 bound
+                # so HAProxy on another host can reach this node). Falling through to
+                # ServerConfig defaults risks rewriting --host 0.0.0.0
+                # to 127.0.0.1 (the ServerConfig default), dropping the node off the
+                # load balancer (production outage).
+                # Treat identically to the CORRUPT case: return None so the caller
+                # preserves the live unit unchanged.
                 logger.debug(
-                    "Workers config already present in service file",
+                    "DEPLOY: applied_launch.json missing — preserving live ExecStart "
+                    "(same as corrupt path; live unit is the confirmed running state)",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return True
-
-            # Add --workers 1 to ExecStart line
-            if "ExecStart=" in content and "uvicorn" in content:
-                # Find ExecStart line and add --workers 1
-                lines = content.split("\n")
-                updated_lines = []
-                modified = False
-
-                for line in lines:
-                    if line.startswith("ExecStart=") and "uvicorn" in line:
-                        # Add --workers 1 before any newline
-                        line = line.rstrip() + " --workers 1"
-                        modified = True
-                    updated_lines.append(line)
-
-                if modified:
-                    new_content = "\n".join(updated_lines)
-                    # Write via sudo
-                    result = subprocess.run(
-                        ["sudo", "tee", str(service_path)],
-                        input=new_content,
-                        capture_output=True,
-                        text=True,
-                    )
-
-                    if result.returncode != 0:
-                        logger.error(
-                            format_error_log(
-                                "DEPLOY-GENERAL-018",
-                                f"Failed to update service file: {result.stderr}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                        )
-                        return False
-
-                    # Reload systemd
-                    subprocess.run(
-                        ["sudo", "systemctl", "daemon-reload"],
-                        capture_output=True,
-                    )
-
-                    logger.info(
-                        "Added --workers 1 to service file",
+                return None
+            return {}
+        try:
+            return dict(json.loads(source_path.read_text()))
+        except (json.JSONDecodeError, OSError) as exc:
+            if mode == "DEPLOY":
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-199",
+                        f"DEPLOY: applied_launch.json corrupt — preserving live ExecStart: {exc}",
                         extra={"correlation_id": get_correlation_id()},
                     )
+                )
+                return None
+            logger.debug(
+                f"APPLY: launch.json unreadable ({exc}); falling through to ServerConfig defaults",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return {}
 
-            return True
+    def _fill_from_live_execstart(
+        self,
+        mode: str,
+        host: Optional[str],
+        port: Optional[int],
+        workers: Optional[int],
+    ) -> tuple:
+        """Fill any still-None DEPLOY values from the live ExecStart.
 
-        except Exception as e:
+        Story #1196 AC2 (FIX-1 / MAJOR-M1): the config.json rung is removed
+        from BOTH modes.
+          APPLY:  missing values are left None here so the caller applies the
+                  ServerConfig defaults directly -- no fallback source between
+                  launch.json and the literal defaults.
+          DEPLOY: missing values (a partially-populated applied_launch.json)
+                  are filled from the CURRENT live-unit ExecStart -- the
+                  confirmed running state -- never from config.json, before
+                  falling through to ServerConfig defaults.
+        """
+        if mode != "DEPLOY" or all(v is not None for v in (host, port, workers)):
+            return host, port, workers
+        live = read_execstart_flags(self.service_name)
+        if host is None:
+            host = live.get("host")
+        if port is None:
+            port = live.get("port")
+        if workers is None:
+            workers = live.get("workers")
+        return host, port, workers
+
+    def _resolve_launch_values(self, mode: str) -> Optional[dict]:
+        """Return resolved {host, port, workers} or None (DEPLOY: missing/corrupt source).
+
+        For APPLY mode, also includes applied_restart_generation sourced from
+        launch.json's target_restart_generation (defaults to 0 when absent).
+        DEPLOY mode is unaffected: it reads applied_launch.json which has no generation
+        field, and the ExecStart rewrite must not receive that field.
+        """
+        raw = self._read_launch_source(mode)
+        if raw is None:
+            return (
+                None  # DEPLOY: corrupt/missing applied_launch.json — preserve ExecStart
+            )
+
+        host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
+        host, port, workers = self._fill_from_live_execstart(mode, host, port, workers)
+        result: dict = {
+            "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
+            "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
+            "workers": max(
+                1, int(workers) if workers is not None else _LAUNCH_DEFAULT_WORKERS
+            ),
+        }
+        if mode == "APPLY":
+            # APPLY reads launch.json; target_restart_generation is written by Story #1198.
+            # Story #1200 reads applied_restart_generation to detect pending restart loops.
+            # Default 0 matches COALESCE(applied, 0) semantics in #1200 AC1/AC5.
+            result["applied_restart_generation"] = int(
+                raw.get("target_restart_generation") or 0
+            )
+        return result
+
+    @staticmethod
+    def _is_cidx_execstart(line: str) -> bool:
+        """Detection predicate covering both ExecStart shapes (CRITICAL-D).
+
+        The old uvicorn-only gate silently skipped installer-shape units that use
+        'code_indexer.server.main' instead of 'uvicorn'. This predicate covers both.
+        """
+        return line.startswith("ExecStart=") and (
+            "code_indexer.server.main" in line or "uvicorn" in line
+        )
+
+    @staticmethod
+    def _read_flag(line: str, flag: str) -> "Optional[str]":
+        """Extract the value of a flag from an ExecStart line (Bug #1232).
+
+        Uses the same bounded-token regex as _rewrite_flag so '--workers 1'
+        is never confused with '--workers 10'.
+
+        Returns the string value following flag, or None if flag is absent.
+        """
+        import re as _re
+
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+(\S+)")
+        m = bounded.search(line)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _rewrite_flag(line: str, flag: str, value: str) -> tuple:
+        """Token-bounded in-place flag rewrite (Bug #1183 idiom).
+
+        Returns (new_line, was_modified). Exact match → no-op.
+        Differing value → bounded replace. Absent flag → append.
+        Never confuses '--workers 1' with '--workers 10'.
+        """
+        import re as _re
+
+        exact = _re.compile(
+            r"(?<!\S)" + _re.escape(flag) + r"\s+" + _re.escape(value) + r"(?!\S)"
+        )
+        if exact.search(line):
+            return line, False
+
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+\S+")
+        if bounded.search(line):
+            return bounded.sub(f"{flag} {value}", line), True
+
+        return line.rstrip() + f" {flag} {value}", True
+
+    def _read_cidx_service_lines(self, service_path: "Path") -> Optional[list]:
+        """Read service file lines; return them only if a cidx ExecStart is present.
+
+        Returns None when the file is missing or contains no cidx ExecStart line.
+        """
+        if not service_path.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-017",
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        lines = service_path.read_text().split("\n")
+        if not any(self._is_cidx_execstart(ln) for ln in lines):
+            logger.debug(
+                "No cidx ExecStart found; skipping launch config rewrite",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+        return lines
+
+    def _rewrite_execstart_lines(
+        self, lines: list, host: str, port: int, workers: int
+    ) -> tuple:
+        """Rewrite --host/--port/--workers on cidx ExecStart lines only.
+
+        Returns (updated_lines, was_modified). Never writes --log-level (CRITICAL-A).
+        """
+        updated, modified = [], False
+        for line in lines:
+            if self._is_cidx_execstart(line):
+                line, c1 = self._rewrite_flag(line, "--host", str(host))
+                line, c2 = self._rewrite_flag(line, "--port", str(port))
+                line, c3 = self._rewrite_flag(line, "--workers", str(workers))
+                modified = modified or c1 or c2 or c3
+            updated.append(line)
+        return updated, modified
+
+    def _write_and_reload_service(self, service_path: "Path", lines: list) -> bool:
+        """Write lines to service_path via sudo tee, then daemon-reload.
+
+        Returns True on tee success; daemon-reload failure is logged but non-fatal.
+        """
+        tee = subprocess.run(
+            ["sudo", "tee", str(service_path)],
+            input="\n".join(lines),
+            capture_output=True,
+            text=True,
+        )
+        if tee.returncode != 0:
             logger.error(
                 format_error_log(
-                    "DEPLOY-GENERAL-019",
-                    f"Error checking workers config: {e}",
+                    "DEPLOY-GENERAL-018",
+                    f"sudo tee failed updating service file: {tee.stderr}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
+        reload = subprocess.run(
+            ["sudo", "systemctl", "daemon-reload"],
+            capture_output=True,
+            text=True,
+        )
+        if reload.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-173",
+                    f"daemon-reload failed after launch config update: {reload.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+        return True
+
+    def _ensure_launch_config(self, mode: str) -> Optional[dict]:
+        """Rewrite --host/--port/--workers in the live systemd ExecStart.
+
+        APPLY:  returns snapshot {host, port, workers} on success; None on failure.
+        DEPLOY: rewrites ExecStart then always returns None (MAJOR-M5).
+        """
+        if mode not in {"APPLY", "DEPLOY"}:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-200",
+                    f"_ensure_launch_config: invalid mode={mode!r}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        try:
+            values = self._resolve_launch_values(mode)
+            if values is None:
+                return None
+            host, port, workers = values["host"], values["port"], values["workers"]
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            lines = self._read_cidx_service_lines(service_path)
+            if lines is None:
+                return None
+            updated, modified = self._rewrite_execstart_lines(
+                lines, host, port, workers
+            )
+            snapshot: dict = {"host": host, "port": port, "workers": workers}
+            if "applied_restart_generation" in values:
+                snapshot["applied_restart_generation"] = values[
+                    "applied_restart_generation"
+                ]
+            if not modified:
+                logger.debug(
+                    f"ExecStart already matches ({host}:{port} workers={workers}); no-op",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return snapshot if mode == "APPLY" else None
+            if not self._write_and_reload_service(service_path, updated):
+                return None
+            logger.info(
+                f"Rewrote ExecStart: --host {host} --port {port} --workers {workers} "
+                f"(mode={mode})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return snapshot if mode == "APPLY" else None
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-019",
+                    f"Error in _ensure_launch_config(mode={mode}): {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
 
     def _extract_service_user(self, content: str) -> Optional[str]:
         """Extract User= value from service file content.
@@ -2145,11 +2916,8 @@ class DeploymentExecutor:
             expected_rule = f"{service_user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {self.service_name}"
 
             # Use sudo to check /etc/sudoers.d/ (not readable by non-root)
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sudo", "cat", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.returncode == 0:
                 existing_content = check_result.stdout.strip()
@@ -2167,12 +2935,9 @@ class DeploymentExecutor:
             )
 
             # Use sudo tee to write the sudoers file
-            tee_result = subprocess.run(
+            tee_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(sudoers_path)],
                 input=expected_rule,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if tee_result.returncode != 0:
@@ -2186,11 +2951,8 @@ class DeploymentExecutor:
                 return False
 
             # Set correct permissions (0440)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "0440", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if chmod_result.returncode != 0:
@@ -2202,20 +2964,14 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove file with wrong permissions
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
             # Validate with visudo
-            visudo_result = subprocess.run(
+            visudo_result = self._run_systemd_op_with_retry(
                 ["sudo", "visudo", "-c", "-f", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if visudo_result.returncode != 0:
@@ -2227,11 +2983,8 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove invalid sudoers file
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
@@ -2341,13 +3094,29 @@ class DeploymentExecutor:
             details: Optional details about the status
         """
         try:
-            # Get current version from package
-            try:
-                from code_indexer import __version__
+            # Read version from disk so it reflects the newly-deployed code after
+            # git pull, rather than the stale cached import in sys.modules.
+            import re as _re
 
-                version = __version__
-            except ImportError:
-                version = "unknown"
+            version = "unknown"
+            init_py = self.repo_path / "src" / "code_indexer" / "__init__.py"
+            try:
+                text = init_py.read_text()
+                m = _re.search(
+                    r'^__version__\s*=\s*["\']([^"\']+)["\']', text, _re.MULTILINE
+                )
+                if m:
+                    version = m.group(1)
+                else:
+                    raise ValueError("no __version__ line found")
+            except Exception:
+                # Fall back to cached import when file is missing or unparseable
+                try:
+                    from code_indexer import __version__
+
+                    version = __version__
+                except ImportError:
+                    pass
 
             status_data = {
                 "status": status,
@@ -2420,7 +3189,7 @@ class DeploymentExecutor:
                 ["sudo", "systemctl", "restart", AUTO_UPDATE_SERVICE_NAME],
                 capture_output=True,
                 text=True,
-                timeout=SYSTEMCTL_TIMEOUT_SECONDS,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -2467,11 +3236,8 @@ class DeploymentExecutor:
         """
         try:
             # Check current value
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sysctl", "-n", "vm.overcommit_memory"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip() == "1":
                 logger.debug(
@@ -2481,12 +3247,9 @@ class DeploymentExecutor:
                 return True
 
             # Write persistent sysctl config file
-            write_result = subprocess.run(
+            write_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", "/etc/sysctl.d/99-cidx-memory.conf"],
                 input="vm.overcommit_memory = 1\n",
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if write_result.returncode != 0:
                 logger.error(
@@ -2499,11 +3262,8 @@ class DeploymentExecutor:
                 return False
 
             # Apply immediately
-            apply_result = subprocess.run(
+            apply_result = self._run_systemd_op_with_retry(
                 ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if apply_result.returncode != 0:
                 logger.error(
@@ -2540,16 +3300,21 @@ class DeploymentExecutor:
         This provides an additional safety net for OOM conditions when the
         server has large mmap'd virtual memory from HNSW indexes and SQLite DBs.
 
+        Bug #1254: best-effort / non-fatal. Swap is an OOM optimization, not
+        a correctness requirement -- the server runs correctly without it.
+        On read-only/immutable hosts (e.g. "/" mounted read-only) fallocate/
+        chmod/mkswap/swapon legitimately cannot succeed. Any subprocess
+        failure (or unexpected exception) here is logged at WARNING and the
+        method still returns True so deployment proceeds to the restart.
+
         Returns:
-            True if swap exists or was successfully created, False on error
+            True always (best-effort) -- swap setup failures are logged at
+            WARNING and never block deployment.
         """
         try:
             # Check if any swap is already active
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["swapon", "--show", "--noheadings"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip():
                 logger.debug(
@@ -2559,87 +3324,73 @@ class DeploymentExecutor:
                 return True
 
             # Allocate 4GB swap file
-            fallocate_result = subprocess.run(
+            fallocate_result = self._run_systemd_op_with_retry(
                 ["sudo", "fallocate", "-l", "4G", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=60,
             )
             if fallocate_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-093",
-                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr}",
+                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Set secure permissions (0600 - root only)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "600", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if chmod_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-094",
-                        f"chmod 600 /swapfile failed: {chmod_result.stderr}",
+                        f"chmod 600 /swapfile failed: {chmod_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Format as swap
-            mkswap_result = subprocess.run(
+            mkswap_result = self._run_systemd_op_with_retry(
                 ["sudo", "mkswap", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if mkswap_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-095",
-                        f"mkswap /swapfile failed: {mkswap_result.stderr}",
+                        f"mkswap /swapfile failed: {mkswap_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Enable swap immediately
-            swapon_result = subprocess.run(
+            swapon_result = self._run_systemd_op_with_retry(
                 ["sudo", "swapon", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if swapon_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-096",
-                        f"swapon /swapfile failed: {swapon_result.stderr}",
+                        f"swapon /swapfile failed: {swapon_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Add fstab entry for reboot persistence
-            fstab_result = subprocess.run(
+            fstab_result = self._run_systemd_op_with_retry(
                 ["cat", "/etc/fstab"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if "/swapfile" not in fstab_result.stdout:
-                tee_result = subprocess.run(
+                tee_result = self._run_systemd_op_with_retry(
                     ["sudo", "tee", "-a", "/etc/fstab"],
                     input="/swapfile none swap sw 0 0\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 if tee_result.returncode != 0:
                     # Non-fatal: swap is active but will not survive reboot
@@ -2660,14 +3411,15 @@ class DeploymentExecutor:
             return True
 
         except Exception as e:
-            logger.error(
+            logger.warning(
                 format_error_log(
                     "DEPLOY-GENERAL-098",
-                    f"Exception creating swap file: {e}",
+                    f"Exception creating swap file: {e} "
+                    "- swap is an OOM optimization, continuing without it",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-            return False
+            return True  # Bug #1254: non-fatal, swap is best-effort
 
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
@@ -2682,6 +3434,34 @@ class DeploymentExecutor:
             "Starting deployment execution",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Bug #1251: Set TMPDIR for the entire deploy process BEFORE any
+        # subprocess is spawned. Bug #1243 set TMPDIR only on the explicit
+        # `sudo env TMPDIR=...` prefix used by the SUDO pip path; Bug #1245's
+        # writability fix routes editable-home installs (no /.local/ segment,
+        # writable directory -- the staging cluster layout) through the
+        # NO-SUDO command, which carried no TMPDIR at all. Under systemd
+        # PrivateTmp=yes + Python 3.12, the auto-updater's private /tmp is
+        # isolated and unusable, so pip's tempfile.gettempdir() raises
+        # FileNotFoundError at the pybind11/hnswlib build step, dead-looping
+        # the auto-updater (same self-perpetuating class as #1182/#1243/#1245).
+        #
+        # Mutating os.environ here -- rather than threading an explicit env=
+        # kwarg through every no-sudo call site -- is sufficient and
+        # exhaustive: every subprocess.run() invocation in this module either
+        # omits env= entirely (inherits the live process environment, which
+        # now carries TMPDIR) or explicitly builds its env from
+        # os.environ.copy() / dict(os.environ) (build_non_interactive_git_env()
+        # for git operations, the self-restart smoke test, the pace-maker
+        # no-sudo install, the Rust toolchain install + cargo build). So this
+        # single early mutation propagates TMPDIR to every no-sudo child
+        # process without requiring any per-call-site change.
+        #
+        # The SUDO path is unchanged: sudo's env_reset strips inherited
+        # environment variables, so it still requires (and keeps) the
+        # explicit ["sudo", "env", f"TMPDIR={tmpdir}", ...] prefix from
+        # Bug #1243.
+        os.environ["TMPDIR"] = self._deploy_tmpdir()
 
         # Step 0: Calculate hash of auto_update code BEFORE git pull
         hash_before = self._calculate_auto_update_hash()
@@ -2797,8 +3577,14 @@ class DeploymentExecutor:
             )
             return False
 
-        # Step 3: Story #30 AC4 - Ensure workers config
-        self._ensure_workers_config()
+        # Step 3: Story #1199 - Ensure launch config (host/port/workers) from applied_launch.json.
+        # DEPLOY mode reads applied_launch.json → parse/preserve the live ExecStart → ServerConfig
+        # defaults (NEVER launch.json/TARGET; the config.json rung was removed in Story #1196)
+        # so a routine code deploy preserves the last operator-applied launch config without
+        # auto-applying a saved-but-unconfirmed TARGET change (decision #3).
+        # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape
+        # (code_indexer.server.main) and uvicorn-shape units.
+        self._ensure_launch_config("DEPLOY")
 
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()
@@ -2833,6 +3619,20 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Step 6.65: BUG #1318 - Provision Node.js/npm BEFORE the npm-dependent
+        # steps below (Codex CLI install, scip-python install) so both can
+        # actually find npm on PATH instead of silently no-op'ing.
+        if not self.ensure_nodejs():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js provisioning could not be verified/installed — "
+                    "npm-dependent features (scip-python, Codex CLI) will be "
+                    "unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Step 6.7: Story #845 - Idempotently install/update Codex CLI (optional feature)
         if not self._ensure_codex_cli_installed():
             logger.warning(
@@ -2857,6 +3657,25 @@ class DeploymentExecutor:
                     "Ripgrep installation failed",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            )
+
+        # Step 7.1: Ensure scip-python is installed for SCIP-based code intelligence
+        # (mirrors the ripgrep step above; non-fatal — SCIP indexing is degraded,
+        # not the whole deploy, when this fails).
+        scip_python_result = self.ensure_scip_python()
+        if scip_python_result:
+            logger.info(
+                "scip-python installation successful",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "scip-python installation could not be verified/installed — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Step 8: Ensure sudoers rule for server self-restart
@@ -2913,6 +3732,80 @@ class DeploymentExecutor:
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
+
+        # Step 13: Initial Claude CLI installer (non-fatal).
+        # Step 11 updates an existing install via npm; this step installs
+        # from scratch via the official installer when claude is not on PATH.
+        if not self._ensure_claude_cli_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-164",
+                    "Claude CLI install skipped or failed - "
+                    "research assistant feature may be unavailable",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14: Cluster mode only - set up NFS symlinks for Claude home and research data (non-fatal)
+        if not self._ensure_nfs_research_symlinks():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-165",
+                    "NFS research symlink setup failed - "
+                    "research sessions may not be accessible across cluster nodes",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14.5: Bug #1052 - Ensure activated-repos symlink for CoW-daemon cluster (non-fatal)
+        if not self._ensure_activated_repos_symlink_for_cow_daemon():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-166",
+                    "activated-repos symlink setup failed - "
+                    "CoW-daemon activation may not function correctly",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14.6: Bug #1320 Part B - Ensure cow_daemon.daemon_storage_path is
+        # populated on CoW-daemon cluster nodes (non-fatal; leaves unset + logs
+        # when no source resolves, letting Part A's guard fail loud at publish
+        # time instead of silently guessing a value).
+        if not self._ensure_daemon_storage_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-206",
+                    "daemon_storage_path setup failed - "
+                    "CoW-daemon versioned-snapshot publish may fail loud "
+                    "with a path-translation error",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 15: Ensure ~/.local/bin is in PATH in the systemd service unit (non-fatal)
+        if not self._ensure_systemd_claude_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-171",
+                    "systemd PATH update failed - "
+                    "Claude CLI may not be found when invoked via systemd service",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 16: Story #1024 - Ensure Rust toolchain + build xray-cli (FATAL)
+        if not self._ensure_rust_toolchain():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    "Rust toolchain provisioning failed - "
+                    "xray native backend will not function. "
+                    "Deployment cannot continue.",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
 
         logger.info(
             "Deployment execution completed successfully",
@@ -3289,3 +4182,1560 @@ class DeploymentExecutor:
             return False
         self._probe_codex_version()
         return True
+
+    def _check_node_installed(self) -> bool:
+        """BUG #1318: Return True if Node.js is already installed and runnable.
+
+        Checks NODEJS_INSTALL_DIR/bin/node first (our own provisioning
+        target) by actually invoking it with --version, then falls back to
+        shutil.which("node") to detect a system-installed Node.js elsewhere
+        on PATH. Never raises.
+        """
+        node_bin = NODEJS_INSTALL_DIR / "bin" / "node"
+        if node_bin.exists():
+            try:
+                result = subprocess.run(
+                    [str(node_bin), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=NODEJS_VERSION_PROBE_TIMEOUT_SECONDS,
+                )
+                if result.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return shutil.which("node") is not None
+
+    def _download_nodejs_tarball(self, dest_path: Path) -> bool:
+        """BUG #1318: Download the pinned Node.js LTS tarball via curl.
+
+        Mirrors the Rust toolchain's curl usage (no shell=True). Handles
+        nonzero returncode, TimeoutExpired, and OSError as WARNING +
+        return False. Never raises.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--proto",
+                    "=https",
+                    "--tlsv1.2",
+                    "-sSfL",
+                    "-o",
+                    str(dest_path),
+                    NODEJS_DIST_URL,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=NODEJS_INSTALL_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed (curl exit "
+                    f"{result.returncode}): "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def _extract_nodejs_tarball(self, tar_path: Path, install_dir: Path) -> bool:
+        """BUG #1318: Safely extract the Node.js tarball into install_dir.
+
+        tarfile has no --strip-components, so the top-level
+        node-v{NODEJS_VERSION}-linux-x64/ directory shipped by the official
+        dist is extracted to a temp dir first, then its contents are moved
+        up into install_dir. Path-traversal validation mirrors
+        RipgrepInstaller._safe_extract_tar. Never raises.
+        """
+        expected_top_dir = f"node-v{NODEJS_VERSION}-linux-x64"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_extract_dir:
+                abs_dest = os.path.abspath(tmp_extract_dir)
+                with tarfile.open(tar_path, "r:xz") as tar:
+                    for member in tar.getmembers():
+                        member_path = os.path.join(tmp_extract_dir, member.name)
+                        abs_path = os.path.abspath(member_path)
+                        if (
+                            not abs_path.startswith(abs_dest + os.sep)
+                            and abs_path != abs_dest
+                        ):
+                            raise ValueError(
+                                f"Path traversal detected in tar: {member.name}"
+                            )
+                    tar.extractall(tmp_extract_dir, filter="data")
+
+                extracted_root = Path(tmp_extract_dir) / expected_top_dir
+                if not extracted_root.is_dir():
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-202",
+                            f"Extracted Node.js tarball missing expected "
+                            f"directory {expected_top_dir}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+
+                for item in extracted_root.iterdir():
+                    shutil.move(str(item), str(install_dir / item.name))
+            return True
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball extraction failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _add_nodejs_bin_to_process_path(self) -> None:
+        """BUG #1318: Prepend NODEJS_INSTALL_DIR/bin to THIS process's PATH.
+
+        ensure_scip_python()/_ensure_codex_cli_installed() call
+        shutil.which("npm")/subprocess.run(["npm", ...]) without an
+        explicit env= kwarg, relying on the inherited process environment
+        (unlike the Rust toolchain build, which passes an explicit env
+        dict). Updating os.environ here — not just the systemd unit file —
+        is what lets those SAME-execute()-run steps find npm immediately
+        after ensure_nodejs() provisions it. Idempotent: never duplicates
+        the segment. Never raises.
+        """
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        current_path = os.environ.get("PATH", "")
+        segments = current_path.split(":") if current_path else []
+        if node_bin in segments:
+            return
+        os.environ["PATH"] = f"{node_bin}:{current_path}" if current_path else node_bin
+
+    def _run_scip_python_npm_install(self) -> bool:
+        """Run `npm install -g @sourcegraph/scip-python`; return True on success.
+
+        Handles nonzero returncode, TimeoutExpired, and OSError as
+        WARNING + return False. Never raises. Mirrors
+        _run_codex_npm_install().
+        """
+        try:
+            result = subprocess.run(
+                ["npm", "install", "-g", SCIP_PYTHON_PACKAGE],
+                capture_output=True,
+                text=True,
+                timeout=SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            logger.debug(
+                "npm install %s stdout: %s",
+                SCIP_PYTHON_PACKAGE,
+                result.stdout,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-201",
+                        f"npm install {SCIP_PYTHON_PACKAGE} failed "
+                        f"(exit {result.returncode}): {result.stderr}",
+                    ),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} timed out after "
+                    f"{SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS}s",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} could not be spawned: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _provision_nodejs_install_dir(self) -> bool:
+        """BUG #1318: sudo mkdir -p + sudo chown NODEJS_INSTALL_DIR so the
+        current (unprivileged) user can extract the tarball into it.
+        Mirrors the mkdir/chown block in _ensure_rust_toolchain(). Returns
+        False (with WARNING) on either subprocess failure; never raises.
+        """
+        mkdir_result = subprocess.run(
+            ["sudo", "mkdir", "-p", str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if mkdir_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo mkdir -p {NODEJS_INSTALL_DIR} failed: "
+                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        uid_gid = f"{os.getuid()}:{os.getgid()}"
+        chown_result = subprocess.run(
+            ["sudo", "chown", "-R", uid_gid, str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if chown_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo chown -R {uid_gid} {NODEJS_INSTALL_DIR} failed: "
+                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def ensure_nodejs(self) -> bool:
+        """BUG #1318: Ensure a pinned Node.js LTS toolchain is provisioned
+        (system-wide, at NODEJS_INSTALL_DIR — mirrors RUST_SYSTEM_DIR) so
+        npm is available for scip-python / Codex CLI installation.
+
+        Idempotent (skips when already installed). Non-fatal: any failure
+        logs WARNING and returns False; never raises. On success (or when
+        already installed) wires NODEJS_INSTALL_DIR/bin onto this
+        process's PATH (so the SAME execute() run's npm-dependent steps
+        find it) and the systemd unit PATH (for the restarted server).
+        """
+        if self._check_node_installed():
+            logger.info(
+                "Node.js already installed, skipping provisioning",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            self._add_nodejs_bin_to_process_path()
+            self._ensure_systemd_node_path()
+            return True
+
+        if platform.machine() != "x86_64":
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js pinned tarball only available for x86_64, "
+                    f"found {platform.machine()}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._provision_nodejs_install_dir():
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tar_path = Path(tmp_dir) / "node.tar.xz"
+            if not self._download_nodejs_tarball(tar_path):
+                return False
+            if not self._extract_nodejs_tarball(tar_path, NODEJS_INSTALL_DIR):
+                return False
+
+        if not self._check_node_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js installation verification failed after extraction",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        logger.info(
+            f"Node.js {NODEJS_VERSION} installed successfully at {NODEJS_INSTALL_DIR}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        self._add_nodejs_bin_to_process_path()
+        self._ensure_systemd_node_path()
+        return True
+
+    def ensure_scip_python(self) -> bool:
+        """Idempotently install scip-python via npm for SCIP-based indexing.
+
+        scip-python (npm package @sourcegraph/scip-python) is the SCIP
+        indexer binary invoked by PythonIndexer for `cidx scip generate` /
+        add_golden_repo_index(index_type="scip"). Without it, SCIP indexing
+        fails with "[Errno 2] No such file or directory: 'scip-python'".
+
+        Mirrors ensure_ripgrep() / _ensure_codex_cli_installed(): checks
+        shutil.which("scip-python") first (skip if already present), then
+        requires npm and delegates the install to
+        _run_scip_python_npm_install(). Unlike the optional Codex CLI,
+        scip-python is required for SCIP indexing, so a missing npm is
+        reported as a failed provisioning attempt (WARNING + False) rather
+        than silently "ok".
+
+        Returns:
+            True if already installed or the npm install succeeded.
+            False if it could not be provisioned (npm absent, install
+            failed, timed out, or could not be spawned).
+        """
+        if shutil.which("scip-python") is not None:
+            logger.info(
+                "scip-python already installed, skipping install",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if shutil.which("npm") is None:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "npm not available on PATH; cannot install scip-python — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._run_scip_python_npm_install():
+            return False
+        logger.info(
+            "scip-python installed successfully via npm",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_claude_cli_installed(self) -> bool:
+        """Idempotently install Claude CLI if not already present on PATH.
+
+        Checks shutil.which("claude") first — if found, skips installation.
+        Otherwise runs the official installer via curl + sh pipeline.
+
+        Non-fatal: failures return False with a WARNING; deployment continues.
+
+        Returns:
+            True if claude was already installed or installation succeeded.
+            False if the installer returned nonzero, timed out, or raised.
+        """
+        if shutil.which("claude") is not None:
+            logger.info(
+                "Claude CLI already installed, skipping install",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        logger.info(
+            "Claude CLI not found on PATH, running installer",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            result = subprocess.run(
+                ["sh", "-c", f"curl -fsSL {CLAUDE_INSTALL_URL} | sh"],
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-160",
+                        f"Claude CLI installer failed (rc={result.returncode}): "
+                        f"{result.stderr[:200]}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            logger.info(
+                "Claude CLI installed successfully",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-161",
+                    f"Claude CLI installer timed out after {CLAUDE_INSTALL_TIMEOUT_SECONDS}s",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-162",
+                    f"Claude CLI install failed with exception: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _validate_nfs_mount_point(mount_point: str) -> Path:
+        """Validate and return the NFS mount point as an absolute Path.
+
+        Raises:
+            ValueError: If mount_point is empty or not an absolute path.
+        """
+        if not mount_point:
+            raise ValueError("mount_point is empty")
+        p = Path(mount_point)
+        if not p.is_absolute():
+            raise ValueError(f"mount_point must be absolute, got: {mount_point!r}")
+        return p
+
+    def _ensure_single_nfs_symlink(self, local_path: Path, nfs_target: Path) -> None:
+        """Idempotently create one NFS symlink for a research data directory.
+
+        If local_path is already a correct symlink, skips. If it is a regular
+        directory, migrates contents to nfs_target (skipping collisions) then
+        removes the dir. Finally creates the symlink.
+        """
+        if local_path.is_symlink():
+            if local_path.readlink() == nfs_target:
+                logger.debug(
+                    f"NFS symlink already correct: {local_path} -> {nfs_target}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return
+            local_path.unlink()
+
+        nfs_target.mkdir(parents=True, exist_ok=True)
+
+        if local_path.exists() and local_path.is_dir():
+            for item in local_path.iterdir():
+                if item.is_symlink():
+                    item.unlink()
+                    continue
+                dest = nfs_target / item.name
+                if not dest.exists():
+                    shutil.move(str(item), str(dest))
+            try:
+                shutil.rmtree(str(local_path))
+            except OSError as exc:
+                logger.warning(
+                    f"Could not fully remove {local_path} after migration: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.symlink_to(nfs_target)
+        logger.info(
+            f"Created NFS research symlink: {local_path} -> {nfs_target}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _consolidate_old_claude_projects(self, nfs_base: Path) -> None:
+        """Migrate data from old .claude-projects/ NFS layout to .claude/projects/.
+
+        Previous Step 14 stored projects at {nfs_base}/.claude-projects/.
+        New layout stores everything under {nfs_base}/.claude/.
+        This moves data from old location to new, preserving existing data.
+        Files that already exist at the destination are skipped (no overwrite).
+        The old directory is removed after migration; if items remain due to
+        collisions the rmdir fails and a debug log is emitted for manual cleanup.
+        """
+        old_projects = nfs_base / ".claude-projects"
+        new_projects = nfs_base / ".claude" / "projects"
+
+        if not old_projects.exists() or not old_projects.is_dir():
+            return
+
+        new_projects.mkdir(parents=True, exist_ok=True)
+        for item in old_projects.iterdir():
+            dest = new_projects / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+
+        try:
+            old_projects.rmdir()
+        except OSError as exc:
+            logger.debug(
+                f"Old .claude-projects/ not empty after migration (collision items remain); "
+                f"leaving for manual cleanup: {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        logger.info(
+            f"Consolidated old .claude-projects/ into {new_projects}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _ensure_nfs_research_symlinks(self) -> bool:
+        """Idempotently set up NFS symlinks for research session data in cluster mode.
+
+        Only runs when storage_mode == 'postgres' AND ontap.mount_point is a
+        valid absolute path.
+
+        Creates two symlinks so any cluster node shares Claude state and research data:
+          ~/.claude/              -> {mount_point}/.claude/
+          ~/.cidx-server/research/ -> {mount_point}/.cidx-research/
+
+        Non-fatal: any exception returns False with a WARNING.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            if not config or getattr(config, "storage_mode", "") != "postgres":
+                logger.debug(
+                    "NFS research symlinks: not in cluster mode, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            ontap = getattr(config, "ontap", None)
+            if not ontap:
+                logger.debug(
+                    "NFS research symlinks: no ontap config, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            try:
+                nfs_base = self._validate_nfs_mount_point(
+                    getattr(ontap, "mount_point", "")
+                )
+            except ValueError:
+                logger.debug(
+                    "NFS research symlinks: mount_point not set or invalid, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            home = Path.home()
+
+            # Consolidate old .claude-projects/ layout if present
+            self._consolidate_old_claude_projects(nfs_base)
+
+            for local_path, nfs_target in [
+                (home / ".claude", nfs_base / ".claude"),
+                (home / ".cidx-server" / "research", nfs_base / ".cidx-research"),
+            ]:
+                self._ensure_single_nfs_symlink(local_path, nfs_target)
+
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-163",
+                    f"NFS research symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _ensure_activated_repos_symlink_for_cow_daemon(self) -> bool:
+        """Bug #1052: Idempotently set up activated-repos symlink for CoW-daemon cluster nodes.
+
+        On CoW-daemon deployments, ~/.cidx-server/data/activated-repos must be a
+        symlink to {cow_daemon.mount_point}/activated-repos so that
+        CowDaemonBackend.create_clone_at_path() accepts destination paths as valid.
+
+        Story #1034 set up golden-repos but never activated-repos. This step closes
+        that gap so fresh cluster nodes provision correctly without manual SSH.
+
+        Non-fatal: any exception returns False with a WARNING.
+        Returns True in all handled cases (no-op, symlink created, real-dir warning).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1052: clone_backend=%r, not cow-daemon — skipping activated-repos symlink setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
+                logger.warning(
+                    "Bug #1052: clone_backend=cow-daemon but cow_daemon config missing or "
+                    "mount_point empty — skipping activated-repos symlink setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            target = Path(cow_cfg.mount_point) / "activated-repos"
+            link_path = _cidx_data_dir / "data" / "activated-repos"
+
+            if link_path.is_symlink():
+                current_target = os.readlink(str(link_path))
+                if current_target == str(target):
+                    logger.debug(
+                        "Bug #1052: activated-repos symlink already correct: %s -> %s",
+                        link_path,
+                        target,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+                logger.warning(
+                    "Bug #1052: activated-repos symlink points to %s but expected %s "
+                    "— manual review needed",
+                    current_target,
+                    target,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            if link_path.exists():
+                # Real directory — do NOT move user data from the auto-updater.
+                logger.warning(
+                    "Bug #1052: activated-repos exists as real directory with content; "
+                    "manual migration required to enable CoW activation. "
+                    "Run: sudo systemctl stop cidx-server && "
+                    "mv %s %s.legacy.bug1052 && "
+                    "mkdir -p %s && "
+                    "ln -s %s %s && "
+                    "sudo systemctl start cidx-server",
+                    link_path,
+                    link_path,
+                    target,
+                    target,
+                    link_path,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # link_path missing — create symlink
+            target.mkdir(parents=True, exist_ok=True)
+            link_path.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(target), str(link_path))
+            logger.info(
+                "Bug #1052: created activated-repos symlink %s -> %s",
+                link_path,
+                target,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-167",
+                    f"Bug #1052: activated-repos symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _resolve_daemon_storage_path() -> Optional[str]:
+        """Bug #1320 Part B: resolve the CoW daemon's local storage root
+        (base_path) using a fixed priority order. NEVER hardcodes or guesses
+        an environment-specific path — returns None when no source resolves.
+
+        Priority order:
+          1. CIDX_COW_DAEMON_STORAGE_PATH env var (explicit operator override,
+             set by the installer's --cow-daemon-storage-path flag or by the
+             operator directly on the auto-updater's environment).
+          2. Co-located CoW daemon config `base_path` field at
+             COW_DAEMON_HOST_CONFIG_PATH — only present/readable on the
+             daemon-HOST node (the daemon exposes no API reporting its own
+             base_path, so this is the only runtime-derivable source besides
+             the explicit override).
+
+        Returns:
+            The resolved absolute path string, or None if neither source
+            is available/valid.
+        """
+        env_value = os.environ.get("CIDX_COW_DAEMON_STORAGE_PATH", "").strip()
+        if env_value:
+            return env_value
+
+        try:
+            if COW_DAEMON_HOST_CONFIG_PATH.is_file():
+                with open(COW_DAEMON_HOST_CONFIG_PATH) as f:
+                    daemon_config = json.load(f)
+                base_path = daemon_config.get("base_path", "")
+                if isinstance(base_path, str) and base_path.strip():
+                    return base_path.strip()
+        except (OSError, json.JSONDecodeError, AttributeError) as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-203",
+                    "Bug #1320: could not read co-located CoW daemon config "
+                    f"at {COW_DAEMON_HOST_CONFIG_PATH} for daemon_storage_path "
+                    f"auto-detect: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return None
+
+    def _ensure_daemon_storage_path(self) -> bool:
+        """Bug #1320 Part B: idempotently populate cow_daemon.daemon_storage_path
+        in config.json so CowDaemonBackend can translate CIDX paths (mount_point
+        view) to the daemon's local filesystem paths (storage_path view).
+
+        Part A (already shipped) made CowDaemonBackend._translate_to_daemon_path
+        raise a clear ValueError instead of silently emitting an untranslatable
+        NFS path when this field is empty/null. This step is what actually
+        populates the value, using _resolve_daemon_storage_path() (env var,
+        then co-located daemon config — never a hardcoded default).
+
+        VALUE-AWARE idempotent (Bug #1183 style): only writes when the field
+        is currently missing or empty. NEVER overwrites an existing non-empty
+        value, even if a different value would be freshly resolved — an
+        operator or a prior run may have set it deliberately.
+
+        Non-fatal in all handled cases (no-op, write, or unresolved-leave-
+        unset all return True); only an unexpected exception while reading or
+        writing config.json returns False.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+            if config is None:
+                logger.debug(
+                    "Bug #1320: config.json absent — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1320: clone_backend=%r, not cow-daemon — skipping "
+                    "daemon_storage_path setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None:
+                logger.warning(
+                    "Bug #1320: clone_backend=cow-daemon but cow_daemon config "
+                    "missing — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            existing_value = (
+                getattr(cow_cfg, "daemon_storage_path", None) or ""
+            ).strip()
+            if existing_value:
+                logger.debug(
+                    "Bug #1320: cow_daemon.daemon_storage_path already set "
+                    "(%s) — no-op",
+                    existing_value,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            resolved_value = self._resolve_daemon_storage_path()
+            if not resolved_value:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-204",
+                        "Bug #1320: cow_daemon.daemon_storage_path is unset and "
+                        "could not be auto-resolved (no CIDX_COW_DAEMON_STORAGE_PATH "
+                        "env var, no readable co-located CoW daemon config at "
+                        f"{COW_DAEMON_HOST_CONFIG_PATH}) — leaving unset; "
+                        "CowDaemonBackend will fail loud on the next "
+                        "versioned-snapshot publish that needs path translation",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True
+
+            config_path = _cidx_data_dir / "config.json"
+            with open(config_path) as f:
+                config_dict = json.load(f)
+            cow_daemon_dict = config_dict.get("cow_daemon") or {}
+            cow_daemon_dict["daemon_storage_path"] = resolved_value
+            config_dict["cow_daemon"] = cow_daemon_dict
+            _cidx_data_dir.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(config_dict, f, indent=2)
+                f.write("\n")
+
+            logger.info(
+                "Bug #1320: set cow_daemon.daemon_storage_path=%s in config.json",
+                resolved_value,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-205",
+                    f"Bug #1320: daemon_storage_path setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _build_updated_service_content(content: str, local_bin: str) -> str:
+        """Return updated systemd service content with local_bin prepended to PATH.
+
+        Scans for an Environment="PATH=..." line:
+          - Already has local_bin as an exact segment: returns content unchanged.
+          - Has PATH line but missing local_bin: replaces that line in-place,
+            preserving the original line's indentation and line ending.
+          - No PATH line: appends a full default PATH line at end.
+
+        Raises TypeError if either argument is not a str.
+        Raises ValueError if local_bin is empty.
+        """
+        if not isinstance(content, str) or not isinstance(local_bin, str):
+            raise TypeError("content and local_bin must be str")
+        if not local_bin:
+            raise ValueError("local_bin must not be empty")
+
+        lines = content.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith('Environment="PATH='):
+                continue
+            path_value = stripped[len('Environment="PATH=') : -1]
+            if local_bin in path_value.split(":"):
+                return content
+            # Preserve original leading whitespace and trailing line ending
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = line[len(line.rstrip("\r\n")) :]
+            lines[i] = f'{indent}Environment="PATH={local_bin}:{path_value}"{ending}'
+            return "".join(lines)
+
+        if not content.endswith("\n"):
+            content += "\n"
+        return (
+            content + f'Environment="PATH={local_bin}:{SYSTEMD_DEFAULT_PATH_SUFFIX}"\n'
+        )
+
+    @staticmethod
+    def _remove_path_segment(content: str, segment: str) -> str:
+        """Remove a specific PATH segment from Environment="PATH=..." line.
+
+        Returns content unchanged if the segment is not present.
+        """
+        lines = content.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith('Environment="PATH='):
+                continue
+            path_value = stripped[len('Environment="PATH=') : -1]
+            segments = path_value.split(":")
+            if segment not in segments:
+                return content
+            segments = [s for s in segments if s != segment]
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = line[len(line.rstrip("\r\n")) :]
+            lines[i] = f'{indent}Environment="PATH={":".join(segments)}"{ending}'
+            return "".join(lines)
+        return content
+
+    @staticmethod
+    def _line_parts(line: str) -> tuple[str, str]:
+        """Return (indent, line_ending) for a line, preserving whitespace on both ends."""
+        indent = line[: len(line) - len(line.lstrip())]
+        ending = line[len(line.rstrip("\r\n")) :]
+        return indent, ending
+
+    @staticmethod
+    def _ensure_systemd_env_var(content: str, key: str, value: str) -> str:
+        """Ensure Environment="KEY=VALUE" exists in systemd unit content.
+
+        If key already has correct value, returns unchanged.
+        If key exists with wrong value, updates in place.
+        If key not found, inserts after the last Environment= line.
+        If no Environment= lines exist, appends to end of content.
+        """
+        target = f'Environment="{key}={value}"'
+        lines = content.splitlines(keepends=True)
+
+        last_env_idx = -1
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(f'Environment="{key}='):
+                # Key exists — check value
+                if stripped == target:
+                    return content  # Already correct
+                # Wrong value — update in place
+                indent, ending = DeploymentExecutor._line_parts(line)
+                lines[i] = f"{indent}{target}{ending}"
+                return "".join(lines)
+            if stripped.startswith("Environment="):
+                last_env_idx = i
+
+        # Key not found — insert after last Environment= line
+        if last_env_idx >= 0:
+            ref_line = lines[last_env_idx]
+            indent, ending = DeploymentExecutor._line_parts(ref_line)
+            lines.insert(last_env_idx + 1, f"{indent}{target}{ending}")
+        else:
+            # No Environment= lines at all — append to end, ensuring trailing newline
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] = lines[-1] + "\n"
+            lines.append(f"{target}\n")
+
+        return "".join(lines)
+
+    def _write_service_file_via_sudo(self, service_file: Path, content: str) -> bool:
+        """Write content to a systemd service file via sudo tee. Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["sudo", "tee", str(service_file)],
+                input=content,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-169",
+                    f"sudo tee could not be invoked for {service_file}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-169",
+                    f"sudo tee failed writing {service_file}: "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        return True
+
+    def _reload_systemd_daemon(self) -> bool:
+        """Run sudo systemctl daemon-reload. Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["sudo", "systemctl", "daemon-reload"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-170",
+                    f"systemctl daemon-reload could not be invoked: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-170",
+                    f"systemctl daemon-reload failed: "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        return True
+
+    def _ensure_systemd_claude_path(self) -> bool:
+        """Ensure the cidx-server systemd service unit has ~/.local/bin in PATH.
+
+        Non-fatal: returns False with WARNING when the service file is missing
+        or any subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        local_bin = str(Path.home() / ".local" / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, local_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {local_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {local_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_systemd_rust_path(self) -> bool:
+        """Ensure the cidx-server systemd service unit has /opt/rust/bin in PATH.
+
+        Also removes stale /root/.cargo/bin entries from prior deployments.
+        Non-fatal: returns False with WARNING when the service file is missing
+        or any subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        rust_bin = str(RUST_SYSTEM_DIR / "bin")
+        original = service_file.read_text()
+
+        # Step 1: Remove stale /root/.cargo/bin if present
+        updated = self._remove_path_segment(
+            original, str(Path("/root") / ".cargo" / "bin")
+        )
+
+        # Step 2: Prepend /opt/rust/bin if not already present
+        updated = self._build_updated_service_content(updated, rust_bin)
+
+        # Step 3: Ensure RUSTUP_HOME so rustup proxy finds the toolchain
+        updated = self._ensure_systemd_env_var(
+            updated, "RUSTUP_HOME", str(RUST_SYSTEM_DIR)
+        )
+
+        # Step 4: Ensure CARGO_HOME for cargo binaries
+        updated = self._ensure_systemd_env_var(
+            updated, "CARGO_HOME", str(RUST_SYSTEM_DIR)
+        )
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {rust_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {rust_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_systemd_node_path(self) -> bool:
+        """BUG #1318: Ensure the cidx-server systemd service unit has
+        NODEJS_INSTALL_DIR/bin (/opt/node/bin) in PATH.
+
+        Mirrors _ensure_systemd_rust_path() exactly. Non-fatal: returns
+        False with WARNING when the service file is missing or any
+        subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, node_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {node_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {node_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Story #1024: Rust toolchain + xray-cli build helpers
+    # ------------------------------------------------------------------
+
+    def _check_rustc_installed(self, env: dict) -> bool:
+        """Return True if rustc is available on PATH (including ~/.cargo/bin)."""
+        try:
+            result = subprocess.run(
+                ["rustc", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=RUSTC_VERSION_TIMEOUT_SECONDS,
+                env=env,
+            )
+            if result.returncode == 0:
+                logger.info(
+                    "Rust toolchain already installed: %s",
+                    result.stdout.strip(),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return False
+
+    def _install_rust_toolchain(self, env: dict) -> bool:
+        """Download and run the rustup installer (curl + sh, no shell=True).
+
+        Returns True on success, False on any failure.
+        Pin stable is handled separately by the caller (_ensure_rust_toolchain).
+        """
+        logger.info(
+            "rustc not found — installing Rust toolchain via rustup",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        # M5: Use two separate subprocess calls instead of shell=True pipeline.
+        # Step 1: Download the installer script via curl (bytes, no text=True).
+        try:
+            curl_result = subprocess.run(
+                RUSTUP_CURL_ARGS,
+                capture_output=True,
+                timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (curl): {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if curl_result.returncode != 0:
+            stderr_text = (
+                curl_result.stderr.decode()
+                if isinstance(curl_result.stderr, bytes)
+                else curl_result.stderr
+            )
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (curl): "
+                    f"{stderr_text[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        # Step 2: Pipe the downloaded script into sh (no shell=True).
+        try:
+            install_result = subprocess.run(
+                RUSTUP_SH_ARGS,
+                input=curl_result.stdout,
+                capture_output=True,
+                timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (sh): {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if install_result.returncode != 0:
+            stderr_text = (
+                install_result.stderr.decode()
+                if isinstance(install_result.stderr, bytes)
+                else install_result.stderr
+            )
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (sh): "
+                    f"{stderr_text[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        logger.info(
+            "Rust toolchain installed successfully",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _verify_c_compiler(self) -> bool:
+        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate).
+
+        Bug #1255/#1296: the deploy itself stays non-fatal on a missing C
+        compiler (xray is a non-core/optional feature and pip install +
+        restart must still complete), but this is logged at ERROR, not
+        WARNING: there is NO Python evaluation fallback for xray query-time
+        execution. xray_search/xray_explore call the native xray-cli binary
+        unconditionally; without it they return BinaryNotFound for every
+        file. A missing C compiler blocks the xray-cli build, so this is a
+        real capability loss that must stay loudly visible to operators.
+        """
+        for cc in ["gcc", "cc", "clang"]:
+            if shutil.which(cc) is not None:
+                return True
+        logger.error(
+            format_error_log(
+                "DEPLOY-GENERAL-172",
+                "xray native search UNAVAILABLE: no C compiler found "
+                "(gcc/cc/clang) -- xray-cli native binary cannot be built; "
+                "xray_search/xray_explore will return BinaryNotFound until "
+                "a C compiler is installed and the binary is built. "
+                "(Evaluator pre-flight validation still works; query-time "
+                "evaluation does not.)",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return False
+
+    def _build_xray_cli(self, rust_dir: Path, env: dict) -> bool:
+        """Run cargo build --release -p xray-cli inside rust_dir.
+
+        Returns True on success, False on nonzero exit or timeout.
+
+        Bug #1255/#1296: the caller (_ensure_rust_toolchain) still treats a
+        False return as non-fatal to the overall deploy (pip install +
+        restart must still complete), but the failure is logged at ERROR,
+        not WARNING: there is NO Python evaluation fallback for xray
+        query-time execution. xray_search/xray_explore call the native
+        xray-cli binary unconditionally; without it they return
+        BinaryNotFound for every file, so a failed build is a real
+        capability loss that must stay loudly visible to operators.
+        """
+        try:
+            build_result = subprocess.run(
+                ["cargo", "build", "--release", "-p", "xray-cli"],
+                cwd=str(rust_dir),
+                capture_output=True,
+                text=True,
+                timeout=CARGO_BUILD_TIMEOUT_SECONDS,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build error: {exc}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if build_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build exited "
+                    f"{build_result.returncode}: "
+                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        logger.info(
+            "xray-cli binary built successfully",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _is_rust_toolchain_usable(self, env: dict) -> bool:
+        """Bug #1255: return True if BOTH rustc and cargo are present and
+        runnable directly from RUST_SYSTEM_DIR/bin, using the resolved
+        absolute binary paths (not a PATH lookup).
+
+        Immutable host images often ship a pre-provisioned RUST_SYSTEM_DIR
+        on a read-only root filesystem: the toolchain files are present and
+        world-executable, but `chown` can never succeed there.  Running a
+        binary only requires execute permission, not ownership, so this
+        probe is sufficient to recognize "already usable" without touching
+        ownership at all.
+        """
+        rust_bin = RUST_SYSTEM_DIR / "bin"
+        for binary_name in ("rustc", "cargo"):
+            binary_path = rust_bin / binary_name
+            try:
+                result = subprocess.run(
+                    [str(binary_path), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=RUSTC_VERSION_TIMEOUT_SECONDS,
+                    env=env,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if result.returncode != 0:
+                return False
+        return True
+
+    def _resolve_rust_build_env(self, env: dict) -> dict:
+        """Bug #1255: redirect CARGO_HOME to a writable fallback (~/.cargo)
+        for the xray-cli build step when RUST_SYSTEM_DIR exists but is not
+        writable (immutable host, read-only root filesystem).
+
+        RUSTUP_HOME is left untouched -- it must keep pointing at
+        RUST_SYSTEM_DIR so rustup's proxy binaries resolve the toolchain
+        that is actually installed there.  Only CARGO_HOME needs to be
+        writable, since `cargo build` may need to write to its registry
+        cache (new dependency downloads, index updates); build artifacts
+        themselves go to the project-local rust_dir/target, which is
+        writable because pip_install()/git_pull() already proved the repo
+        checkout itself is writable earlier in execute().
+
+        Returns a new dict; never mutates the input env.
+        """
+        build_env = dict(env)
+        if RUST_SYSTEM_DIR.exists() and not os.access(RUST_SYSTEM_DIR, os.W_OK):
+            writable_cargo_home = str(Path.home() / ".cargo")
+            build_env["CARGO_HOME"] = writable_cargo_home
+            logger.info(
+                "%s is not writable; using %s as CARGO_HOME for the xray-cli build",
+                RUST_SYSTEM_DIR,
+                writable_cargo_home,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        return build_env
+
+    def _ensure_rust_toolchain(self) -> bool:
+        """Story #1024 / Bug #1255: Ensure Rust toolchain is installed and
+        xray-cli binary is built.
+
+        Installs to RUST_SYSTEM_DIR (/opt/rust) so the toolchain is accessible
+        to the cidx-server service user (not just root).
+
+        Bug #1255: on immutable hosts RUST_SYSTEM_DIR may already be
+        provisioned (rustc/cargo present, world-executable) on a read-only
+        root filesystem.  Provisioning (mkdir/chown/install) is skipped
+        entirely when the toolchain already proves usable; if provisioning
+        IS attempted and mkdir/chown fails, a usability recheck makes the
+        failure non-fatal as long as the toolchain works anyway.
+
+        Idempotent: skips install when rustc is already on PATH.
+        Returns True on success, when rust/ dir is absent (non-fatal skip),
+        or when the xray-cli build/C-compiler step fails. That failure is
+        non-fatal to the OVERALL deploy (pip install + restart must still
+        complete -- xray is a non-core/optional feature), but it is NOT a
+        graceful degrade to an alternate execution path: there is no Python
+        evaluation fallback for xray query-time execution, so
+        xray_search/xray_explore become genuinely unavailable
+        (BinaryNotFound) until the binary builds successfully. That
+        capability loss is logged at ERROR (see _verify_c_compiler /
+        _build_xray_cli) precisely because it is real, even though it does
+        not block the deploy.
+        Returns False ONLY when the toolchain is genuinely missing and
+        cannot be installed (FATAL) -- the host truly lacks Rust.
+        """
+        rust_bin = RUST_SYSTEM_DIR / "bin"
+        env = os.environ.copy()
+        env["RUSTUP_HOME"] = str(RUST_SYSTEM_DIR)
+        env["CARGO_HOME"] = str(RUST_SYSTEM_DIR)
+        current_path = env.get("PATH", "")
+        if current_path:
+            env["PATH"] = f"{rust_bin}:{current_path}"
+        else:
+            env["PATH"] = str(rust_bin)
+
+        if self._is_rust_toolchain_usable(env):
+            logger.info(
+                "Rust toolchain already present and usable at %s; "
+                "skipping provisioning",
+                RUST_SYSTEM_DIR,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            mkdir_result = subprocess.run(
+                ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
+                capture_output=True,
+                text=True,
+            )
+            if mkdir_result.returncode != 0:
+                if self._is_rust_toolchain_usable(env):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed but the "
+                            f"toolchain is already usable -- continuing "
+                            f"without provisioning: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.error(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+            else:
+                uid_gid = f"{os.getuid()}:{os.getgid()}"
+                chown_result = subprocess.run(
+                    ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
+                    capture_output=True,
+                    text=True,
+                )
+                if chown_result.returncode != 0:
+                    if self._is_rust_toolchain_usable(env):
+                        logger.warning(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed but the toolchain is already usable "
+                                f"-- continuing without ownership change: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.error(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return False
+
+        self._ensure_systemd_rust_path()
+
+        if not self._check_rustc_installed(env):
+            if not self._install_rust_toolchain(env):
+                return False
+
+        repo_root = Path(__file__).resolve().parents[4]
+        rust_dir = repo_root / "rust"
+        if not rust_dir.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    "rust/ directory not found — xray native backend unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True  # Non-fatal: older code versions may not have rust/
+
+        if not self._verify_c_compiler():
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
+
+        build_env = self._resolve_rust_build_env(env)
+        if not self._build_xray_cli(rust_dir, build_env):
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
+        return True
+
+
+def read_execstart_flags(service_name: str = "cidx-server") -> dict:
+    """Read host/port/workers from the live systemd ExecStart line (Bug #1232).
+
+    Reuses DeploymentExecutor._is_cidx_execstart (detection) and
+    DeploymentExecutor._read_flag (bounded-token extraction) so there is
+    exactly ONE ExecStart parser in the codebase.
+
+    Returns a dict containing any subset of 'host' (str), 'port' (int),
+    'workers' (int) that were found.  Returns an empty dict when:
+      - the service file does not exist,
+      - it cannot be read (OSError),
+      - it contains no cidx ExecStart line.
+
+    Values for 'port' and 'workers' are coerced to int; entries with
+    non-integer values are omitted rather than raising.
+    """
+    service_path = SYSTEMD_UNIT_DIR / f"{service_name}.service"
+    if not service_path.exists():
+        return {}
+    try:
+        lines = service_path.read_text().split("\n")
+    except OSError:
+        return {}
+
+    result: dict = {}
+    for line in lines:
+        if not DeploymentExecutor._is_cidx_execstart(line):
+            continue
+        host = DeploymentExecutor._read_flag(line, "--host")
+        if host is not None:
+            result["host"] = host
+        port_str = DeploymentExecutor._read_flag(line, "--port")
+        if port_str is not None:
+            try:
+                result["port"] = int(port_str)
+            except ValueError:
+                pass
+        workers_str = DeploymentExecutor._read_flag(line, "--workers")
+        if workers_str is not None:
+            try:
+                result["workers"] = int(workers_str)
+            except ValueError:
+                pass
+        break  # only the first cidx ExecStart line matters
+    return result

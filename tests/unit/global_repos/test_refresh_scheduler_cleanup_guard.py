@@ -1,15 +1,18 @@
 """
-Unit tests for RefreshScheduler cleanup guard (Story #236).
+Unit tests for RefreshScheduler cleanup guard (Story #236 + Bug #1084 Phase A4).
 
-Tests the cleanup guard fix:
-- AC1: Master golden repo must NEVER be scheduled for cleanup
-- AC3: Old versioned snapshots MUST still be scheduled for cleanup
+The cleanup gate decides whether the SUPERSEDED snapshot should be scheduled for
+deletion after an alias swap. Two invariants:
 
-The bug: _execute_refresh() called cleanup_manager.schedule_cleanup(current_target)
-unconditionally. On first refresh, current_target IS the master golden repo,
-so the master was deleted permanently.
+- AC1 (Story #236): the master golden repo (golden-repos/{repo}) must NEVER be
+  scheduled for cleanup — on first refresh current_target IS the master.
+- AC3 (Story #236): old versioned snapshots MUST be scheduled for cleanup.
 
-The fix: Only schedule cleanup when current_target contains '.versioned'.
+Bug #1084 Phase A4: the gate previously used a brittle ``".versioned" in target``
+substring test that only recognized the LocalCloneBackend layout. It now uses the
+canonical predicate (``snapshot_manager.is_versioned_snapshot``) and an explicit
+master-path comparison, so cow-daemon canonical AND legacy snapshots are
+recognized while the master is always preserved.
 """
 
 import pytest
@@ -62,6 +65,43 @@ def mock_registry():
     return registry
 
 
+def _make_cow_snapshot_manager(mount_point):
+    """Build a real VersionedSnapshotManager wired to a CowDaemonBackend so the
+    gate's predicate recognizes cow canonical AND legacy shapes under the mount."""
+    from code_indexer.server.storage.shared.snapshot_manager import (
+        VersionedSnapshotManager,
+    )
+    from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+    from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+    backend = CowDaemonBackend(
+        config=CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="k",
+            mount_point=mount_point,
+        )
+    )
+    return VersionedSnapshotManager(clone_backend=backend)
+
+
+def _make_scheduler(
+    golden_repos_dir,
+    mock_config_source,
+    mock_query_tracker,
+    mock_cleanup_manager,
+    mock_registry,
+    snapshot_manager=None,
+):
+    return RefreshScheduler(
+        golden_repos_dir=str(golden_repos_dir),
+        config_source=mock_config_source,
+        query_tracker=mock_query_tracker,
+        cleanup_manager=mock_cleanup_manager,
+        registry=mock_registry,
+        snapshot_manager=snapshot_manager,
+    )
+
+
 @pytest.fixture
 def scheduler(
     golden_repos_dir,
@@ -70,164 +110,174 @@ def scheduler(
     mock_cleanup_manager,
     mock_registry,
 ):
-    """Create RefreshScheduler with a mock registry."""
-    return RefreshScheduler(
-        golden_repos_dir=str(golden_repos_dir),
-        config_source=mock_config_source,
-        query_tracker=mock_query_tracker,
-        cleanup_manager=mock_cleanup_manager,
-        registry=mock_registry,
+    """RefreshScheduler with a mock registry and NO snapshot_manager (local mode)."""
+    return _make_scheduler(
+        golden_repos_dir,
+        mock_config_source,
+        mock_query_tracker,
+        mock_cleanup_manager,
+        mock_registry,
     )
 
 
-# ---------------------------------------------------------------------------
-# AC1 + AC3: Cleanup guard
-# ---------------------------------------------------------------------------
+def _run_refresh(scheduler, golden_repos_dir, current_target, new_versioned_path):
+    """Drive _execute_refresh with the given current_target through the swap."""
+    alias_name = "my-repo-global"
+    master_path = str(golden_repos_dir / "my-repo")
+    (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
 
+    scheduler.registry.get_global_repo.return_value = {
+        "alias_name": alias_name,
+        "repo_url": "git@github.com:org/my-repo.git",
+    }
 
-class TestCleanupGuard:
-    """
-    AC1: cleanup_manager.schedule_cleanup must NOT be called for master paths.
-    AC3: cleanup_manager.schedule_cleanup MUST be called for .versioned/ paths.
-    """
-
-    def test_master_path_not_scheduled_for_cleanup_on_first_refresh(
-        self, scheduler, golden_repos_dir, mock_cleanup_manager, mock_registry
+    with (
+        patch.object(
+            scheduler.alias_manager, "read_alias", return_value=current_target
+        ),
+        patch.object(scheduler.alias_manager, "swap_alias"),
+        patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+        patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+        patch.object(scheduler, "_index_source"),
+        patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+        patch(
+            "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+        ) as mock_git_updater_cls,
     ):
-        """
-        AC1: On first refresh, current_target IS the master golden repo.
-        cleanup_manager.schedule_cleanup must NOT be called with the master path.
-        """
-        alias_name = "my-repo-global"
-        master_path = str(golden_repos_dir / "my-repo")
-        new_versioned_path = str(
-            golden_repos_dir / ".versioned" / "my-repo" / "v_1000000"
-        )
+        mock_updater = Mock()
+        mock_updater.has_changes.return_value = True
+        mock_updater.get_source_path.return_value = master_path
+        mock_git_updater_cls.return_value = mock_updater
 
-        mock_registry.get_global_repo.return_value = {
-            "alias_name": alias_name,
-            "repo_url": "git@github.com:org/my-repo.git",
-        }
+        scheduler._execute_refresh(alias_name)
 
-        with (
-            patch.object(
-                scheduler.alias_manager, "read_alias", return_value=master_path
-            ),
-            patch.object(scheduler.alias_manager, "swap_alias"),
-            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
-            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
-            patch.object(scheduler, "_index_source"),
-            patch.object(
-                scheduler, "_create_snapshot", return_value=new_versioned_path
-            ),
-            patch(
-                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
-            ) as mock_git_updater_cls,
-        ):
-            mock_updater = Mock()
-            mock_updater.has_changes.return_value = True
-            mock_updater.get_source_path.return_value = master_path
-            mock_git_updater_cls.return_value = mock_updater
 
-            scheduler._execute_refresh(alias_name)
+# ---------------------------------------------------------------------------
+# AC1: master preserved (Story #236)
+# ---------------------------------------------------------------------------
 
-        # Master path must NOT be scheduled for cleanup
-        for call_args in mock_cleanup_manager.schedule_cleanup.call_args_list:
-            path_arg = call_args[0][0]
-            assert path_arg != master_path, (
-                f"Master golden repo was scheduled for cleanup: {path_arg}"
-            )
 
-    def test_cleanup_not_called_at_all_when_master_is_current_target(
-        self, scheduler, golden_repos_dir, mock_cleanup_manager, mock_registry
+class TestMasterPreserved:
+    def test_master_path_local_not_scheduled(
+        self, scheduler, golden_repos_dir, mock_cleanup_manager
     ):
-        """
-        AC1 (strict): When current_target does not contain '.versioned',
-        schedule_cleanup must not be called at all.
-        """
-        alias_name = "my-repo-global"
+        """First refresh: current_target IS the master — never schedule it."""
         master_path = str(golden_repos_dir / "my-repo")
-        new_versioned_path = str(
-            golden_repos_dir / ".versioned" / "my-repo" / "v_9999999"
-        )
+        new_versioned = str(golden_repos_dir / ".versioned" / "my-repo" / "v_1000000")
 
-        mock_registry.get_global_repo.return_value = {
-            "alias_name": alias_name,
-            "repo_url": "git@github.com:org/my-repo.git",
-        }
+        _run_refresh(scheduler, golden_repos_dir, master_path, new_versioned)
 
-        with (
-            patch.object(
-                scheduler.alias_manager, "read_alias", return_value=master_path
-            ),
-            patch.object(scheduler.alias_manager, "swap_alias"),
-            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
-            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
-            patch.object(scheduler, "_index_source"),
-            patch.object(
-                scheduler, "_create_snapshot", return_value=new_versioned_path
-            ),
-            patch(
-                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
-            ) as mock_git_updater_cls,
-        ):
-            mock_updater = Mock()
-            mock_updater.has_changes.return_value = True
-            mock_updater.get_source_path.return_value = master_path
-            mock_git_updater_cls.return_value = mock_updater
-
-            scheduler._execute_refresh(alias_name)
-
-        # schedule_cleanup must NOT be called at all when current_target is master
         mock_cleanup_manager.schedule_cleanup.assert_not_called()
 
-    def test_versioned_path_is_scheduled_for_cleanup(
-        self, scheduler, golden_repos_dir, mock_cleanup_manager, mock_registry
+    def test_master_path_preserved_even_with_cow_snapshot_manager(
+        self,
+        golden_repos_dir,
+        mock_config_source,
+        mock_query_tracker,
+        mock_cleanup_manager,
+        mock_registry,
     ):
-        """
-        AC3: When current_target is a versioned snapshot (.versioned/ path),
-        cleanup_manager.schedule_cleanup MUST be called with that path.
-        """
-        alias_name = "my-repo-global"
-        old_versioned_path = str(
-            golden_repos_dir / ".versioned" / "my-repo" / "v_1000000"
-        )
-        new_versioned_path = str(
-            golden_repos_dir / ".versioned" / "my-repo" / "v_2000000"
+        """With a cow snapshot_manager wired, the master base clone (which is NOT
+        under the mount in canonical/legacy snapshot shape) is still preserved."""
+        sm = _make_cow_snapshot_manager(mount_point="/mnt/cow-storage")
+        sched = _make_scheduler(
+            golden_repos_dir,
+            mock_config_source,
+            mock_query_tracker,
+            mock_cleanup_manager,
+            mock_registry,
+            snapshot_manager=sm,
         )
         master_path = str(golden_repos_dir / "my-repo")
+        new_versioned = "/mnt/cow-storage/.versioned/my-repo/v_2000000"
 
-        # Create master directory so fix-up can find it
-        (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
+        _run_refresh(sched, golden_repos_dir, master_path, new_versioned)
 
-        mock_registry.get_global_repo.return_value = {
-            "alias_name": alias_name,
-            "repo_url": "git@github.com:org/my-repo.git",
-        }
+        mock_cleanup_manager.schedule_cleanup.assert_not_called()
 
-        with (
-            patch.object(
-                scheduler.alias_manager, "read_alias", return_value=old_versioned_path
-            ),
-            patch.object(scheduler.alias_manager, "swap_alias"),
-            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
-            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
-            patch.object(scheduler, "_index_source"),
-            patch.object(
-                scheduler, "_create_snapshot", return_value=new_versioned_path
-            ),
-            patch(
-                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
-            ) as mock_git_updater_cls,
-        ):
-            mock_updater = Mock()
-            mock_updater.has_changes.return_value = True
-            mock_updater.get_source_path.return_value = master_path
-            mock_git_updater_cls.return_value = mock_updater
 
-            scheduler._execute_refresh(alias_name)
+# ---------------------------------------------------------------------------
+# AC3: superseded snapshots scheduled (Story #236 + Bug #1084)
+# ---------------------------------------------------------------------------
 
-        # Versioned path MUST be scheduled for cleanup
-        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(
-            old_versioned_path
+
+class TestSupersededSnapshotScheduled:
+    def test_local_canonical_snapshot_scheduled(
+        self, scheduler, golden_repos_dir, mock_cleanup_manager
+    ):
+        old_versioned = str(golden_repos_dir / ".versioned" / "my-repo" / "v_1000000")
+        new_versioned = str(golden_repos_dir / ".versioned" / "my-repo" / "v_2000000")
+
+        _run_refresh(scheduler, golden_repos_dir, old_versioned, new_versioned)
+
+        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(old_versioned)
+
+    def test_cow_canonical_snapshot_scheduled(
+        self,
+        golden_repos_dir,
+        mock_config_source,
+        mock_query_tracker,
+        mock_cleanup_manager,
+        mock_registry,
+    ):
+        sm = _make_cow_snapshot_manager(mount_point="/mnt/cow-storage")
+        sched = _make_scheduler(
+            golden_repos_dir,
+            mock_config_source,
+            mock_query_tracker,
+            mock_cleanup_manager,
+            mock_registry,
+            snapshot_manager=sm,
         )
+        old_versioned = "/mnt/cow-storage/.versioned/my-repo/v_1700000000"
+        new_versioned = "/mnt/cow-storage/.versioned/my-repo/v_1700009999"
+
+        _run_refresh(sched, golden_repos_dir, old_versioned, new_versioned)
+
+        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(old_versioned)
+
+    def test_cow_legacy_snapshot_scheduled(
+        self,
+        golden_repos_dir,
+        mock_config_source,
+        mock_query_tracker,
+        mock_cleanup_manager,
+        mock_registry,
+    ):
+        """Bug #1084: legacy cow snapshot ({mount}/{ns}/v_*) is recognized and scheduled."""
+        sm = _make_cow_snapshot_manager(mount_point="/mnt/cow-storage")
+        sched = _make_scheduler(
+            golden_repos_dir,
+            mock_config_source,
+            mock_query_tracker,
+            mock_cleanup_manager,
+            mock_registry,
+            snapshot_manager=sm,
+        )
+        old_versioned = "/mnt/cow-storage/my-repo/v_1699999999"
+        new_versioned = "/mnt/cow-storage/.versioned/my-repo/v_1700009999"
+
+        _run_refresh(sched, golden_repos_dir, old_versioned, new_versioned)
+
+        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(old_versioned)
+
+
+# ---------------------------------------------------------------------------
+# Bug #1084: None alias graceful handling (no TypeError)
+# ---------------------------------------------------------------------------
+
+
+class TestNoneAliasGraceful:
+    def test_none_current_target_no_crash_no_schedule(
+        self, scheduler, golden_repos_dir, mock_cleanup_manager
+    ):
+        """A missing alias (read_alias -> None) must not raise; the refresh
+        short-circuits before the gate, so cleanup is never scheduled."""
+        alias_name = "my-repo-global"
+
+        with patch.object(scheduler.alias_manager, "read_alias", return_value=None):
+            result = scheduler._execute_refresh(alias_name)
+
+        # Refresh returns gracefully (alias-not-found short-circuit).
+        assert result["success"] is True
+        mock_cleanup_manager.schedule_cleanup.assert_not_called()

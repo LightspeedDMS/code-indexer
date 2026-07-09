@@ -138,13 +138,17 @@ class OAuthTokenRateLimiter:
         """Check lockout in PostgreSQL. Called under self._lock."""
         assert self._pool is not None
         now = time.time()
+        from psycopg.rows import tuple_row
+
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT locked_until FROM rate_limit_lockouts "
-                "WHERE limiter_type = %s AND identifier = %s "
-                "AND locked_until > %s",
-                (self._limiter_type, identifier, now),
-            ).fetchone()
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    "SELECT locked_until FROM rate_limit_lockouts "
+                    "WHERE limiter_type = %s AND identifier = %s "
+                    "AND locked_until > %s",
+                    (self._limiter_type, identifier, now),
+                )
+                row = cur.fetchone()
         if row is None:
             return None
         remaining = row[0] - now
@@ -163,12 +167,16 @@ class OAuthTokenRateLimiter:
             )
             # Window is 2x lockout duration to catch distributed retry attacks
             cutoff = now - (self._lockout_duration_minutes * 60 * 2)
-            row = conn.execute(
-                "SELECT COUNT(*) FROM rate_limit_failures "
-                "WHERE limiter_type = %s AND identifier = %s "
-                "AND failed_at > %s",
-                (self._limiter_type, identifier, cutoff),
-            ).fetchone()
+            from psycopg.rows import tuple_row
+
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM rate_limit_failures "
+                    "WHERE limiter_type = %s AND identifier = %s "
+                    "AND failed_at > %s",
+                    (self._limiter_type, identifier, cutoff),
+                )
+                row = cur.fetchone()
             count = row[0] if row else 0
             if count >= self._max_attempts:
                 locked_until = now + (self._lockout_duration_minutes * 60)
@@ -327,13 +335,17 @@ class OAuthRegisterRateLimiter:
         """Check lockout in PostgreSQL. Called under self._lock."""
         assert self._pool is not None
         now = time.time()
+        from psycopg.rows import tuple_row
+
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT locked_until FROM rate_limit_lockouts "
-                "WHERE limiter_type = %s AND identifier = %s "
-                "AND locked_until > %s",
-                (self._limiter_type, identifier, now),
-            ).fetchone()
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    "SELECT locked_until FROM rate_limit_lockouts "
+                    "WHERE limiter_type = %s AND identifier = %s "
+                    "AND locked_until > %s",
+                    (self._limiter_type, identifier, now),
+                )
+                row = cur.fetchone()
         if row is None:
             return None
         remaining = row[0] - now
@@ -352,12 +364,16 @@ class OAuthRegisterRateLimiter:
             )
             # Window is 2x lockout duration to catch distributed retry attacks
             cutoff = now - (self._lockout_duration_minutes * 60 * 2)
-            row = conn.execute(
-                "SELECT COUNT(*) FROM rate_limit_failures "
-                "WHERE limiter_type = %s AND identifier = %s "
-                "AND failed_at > %s",
-                (self._limiter_type, identifier, cutoff),
-            ).fetchone()
+            from psycopg.rows import tuple_row
+
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM rate_limit_failures "
+                    "WHERE limiter_type = %s AND identifier = %s "
+                    "AND failed_at > %s",
+                    (self._limiter_type, identifier, cutoff),
+                )
+                row = cur.fetchone()
             count = row[0] if row else 0
             if count >= self._max_attempts:
                 locked_until = now + (self._lockout_duration_minutes * 60)

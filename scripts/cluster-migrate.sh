@@ -36,6 +36,8 @@ SRC_DIR=""
 CLONE_BACKEND="ontap"
 DAEMON_URL=""
 DAEMON_API_KEY=""
+NODE_ID=""
+IS_STORAGE_NODE=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -56,9 +58,11 @@ Storage backend (choose one):
   --nfs-mount PATH            Path to NFS mount (primary name, alias for --ontap-mount)
   --daemon-url URL            CoW daemon URL (required for --clone-backend cow-daemon)
   --daemon-api-key KEY        CoW daemon API key (required for --clone-backend cow-daemon)
+  --node-id ID                Cluster node identifier (auto-generated if omitted)
 
 Optional:
   --cidx-data-dir PATH        CIDX server data directory (default: ~/.cidx-server)
+  --is-storage-node           This node hosts shared storage locally (skip NFS self-mount)
   --dry-run                   Print what would be done without making changes
   --rollback                  Restore from backups created by a previous migration run
   --python PATH               Path to python3 binary (default: python3)
@@ -81,10 +85,17 @@ while [[ $# -gt 0 ]]; do
         --clone-backend)   CLONE_BACKEND="$2";   shift 2 ;;
         --daemon-url)      DAEMON_URL="$2";      shift 2 ;;
         --daemon-api-key)  DAEMON_API_KEY="$2";  shift 2 ;;
+        --node-id)         NODE_ID="$2";         shift 2 ;;
+        --is-storage-node) IS_STORAGE_NODE=true; shift   ;;
         -h|--help)         usage ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac
 done
+
+# Auto-generate NODE_ID from hostname + random hex if not provided
+if [[ -z "$NODE_ID" ]]; then
+    NODE_ID="$(hostname -s)-$(head -c 4 /dev/urandom | od -A n -t x4 | tr -d ' ')"
+fi
 
 # ---------------------------------------------------------------------------
 # Resolve paths (before sourcing lib so lib can use them)
@@ -172,6 +183,36 @@ backup_databases() {
 }
 
 # ---------------------------------------------------------------------------
+# Story #999: Seed .encryption_key_salt from .jwt_secret
+# ---------------------------------------------------------------------------
+
+seed_encryption_key_salt() {
+    log_step "Seeding .encryption_key_salt from .jwt_secret (Story #999)"
+
+    local salt_file="${CIDX_DATA_DIR}/.encryption_key_salt"
+    local jwt_file="${CIDX_DATA_DIR}/.jwt_secret"
+
+    if [ -f "$salt_file" ]; then
+        log_info ".encryption_key_salt already exists — skipping seed."
+        return 0
+    fi
+
+    if [ ! -f "$jwt_file" ]; then
+        log_warn ".jwt_secret not found at $jwt_file — .encryption_key_salt will be seeded from hostname at first startup."
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        log_dry "Would copy $jwt_file -> $salt_file"
+        return 0
+    fi
+
+    tr -d '\n' < "$jwt_file" > "$salt_file"
+    chmod 600 "$salt_file"
+    log_info "Created $salt_file from $jwt_file (stripped, mode 0600)"
+}
+
+# ---------------------------------------------------------------------------
 # PostgreSQL schema migrations
 # ---------------------------------------------------------------------------
 
@@ -200,17 +241,36 @@ run_schema_migrations() {
 migrate_data_to_postgres() {
     log_step "Migrating SQLite data to PostgreSQL"
 
+    # Build the command array once; dry-run renders from the same array.
+    local migrate_cmd=(
+        "$PYTHON_BIN" -m code_indexer.server.tools.migrate_to_postgres
+        --sqlite-path "$SQLITE_DB"
+        --groups-path "$GROUPS_DB"
+        --pg-url "$POSTGRES_URL"
+        --server-dir "$CIDX_DATA_DIR"
+    )
+
+    local oauth_db="${DATA_DIR}/oauth.db"
+    local scip_audit_db="${DATA_DIR}/scip_audit.db"
+    local refresh_tokens_db="${DATA_DIR}/refresh_tokens.db"
+
+    if [[ -f "$oauth_db" ]]; then
+        migrate_cmd+=(--oauth-path "$oauth_db")
+    fi
+    if [[ -f "$scip_audit_db" ]]; then
+        migrate_cmd+=(--scip-audit-path "$scip_audit_db")
+    fi
+    if [[ -f "$refresh_tokens_db" ]]; then
+        migrate_cmd+=(--refresh-tokens-path "$refresh_tokens_db")
+    fi
+
     if $DRY_RUN; then
-        log_dry "Would run: python3 -m code_indexer.server.tools.migrate_to_postgres --sqlite-path ... --groups-path ... --pg-url ..."
+        log_dry "Would run: ${migrate_cmd[*]}"
         return
     fi
 
     log_info "Running SQLite-to-PostgreSQL data migration..."
-    if ! PYTHONPATH="$PYTHONPATH" "$PYTHON_BIN" -m \
-        code_indexer.server.tools.migrate_to_postgres \
-        --sqlite-path "$SQLITE_DB" \
-        --groups-path "$GROUPS_DB" \
-        --pg-url "$POSTGRES_URL"; then
+    if ! PYTHONPATH="$PYTHONPATH" "${migrate_cmd[@]}"; then
         log_error "Data migration failed. Aborting."
         log_info "SQLite databases are untouched. Backups at: $BACKUP_DIR"
         exit 1
@@ -370,7 +430,7 @@ update_config_for_cluster() {
     log_step "Updating config.json for cluster mode"
 
     if $DRY_RUN; then
-        log_dry "Would set storage_mode=postgres, postgres_dsn, and clone_backend=${CLONE_BACKEND} in $CONFIG_JSON"
+        log_dry "Would set storage_mode=postgres, postgres_dsn, clone_backend=${CLONE_BACKEND}, and cluster.node_id=${NODE_ID} in $CONFIG_JSON"
         return
     fi
 
@@ -382,6 +442,7 @@ update_config_for_cluster() {
     CIDX_DAEMON_URL="$DAEMON_URL" \
     CIDX_DAEMON_API_KEY="$DAEMON_API_KEY" \
     CIDX_MOUNT_POINT="$ONTAP_MOUNT" \
+    CIDX_NODE_ID="$NODE_ID" \
     PYTHONPATH="$PYTHONPATH" "$PYTHON_BIN" - <<'PYEOF'
 import json, os, tempfile
 
@@ -391,6 +452,7 @@ clone_backend  = os.environ['CIDX_CLONE_BACKEND']
 daemon_url     = os.environ['CIDX_DAEMON_URL']
 daemon_api_key = os.environ['CIDX_DAEMON_API_KEY']
 mount_point    = os.environ['CIDX_MOUNT_POINT']
+node_id        = os.environ.get('CIDX_NODE_ID', '')
 config_dir     = os.path.dirname(config_file)
 
 with open(config_file, 'r') as f:
@@ -415,6 +477,10 @@ elif clone_backend == 'local':
 else:
     # 'ontap' or unrecognised: keep existing ontap section, remove cow_daemon
     desired.pop('cow_daemon', None)
+
+if node_id:
+    desired['cluster'] = desired.get('cluster') or {}
+    desired['cluster']['node_id'] = node_id
 
 # Idempotency: skip write if nothing changed
 if config == desired:
@@ -538,11 +604,16 @@ main() {
     validate_prerequisites
     stop_server
     backup_databases
+    seed_encryption_key_salt
     run_schema_migrations
     migrate_data_to_postgres
-    copy_golden_repos_to_nfs
-    copy_versioned_to_nfs
-    update_alias_json_files
+    if [[ "${CLONE_BACKEND}" != "local" ]]; then
+        copy_golden_repos_to_nfs
+        copy_versioned_to_nfs
+        update_alias_json_files
+    else
+        log_info "Clone backend is 'local' — skipping NFS copy (golden repos stay on local filesystem)."
+    fi
     update_config_for_cluster
     restart_server
     validate_health

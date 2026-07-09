@@ -3,9 +3,9 @@
 Maps canonical language names to tree-sitter-languages grammar names,
 and file extensions to canonical language names.
 
-NOTE: This module has NO imports of tree_sitter or tree_sitter_languages.
-Those imports are deferred to AstSearchEngine.__init__() to preserve CLI
-startup time (~1.3s baseline).
+NOTE: This module has no module-level imports of tree_sitter or
+tree_sitter_languages.  Imports are deferred to function bodies called
+only from AstSearchEngine.__init__() to preserve CLI startup time.
 """
 
 # Mandatory languages: canonical name -> grammar name used by tree_sitter_languages
@@ -21,6 +21,8 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
     "csharp": "c_sharp",
     "html": "html",
     "css": "css",
+    "c": "c",
+    "cpp": "cpp",
 }
 
 # File extension -> canonical language name mapping
@@ -42,18 +44,29 @@ EXTENSION_MAP: dict[str, str] = {
     ".html": "html",
     ".htm": "html",
     ".css": "css",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".c++": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
+    ".h++": "cpp",
 }
 
 
 def _hcl_available() -> bool:
-    """Return True if tree_sitter_hcl is installed, False otherwise.
+    """Return True if tree_sitter_languages bundles the HCL grammar.
 
     Used to conditionally add 'terraform' to the supported languages list
     at AstSearchEngine instantiation time.
     """
     try:
-        import tree_sitter_hcl  # noqa: F401
+        from tree_sitter_languages import get_language
 
+        get_language("hcl")
         return True
-    except ImportError:
+    except Exception:
         return False

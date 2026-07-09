@@ -58,11 +58,19 @@ class TestCheckGitLabToken:
 
     @pytest.mark.asyncio
     async def test_gitlab_token_not_configured(self):
-        """Test GitLab token not configured returns NOT_CONFIGURED."""
+        """Test GitLab token not configured returns NOT_CONFIGURED.
+
+        Bug #1304: patch target corrected to
+        code_indexer.server.services.ci_token_manager.CITokenManager --
+        DiagnosticsService._get_token_manager() resolves CITokenManager via
+        create_token_manager() in ci_token_manager.py, so patching the name
+        re-exported into diagnostics_service.py was a no-op that let this
+        host's real GitLab token (e.g. from .local-testing) leak through.
+        """
         service = DiagnosticsService()
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = None
@@ -74,14 +82,17 @@ class TestCheckGitLabToken:
 
     @pytest.mark.asyncio
     async def test_gitlab_token_invalid_format_warning(self):
-        """Test GitLab token with invalid format returns WARNING."""
+        """Test GitLab token with invalid format returns WARNING.
+
+        Bug #1304: same corrected patch target as test_gitlab_token_not_configured.
+        """
         service = DiagnosticsService()
 
         mock_token_data = MagicMock()
         mock_token_data.token = "invalid_token_format"
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -443,125 +454,126 @@ class TestTokenManagerSQLiteBackend:
     """Tests for Bug #146: Verify CITokenManager uses SQLite backend."""
 
     @pytest.mark.asyncio
-    async def test_check_github_api_uses_sqlite_backend(self):
-        """Test check_github_api() creates CITokenManager with SQLite backend."""
-        import tempfile
+    async def test_check_github_api_uses_sqlite_backend(self, tmp_path):
+        """Test check_github_api() creates CITokenManager with SQLite backend.
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
+        Bug #1304: two fixes bundled --
+        1. Patch target corrected to
+           code_indexer.server.services.ci_token_manager.CITokenManager --
+           _get_token_manager() resolves CITokenManager via
+           create_token_manager() in ci_token_manager.py, not via the name
+           re-exported into diagnostics_service.py (patching the latter was
+           a silent no-op).
+        2. db_path must live two directories under an existing writable
+           server_dir (<server_dir>/data/cidx_server.db), matching
+           DiagnosticsService.__init__'s real layout. A bare
+           tempfile.NamedTemporaryFile(suffix=".db") lives directly in /tmp,
+           so _get_token_manager()'s server_dir = Path(db_path).parent.parent
+           computed to "/" and ensure_encryption_key_salt() raised
+           PermissionError trying to write /.encryption_key_salt -- BEFORE
+           ever reaching the mocked CITokenManager (proven via direct repro).
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_db_path = str(data_dir / "cidx_server.db")
 
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
+        service = DiagnosticsService(db_path=tmp_db_path)
 
-            with patch(
-                "code_indexer.server.services.diagnostics_service.CITokenManager"
-            ) as mock_manager_class:
-                # Mock to return None (not configured) to avoid API call
-                mock_manager = mock_manager_class.return_value
-                mock_manager.get_token.return_value = None
+        with patch(
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
+        ) as mock_manager_class:
+            # Mock to return None (not configured) to avoid API call
+            mock_manager = mock_manager_class.return_value
+            mock_manager.get_token.return_value = None
 
-                await service.check_github_api()
+            await service.check_github_api()
 
-                # Verify CITokenManager was created with SQLite backend
-                mock_manager_class.assert_called_once()
-                call_kwargs = mock_manager_class.call_args[1]
-                assert call_kwargs.get("use_sqlite") is True
-                assert call_kwargs.get("db_path") == tmp_db_path
-        finally:
-            import os
-
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
-
-    @pytest.mark.asyncio
-    async def test_check_gitlab_api_uses_sqlite_backend(self):
-        """Test check_gitlab_api() creates CITokenManager with SQLite backend."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
-
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
-
-            with patch(
-                "code_indexer.server.services.diagnostics_service.CITokenManager"
-            ) as mock_manager_class:
-                # Mock to return None (not configured) to avoid API call
-                mock_manager = mock_manager_class.return_value
-                mock_manager.get_token.return_value = None
-
-                await service.check_gitlab_api()
-
-                # Verify CITokenManager was created with SQLite backend
-                mock_manager_class.assert_called_once()
-                call_kwargs = mock_manager_class.call_args[1]
-                assert call_kwargs.get("use_sqlite") is True
-                assert call_kwargs.get("db_path") == tmp_db_path
-        finally:
-            import os
-
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
+            # Verify CITokenManager was created with SQLite backend
+            mock_manager_class.assert_called_once()
+            call_kwargs = mock_manager_class.call_args[1]
+            assert call_kwargs.get("use_sqlite") is True
+            assert call_kwargs.get("db_path") == tmp_db_path
 
     @pytest.mark.asyncio
-    async def test_check_github_token_uses_sqlite_backend(self):
-        """Test check_github_token() creates CITokenManager with SQLite backend."""
-        import tempfile
+    async def test_check_gitlab_api_uses_sqlite_backend(self, tmp_path):
+        """Test check_gitlab_api() creates CITokenManager with SQLite backend.
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
+        Bug #1304: same fixes as test_check_github_api_uses_sqlite_backend
+        above (corrected patch target + tmp_path/data-subdir server_dir layout).
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_db_path = str(data_dir / "cidx_server.db")
 
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
+        service = DiagnosticsService(db_path=tmp_db_path)
 
-            with patch(
-                "code_indexer.server.services.diagnostics_service.CITokenManager"
-            ) as mock_manager_class:
-                # Mock to return None (not configured) to avoid API call
-                mock_manager = mock_manager_class.return_value
-                mock_manager.get_token.return_value = None
+        with patch(
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
+        ) as mock_manager_class:
+            # Mock to return None (not configured) to avoid API call
+            mock_manager = mock_manager_class.return_value
+            mock_manager.get_token.return_value = None
 
-                await service.check_github_token()
+            await service.check_gitlab_api()
 
-                # Verify CITokenManager was created with SQLite backend
-                mock_manager_class.assert_called_once()
-                call_kwargs = mock_manager_class.call_args[1]
-                assert call_kwargs.get("use_sqlite") is True
-                assert call_kwargs.get("db_path") == tmp_db_path
-        finally:
-            import os
-
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
+            # Verify CITokenManager was created with SQLite backend
+            mock_manager_class.assert_called_once()
+            call_kwargs = mock_manager_class.call_args[1]
+            assert call_kwargs.get("use_sqlite") is True
+            assert call_kwargs.get("db_path") == tmp_db_path
 
     @pytest.mark.asyncio
-    async def test_check_gitlab_token_uses_sqlite_backend(self):
-        """Test check_gitlab_token() creates CITokenManager with SQLite backend."""
-        import tempfile
+    async def test_check_github_token_uses_sqlite_backend(self, tmp_path):
+        """Test check_github_token() creates CITokenManager with SQLite backend.
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
+        Bug #1304: same fixes as test_check_github_api_uses_sqlite_backend
+        above (corrected patch target + tmp_path/data-subdir server_dir layout).
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_db_path = str(data_dir / "cidx_server.db")
 
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
+        service = DiagnosticsService(db_path=tmp_db_path)
 
-            with patch(
-                "code_indexer.server.services.diagnostics_service.CITokenManager"
-            ) as mock_manager_class:
-                # Mock to return None (not configured) to avoid API call
-                mock_manager = mock_manager_class.return_value
-                mock_manager.get_token.return_value = None
+        with patch(
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
+        ) as mock_manager_class:
+            # Mock to return None (not configured) to avoid API call
+            mock_manager = mock_manager_class.return_value
+            mock_manager.get_token.return_value = None
 
-                await service.check_gitlab_token()
+            await service.check_github_token()
 
-                # Verify CITokenManager was created with SQLite backend
-                mock_manager_class.assert_called_once()
-                call_kwargs = mock_manager_class.call_args[1]
-                assert call_kwargs.get("use_sqlite") is True
-                assert call_kwargs.get("db_path") == tmp_db_path
-        finally:
-            import os
+            # Verify CITokenManager was created with SQLite backend
+            mock_manager_class.assert_called_once()
+            call_kwargs = mock_manager_class.call_args[1]
+            assert call_kwargs.get("use_sqlite") is True
+            assert call_kwargs.get("db_path") == tmp_db_path
 
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
+    @pytest.mark.asyncio
+    async def test_check_gitlab_token_uses_sqlite_backend(self, tmp_path):
+        """Test check_gitlab_token() creates CITokenManager with SQLite backend.
+
+        Bug #1304: same fixes as test_check_github_api_uses_sqlite_backend
+        above (corrected patch target + tmp_path/data-subdir server_dir layout).
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_db_path = str(data_dir / "cidx_server.db")
+
+        service = DiagnosticsService(db_path=tmp_db_path)
+
+        with patch(
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
+        ) as mock_manager_class:
+            # Mock to return None (not configured) to avoid API call
+            mock_manager = mock_manager_class.return_value
+            mock_manager.get_token.return_value = None
+
+            await service.check_gitlab_token()
+
+            # Verify CITokenManager was created with SQLite backend
+            mock_manager_class.assert_called_once()
+            call_kwargs = mock_manager_class.call_args[1]
+            assert call_kwargs.get("use_sqlite") is True
+            assert call_kwargs.get("db_path") == tmp_db_path

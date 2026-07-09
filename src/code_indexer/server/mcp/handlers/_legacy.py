@@ -12,6 +12,7 @@ All handlers return MCP-compliant responses with content arrays:
 """
 
 import logging
+import os
 import sys
 import types
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
@@ -142,13 +143,29 @@ def _is_git_repo(path: Path) -> bool:
 
 
 def _find_latest_versioned_repo(base_path: Path, repo_name: str) -> Optional[str]:
-    """Find most recent versioned git repo in .versioned/{name}/v_*/ structure."""
+    """Find most recent versioned git repo in .versioned/{name}/v_*/ structure.
+
+    Bug #1084 B5: per-directory SHAPE detection is routed through the single
+    canonical predicate (``snapshot_paths.is_versioned_snapshot``) instead of a
+    bare ``startswith("v_")`` test, so only canonical ``v_<digits>`` snapshot
+    leaves qualify -- consistent with every other consumer. Behavior-neutral in
+    production (the Step-0 alias read in ``_resolve_repo_path`` short-circuits
+    this path before it runs).
+    """
+    from code_indexer.server.storage.shared.snapshot_paths import (
+        is_versioned_snapshot,
+    )
+
     versioned_base = base_path / ".versioned" / repo_name
     if not versioned_base.exists():
         return None
 
     version_dirs = sorted(
-        [d for d in versioned_base.iterdir() if d.is_dir() and d.name.startswith("v_")],
+        [
+            d
+            for d in versioned_base.iterdir()
+            if d.is_dir() and is_versioned_snapshot(str(d))
+        ],
         key=lambda d: d.name,
         reverse=True,
     )
@@ -302,7 +319,14 @@ def _resolve_git_repo_path(
 
         return resolved, None
 
-    activated_repo_manager = ActivatedRepoManager()
+    # Bug #1151: derive data_dir from CIDX_SERVER_DATA_DIR (same as service_init.py:162-163/195)
+    # so non-default-data-dir deployments resolve activated repos correctly.
+    _server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+    )
+    activated_repo_manager = ActivatedRepoManager(
+        data_dir=str(Path(_server_data_dir) / "data")
+    )
     repo_path = activated_repo_manager.get_activated_repo_path(
         username=username, user_alias=repository_alias
     )
@@ -426,7 +450,6 @@ from .git_read import (  # noqa: F401, E402
     handle_git_log,
     handle_git_show_commit,
     handle_git_file_at_revision,
-    handle_git_diff,
     handle_git_blame,
     handle_git_search_commits,
     handle_git_search_diffs,
@@ -576,10 +599,12 @@ from .admin import (  # noqa: F401, E402
 )
 
 from .xray import _register as _xray_register  # noqa: E402
+from .xray_batch import _register as _xray_batch_register  # noqa: E402
 
 _admin_register(HANDLER_REGISTRY)
 _depmap_register(HANDLER_REGISTRY)
 _xray_register(HANDLER_REGISTRY)
+_xray_batch_register(HANDLER_REGISTRY)
 
 
 # ---------------------------------------------------------------------------

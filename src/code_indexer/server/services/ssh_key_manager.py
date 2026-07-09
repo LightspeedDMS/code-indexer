@@ -5,9 +5,13 @@ Provides unified interface for SSH key management, coordinating
 key generation, metadata storage, and SSH config updates.
 
 Supports both SQLite backend (Story #702) and JSON file storage (backward compatible).
+Cluster mode (Bug #1072): encrypts private key content via Fernet and persists
+the encrypted blob to the PostgreSQL backend so the sync service can distribute
+the key to all cluster nodes.
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -18,6 +22,8 @@ import filelock
 from .ssh_key_generator import SSHKeyGenerator
 from .ssh_config_manager import SSHConfigManager, HostEntry
 from .key_discovery_service import KeyDiscoveryService, KeyInfo
+
+logger = logging.getLogger(__name__)
 
 
 class KeyNotFoundError(Exception):
@@ -72,7 +78,31 @@ class SSHKeyManager:
     and key discovery operations.
 
     Supports both SQLite backend (Story #702) and JSON file storage (backward compatible).
+    Cluster mode (Bug #1072): when pg_backend and fernet are set (via constructor or
+    set_cluster_dependencies classmethod), create_key encrypts the private key content
+    and persists the encrypted blob to PostgreSQL so the sync service can distribute it.
     """
+
+    # Class-level cluster dependencies — set once from lifespan via set_cluster_dependencies().
+    # Instances fall back to these when not explicitly passed to __init__.
+    _cluster_pg_backend: Optional[Any] = None
+    _cluster_fernet: Optional[Any] = None
+
+    @classmethod
+    def set_cluster_dependencies(cls, pg_backend: Any, fernet: Any) -> None:
+        """Inject cluster-mode dependencies at the class level.
+
+        Called once from lifespan when the server starts in cluster mode.
+        All subsequently constructed SSHKeyManager instances will pick up
+        these values unless they are overridden via explicit constructor params.
+
+        Args:
+            pg_backend: SSHKeysPostgresBackend instance.
+            fernet: cryptography.fernet.Fernet instance for encrypting private keys.
+        """
+        cls._cluster_pg_backend = pg_backend
+        cls._cluster_fernet = fernet
+        logger.info("SSHKeyManager: cluster dependencies injected (PG + Fernet)")
 
     def __init__(
         self,
@@ -81,6 +111,8 @@ class SSHKeyManager:
         config_path: Optional[Path] = None,
         use_sqlite: bool = False,
         db_path: Optional[Path] = None,
+        pg_backend: Optional[Any] = None,
+        fernet: Optional[Any] = None,
     ):
         """
         Initialize the SSH key manager.
@@ -92,9 +124,21 @@ class SSHKeyManager:
             config_path: Path to SSH config file. Defaults to ~/.ssh/config
             use_sqlite: If True, use SQLite backend instead of JSON files (Story #702)
             db_path: Path to SQLite database file (required when use_sqlite=True)
+            pg_backend: Optional SSHKeysPostgresBackend for cluster mode (Bug #1072).
+                        Falls back to class-level _cluster_pg_backend if not supplied.
+            fernet: Optional Fernet instance for encrypting private keys in cluster mode.
+                    Falls back to class-level _cluster_fernet if not supplied.
         """
         self._use_sqlite = use_sqlite
         self._sqlite_backend: Optional[Any] = None
+
+        # Cluster-mode deps: explicit params take precedence over class-level attrs.
+        self._pg_backend: Optional[Any] = (
+            pg_backend if pg_backend is not None else self.__class__._cluster_pg_backend
+        )
+        self._fernet: Optional[Any] = (
+            fernet if fernet is not None else self.__class__._cluster_fernet
+        )
 
         if ssh_dir is None:
             ssh_dir = Path.home() / ".ssh"
@@ -174,7 +218,43 @@ class SSHKeyManager:
                 is_imported=False,
             )
 
-            # Save metadata - SQLite or JSON
+            # --- Cluster mode: encrypt private key and persist to PG ---
+            pg_backend = self._pg_backend
+            fernet = self._fernet
+            if pg_backend is not None and fernet is not None:
+                # Read the private key file written by the generator
+                private_key_content = Path(generated.private_path).read_text()
+                encrypted_private = fernet.encrypt(
+                    private_key_content.encode()
+                ).decode()
+                try:
+                    pg_backend.create_key(
+                        name=name,
+                        fingerprint=generated.fingerprint,
+                        key_type=key_type,
+                        private_path=str(generated.private_path),
+                        public_path=str(generated.public_path),
+                        public_key=generated.public_key,
+                        email=email,
+                        description=description,
+                        is_imported=metadata.is_imported,
+                        private_key=encrypted_private,
+                    )
+                    logger.info(
+                        "SSHKeyManager: persisted encrypted private key for '%s' to PG",
+                        name,
+                    )
+                except Exception:
+                    logger.exception(
+                        "SSHKeyManager: failed to persist encrypted private key for '%s' to PG",
+                        name,
+                    )
+                    raise
+
+            # --- Save local metadata: SQLite or JSON ---
+            # In cluster mode the SQLite record has private_key=None (PG is the
+            # source of truth for sync).  In solo mode private_key stays None too
+            # (the column exists but solo nodes don't use the encrypted blob).
             if self._use_sqlite and self._sqlite_backend is not None:
                 self._sqlite_backend.create_key(
                     name=name,
@@ -241,7 +321,7 @@ class SSHKeyManager:
                     raise KeyNotFoundError(
                         f"Key '{key_name}' unexpectedly missing after assignment"
                     )
-                return KeyMetadata(**updated_data)
+                return self._key_metadata_from_backend(updated_data)
             else:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
@@ -304,6 +384,20 @@ class SSHKeyManager:
 
                 # Remove from SQLite (cascade deletes hosts)
                 self._sqlite_backend.delete_key(key_name)
+
+                # --- Cluster mode: remove from PG so key cannot resurrect on next sync ---
+                if self._pg_backend is not None:
+                    try:
+                        self._pg_backend.delete_key(key_name)
+                        logger.info(
+                            "SSHKeyManager: deleted key '%s' from PG backend", key_name
+                        )
+                    except Exception:
+                        logger.exception(
+                            "SSHKeyManager: failed to delete key '%s' from PG backend",
+                            key_name,
+                        )
+                        raise
             else:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
@@ -357,7 +451,7 @@ class SSHKeyManager:
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
             keys_data = self._sqlite_backend.list_keys()
-            managed_keys = [KeyMetadata(**key_data) for key_data in keys_data]
+            managed_keys = [self._key_metadata_from_backend(kd) for kd in keys_data]
         else:
             # JSON file storage (backward compatible)
             managed_keys = []
@@ -380,6 +474,16 @@ class SSHKeyManager:
                 unmanaged_keys.append(key_info)
 
         return KeyListResult(managed=managed_keys, unmanaged=unmanaged_keys)
+
+    @staticmethod
+    def _key_metadata_from_backend(data: dict) -> "KeyMetadata":
+        """
+        Construct a KeyMetadata from a dict returned by the SQLite/PG backend.
+
+        Strips 'private_key': it is an internal encrypted blob for cluster sync
+        (Bug #1072 Chunk 1) and is not a field on KeyMetadata.
+        """
+        return KeyMetadata(**{k: v for k, v in data.items() if k != "private_key"})
 
     def get_public_key(self, key_name: str) -> str:
         """

@@ -36,7 +36,9 @@ class TestChunkTypeFiltering:
     def test_query_temporal_accepts_chunk_type_parameter(self, temporal_search_service):
         """Test that query_temporal accepts chunk_type parameter and applies filter.
 
-        This test verifies AC3/AC4: chunk_type filtering is supported.
+        Story #1290 AC12: chunk_type="commit_message" maps onto is_head=True
+        (the old distinct "commit_message"/"commit_diff" `type` payload values
+        no longer exist -- every chunk carries type="commit_chunk").
         """
         # Arrange
         mock_vector_store = temporal_search_service.vector_store_client
@@ -51,29 +53,30 @@ class TestChunkTypeFiltering:
                 id="test:commit:abc123:0",
                 score=0.9,
                 payload={
-                    "type": "commit_message",
+                    "type": "commit_chunk",
+                    "is_head": True,
                     "commit_hash": "abc123",
                     "commit_timestamp": 1704153600,  # 2024-01-02 00:00:00 UTC (in range)
                     "commit_date": "2024-01-02",
                     "author_name": "Test User",
                     "author_email": "test@example.com",
                     "commit_message": "Fix bug",
-                    "path": "[commit:abc123]",
+                    "primary_path": "[commit:abc123]",
                 },
                 chunk_text="Fix authentication bug",
             ),
             MagicMock(
-                id="test:diff:def456:file.py:0",
+                id="test:commit:def456:1",
                 score=0.85,
                 payload={
-                    "type": "commit_diff",
+                    "type": "commit_chunk",
+                    "is_head": False,
                     "commit_hash": "def456",
                     "commit_timestamp": 1704240000,  # 2024-01-03 00:00:00 UTC (in range)
                     "commit_date": "2024-01-03",
                     "author_name": "Test User",
                     "author_email": "test@example.com",
-                    "path": "file.py",
-                    "diff_type": "modified",
+                    "primary_path": "file.py",
                 },
                 chunk_text="def authenticate():",
             ),
@@ -86,12 +89,12 @@ class TestChunkTypeFiltering:
             query="authentication",
             time_range=("2024-01-01", "2024-12-31"),
             limit=10,
-            chunk_type="commit_message",  # AC3: Filter to commit messages only
+            chunk_type="commit_message",  # AC12: is_head=True only
         )
 
-        # Assert: Should only return commit_message chunks
+        # Assert: Should only return the head chunk
         assert len(results.results) == 1
-        assert results.results[0].metadata["type"] == "commit_message"
+        assert results.results[0].metadata["is_head"] is True
         assert "Fix authentication bug" in results.results[0].content
 
     def test_query_without_chunk_type_returns_mixed_results(
@@ -161,8 +164,8 @@ class TestChunkTypeFiltering:
     def test_chunk_type_combines_with_other_filters(self, temporal_search_service):
         """Test that chunk_type filter combines correctly with author and time_range.
 
-        This test verifies AC6: chunk_type filter works alongside other temporal filters
-        (author, time_range, diff_type).
+        Story #1290 AC12/AC13: chunk_type is now is_head-based and must still
+        compose correctly with the author filter.
         """
         # Arrange
         mock_vector_store = temporal_search_service.vector_store_client
@@ -176,14 +179,15 @@ class TestChunkTypeFiltering:
                 id="test:commit:abc123:0",
                 score=0.9,
                 payload={
-                    "type": "commit_message",
+                    "type": "commit_chunk",
+                    "is_head": True,
                     "commit_hash": "abc123",
                     "commit_timestamp": 1704153600,  # 2024-01-02 00:00:00 UTC (in range)
                     "commit_date": "2024-01-02",
                     "author_name": "Alice Smith",
                     "author_email": "alice@example.com",
                     "commit_message": "Fix bug",
-                    "path": "[commit:abc123]",
+                    "primary_path": "[commit:abc123]",
                 },
                 chunk_text="Fix authentication bug",
             ),
@@ -191,29 +195,30 @@ class TestChunkTypeFiltering:
                 id="test:commit:def456:1",
                 score=0.88,
                 payload={
-                    "type": "commit_message",
+                    "type": "commit_chunk",
+                    "is_head": True,
                     "commit_hash": "def456",
                     "commit_timestamp": 1704240000,  # 2024-01-03 00:00:00 UTC (in range)
                     "commit_date": "2024-01-03",
                     "author_name": "Bob Jones",
                     "author_email": "bob@example.com",
                     "commit_message": "Update auth",
-                    "path": "[commit:def456]",
+                    "primary_path": "[commit:def456]",
                 },
                 chunk_text="Update authentication method",
             ),
             MagicMock(
-                id="test:diff:ghi789:file.py:0",
+                id="test:commit:ghi789:0",
                 score=0.85,
                 payload={
-                    "type": "commit_diff",
+                    "type": "commit_chunk",
+                    "is_head": False,
                     "commit_hash": "ghi789",
                     "commit_timestamp": 1704326400,  # 2024-01-04 00:00:00 UTC (in range)
                     "commit_date": "2024-01-04",
                     "author_name": "Alice Smith",
                     "author_email": "alice@example.com",
-                    "path": "file.py",
-                    "diff_type": "modified",
+                    "primary_path": "file.py",
                 },
                 chunk_text="def authenticate():",
             ),
@@ -226,12 +231,12 @@ class TestChunkTypeFiltering:
             query="authentication",
             time_range=("2024-01-01", "2024-12-31"),
             limit=10,
-            chunk_type="commit_message",  # AC6: Filter to commit messages
-            author="Alice",  # AC6: Filter to Alice's commits
+            chunk_type="commit_message",  # AC12: is_head=True only
+            author="Alice",  # Filter to Alice's commits
         )
 
-        # Assert: Should only return commit_message chunks from Alice
+        # Assert: Should only return the head chunk authored by Alice
         assert len(results.results) == 1
-        assert results.results[0].metadata["type"] == "commit_message"
+        assert results.results[0].metadata["is_head"] is True
         assert "Alice" in results.results[0].metadata["author_name"]
         assert "Fix authentication bug" in results.results[0].content

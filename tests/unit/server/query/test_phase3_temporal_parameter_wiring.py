@@ -296,8 +296,6 @@ class TestCombinedPhase3ParameterWiring:
                 # Existing temporal parameters (Story #446)
                 time_range="2024-01-01..2024-12-31",
                 at_commit="abc123",
-                include_removed=True,
-                show_evolution=True,
                 # Phase 3 temporal filtering parameters
                 diff_type=["added", "modified"],
                 author="dev@example.com",
@@ -309,8 +307,6 @@ class TestCombinedPhase3ParameterWiring:
             # Existing temporal
             assert call_kwargs["time_range"] == "2024-01-01..2024-12-31"
             assert call_kwargs["at_commit"] == "abc123"
-            assert call_kwargs["include_removed"] is True
-            assert call_kwargs["show_evolution"] is True
             # Phase 3
             assert call_kwargs["diff_type"] == ["added", "modified"]
             assert call_kwargs["author"] == "dev@example.com"

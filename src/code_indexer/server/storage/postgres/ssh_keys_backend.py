@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class SSHKeysPostgresBackend:
         email: Optional[str] = None,
         description: Optional[str] = None,
         is_imported: bool = False,
+        private_key: Optional[str] = None,
     ) -> None:
         """Create a new SSH key record."""
         now = datetime.now(timezone.utc).isoformat()
@@ -53,8 +55,19 @@ class SSHKeysPostgresBackend:
             conn.execute(
                 """INSERT INTO ssh_keys
                    (name, fingerprint, key_type, private_path, public_path,
-                    public_key, email, description, created_at, is_imported)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    public_key, email, description, created_at, is_imported,
+                    private_key)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (name) DO UPDATE SET
+                     fingerprint = EXCLUDED.fingerprint,
+                     key_type = EXCLUDED.key_type,
+                     private_path = EXCLUDED.private_path,
+                     public_path = EXCLUDED.public_path,
+                     public_key = EXCLUDED.public_key,
+                     email = EXCLUDED.email,
+                     description = EXCLUDED.description,
+                     is_imported = EXCLUDED.is_imported,
+                     private_key = EXCLUDED.private_key""",
                 (
                     name,
                     fingerprint,
@@ -66,6 +79,7 @@ class SSHKeysPostgresBackend:
                     description,
                     now,
                     is_imported,
+                    private_key,
                 ),
             )
         logger.info(f"Created SSH key: {name}")
@@ -75,7 +89,8 @@ class SSHKeysPostgresBackend:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 """SELECT name, fingerprint, key_type, private_path, public_path,
-                          public_key, email, description, created_at, imported_at, is_imported
+                          public_key, email, description, created_at, imported_at, is_imported,
+                          private_key
                    FROM ssh_keys WHERE name = %s""",
                 (name,),
             )
@@ -83,20 +98,23 @@ class SSHKeysPostgresBackend:
             if row is None:
                 return None
             hosts = self._get_hosts_for_key(conn, name)
-        return {
-            "name": row[0],
-            "fingerprint": row[1],
-            "key_type": row[2],
-            "private_path": row[3],
-            "public_path": row[4],
-            "public_key": row[5],
-            "email": row[6],
-            "description": row[7],
-            "created_at": row[8],
-            "imported_at": row[9],
-            "is_imported": bool(row[10]),
-            "hosts": hosts,
-        }
+        return sanitize_row(
+            {
+                "name": row[0],
+                "fingerprint": row[1],
+                "key_type": row[2],
+                "private_path": row[3],
+                "public_path": row[4],
+                "public_key": row[5],
+                "email": row[6],
+                "description": row[7],
+                "created_at": row[8],
+                "imported_at": row[9],
+                "is_imported": bool(row[10]),
+                "hosts": hosts,
+                "private_key": row[11],
+            }
+        )
 
     def _get_hosts_for_key(self, conn: Any, key_name: str) -> List[str]:
         """Get hosts assigned to a key from junction table."""
@@ -137,7 +155,8 @@ class SSHKeysPostgresBackend:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 """SELECT name, fingerprint, key_type, private_path, public_path,
-                          public_key, email, description, created_at, imported_at, is_imported
+                          public_key, email, description, created_at, imported_at, is_imported,
+                          private_key
                    FROM ssh_keys"""
             )
             rows = cursor.fetchall()
@@ -146,20 +165,23 @@ class SSHKeysPostgresBackend:
                 key_name = row[0]
                 hosts = self._get_hosts_for_key(conn, key_name)
                 result.append(
-                    {
-                        "name": key_name,
-                        "fingerprint": row[1],
-                        "key_type": row[2],
-                        "private_path": row[3],
-                        "public_path": row[4],
-                        "public_key": row[5],
-                        "email": row[6],
-                        "description": row[7],
-                        "created_at": row[8],
-                        "imported_at": row[9],
-                        "is_imported": bool(row[10]),
-                        "hosts": hosts,
-                    }
+                    sanitize_row(
+                        {
+                            "name": key_name,
+                            "fingerprint": row[1],
+                            "key_type": row[2],
+                            "private_path": row[3],
+                            "public_path": row[4],
+                            "public_key": row[5],
+                            "email": row[6],
+                            "description": row[7],
+                            "created_at": row[8],
+                            "imported_at": row[9],
+                            "is_imported": bool(row[10]),
+                            "hosts": hosts,
+                            "private_key": row[11],
+                        }
+                    )
                 )
         return result
 

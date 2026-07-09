@@ -96,6 +96,15 @@ class ActivatedReaperService:
         for repo in all_repos:
             username: str = repo.get("username", "")
             user_alias: str = repo.get("user_alias", "")
+            if not username or not user_alias:
+                errors.append(
+                    {
+                        "username": username,
+                        "user_alias": user_alias,
+                        "error": "Skipped: missing username or user_alias",
+                    }
+                )
+                continue
             raw_ts: Optional[str] = repo.get("last_accessed")
             last_accessed: Optional[datetime] = _parse_last_accessed(raw_ts)
 
@@ -108,6 +117,7 @@ class ActivatedReaperService:
                         "deactivate_repository",
                         self._activated_repo_manager._do_deactivate_repository,
                         submitter_username="system",
+                        actor_username="system",
                         is_admin=True,
                         repo_alias=user_alias,
                         username=username,

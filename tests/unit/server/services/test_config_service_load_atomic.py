@@ -269,6 +269,10 @@ def test_load_runtime_from_pg_passes_base_config(tmp_path):
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
+    # cursor(row_factory=...) context manager must return mock_conn so that
+    # cur.execute() routes through mock_conn.execute() with the configured return.
+    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
     mock_conn.execute.return_value.fetchone.return_value = mock_row
     mock_pool = MagicMock()
     mock_pool.connection.return_value = mock_conn

@@ -59,10 +59,7 @@ CIDX currently supports **23 query parameters** across three interfaces:
 | Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
 |-----------|------|----------|------------|-----------|---------|-------------|-------|
 | time_range | string | --time-range | time_range | time_range | None | Time range filter (YYYY-MM-DD..YYYY-MM-DD) | Story #446 |
-| at_commit | string | N/A | at_commit | at_commit | None | Query code at specific commit hash or ref - API-only | Story #446 |
-| include_removed | boolean | N/A | include_removed | include_removed | false | Include removed files in results - API-only | Story #446 |
-| show_evolution | boolean | N/A | show_evolution | show_evolution | false | Show code evolution timeline - API-only | Story #446 |
-| evolution_limit | integer | N/A | evolution_limit | evolution_limit | None | Limit evolution entries (user-controlled) - API-only | Story #446 |
+| at_commit | string | N/A | at_commit | at_commit | None | Point-in-time scoping to a specific commit hash or ref (restricts results to commits at/before it; unresolvable ref errors) - API-only | Story #446, Bug #1301 |
 
 ### Temporal Filtering Parameters
 
@@ -86,17 +83,20 @@ CIDX currently supports **23 query parameters** across three interfaces:
 
 - **Underscore notation**: `query_text`, `min_score`, `exclude_language`
 - **Enum field**: `search_mode` (values: `semantic`, `fts`, `hybrid`)
-- **Boolean fields**: `case_sensitive`, `fuzzy`, `regex`, `include_removed`, `show_evolution`
+- **Boolean fields**: `case_sensitive`, `fuzzy`, `regex`
 
 ## API-Only Parameters
 
 The following parameters are **NOT exposed in CLI** (only available via REST/MCP):
 
-1. **at_commit**: Query code at specific commit hash - API provides more flexibility
-2. **include_removed**: Include removed files - API-specific feature
-3. **show_evolution**: Code evolution timeline - API-specific feature
-4. **evolution_limit**: Control evolution entry count - API-specific feature
-5. **file_extensions**: Array-based extension filtering - API uses this, CLI uses --language
+1. **at_commit**: Point-in-time scoping to a specific commit hash - API provides more flexibility
+2. **file_extensions**: Array-based extension filtering - API uses this, CLI uses --language
+
+Note (Bug #1301): `include_removed`, `show_evolution`, and `evolution_limit` were retired --
+they were advertised but permanently non-functional (silent no-ops) on the per-commit
+temporal index. They have been removed from REST/MCP entirely, not just from CLI. Per-file
+diff timelines are available via the existing git tools (`git_file_history`, `git_log`,
+`git_blame`, `git_diff`) instead.
 
 ## Validation Rules
 

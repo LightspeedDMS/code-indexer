@@ -16,9 +16,13 @@ import html
 import logging
 import re
 import threading
-from datetime import datetime, timezone
+import uuid as _uuid
+from datetime import datetime, datetime as _dt, timezone, timezone as _tz
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import TYPE_CHECKING, Optional, Set, Tuple, cast
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
 from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
@@ -66,18 +70,22 @@ def _get_dashboard_service():
 
     try:
         config_service = get_config_service()
-        config_manager = config_service.config_manager
 
-        # Get tracking backend
-        server_dir = config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-
-        from ..storage.sqlite_backends import DependencyMapTrackingBackend
-
-        tracking_backend = DependencyMapTrackingBackend(db_path)
-
-        # Get dependency map service from app state (may be None if disabled)
         dep_map_service = _get_dep_map_service_from_state()
+
+        # Use the tracking backend from the dep-map service -- correctly
+        # wired to PG in cluster mode by lifespan.py. Falls back to SQLite
+        # only in solo mode when dep_map_service is unavailable.
+        tracking_backend = None
+        if dep_map_service is not None:
+            tracking_backend = dep_map_service._tracking_backend
+        if tracking_backend is None:
+            config_manager = config_service.config_manager
+            server_dir = config_manager.server_dir
+            db_path = str(server_dir / "data" / "cidx_server.db")
+            from ..storage.sqlite_backends import DependencyMapTrackingBackend
+
+            tracking_backend = DependencyMapTrackingBackend(db_path)
 
         return DependencyMapDashboardService(
             tracking_backend=tracking_backend,
@@ -91,22 +99,16 @@ def _get_dashboard_service():
 
 def _get_dashboard_cache_backend():
     """
-    Construct and return a DependencyMapDashboardCacheBackend backed by the server DB.
+    Construct and return a FilesystemDashboardCacheBackend for the dep-map output dir.
 
-    Follows the same config-resolution pattern as _get_dashboard_service.
-    Returns None if the server configuration is unavailable.
+    Returns None if _get_dep_map_output_dir() returns None (dep-map disabled/unavailable).
     """
-    try:
-        from ..services.config_service import get_config_service
-        from ..storage.sqlite_backends import DependencyMapDashboardCacheBackend
-
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-        return DependencyMapDashboardCacheBackend(db_path)
-    except Exception as e:
-        logger.warning("_get_dashboard_cache_backend failed: %s", e)
+    dep_map_dir = _get_dep_map_output_dir()
+    if dep_map_dir is None:
         return None
+    from ..storage.filesystem_backends import FilesystemDashboardCacheBackend
+
+    return FilesystemDashboardCacheBackend(cache_dir=dep_map_dir)
 
 
 def _get_job_tracker():
@@ -257,18 +259,20 @@ _DASHBOARD_CACHE_TTL_DEFAULT = 600
 # Operation type registered with BackgroundJobManager for dashboard analysis jobs
 _DASHBOARD_OP_TYPE = "dep_map_dashboard"
 
+# TODO: expose via Web UI Config Screen (Story #1035 follow-up)
+DASHBOARD_STALE_TIMEOUT_SECONDS = 1800  # 30 minutes — dashboard sentinel stale recovery
 
-def _get_repair_journal_dir() -> Path:
+
+def _get_repair_journal_dir() -> Optional[Path]:
     """Return the repair activity journal directory.
 
-    Honors CIDX_DATA_DIR env var (Bug #879 IPC alignment).
-    Falls back to ~/.tmp when CIDX_DATA_DIR is unset.
+    Bug #1041: Returns shared NFS path from dep_map_service so all cluster
+    nodes can read it. Returns None when dep_map_service is unavailable.
     """
-    import os as _os
-
-    raw = _os.environ.get("CIDX_DATA_DIR", "").strip()
-    base = Path(raw) if raw else Path.home() / ".tmp"
-    return base / "depmap-repair-journal"
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is not None:
+        return cast(Optional[Path], dep_map_service.get_activity_journal_dir())
+    return None
 
 
 class _NullJobTracker:
@@ -339,7 +343,7 @@ def _submit_dashboard_job(
             new_job_id,
             submitter_username="system",
             is_admin=True,
-            repo_alias=None,
+            repo_alias="__depmap_dashboard__",
         )
     except Exception as exc:
         logger.warning("_submit_dashboard_job: submit_job raised: %s", exc)
@@ -354,7 +358,10 @@ def _submit_dashboard_job(
         cache_backend.clear_job_slot()
         return None
 
-    return str(submitted_id)
+    actual_id = str(submitted_id)
+    if actual_id != new_job_id:
+        cache_backend.claim_job_slot(actual_id)
+    return actual_id
 
 
 def _render_complete_response(request, session, cached_row: dict) -> HTMLResponse:
@@ -544,8 +551,19 @@ def depmap_activity_journal_partial(request: Request, offset: int = 0):
     progress_info = ""
 
     if dep_map_service is not None:
-        journal = dep_map_service.activity_journal
-        content, new_offset = journal.get_content(offset)
+        # Bug #1041: Read from shared NFS path so any cluster node can serve the journal
+        shared_dir = dep_map_service.get_activity_journal_dir()
+        if shared_dir is not None:
+            journal_file = shared_dir / "_activity.md"
+            from ..services.activity_journal_service import ActivityJournalService
+
+            content, new_offset = ActivityJournalService.get_content_from_path(
+                journal_file, offset
+            )
+        else:
+            # Fallback to in-memory pointer (solo mode without golden_repos_manager)
+            journal = dep_map_service.activity_journal
+            content, new_offset = journal.get_content(offset)
         progress, progress_info = _get_progress_from_service(dep_map_service)
 
     html_content = _render_journal_html(content)
@@ -559,6 +577,208 @@ def depmap_activity_journal_partial(request: Request, offset: int = 0):
     # Check if analysis is currently running
     is_active = dep_map_service is not None and not dep_map_service.is_available()
     response.headers["X-Journal-Active"] = "1" if is_active else "0"
+    return response
+
+
+def _get_description_scheduler_from_state():
+    """Return the DescriptionRefreshScheduler from app state, or None if unavailable."""
+    try:
+        from code_indexer.server.app import app
+
+        return getattr(app.state, "description_refresh_scheduler", None)
+    except Exception:
+        return None
+
+
+def _backfill_journal_headers_from_service(
+    journal_svc,
+    offset: int,
+) -> dict:
+    """Build the pinned wire-contract response headers from a BackfillJournalService.
+
+    Reads the _status.json sidecar (source of truth) and the activity journal
+    (for new content since *offset*).
+
+    Returns a plain dict with keys:
+      X-Journal-Offset        - new byte offset
+      X-Backfill-Active       - "1" while running or within 30s grace, else "0"
+      X-Backfill-Total        - str(int)
+      X-Backfill-Done         - str(int)
+      X-Backfill-Failed       - str(int)
+      X-Backfill-Completed-At - ISO str or ""
+
+    Never raises — callers should not crash on sidecar absence.
+
+    Args:
+        journal_svc: BackfillJournalService instance (lifecycle or description).
+        offset: Current byte offset for incremental journal reads.
+    """
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    # Read journal content since offset
+    journal_path = journal_svc.journal_path
+    new_offset = offset
+    if journal_path is not None:
+        _content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    # Read sidecar for status fields
+    status = journal_svc.get_status() or {}
+    is_active = journal_svc.is_active()
+
+    total = status.get("total", 0) or 0
+    done = status.get("done", 0) or 0
+    failed = status.get("failed", 0) or 0
+    completed_at = status.get("completed_at") or ""
+
+    return {
+        "X-Journal-Offset": str(new_offset),
+        "X-Backfill-Active": "1" if is_active else "0",
+        "X-Backfill-Total": str(total),
+        "X-Backfill-Done": str(done),
+        "X-Backfill-Failed": str(failed),
+        "X-Backfill-Completed-At": completed_at,
+    }
+
+
+def _lifecycle_backfill_journal_svc():
+    """Return the lifecycle BackfillJournalService from the scheduler, or build a fresh one."""
+    from code_indexer.server.services.backfill_journal_service import (
+        BackfillJournalService,
+    )
+
+    scheduler = _get_description_scheduler_from_state()
+    if scheduler is not None:
+        # Reuse the scheduler's helper to get the canonical path
+        try:
+            return scheduler._init_backfill_journal("lifecycle")
+        except Exception:
+            pass
+    # Fallback: can't surface journal content but avoids 500
+    import tempfile
+
+    return BackfillJournalService(
+        namespace="lifecycle",
+        journal_dir=Path(tempfile.gettempdir()) / "cidx-lifecycle-backfill-journal",
+    )
+
+
+def _description_backfill_journal_svc():
+    """Return the description BackfillJournalService from the scheduler, or build a fresh one."""
+    from code_indexer.server.services.backfill_journal_service import (
+        BackfillJournalService,
+    )
+
+    scheduler = _get_description_scheduler_from_state()
+    if scheduler is not None:
+        try:
+            return scheduler._init_backfill_journal("description")
+        except Exception:
+            pass
+    import tempfile
+
+    return BackfillJournalService(
+        namespace="description",
+        journal_dir=Path(tempfile.gettempdir()) / "cidx-description-backfill-journal",
+    )
+
+
+@dependency_map_router.get(
+    "/partials/lifecycle-backfill-journal", response_class=HTMLResponse
+)
+def lifecycle_backfill_journal_partial(request: Request, offset: int = 0):
+    """
+    HTMX partial for lifecycle backfill incremental journal content (Story #1062).
+
+    GET /admin/partials/lifecycle-backfill-journal?offset=N
+
+    Admin-only. Returns new journal entries since byte offset as HTML.
+    Response headers (always present, source of truth = _status.json sidecar):
+      X-Journal-Offset        - new byte offset for next poll
+      X-Backfill-Active       - "1" while running OR within 30s post-completion grace, else "0"
+      X-Backfill-Total        - integer (0 when no run recorded)
+      X-Backfill-Done         - integer
+      X-Backfill-Failed       - integer
+      X-Backfill-Completed-At - ISO timestamp or "" (empty when still running / never run)
+    Auth: admin session (mirrors depmap-activity-journal). 401 empty body when not admin.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    journal_svc = _lifecycle_backfill_journal_svc()
+
+    # Read journal content since offset for the HTML body
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    journal_path = journal_svc.journal_path
+    content = ""
+    new_offset = offset
+    if journal_path is not None:
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    html_content = _render_journal_html(content)
+    headers = _backfill_journal_headers_from_service(journal_svc, offset)
+    # Override offset since we already read it above
+    headers["X-Journal-Offset"] = str(new_offset)
+
+    response = HTMLResponse(content=html_content)
+    for key, value in headers.items():
+        response.headers[key] = value
+    return response
+
+
+@dependency_map_router.get(
+    "/partials/description-backfill-journal", response_class=HTMLResponse
+)
+def description_backfill_journal_partial(request: Request, offset: int = 0):
+    """
+    HTMX partial for description backfill incremental journal content (Story #1062).
+
+    GET /admin/partials/description-backfill-journal?offset=N
+
+    Admin-only. Returns new journal entries since byte offset as HTML.
+    Response headers (always present, source of truth = _status.json sidecar):
+      X-Journal-Offset        - new byte offset for next poll
+      X-Backfill-Active       - "1" while running OR within 30s post-completion grace, else "0"
+      X-Backfill-Total        - integer (0 when no run recorded)
+      X-Backfill-Done         - integer
+      X-Backfill-Failed       - integer
+      X-Backfill-Completed-At - ISO timestamp or "" (empty when still running / never run)
+    Auth: admin session (mirrors depmap-activity-journal). 401 empty body when not admin.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    journal_svc = _description_backfill_journal_svc()
+
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    journal_path = journal_svc.journal_path
+    content = ""
+    new_offset = offset
+    if journal_path is not None:
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    html_content = _render_journal_html(content)
+    headers = _backfill_journal_headers_from_service(journal_svc, offset)
+    headers["X-Journal-Offset"] = str(new_offset)
+
+    response = HTMLResponse(content=html_content)
+    for key, value in headers.items():
+        response.headers[key] = value
     return response
 
 
@@ -665,9 +885,17 @@ def depmap_job_status_partial(request: Request):
     cache_backend = _get_dashboard_cache_backend()
     tracker = _get_job_tracker()
 
-    # STATE 1: fresh cache available
-    if cache_backend is not None and cache_backend.is_fresh(
-        _DASHBOARD_CACHE_TTL_DEFAULT
+    # Story #1040: detect running analysis (full/delta/refinement) BEFORE state machine.
+    # When analysis is running, skip fresh-cache shortcut and show computing partial
+    # with stop button instead of the idle dashboard.
+    _dep_map_svc = _get_dep_map_service_from_state()
+    _analysis_running = _dep_map_svc is not None and not _dep_map_svc.is_available()
+
+    # STATE 1: fresh cache available (skip if analysis is running)
+    if (
+        not _analysis_running
+        and cache_backend is not None
+        and cache_backend.is_fresh(_DASHBOARD_CACHE_TTL_DEFAULT)
     ):
         cached = cache_backend.get_cached()
         if cached is not None:
@@ -679,32 +907,80 @@ def depmap_job_status_partial(request: Request):
         job = tracker.get_job(job_id) if tracker is not None else None
         if job is not None:
             if job.status == "completed":
-                cached = (
-                    cache_backend.get_cached() if cache_backend is not None else None
-                )
-                if cached is not None:
-                    return _render_complete_response(request, session, cached)
+                if not _analysis_running:
+                    if cache_backend is not None:
+                        cached = cache_backend.get_cached()
+                        if cached is not None:
+                            return _render_complete_response(request, session, cached)
             elif job.status == "failed":
-                error = getattr(job, "error", None) or "Unknown error"
-                return _render_error_response(request, error)
+                if not _analysis_running:
+                    error = getattr(job, "error", None) or "Unknown error"
+                    return _render_error_response(request, error)
             elif job.status in ("running", "pending"):
                 return _render_computing_response(request, job_id, tracker)
 
-    # STATE 3: any in-flight job running (generic, no specific job_id from caller)
+    # STATE 3a: analysis job (full/delta/refinement) is running -- show computing
+    # partial with stop button. Analysis jobs are tracked via SharedJobSentinel,
+    # not the dashboard cache slot.
+    if _analysis_running:
+        _analysis_job_id = "analysis"
+        try:
+            _sentinel_dir = _dep_map_svc.get_sentinel_dir()
+            if _sentinel_dir is not None:
+                from ..services.shared_job_sentinel import SharedJobSentinel
+                from ..services.dependency_map_service import (
+                    ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+
+                _s3a = SharedJobSentinel(
+                    sentinel_dir=Path(_sentinel_dir),
+                    stale_timeout_seconds=ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+                _active = _s3a.read_active("analysis")
+                if _active is not None:
+                    _analysis_job_id = _active.job_id
+        except Exception as _e3a:
+            logger.debug("STATE 3a sentinel read failed: %s", _e3a)
+        return _render_computing_response(request, _analysis_job_id, tracker)
+
+    # STATE 3: any in-flight dashboard job running (check actual job status, not sentinel)
     running_job_id = (
         cache_backend.get_running_job_id(tracker) if cache_backend is not None else None
     )
     if running_job_id:
         return _render_computing_response(request, running_job_id, tracker)
 
-    # STATE 4: no cache, no in-flight job — submit a new background job
+    # STATE 3b: check dashboard SharedJobSentinel for a winner on another node.
+    # If another node holds the "dashboard" sentinel, attach to its job_id and
+    # render the computing partial WITHOUT submitting a new job.
+    _sentinel_dir_db = _get_dep_map_output_dir()
+    if _sentinel_dir_db is not None:
+        try:
+            from ..services.shared_job_sentinel import SharedJobSentinel as _SJS_DB
+
+            _sjs_db = _SJS_DB(
+                sentinel_dir=Path(_sentinel_dir_db),
+                stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
+            )
+            _active_db = _sjs_db.read_active("dashboard")
+            if _active_db is not None:
+                return _render_computing_response(request, _active_db.job_id, tracker)
+        except Exception as _e3b:
+            logger.debug("STATE 3b dashboard sentinel read failed: %s", _e3b)
+
+    # STATE 4: no cache, no in-flight job -- submit a new background dashboard job.
+    # Dashboard jobs are lightweight (~1s) and already have dedup via
+    # cache_backend.claim_job_slot(). SharedJobSentinel is NOT used for dashboard
+    # jobs -- the sentinel was never released after completion, causing permanent
+    # "Processing..." on every subsequent page load (Bug in Story #1035).
     bg_manager = _get_background_job_manager()
     dashboard_service = _get_dashboard_service()
-    new_job_id = _submit_dashboard_job(
+
+    submitted_id = _submit_dashboard_job(
         cache_backend, bg_manager, dashboard_service, tracker
     )
-    if new_job_id:
-        return _render_computing_response(request, new_job_id, tracker)
+    if submitted_id:
+        return _render_computing_response(request, submitted_id, tracker)
 
     # Submission failed: async infrastructure unavailable
     logger.warning(
@@ -1013,12 +1289,24 @@ def depmap_graph_data(request: Request):
 
 def _get_dep_map_output_dir() -> Optional[Path]:
     """
-    Get the dependency map output directory path (Story #342).
+    Get the dependency map output directory path (Story #342, Story #1035 B6).
 
     Returns the path to golden-repos/cidx-meta/dependency-map/ or None
     if the directory does not exist or the config is unavailable.
+
+    Story #1035 B6: Delegates to dep_map_service.get_sentinel_dir() when the
+    service is available so there is a single source of truth for the path.
+    Falls back to config-based derivation when the service is not wired up.
     """
     try:
+        # B6: prefer the service's authoritative path computation
+        dep_map_service = _get_dep_map_service_from_state()
+        if dep_map_service is not None:
+            sentinel_dir: Optional[Path] = dep_map_service.get_sentinel_dir()
+            if sentinel_dir is not None and sentinel_dir.exists():
+                return sentinel_dir
+
+        # Fallback: config-based derivation (used when service not yet wired)
         from ..services.config_service import get_config_service
 
         config_service = get_config_service()
@@ -1337,11 +1625,11 @@ def _run_repair_with_feedback(
     AC3: job registered then delegated to _execute_repair_body (Story #927).
     AC1/AC4/AC5: handled inside _execute_repair_body.
     """
-    import uuid as _uuid
 
     # AC2: Initialize journal in a repair-specific directory
+    # Bug #1041: journal_dir may be None when dep_map_service is unavailable
     journal_dir = _get_repair_journal_dir()
-    if activity_journal is not None:
+    if activity_journal is not None and journal_dir is not None:
         try:
             journal_dir.mkdir(parents=True, exist_ok=True)
             activity_journal.init(journal_dir)
@@ -1437,10 +1725,7 @@ def trigger_dependency_map_repair(request: Request):
     thread = threading.Thread(target=_run_repair, daemon=True)
     thread.start()
 
-    return JSONResponse(
-        content={"success": True, "message": "Repair analysis triggered"},
-        status_code=202,
-    )
+    return JSONResponse(content={"success": True}, status_code=202)
 
 
 @dependency_map_router.post(
@@ -1486,41 +1771,163 @@ def trigger_dependency_map(
             status_code=503,
         )
 
-    # Pre-flight check: prevent concurrent run start using is_available()
+    # Story #1035 — B2/B3: pre-flight sentinel check; on conflict, include
+    # active job_id from the shared sentinel in the 409 body.
     if not dep_map_service.is_available():
+        sentinel_dir_pf = dep_map_service.get_sentinel_dir()
+        active_job_id_pf: str = "unknown"
+        if isinstance(sentinel_dir_pf, (str, Path)):
+            from code_indexer.server.services.shared_job_sentinel import (
+                SharedJobSentinel as _SharedJobSentinel,
+            )
+            from code_indexer.server.services.dependency_map_service import (
+                ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_PF,
+            )
+
+            _sentinel_pf = _SharedJobSentinel(
+                sentinel_dir=Path(sentinel_dir_pf),
+                stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_PF,
+            )
+            _active_pf = _sentinel_pf.read_active("analysis")
+            if _active_pf is not None:
+                active_job_id_pf = _active_pf.job_id
         return JSONResponse(
-            content={"error": "Analysis already in progress"},
+            content={
+                "error": "already in progress",
+                "job_id": active_job_id_pf,
+                "mode": mode,
+            },
             status_code=409,
         )
+
+    # Story #1035 — B3: synchronous sentinel claim BEFORE spawning the thread.
+    # Catches TOCTOU window between is_available() and the actual claim.
+    job_id = (
+        f"dep-map-{mode}-{_uuid.uuid4().hex[:8]}-{int(_dt.now(_tz.utc).timestamp())}"
+    )
+    pre_claimed = False
+    sentinel_obj: Optional["SharedJobSentinel"] = None
+    sentinel_dir_sc = dep_map_service.get_sentinel_dir()
+    if isinstance(sentinel_dir_sc, (str, Path)):
+        from code_indexer.server.services.shared_job_sentinel import (
+            SharedJobSentinel as _SharedJobSentinel_SC,
+        )
+        from code_indexer.server.services.dependency_map_service import (
+            ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+        )
+
+        sentinel_obj = _SharedJobSentinel_SC(
+            sentinel_dir=Path(sentinel_dir_sc),
+            stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+        )
+        _node_id_sc = dep_map_service._get_node_id()
+        _claim_sc = sentinel_obj.try_claim("analysis", job_id, _node_id_sc)
+        if not _claim_sc.success:
+            winner_job_id = (
+                _claim_sc.active.job_id if _claim_sc.active is not None else "unknown"
+            )
+            return JSONResponse(
+                content={
+                    "error": "already in progress",
+                    "job_id": winner_job_id,
+                    "mode": mode,
+                },
+                status_code=409,
+            )
+        pre_claimed = True
 
     if mode == "full":
 
         def _run_full():
+            from code_indexer.server.services.dependency_map_service import (
+                AnalysisAlreadyRunningError,
+            )
+            from code_indexer.server.services.job_tracker import DuplicateJobError
+
             try:
-                dep_map_service.run_full_analysis()
+                dep_map_service.run_full_analysis(
+                    job_id=job_id, pre_claimed=pre_claimed
+                )
+            except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
+                logger.info("Background full analysis skipped (duplicate): %s", e)
             except Exception as e:
                 logger.error("Background full analysis failed: %s", e)
 
-        thread = threading.Thread(target=_run_full, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_full, daemon=True)
+            thread.start()
+        except Exception:
+            # N1: release sentinel if thread spawn fails
+            if pre_claimed and sentinel_obj is not None:
+                sentinel_obj.release("analysis", expected_job_id=job_id)
+            raise
         return JSONResponse(
-            content={"success": True, "message": "Full analysis triggered"},
+            content={"success": True, "job_id": job_id, "mode": mode},
             status_code=202,
         )
     else:  # delta
 
         def _run_delta():
+            from code_indexer.server.services.dependency_map_service import (
+                AnalysisAlreadyRunningError,
+            )
+            from code_indexer.server.services.job_tracker import DuplicateJobError
+
             try:
-                dep_map_service.run_delta_analysis()
+                dep_map_service.run_delta_analysis(
+                    job_id=job_id, pre_claimed=pre_claimed
+                )
+            except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
+                logger.info("Background delta analysis skipped (duplicate): %s", e)
             except Exception as e:
                 logger.error("Background delta analysis failed: %s", e)
 
-        thread = threading.Thread(target=_run_delta, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_delta, daemon=True)
+            thread.start()
+        except Exception:
+            # N1: release sentinel if thread spawn fails
+            if pre_claimed and sentinel_obj is not None:
+                sentinel_obj.release("analysis", expected_job_id=job_id)
+            raise
         return JSONResponse(
-            content={"success": True, "message": "Delta refresh triggered"},
+            content={"success": True, "job_id": job_id, "mode": mode},
             status_code=202,
         )
+
+
+@dependency_map_router.post(
+    "/dependency-map/cancel",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def cancel_dependency_map_analysis(request: Request):
+    """
+    Cancel a running dependency map analysis (Story #1040).
+
+    POST /admin/dependency-map/cancel
+
+    Admin-only. Sends a cancellation signal to any running full or delta analysis.
+    Returns immediately — the running analysis will stop at the next domain iteration.
+    No MCP tool is provided; this endpoint is REST-only.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            content={"error": "Admin access required"},
+            status_code=401,
+        )
+
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is None:
+        return JSONResponse(
+            content={
+                "error": "Dependency map service not available (disabled or not initialized)"
+            },
+            status_code=503,
+        )
+
+    result = dep_map_service.cancel_running_analysis()
+    return JSONResponse(content=result, status_code=200)
 
 
 @dependency_map_router.post(
@@ -1536,7 +1943,6 @@ def trigger_refinement(request: Request):
     Admin-only. Returns JSON with success or error.
     Refinement runs in a background daemon thread with job tracking.
     """
-    import uuid as _uuid
 
     session = _require_admin_session(request)
     if not session:
@@ -1571,7 +1977,4 @@ def trigger_refinement(request: Request):
     thread = threading.Thread(target=_run_refinement, daemon=True)
     thread.start()
 
-    return JSONResponse(
-        content={"success": True, "message": "Refinement triggered", "job_id": job_id},
-        status_code=202,
-    )
+    return JSONResponse(content={"success": True, "job_id": job_id}, status_code=202)

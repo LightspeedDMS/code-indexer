@@ -153,7 +153,7 @@ def test_hardcoded_credential_scanner_python() -> None:
     evaluator = (
         "return ("
         "len(node.named_children) > 1"
-        " and bool(node.named_children[1].text.strip('\"').strip(\"'\"))"
+        " and len(node.named_children[1].text.strip('\"').strip(\"'\")) > 0"
         " and not node.named_children[1].text.strip('\"').strip(\"'\").startswith('<')"
         " and 'test' not in node.named_children[0].text.lower()"
         ")"

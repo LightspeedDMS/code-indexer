@@ -176,3 +176,38 @@ class TestRelativeTimeFilter:
         # Act & Assert
         with pytest.raises(ValueError):
             relative_time(invalid_timestamp)
+
+    def test_relative_time_with_datetime_object_minutes_ago(self):
+        """Test: Accepts timezone-aware datetime object (PG native type) without crashing."""
+        # Arrange: PG returns datetime objects, not strings
+        now = datetime.now(timezone.utc)
+        dt_input = now - timedelta(minutes=5)
+
+        # Act
+        result = relative_time(dt_input)
+
+        # Assert
+        assert result == "5 minutes ago"
+
+    def test_relative_time_with_naive_datetime_object(self):
+        """Test: Accepts naive datetime object (no tzinfo) - treated as UTC."""
+        # Arrange: PG may return naive datetimes for some timestamp columns
+        now = datetime.now(timezone.utc)
+        naive_dt = (now - timedelta(hours=2)).replace(tzinfo=None)
+
+        # Act
+        result = relative_time(naive_dt)
+
+        # Assert
+        assert result == "2 hours ago"
+
+    def test_relative_time_with_datetime_object_old_timestamp(self):
+        """Test: Datetime object older than 24h produces absolute format."""
+        # Arrange
+        dt_input = datetime(2026, 1, 10, 8, 30, 0, tzinfo=timezone.utc)
+
+        # Act
+        result = relative_time(dt_input)
+
+        # Assert: should be absolute format since it's old
+        assert result == "Jan 10, 08:30"

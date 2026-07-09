@@ -209,3 +209,52 @@ class TestServerConfigManagerBackgroundJobsValidation:
 
         with pytest.raises(ValueError, match="max_concurrent_background_jobs"):
             config_manager.validate_config(config)
+
+
+class TestBackgroundJobsConfigUnknownKeyHardening:
+    """Tests for Bug #1064-style unknown-key resilience in BackgroundJobsConfig loading.
+
+    Ensures that a config.json written by a future or past server version with
+    extra/removed fields inside background_jobs_config loads cleanly instead of
+    crashing with TypeError: __init__() got an unexpected keyword argument.
+    """
+
+    def test_background_jobs_config_unknown_key_loads_without_raising(self, tmp_path):
+        """AC: background_jobs_config dict with an unknown key must load without TypeError.
+
+        This is the RED test — it fails against the current unfiltered
+        BackgroundJobsConfig(**config_dict["background_jobs_config"]) construction.
+        After applying the same unknown-key filter used for top-level ServerConfig,
+        it must pass with known fields applied correctly.
+        """
+        config_data = {
+            "server_dir": str(tmp_path),
+            "background_jobs_config": {
+                "max_concurrent_background_jobs": 7,
+                "totally_unknown_future_field": "should_be_ignored",
+            },
+        }
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps(config_data))
+
+        config_manager = ServerConfigManager(str(tmp_path))
+        # Must not raise TypeError
+        config = config_manager.load_config()
+
+        assert config.background_jobs_config.max_concurrent_background_jobs == 7
+
+    def test_max_concurrent_refresh_jobs_survives_save_reload_roundtrip(self, tmp_path):
+        """AC: max_concurrent_refresh_jobs set explicitly must survive save→reload.
+
+        This field was added in Bug #1063; verifying it is not silently dropped
+        on round-trip (i.e., it is a known field and is not stripped by the filter).
+        """
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+
+        config.background_jobs_config.max_concurrent_refresh_jobs = 4
+        config_manager.save_config(config)
+
+        loaded = config_manager.load_config()
+        assert loaded.background_jobs_config.max_concurrent_refresh_jobs == 4

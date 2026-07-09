@@ -541,7 +541,14 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_notification_request_without_id(self):
-        """Test notification (request without id) is processed."""
+        """Test internal process_jsonrpc_request() handles notification (no id) without error.
+
+        This tests the internal function only — it still returns a JSON-RPC dict.
+        The HTTP route handler (mcp_endpoint) is responsible for translating that
+        to HTTP 202 with no body per the MCP Streamable HTTP transport spec.
+        See TestStreamableHTTPTransport.test_post_mcp_notification_returns_202 for
+        the HTTP-layer behavior.
+        """
         user = User(
             username="test",
             password_hash="hashed_password",
@@ -552,7 +559,8 @@ class TestEdgeCases:
 
         response = await process_jsonrpc_request(request, user)
 
-        # Notification should still return response for Phase 1
+        # Internal function returns a JSON-RPC dict regardless of notification/request.
+        # HTTP 202 translation happens at the route handler level, not here.
         assert "jsonrpc" in response
 
     @pytest.mark.asyncio
@@ -625,7 +633,7 @@ class TestInitializeMethod:
         # Result must contain required fields per MCP spec
         result = response["result"]
         assert "protocolVersion" in result
-        assert result["protocolVersion"] == "2025-06-18"
+        assert result["protocolVersion"] == "2024-11-05"
         assert "capabilities" in result
         assert "serverInfo" in result
 
@@ -658,52 +666,127 @@ class TestInitializeMethod:
         result = response["result"]
         assert "tools" in result["capabilities"]
 
+    @pytest.mark.asyncio
+    async def test_initialize_negotiates_client_protocol_version(self):
+        """Client sends 2025-03-26; server must echo it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "rmcp", "version": "0.1.0"},
+            },
+            "id": "init-neg-1",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["jsonrpc"] == "2.0"
+        assert "result" in response
+        assert response["result"]["protocolVersion"] == "2025-03-26"
+
+    @pytest.mark.asyncio
+    async def test_initialize_negotiates_latest_version(self):
+        """Client sends 2025-06-18; server echoes it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+            },
+            "id": "init-neg-2",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_unknown_version_returns_latest(self):
+        """Client sends unknown version 9999-01-01; server returns latest 2025-06-18."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "9999-01-01",
+                "capabilities": {},
+            },
+            "id": "init-neg-3",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_missing_version_returns_latest(self):
+        """Client sends no protocolVersion; server returns latest 2025-06-18."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+            },
+            "id": "init-neg-4",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_legacy_version_supported(self):
+        """Client sends legacy 2024-11-05; server echoes it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+            },
+            "id": "init-neg-5",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2024-11-05"
+
 
 @pytest.mark.slow
 class TestStreamableHTTPTransport:
     """Test Streamable HTTP transport features (GET, DELETE, Mcp-Session-Id)."""
-
-    @pytest.mark.skip(
-        reason="Hangs indefinitely - TestClient blocks on infinite SSE stream"
-    )
-    @pytest.mark.slow
-    def test_get_mcp_returns_sse_stream_with_auth(self):
-        """Test GET /mcp returns SSE event stream when authenticated.
-
-        Marked as slow because TestClient blocks on SSE stream consumption.
-        """
-        from fastapi.testclient import TestClient
-        from code_indexer.server.app import create_app
-        from code_indexer.server.auth.user_manager import User, UserRole
-        from code_indexer.server.mcp.protocol import get_optional_user
-        import datetime
-
-        app = create_app()
-
-        # Mock authentication using dependency override
-        test_user = User(
-            username="test_user",
-            password_hash="hashed",
-            role=UserRole.POWER_USER,
-            created_at=datetime.datetime.now(),
-        )
-
-        app.dependency_overrides[get_optional_user] = lambda: test_user
-        client = TestClient(app)
-
-        try:
-            # GET /mcp with auth should return SSE stream
-            response = client.get("/mcp", headers={"Accept": "text/event-stream"})
-
-            # Should return 200 with SSE content-type
-            assert response.status_code == 200, (
-                f"Expected 200, got {response.status_code}"
-            )
-            assert "text/event-stream" in response.headers.get("content-type", ""), (
-                f"Expected SSE content-type, got {response.headers.get('content-type')}"
-            )
-        finally:
-            app.dependency_overrides.clear()
 
     def test_get_mcp_requires_authentication(self):
         """Test GET /mcp returns 401 Unauthorized for unauthenticated requests per MCP spec."""
@@ -848,3 +931,131 @@ class TestStreamableHTTPTransport:
         assert "www-authenticate" in response.headers, (
             "Expected WWW-Authenticate header for invalid token"
         )
+
+    def test_post_mcp_notification_returns_202(self):
+        """Test POST /mcp with notification (no id) returns HTTP 202 with empty body.
+
+        MCP Streamable HTTP transport spec requires notifications to return
+        HTTP 202 Accepted with no body. This is what rmcp (Codex Rust client)
+        expects during handshake when it sends notifications/initialized.
+        """
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC notification: no "id" field
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for notification, got {response.status_code}. "
+                "MCP Streamable HTTP spec requires 202 with no body for notifications."
+            )
+            assert response.content == b"", (
+                f"Expected empty body for notification 202, got: {response.content!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_regular_request_returns_200(self):
+        """Test POST /mcp with regular request (has id) returns HTTP 200 with JSON-RPC body."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC request: has "id" field
+            request_body = {"jsonrpc": "2.0", "method": "tools/list", "id": "req-1"}
+            response = client.post("/mcp", json=request_body)
+
+            assert response.status_code == 200, (
+                f"Expected HTTP 200 for regular request, got {response.status_code}"
+            )
+            body = response.json()
+            assert "jsonrpc" in body, (
+                f"Expected JSON-RPC body for regular request, got: {body}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_public_notification_returns_202(self):
+        """Test POST /mcp-public with notification (no id) returns HTTP 202 with empty body."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+
+        app = create_app()
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC notification: no "id" field
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp-public", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for mcp-public notification, got {response.status_code}. "
+                "MCP Streamable HTTP spec requires 202 with no body for notifications."
+            )
+            assert response.content == b"", (
+                f"Expected empty body for mcp-public notification 202, got: {response.content!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_notification_202_has_session_id_header(self):
+        """Test POST /mcp notification 202 response includes Mcp-Session-Id header."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for notification, got {response.status_code}"
+            )
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header on 202 response, "
+                f"got headers: {list(response.headers.keys())}"
+            )
+            session_id = response.headers["mcp-session-id"]
+            assert len(session_id) > 0, "Session ID must not be empty"
+        finally:
+            app.dependency_overrides.clear()

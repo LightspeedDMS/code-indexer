@@ -127,7 +127,7 @@ class TestAstSearchEngineParse:
 
 
 class TestAstSearchEngineLanguages:
-    """parse() works for all 10 mandatory languages using real fixture files."""
+    """parse() works for all 12 mandatory languages using real fixture files."""
 
     def _parse_fixture(self, lang: str, fixture_name: str) -> None:
         """Parse a fixture file and assert the root is a valid XRayNode."""
@@ -175,6 +175,12 @@ class TestAstSearchEngineLanguages:
 
     def test_parse_css_smoke(self) -> None:
         self._parse_fixture("css", "smoke")
+
+    def test_parse_c_smoke(self) -> None:
+        self._parse_fixture("c", "smoke")
+
+    def test_parse_cpp_smoke(self) -> None:
+        self._parse_fixture("cpp", "smoke")
 
 
 class TestAstSearchEngineDetectLanguage:
@@ -227,6 +233,18 @@ class TestAstSearchEngineDetectLanguage:
     def test_detect_css(self) -> None:
         engine = _make_engine()
         assert engine.detect_language(Path("styles.css")) == "css"
+
+    def test_detect_c(self) -> None:
+        engine = _make_engine()
+        assert engine.detect_language(Path("main.c")) == "c"
+        assert engine.detect_language(Path("header.h")) == "c"
+
+    def test_detect_cpp(self) -> None:
+        engine = _make_engine()
+        assert engine.detect_language(Path("main.cpp")) == "cpp"
+        assert engine.detect_language(Path("main.cc")) == "cpp"
+        assert engine.detect_language(Path("main.cxx")) == "cpp"
+        assert engine.detect_language(Path("main.hpp")) == "cpp"
 
     def test_detect_uppercase_extension(self) -> None:
         """Extension detection is case-insensitive."""

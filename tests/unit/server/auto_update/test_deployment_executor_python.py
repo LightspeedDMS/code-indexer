@@ -308,9 +308,15 @@ class TestPipInstallUsesServerPython:
             executor, "_get_server_python", return_value=server_python
         ) as mock_get_python:
             with patch("subprocess.run") as mock_run:
+                # Bug #1234: pip_install() probes pip --version before installing.
+                # Bug #1245: pip_install() now also probes _is_user_install first.
+                # Call order:
+                #   [0] _is_user_install probe  (import code_indexer; print(__file__))
+                #   [1] pip --version probe  (returns pip version to decide flag)
+                #   [2] pip install          (the actual install)
                 mock_run.return_value = Mock(
                     returncode=0,
-                    stdout="Successfully installed code-indexer",
+                    stdout="pip 23.1 from /usr/local/lib/python3/dist-packages/pip (python 3.9)\n",
                     stderr="",
                 )
 
@@ -319,14 +325,25 @@ class TestPipInstallUsesServerPython:
         assert result is True
         mock_get_python.assert_called_once()
 
-        # Verify subprocess.run was called with sudo and server Python
-        # Uses sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+        # Verify subprocess.run was called three times:
+        # _is_user_install probe + pip --version probe + pip install
         calls = mock_run.call_args_list
-        assert len(calls) == 1
-        call_args = calls[0][0][0]
-        assert call_args[0] == "sudo"
-        assert call_args[1] == server_python
-        assert call_args[2:] == [
+        assert len(calls) == 3
+
+        # [2] is the actual pip install — verify it uses sudo + env TMPDIR + server python
+        # Bug #1243: command is now ["sudo", "env", "TMPDIR=<dir>", python, "-m", "pip", ...]
+        pip_install_args = calls[2][0][0]
+        assert pip_install_args[0] == "sudo"
+        assert pip_install_args[1] == "env", (
+            "Bug #1243: 'env' must appear at position 1 to pass TMPDIR through sudo"
+        )
+        assert pip_install_args[2].startswith("TMPDIR="), (
+            "Bug #1243: TMPDIR=<path> must appear at position 2"
+        )
+        assert pip_install_args[3] == server_python, (
+            "Server python must appear at position 3 (after sudo env TMPDIR=)"
+        )
+        assert pip_install_args[4:] == [
             "-m",
             "pip",
             "install",
@@ -359,7 +376,7 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
     @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
     @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
@@ -367,8 +384,10 @@ class TestExecuteCallsEnsureAutoUpdater:
         DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
     def test_execute_calls_ensure_auto_updater(
         self,
+        mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,
         mock_git_submodule,
@@ -395,7 +414,7 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
     @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
     @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
@@ -403,8 +422,10 @@ class TestExecuteCallsEnsureAutoUpdater:
         DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
     def test_execute_continues_on_ensure_auto_updater_failure(
         self,
+        mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,
         mock_git_submodule,

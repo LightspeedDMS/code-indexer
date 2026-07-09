@@ -239,20 +239,56 @@ class UsersPostgresBackend:
         key_hash: str,
         key_prefix: str,
         name: Optional[str] = None,
+        key_sha256: Optional[str] = None,
     ) -> None:
-        """Add an API key for a user."""
+        """Add an API key for a user.
+
+        key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+            (Bug #1144). None for legacy callers that don't supply it.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         with self._pool.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO user_api_keys
-                    (key_id, username, key_hash, key_prefix, name, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (key_id, username, key_hash, key_prefix, name, created_at, key_sha256)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (key_id, username, key_hash, key_prefix, name, now),
+                (key_id, username, key_hash, key_prefix, name, now, key_sha256),
             )
             conn.commit()
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed SELECT — never scans all rows. Returns None when not found
+        (including legacy rows with NULL key_sha256).
+
+        NEVER cached — must be a live DB read so revocation takes effect immediately.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT key_id, username, key_hash, key_prefix, name, created_at
+                FROM user_api_keys
+                WHERE key_sha256 = %s
+                """,
+                (sha256_hex,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        return sanitize_row(
+            {
+                "key_id": row[0],
+                "username": row[1],
+                "key_hash": row[2],
+                "key_prefix": row[3],
+                "name": row[4],
+                "created_at": row[5],
+            }
+        )
 
     def delete_api_key(self, username: str, key_id: str) -> bool:
         """Delete an API key for a user."""
@@ -351,15 +387,17 @@ class UsersPostgresBackend:
             ).fetchall()
 
         return [
-            {
-                "username": r[0],
-                "credential_id": r[1],
-                "client_id": r[2],
-                "client_id_prefix": r[3],
-                "name": r[4],
-                "created_at": r[5],
-                "last_used_at": r[6],
-            }
+            sanitize_row(
+                {
+                    "username": r[0],
+                    "credential_id": r[1],
+                    "client_id": r[2],
+                    "client_id_prefix": r[3],
+                    "name": r[4],
+                    "created_at": r[5],
+                    "last_used_at": r[6],
+                }
+            )
             for r in rows
         ]
 
@@ -377,16 +415,18 @@ class UsersPostgresBackend:
             ).fetchall()
 
         return [
-            {
-                "credential_id": r[0],
-                "client_id": r[1],
-                "client_id_prefix": r[2],
-                "name": r[3],
-                "created_at": r[4],
-                "last_used_at": r[5],
-                "owner": "admin (system)",
-                "is_system": True,
-            }
+            sanitize_row(
+                {
+                    "credential_id": r[0],
+                    "client_id": r[1],
+                    "client_id_prefix": r[2],
+                    "name": r[3],
+                    "created_at": r[4],
+                    "last_used_at": r[5],
+                    "owner": "admin (system)",
+                    "is_system": True,
+                }
+            )
             for r in rows
         ]
 
@@ -414,15 +454,17 @@ class UsersPostgresBackend:
             return None
 
         username = row[0]
-        credential = {
-            "credential_id": row[1],
-            "client_id": row[2],
-            "client_secret_hash": row[3],
-            "client_id_prefix": row[4],
-            "name": row[5],
-            "created_at": row[6],
-            "last_used_at": row[7],
-        }
+        credential = sanitize_row(
+            {
+                "credential_id": row[1],
+                "client_id": row[2],
+                "client_secret_hash": row[3],
+                "client_id_prefix": row[4],
+                "name": row[5],
+                "created_at": row[6],
+                "last_used_at": row[7],
+            }
+        )
         return (username, credential)
 
     # ------------------------------------------------------------------

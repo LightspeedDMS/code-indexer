@@ -9,12 +9,27 @@ to avoid behavioral changes during extraction.  Refactoring is tracked
 separately.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+# Story #1293: WIRED correlation_id reader. The previous import
+# (code_indexer.server.middleware.correlation.get_correlation_id) reads a
+# ContextVar whose CorrelationContextMiddleware is NEVER registered in
+# startup/app_wiring.py -- only telemetry.correlation_bridge's
+# CorrelationBridgeMiddleware is -- so that reader always returned None in
+# production and every search_event_log / search_embed_event row emitted
+# from this module silently carried correlation_id=None.
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import asyncio
 import logging
+import socket
 import time
-from typing import Dict, Any, List, Optional, cast
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.search_event_log_writer import (
+        SearchEventLogWriter,
+    )
 from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
@@ -22,6 +37,12 @@ from . import _utils
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.search_event_context import (
+    SearchEventContext,
+    _search_event_ctx,
+)
+from code_indexer.server.services.search_event_log_writer import SearchEventRecord
+from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.mcp.memory_retrieval_pipeline import (
     MemoryRetrievalPipeline,
@@ -46,6 +67,7 @@ from ._utils import (
     _is_temporal_query,
     _get_temporal_status,
     _expand_wildcard_patterns,
+    _has_wildcard,
     _enforce_repo_count_cap,
     _get_query_tracker,
     _get_access_filtering_service,
@@ -73,6 +95,24 @@ _CIDX_META_DIR_NAME = "cidx-meta"
 # Bug #881 Phase 1: query_text is truncated to this length in INFO logs to avoid
 # logging potentially large or sensitive query strings at INFO level.
 _QUERY_LOG_TRUNCATION_LIMIT = 100
+
+# Issue #1159 spec A8: query_text stored in SearchEventRecord is capped at 500 codepoints.
+_QUERY_TEXT_MAX_CODEPOINTS = 500
+
+
+def _get_search_event_writer() -> "Optional[SearchEventLogWriter]":
+    """Return the SearchEventLogWriter from app state, or None if unavailable.
+
+    Issue #1159: reads app_module.app.state.search_event_log_writer so tests
+    can monkeypatch this function directly without touching app state.
+    Uses stepwise getattr so attribute-access errors on missing state do not
+    propagate and do not silence unrelated failures.
+    """
+    state = getattr(getattr(_utils.app_module, "app", None), "state", None)
+    if state is None:
+        return None
+    return getattr(state, "search_event_log_writer", None)
+
 
 # Bug #881 Phase 1: max number of expanded aliases shown in the omni post-expansion log.
 _OMNI_LOG_MAX_ALIASES_SHOWN = 10
@@ -123,14 +163,46 @@ def _filter_errors_for_user(errors: dict, user: User) -> dict:
 
 def _apply_search_truncation(
     results: list, search_mode: str, params: Dict[str, Any]
-) -> list:
-    """Apply payload truncation based on search mode."""
+) -> Tuple[list, Dict[str, Any]]:
+    """Apply payload truncation based on search mode.
+
+    Returns:
+        (results, meta) 2-tuple.  For fts/hybrid modes, meta contains:
+          - preview_size_chars: int  -- threshold from payload_cache config
+          - rows_capped: int         -- rows where at least one field was truncated
+        For non-fts/hybrid modes, meta is an empty dict {}.
+        When payload_cache is not configured, meta is an empty dict for fts/hybrid too.
+
+    AC4 (Bug #1202): meta is injected into query_metadata by callers so the
+    MCP consumer can see how many rows were truncated and at what threshold.
+    """
     if search_mode in ["fts", "hybrid"]:
-        return _apply_fts_payload_truncation(results)
+        truncated = _apply_fts_payload_truncation(results)
+        # Build meta only when a payload_cache is active.  _apply_fts_payload_truncation
+        # returns the original list unchanged when there is no cache, so rows_capped
+        # would be 0 anyway -- return empty meta to avoid surfacing a misleading 0.
+        payload_cache = getattr(
+            getattr(_utils.app_module.app, "state", None), "payload_cache", None
+        )
+        if payload_cache is None:
+            logger.debug(
+                "AC4 fts truncation meta: payload_cache not configured, skipping meta"
+            )
+            return truncated, {}
+        rows_capped = sum(
+            1
+            for r in truncated
+            if r.get("snippet_has_more") or r.get("match_text_has_more")
+        )
+        meta: Dict[str, Any] = {
+            "preview_size_chars": payload_cache.config.preview_size_chars,
+            "rows_capped": rows_capped,
+        }
+        return truncated, meta
     elif _is_temporal_query(params):
-        return _apply_temporal_payload_truncation(results)
+        return _apply_temporal_payload_truncation(results), {}
     else:
-        return _apply_payload_truncation(results)
+        return _apply_payload_truncation(results), {}
 
 
 def _resolve_search_type(params: Dict[str, Any], user: User) -> str:
@@ -197,7 +269,7 @@ def _build_multi_search_request(
     """
     from ...multi.models import MultiSearchRequest
 
-    return MultiSearchRequest(  # type: ignore[arg-type]  # search_type validated to Literal values by _resolve_search_type
+    return MultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; precomputed_query_vector has default None but exclude=True confuses mypy
         repositories=repo_aliases,
         query=params.get("query_text", ""),
         search_type=search_type,  # type: ignore[arg-type]
@@ -212,6 +284,8 @@ def _build_multi_search_request(
         exclude_language=params.get("exclude_language"),
         exclude_path=params.get("exclude_path"),
         accuracy=params.get("accuracy", "balanced"),
+        no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 
@@ -290,9 +364,16 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Story #36: Uses MultiSearchService for parallel execution.
     Story #51: Synchronous for FastAPI thread pool execution.
     """
-    from ...routes.multi_query_routes import get_multi_search_service
+    from ...multi.multi_search_config import MultiSearchConfig
+    from ...multi.multi_search_service import MultiSearchService
 
-    repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
+    # Bug #1287 Defect B: search_mode is needed BEFORE wildcard expansion so
+    # the internal cidx-meta* bookkeeping repo(s) can be excluded from
+    # fts/hybrid wildcard fan-out (they have no FTS index by design).
+    search_mode = params.get("search_mode", "semantic")
+    repo_aliases = _expand_wildcard_patterns(
+        params.get("repository_alias", []), user, search_mode=search_mode
+    )
     if isinstance(repo_aliases, CapBreach):
         return cap_breach_response(repo_aliases)
     # Bug #894: enforce total fan-out cap after wildcard expansion + literal union
@@ -315,7 +396,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if _elided > 0
         else repr(_aliases_preview)
     )
-    logger.info(
+    # py-spy logging-lock fix (follow-up to Bug #1078): demoted from INFO to
+    # DEBUG so this per-query audit line no longer acquires the logging handler
+    # lock on the hot path at default log levels (operators can re-enable via
+    # DEBUG when diagnosing fan-out expansion).
+    logger.debug(
         f"_omni_search_code post-expansion: user={user.username!r} "
         f"correlation_id={get_correlation_id()!r} "
         f"expanded_count={len(repo_aliases)} "
@@ -329,10 +414,33 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repo_aliases, params, search_type, effective_limit
     )
 
-    # C6 Phase 3: use the shared multi-search singleton (ownership-injected at
-    # startup) so MCP omni caches repos this node owns, consistent with the REST
-    # /api/query/multi path. Also avoids building a new thread pool per call.
-    service = get_multi_search_service()
+    # Story #1148 PART 1: For semantic omni searches, compute the query embedding
+    # ONCE here (via the same VoyageAI chokepoint used by _search_activated_repo)
+    # and thread it into every per-repo call as precomputed_query_vector.
+    # Defect #1148 fix: _compute_shared_query_vector now returns (vector, digest).
+    # The digest is set on the request so _search_semantic_sync can verify that
+    # each repo's own embedding-service config matches before reusing the vector.
+    # Repos on a different provider config (e.g. Cohere embed-v4.0 vs Voyage 1024)
+    # receive precomputed_query_vector=None and embed via their own chokepoint.
+    # On failure: WARNING is logged by _compute_shared_query_vector (Messi #13);
+    # no precomputed vector is set so each repo embeds independently (explicit fallback).
+    if search_type == "semantic" and repo_aliases:
+        query_text = params.get("query_text", "") or ""
+        if query_text:
+            _omni_vec, _omni_digest = _compute_shared_query_vector(
+                str(query_text),
+                no_embedding_cache_shortcut=params.get(
+                    "no_embedding_cache_shortcut", False
+                ),
+            )
+            if _omni_vec:
+                request.precomputed_query_vector = _omni_vec
+                request.precomputed_query_vector_digest = _omni_digest
+
+    config = MultiSearchConfig.from_config(get_config_service())
+    from ...app import _server_hnsw_cache as _hnsw_cache
+
+    service = MultiSearchService.get_instance(config, hnsw_index_cache=_hnsw_cache)
     try:
         response = service.search(request)
     except Exception as e:
@@ -355,9 +463,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     response_format = params.get(
         "response_format", "grouped" if len(repo_aliases) > 1 else "flat"
     )
-    search_mode = params.get("search_mode", "semantic")
+    fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
-        final_results = _apply_search_truncation(final_results, search_mode, params)
+        final_results, fts_truncation_meta = _apply_search_truncation(
+            final_results, search_mode, params
+        )
 
     access_filtering_service = _get_access_filtering_service()
     if access_filtering_service:
@@ -373,6 +483,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         errors=errors,
         cursor="",
     )
+
+    # AC4 (Bug #1202): surface fts truncation metadata in omni response.
+    if fts_truncation_meta:
+        omni_qm = formatted.setdefault("query_metadata", {})
+        omni_qm.update(fts_truncation_meta)
 
     if _is_temporal_query(params):
         temporal_status = _get_temporal_status(repo_aliases)
@@ -435,7 +550,9 @@ def _apply_rerank_and_filter(
 ) -> tuple:
     """Apply reranking, truncation, and access filtering to search results.
 
-    Returns (filtered_results, rerank_meta).
+    Returns (filtered_results, rerank_meta) where rerank_meta is the dict from
+    _apply_reranking_sync, optionally enriched with AC4 fts truncation keys
+    (preview_size_chars, rows_capped) when search_mode is fts or hybrid.
     """
     rerank_query = params.get("rerank_query")
     rerank_instruction = params.get("rerank_instruction")
@@ -443,13 +560,18 @@ def _apply_rerank_and_filter(
         results=results,
         rerank_query=rerank_query,
         rerank_instruction=rerank_instruction,
-        content_extractor=lambda r: r.get("content", "") or r.get("code_snippet", ""),
+        content_extractor=_mcp_reranking.extract_rerank_document,
         requested_limit=requested_limit,
         config_service=get_config_service(),
     )
 
     search_mode = params.get("search_mode", "semantic")
-    results = _apply_search_truncation(results, search_mode, params)
+    results, fts_truncation_meta = _apply_search_truncation(
+        results, search_mode, params
+    )
+    # AC4 (Bug #1202): surface fts truncation metadata alongside rerank meta.
+    if fts_truncation_meta:
+        rerank_meta.update(fts_truncation_meta)
 
     access_filtering_service = _get_access_filtering_service()
     if access_filtering_service:
@@ -467,13 +589,27 @@ def _apply_rerank_and_filter(
 _MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
 
 
-def _compute_memory_query_vector(query_text: str) -> List[float]:
+def _compute_memory_query_vector(
+    query_text: str,
+    no_embedding_cache_shortcut: bool = False,
+) -> List[float]:
     """Compute a Voyage embedding for query_text using VoyageAIClient.
 
     Uses VoyageAIClient(VoyageAIConfig()) which picks up VOYAGE_API_KEY from
     the environment — the same provider and key used by code search internally.
     This is called once per request and the vector is shared with memory
     retrieval (GAP 1: zero duplicate Voyage API calls).
+
+    Bug #1078: the HTTP call is gated through ProviderConcurrencyGovernor so
+    memory-retrieval embeddings do not bypass the per-budget concurrency cap.
+
+    Bug #899 (fault-injection factory wired here): previously VoyageAIClient was
+    constructed without an http_client_factory, bypassing fault injection in Phase 5
+    E2E tests. Now passes _get_http_client_factory() from search_service.
+
+    Story #1108 (S4): no_embedding_cache_shortcut is forwarded to
+    coalesced_query_embedding so the caller can bypass the cache read for this
+    request without disabling future cache benefit (write still fires).
 
     Returns:
         A non-empty list of floats on success.
@@ -483,13 +619,41 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     try:
         from code_indexer.config import VoyageAIConfig
         from code_indexer.services.voyage_ai import VoyageAIClient
-
-        provider = VoyageAIClient(VoyageAIConfig())
-        # cast: EmbeddingProvider.get_embedding is typed as returning Any upstream
-        # (broad protocol), but for VoyageAIClient it always yields a List[float].
-        return cast(
-            List[float], provider.get_embedding(query_text, embedding_purpose="query")
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.governed_call import (
+            coalesced_query_embedding,
         )
+
+        # Bug #899 fix: pass factory so fault injection intercepts this client.
+        # AttributeError guard: app.state not set in unit-test environments without
+        # full lifespan; None is equivalent to the pre-#899 default (no fault injection).
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "VoyageAIClient using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+
+        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
+        vec, _embed_meta = coalesced_query_embedding(
+            provider,
+            query_text,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        )
+        # Issue #1159: propagate Voyage embedding cache metadata to SearchEventContext.
+        _event_ctx = _search_event_ctx.get(None)
+        if _event_ctx is not None:
+            _event_ctx.voyage_cache_hit = _embed_meta.key_found
+            _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+            _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
+        return cast(List[float], vec)
     except Exception as exc:
         logger.warning(
             "Memory retrieval: could not compute query vector — %s. "
@@ -499,10 +663,76 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
         return []
 
 
-# Story #883 Phase C: shared alias so callers are explicit about the intent.
-# _compute_shared_query_vector is the single Voyage call per semantic request;
-# the resulting vector is reused by both code search and memory retrieval.
-_compute_shared_query_vector = _compute_memory_query_vector
+def _compute_shared_query_vector(
+    query_text: str,
+    no_embedding_cache_shortcut: bool = False,
+) -> tuple:
+    """Compute the shared pre-fan-out query vector for omni semantic searches.
+
+    Defect #1148 fix: unlike _compute_memory_query_vector (which returns [] on
+    any error for memory-retrieval callers), this function returns a 2-tuple
+    (vector: List[float], digest: str) so that the omni handler can propagate
+    the provider-config digest alongside the vector.  Per-repo searches in
+    _search_semantic_sync compare the digest against their own embedding-service
+    digest and only reuse the precomputed vector when they match — repos on a
+    different provider config embed via their own chokepoint (config-correct).
+
+    On failure: logs WARNING (Messi #13 anti-silent-failure) and returns
+    ([], "") so the caller can detect failure and fall back EXPLICITLY to
+    per-repo embedding (the fallback is observable in logs, not silent).
+
+    Returns:
+        (vector, digest) where vector is a non-empty List[float] and digest is
+        a non-empty str on success; ([], "") on any error.
+    """
+    try:
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.governed_call import (
+            coalesced_query_embedding,
+        )
+        from code_indexer.server.services.coalescer_registry import (
+            _digest_for_provider,
+        )
+
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "VoyageAIClient using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+
+        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
+        digest = _digest_for_provider(provider)
+        vec, _embed_meta = coalesced_query_embedding(
+            provider,
+            query_text,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        )
+        # Issue #1159: propagate Voyage embedding cache metadata to SearchEventContext.
+        _event_ctx = _search_event_ctx.get(None)
+        if _event_ctx is not None:
+            _event_ctx.voyage_cache_hit = _embed_meta.key_found
+            _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+            _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
+        return (cast(List[float], vec), digest)
+    except Exception as exc:
+        logger.warning(
+            "Omni search: could not compute shared query vector — %s. "
+            "Falling back to per-repo embedding (each repo will embed via its "
+            "own provider chokepoint). This is an explicit fallback, not a "
+            "silent failure.",
+            exc,
+        )
+        return ([], "")
 
 
 def _run_memory_retrieval(
@@ -552,7 +782,14 @@ def _run_memory_retrieval(
     # supplied non-empty vector is always used; only compute internally when the
     # caller did not supply a vector at all.
     if query_vector is None:
-        query_vector = _compute_memory_query_vector(query_text)
+        # Story #1108 (S4): thread per-request cache bypass so the fallback
+        # embedding call also honours the flag.
+        query_vector = _compute_memory_query_vector(
+            query_text,
+            no_embedding_cache_shortcut=params.get(
+                "no_embedding_cache_shortcut", False
+            ),
+        )
     if not query_vector:
         # Empty list: either compute returned [] (WARNING logged there) or caller
         # passed an empty list (treated as "no vector available").
@@ -628,7 +865,10 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         (repo_entry, target_path, None) on success.
         (None, None, mcp_error_response) on failure.
     """
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
     golden_repos_dir = _get_golden_repos_dir()
     global_repos = _list_global_repos()
@@ -644,8 +884,13 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
+    # Bug #1315: fall back to the registry's own index_path when the alias
+    # pointer file is missing/unreadable, mirroring MultiSearchService's
+    # omni-path resolution so direct and omni queries behave identically.
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
     if not target_path:
         err = _repo_lookup_error(
             user,
@@ -670,7 +915,6 @@ def _build_search_kwargs(
     The ~30 parameters are required by the _perform_search API and cannot
     be reduced without changing the SemanticQueryManager interface.
     """
-    evolution_limit_raw = params.get("evolution_limit")
     return dict(
         username=user.username,
         user_repos=user_repos,
@@ -687,13 +931,6 @@ def _build_search_kwargs(
         time_range=params.get("time_range"),
         time_range_all=params.get("time_range_all", False),
         at_commit=params.get("at_commit"),
-        include_removed=params.get("include_removed", False),
-        show_evolution=params.get("show_evolution", False),
-        evolution_limit=(
-            _coerce_int(evolution_limit_raw, _DEFAULT_EDIT_DISTANCE)
-            if evolution_limit_raw is not None
-            else None
-        ),
         case_sensitive=params.get("case_sensitive", False),
         fuzzy=params.get("fuzzy", False),
         edit_distance=_coerce_int(params.get("edit_distance"), _DEFAULT_EDIT_DISTANCE),
@@ -705,6 +942,11 @@ def _build_search_kwargs(
         query_strategy=params.get("query_strategy"),
         score_fusion=params.get("score_fusion"),
         preferred_provider=params.get("preferred_provider"),
+        # Story #1108 (S4): per-request cache bypass; web UI search never sets
+        # this — it has no such control, so False is correct for that path.
+        no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        # Story #1291 AC7/AC8: explicit temporal embedder override
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 
@@ -721,7 +963,13 @@ def _execute_tracked_search(
         limit: must be > 0; raises ValueError otherwise.
 
     Returns:
-        (results, execution_time_ms, timeout_occurred)
+        (results, execution_time_ms, timeout_occurred, effective_strategy)
+
+    Bug #1219: _perform_search returns a 2-tuple (List[QueryResult], str) since
+    Bug #1202.  We must unpack it here — mirroring the isinstance guard in
+    query_user_repositories — so that callers receive List[QueryResult], not the
+    raw tuple.  Backward compat: if a test patches _perform_search to return a
+    plain list the plain list is passed through unchanged.
     """
     if limit <= 0:
         raise ValueError(f"limit must be > 0, got {limit}")
@@ -731,11 +979,18 @@ def _execute_tracked_search(
     start_time = time.time()
     timeout_occurred = False
     ref_incremented = False
+    effective_strategy: str = params.get("query_strategy") or "primary_only"
     try:
         if query_tracker is not None and index_path:
             query_tracker.increment_ref(index_path)
             ref_incremented = True
-        results = _utils.app_module.semantic_query_manager._perform_search(**kwargs)
+        _raw = _utils.app_module.semantic_query_manager._perform_search(**kwargs)
+        # Bug #1219 fix: _perform_search returns (results, effective_strategy).
+        # Unpack gracefully; fall back if a test patches it to return a plain list.
+        if isinstance(_raw, tuple):
+            results, effective_strategy = _raw
+        else:
+            results = _raw
     except TimeoutError as e:
         timeout_occurred = True
         raise Exception(f"Query timed out: {e}") from e
@@ -748,7 +1003,7 @@ def _execute_tracked_search(
         if ref_incremented and query_tracker is not None and index_path:
             query_tracker.decrement_ref(index_path)
 
-    return results, execution_time_ms, timeout_occurred
+    return results, execution_time_ms, timeout_occurred, effective_strategy
 
 
 def _search_global_repo(
@@ -774,8 +1029,12 @@ def _search_global_repo(
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
-    results, execution_time_ms, timeout_occurred = _execute_tracked_search(
-        params, user, mock_user_repos, effective_limit, index_path=target_path
+    # Bug #1219 fix: _execute_tracked_search now returns a 4-tuple
+    # (results, execution_time_ms, timeout_occurred, effective_strategy).
+    results, execution_time_ms, timeout_occurred, effective_strategy = (
+        _execute_tracked_search(
+            params, user, mock_user_repos, effective_limit, index_path=target_path
+        )
     )
 
     category_map = _load_category_map("search_code")
@@ -797,13 +1056,17 @@ def _search_global_repo(
                 "results": response_results,
                 "total_results": len(response_results),
                 "query_metadata": {
-                    "query_text": params["query_text"],
+                    "query_text": params.get("query_text", ""),
                     "execution_time_ms": execution_time_ms,
                     "repositories_searched": 1,
                     "timeout_occurred": timeout_occurred,
                     "reranker_used": rerank_meta["reranker_used"],
                     "reranker_provider": rerank_meta["reranker_provider"],
                     "rerank_time_ms": rerank_meta["rerank_time_ms"],
+                    # AC7 (Bug #1202 / Bug #1219): echo effective routing decision
+                    # on the global-repo path, matching activated-repo parity.
+                    "effective_search_mode": params.get("search_mode", "semantic"),
+                    "effective_query_strategy": effective_strategy,
                 },
             },
         }
@@ -852,7 +1115,19 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         mem_cfg = config_service.get_config().memory_retrieval_config
         if mem_cfg.memory_retrieval_enabled:
             query_text = params.get("query_text", "") or ""
-            shared_query_vector = _compute_shared_query_vector(str(query_text))
+            # Story #1108 (S4): thread per-request cache bypass into the
+            # shared embedding call so both code search and memory retrieval
+            # honour the bypass flag without a second Voyage API call.
+            # Defect #1148 fix: _compute_shared_query_vector now returns (vector, digest).
+            # The activated-repo path is single-repo (no mixed-config fan-out), so the
+            # digest is not needed here — only the vector is extracted.
+            _shared_vec, _ = _compute_shared_query_vector(
+                str(query_text),
+                no_embedding_cache_shortcut=params.get(
+                    "no_embedding_cache_shortcut", False
+                ),
+            )
+            shared_query_vector = _shared_vec if _shared_vec else None
 
     kwargs = _build_search_kwargs(params, user, [], effective_limit)
     # query_user_repositories uses repository_alias, not user_repos
@@ -860,6 +1135,24 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     kwargs["repository_alias"] = params.get("repository_alias")
     kwargs["precomputed_query_vector"] = shared_query_vector
     result = _utils.app_module.semantic_query_manager.query_user_repositories(**kwargs)
+
+    # Touch last_accessed for the activated repo (throttled, non-fatal).
+    # Fixes Bug #1098 defect 2: search path never stamped last_accessed,
+    # so search-only users were reaped while actively using their repos.
+    # Global repos (ending with -global) have no user last_accessed TTL.
+    _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+    if _arm is not None:
+        _repo_alias = params.get("repository_alias")
+        if _repo_alias and not str(_repo_alias).endswith("-global"):
+            try:
+                _arm.touch_last_accessed(user.username, str(_repo_alias))
+            except Exception as _exc:
+                logger.debug(
+                    "touch_last_accessed failed for user=%s repo=%s (non-fatal): %s",
+                    user.username,
+                    _repo_alias,
+                    _exc,
+                )
 
     _enrich_activated_results(result, params)
 
@@ -876,6 +1169,13 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         qm["reranker_used"] = rerank_meta["reranker_used"]
         qm["reranker_provider"] = rerank_meta["reranker_provider"]
         qm["rerank_time_ms"] = rerank_meta["rerank_time_ms"]
+        # AC4 (Bug #1202): propagate fts truncation metadata from rerank_meta into qm.
+        # _apply_rerank_and_filter merges preview_size_chars / rows_capped from
+        # _apply_search_truncation into rerank_meta; they must be forwarded here
+        # so the single-repo path matches the omni path's query_metadata coverage.
+        for _ac4_key in ("preview_size_chars", "rows_capped"):
+            if _ac4_key in rerank_meta:
+                qm[_ac4_key] = rerank_meta[_ac4_key]
         # Story #883: parallel memory retrieval — reranker_status extracted here so
         # _run_memory_retrieval receives a plain string, not a nested dict.
         reranker_status: str = rerank_meta["reranker_status"]["status"]
@@ -889,6 +1189,9 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         )
         if relevant_memories is not None:
             qm["relevant_memories"] = relevant_memories
+        # AC7 (Bug #1202): effective_search_mode and effective_query_strategy are
+        # already in qm — they arrive via QueryMetadata.to_dict() in the
+        # per-request result dict.  No singleton read-back needed here.
 
     return _mcp_response({"success": True, "results": result})
 
@@ -900,18 +1203,39 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     - list: _omni_search_code (multi-repo)
     - str ending with -global: _search_global_repo
     - str (other): _search_activated_repo
+
+    Issue #1159: installs SearchEventContext ContextVar before routing so that
+    embedding call sites can write cache metadata into it.  Enqueues a
+    SearchEventRecord on success only (spec H11).  Resets ContextVar in finally.
     """
-    import time
+    import json as _json_mod
 
     _search_start = time.monotonic()
+
+    # Issue #1159: capture context fields before any param mutation below.
+    _query_text_raw = str(params.get("query_text", "") or "")
+    _repo_alias_raw = params.get("repository_alias")
+    _repo_alias_str = str(_repo_alias_raw) if isinstance(_repo_alias_raw, str) else None
+    _search_mode = str(params.get("search_mode", "semantic") or "semantic")
+    _event_ctx = SearchEventContext(
+        username=user.username,
+        repo_alias=_repo_alias_str,
+        query_text=_query_text_raw[:_QUERY_TEXT_MAX_CODEPOINTS],
+        search_type=_search_mode,
+    )
+    _ctx_token = _search_event_ctx.set(_event_ctx)
+
     try:
         repository_alias = params.get("repository_alias")
         repository_alias = _parse_json_string_array(repository_alias)
         params["repository_alias"] = repository_alias
 
-        # Bug #881 Phase 1 entry log: operators can audit every search_code call
+        # Bug #881 Phase 1 entry log: operators can audit every search_code call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels. Re-enable via DEBUG to audit calls.
         _query_log = str(params.get("query_text", ""))[:_QUERY_LOG_TRUNCATION_LIMIT]
-        logger.info(
+        logger.debug(
             f"search_code entry: user={user.username!r} "
             f"correlation_id={get_correlation_id()!r} "
             f"repository_alias={repository_alias!r} "
@@ -921,6 +1245,54 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Bug #1029: validate query_text before routing to sub-handlers.
+        # Hard dict access in _build_search_kwargs causes KeyError when missing.
+        _query_text = params.get("query_text")
+        if not isinstance(_query_text, str) or not _query_text.strip():
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: query_text",
+                    "results": [],
+                }
+            )
+
+        # Story #1039: bare-to-global alias fallback for read-only handlers.
+        # Applied BEFORE routing so the if/elif/else below sees the promoted alias.
+        if (
+            isinstance(repository_alias, str)
+            and repository_alias
+            and not repository_alias.endswith("-global")
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
+        # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
+        # omni/expansion path, not to _search_activated_repo. Wrap the single wildcard
+        # string as a one-element list so the routing below sends it to _omni_search_code
+        # where _expand_wildcard_patterns can expand it properly.
+        if (
+            isinstance(repository_alias, str)
+            and repository_alias
+            and _has_wildcard(repository_alias)
+        ):
+            repository_alias = [repository_alias]
+            params["repository_alias"] = repository_alias
+
         if isinstance(repository_alias, list):
             _result = _omni_search_code(params, user)
         elif repository_alias and repository_alias.endswith("-global"):
@@ -928,13 +1300,82 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         else:
             _result = _search_activated_repo(params, user)
 
-        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call
+        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels.
         _elapsed_ms = int((time.monotonic() - _search_start) * 1000)
-        logger.info(
+        logger.debug(
             f"search_code complete: correlation_id={get_correlation_id()!r} "
             f"result_count=0 elapsed_ms={_elapsed_ms}ms",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Issue #1159: enqueue SearchEventRecord on success only (spec H11).
+        _writer = _get_search_event_writer()
+        if _writer is not None:
+            # Extract result count from the MCP-wrapped response (content[0].text JSON).
+            # Uses narrow type checks and logs on parse failure — no broad exception swallow.
+            _result_count = 0
+            _content_list = (
+                _result.get("content") if isinstance(_result, dict) else None
+            )
+            if isinstance(_content_list, list) and _content_list:
+                _first = _content_list[0]
+                _text = _first.get("text") if isinstance(_first, dict) else None
+                if isinstance(_text, str):
+                    try:
+                        _inner = _json_mod.loads(_text)
+                    except _json_mod.JSONDecodeError as _jde:
+                        logger.debug(
+                            "search_code: could not parse MCP response text for telemetry: %s",
+                            _jde,
+                        )
+                        _inner = {}
+                    _results_payload = (
+                        _inner.get("results") if isinstance(_inner, dict) else None
+                    )
+                    # _results_payload may be a dict (activated-repo wraps results in outer
+                    # dict) or a list (omni / global paths).
+                    if isinstance(_results_payload, dict):
+                        _results_payload = _results_payload.get("results")
+                    if isinstance(_results_payload, list):
+                        _result_count = len(_results_payload)
+
+            # Stepwise node_id lookup — never raises (getattr with defaults).
+            _cfg_svc = get_config_service()
+            _cfg_get = getattr(_cfg_svc, "get_config", None)
+            _cfg_obj = _cfg_get() if callable(_cfg_get) else None
+            _node_id = str(getattr(_cfg_obj, "node_id", "") or "")
+            if not _node_id:
+                try:
+                    _node_id = socket.gethostname()
+                except OSError as _hn_exc:
+                    logger.debug(
+                        "search_code: socket.gethostname() failed, using 'unknown': %s",
+                        _hn_exc,
+                    )
+                    _node_id = "unknown"
+
+            _record = SearchEventRecord(
+                timestamp=time.time(),
+                username=user.username,
+                repo_alias=_event_ctx.repo_alias,
+                search_type=_event_ctx.search_type,
+                query_text=_event_ctx.query_text,
+                voyage_cache_hit=_event_ctx.voyage_cache_hit,
+                voyage_cache_mode=_event_ctx.voyage_cache_mode,
+                voyage_latency_ms=_event_ctx.voyage_latency_ms,
+                cohere_cache_hit=_event_ctx.cohere_cache_hit,
+                cohere_cache_mode=_event_ctx.cohere_cache_mode,
+                cohere_latency_ms=_event_ctx.cohere_latency_ms,
+                total_latency_ms=_elapsed_ms,
+                result_count=_result_count,
+                node_id=_node_id,
+                correlation_id=get_correlation_id(),
+            )
+            _writer.enqueue(_record)
+
         return _result
     except Exception as e:
         logger.exception(
@@ -942,6 +1383,9 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e), "results": []})
+    finally:
+        # Issue #1159: always reset ContextVar so it never leaks into the next request.
+        _search_event_ctx.reset(_ctx_token)
 
 
 async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1165,6 +1609,18 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     if err is not None:
         return err  # type: ignore[no-any-return]  # err is dict from _mcp_response
 
+    # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
+    # omni/expansion path, not to the single-repo path. Wrap the wildcard string as
+    # a one-element list so the routing below sends it to _omni_regex_search where
+    # _expand_wildcard_patterns can expand it properly.
+    if (
+        isinstance(repository_alias, str)
+        and repository_alias
+        and _has_wildcard(repository_alias)
+    ):
+        repository_alias = [repository_alias]
+        args["repository_alias"] = repository_alias
+
     if isinstance(repository_alias, list):
         return await _omni_regex_search(args, user)
 
@@ -1173,6 +1629,25 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     # once per repo with a single alias, so each recursive call increments here —
     # giving exactly N increments for N repos, with no double-count at the omni entry.
     api_metrics_service.increment_regex_search(username=user.username)
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         golden_repos_dir = _get_golden_repos_dir()

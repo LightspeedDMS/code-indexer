@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +104,16 @@ class ResearchSessionsPostgresBackend:
             ).fetchone()
         if row is None:
             return None
-        return {
-            "id": row[0],
-            "name": row[1],
-            "folder_path": row[2],
-            "claude_session_id": row[3],
-            "created_at": row[4],
-            "updated_at": row[5],
-        }
+        return sanitize_row(
+            {
+                "id": row[0],
+                "name": row[1],
+                "folder_path": row[2],
+                "claude_session_id": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+            }
+        )
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         """List all sessions ordered by updated_at DESC."""
@@ -120,14 +123,16 @@ class ResearchSessionsPostgresBackend:
                 "FROM research_sessions ORDER BY updated_at DESC"
             ).fetchall()
         return [
-            {
-                "id": row[0],
-                "name": row[1],
-                "folder_path": row[2],
-                "claude_session_id": row[3],
-                "created_at": row[4],
-                "updated_at": row[5],
-            }
+            sanitize_row(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "folder_path": row[2],
+                    "claude_session_id": row[3],
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                }
+            )
             for row in rows
         ]
 
@@ -184,13 +189,15 @@ class ResearchSessionsPostgresBackend:
             conn.commit()
         if row is None:
             raise RuntimeError("add_message: INSERT RETURNING returned no row")
-        return {
-            "id": row[0],
-            "session_id": row[1],
-            "role": row[2],
-            "content": row[3],
-            "created_at": row[4],
-        }
+        return sanitize_row(
+            {
+                "id": row[0],
+                "session_id": row[1],
+                "role": row[2],
+                "content": row[3],
+                "created_at": row[4],
+            }
+        )
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Return all messages for a session in insertion order."""
@@ -201,13 +208,15 @@ class ResearchSessionsPostgresBackend:
                 (session_id,),
             ).fetchall()
         return [
-            {
-                "id": row[0],
-                "session_id": row[1],
-                "role": row[2],
-                "content": row[3],
-                "created_at": row[4],
-            }
+            sanitize_row(
+                {
+                    "id": row[0],
+                    "session_id": row[1],
+                    "role": row[2],
+                    "content": row[3],
+                    "created_at": row[4],
+                }
+            )
             for row in rows
         ]
 

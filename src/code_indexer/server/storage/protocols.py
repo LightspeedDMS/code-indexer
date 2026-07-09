@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from typing import Protocol, runtime_checkable
 
+
 # ---------------------------------------------------------------------------
 # GlobalReposBackend
 # ---------------------------------------------------------------------------
@@ -58,6 +59,8 @@ class GlobalReposBackend(Protocol):
     def update_next_refresh(
         self, alias_name: str, next_refresh: Optional[str]
     ) -> bool: ...
+
+    def list_due_repos(self, limit: int, now: float) -> List[Dict[str, Any]]: ...
 
     def close(self) -> None: ...
 
@@ -200,8 +203,35 @@ class BackgroundJobsBackend(Protocol):
         metadata: Optional[Dict[str, Any]] = None,
         executing_node: Optional[str] = None,
         claimed_at: Optional[str] = None,
+    ) -> None: ...
+
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
         current_phase: Optional[str] = None,
         phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
     ) -> None: ...
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]: ...
@@ -225,7 +255,17 @@ class BackgroundJobsBackend(Protocol):
         exclude_ids: Optional[Any] = None,
         limit: Optional[int] = None,
         offset: int = 0,
+        username: Optional[str] = None,
     ) -> tuple: ...
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set: ...
 
     def delete_job(self, job_id: str) -> bool: ...
 
@@ -236,6 +276,22 @@ class BackgroundJobsBackend(Protocol):
     def get_job_stats(self, time_filter: str = "24h") -> Dict[str, int]: ...
 
     def cleanup_orphaned_jobs_on_startup(self) -> int: ...
+
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering, no LIMIT/OFFSET.
+        Called by _find_blocking_active_job_id after a unique-index violation to
+        locate the blocking row without risking a pagination miss (Bug #1220).
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        ...
 
     def close(self) -> None: ...
 
@@ -302,6 +358,10 @@ class CITokensBackend(Protocol):
     def delete_token(self, platform: str) -> bool: ...
 
     def list_tokens(self) -> Dict[str, Dict[str, Any]]: ...
+
+    def update_encrypted_token(
+        self, platform: str, new_encrypted_token: str
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -486,6 +546,10 @@ class GitCredentialsBackend(Protocol):
     def get_credential_for_host(
         self, username: str, forge_host: str
     ) -> Optional[Dict[str, Any]]: ...
+
+    def update_encrypted_token(
+        self, credential_id: str, new_encrypted_token: str
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -833,24 +897,6 @@ class ApiMetricsBackend(Protocol):
     by cluster node identifier.
     """
 
-    def insert_metric(
-        self,
-        metric_type: str,
-        timestamp: Optional[str] = None,
-        node_id: Optional[str] = None,
-        username: str = "_anonymous",
-    ) -> None:
-        """Insert a single metric record.
-
-        Args:
-            metric_type: Category of API call ('semantic', 'other_index',
-                         'regex', 'other_api').
-            timestamp: ISO 8601 timestamp string. Uses current UTC time when None.
-            node_id: Optional cluster node identifier (NULL in standalone).
-            username: Username for bucket attribution. Defaults to '_anonymous'.
-        """
-        ...
-
     def upsert_bucket(
         self,
         username: str,
@@ -879,24 +925,6 @@ class ApiMetricsBackend(Protocol):
             min5  — 1 hour
             hour1 — 24 hours
             day1  — 15 days
-        """
-        ...
-
-    def get_metrics(
-        self,
-        window_seconds: int = 3600,
-        node_id: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Return metric counts within the rolling window.
-
-        Args:
-            window_seconds: Time window in seconds (default 3600 = 1 hour).
-            node_id: When provided, filter to metrics from this node only.
-                     When None, aggregate across all nodes.
-
-        Returns:
-            Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls — each mapped to an integer count.
         """
         ...
 
@@ -948,18 +976,6 @@ class ApiMetricsBackend(Protocol):
         """
         ...
 
-    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
-        """Delete metric records older than max_age_seconds.
-
-        Args:
-            max_age_seconds: Records older than this many seconds are deleted
-                             (default 86400 = 24 hours).
-
-        Returns:
-            Number of rows deleted.
-        """
-        ...
-
     def reset(self) -> None:
         """Delete all metric records (used for testing / manual resets)."""
         ...
@@ -997,6 +1013,23 @@ class PayloadCacheBackend(Protocol):
             content: Full content to cache.
             preview: Truncated preview of the content.
             ttl_seconds: Time-to-live in seconds.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        ...
+
+    def store_batch(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE atomic transaction.
+
+        Bug #1181: Batch all per-query stores to avoid N fsync'd commits.
+        The facade (PayloadCache) is the sole handle authority — it generates
+        UUID4 handles and passes them in via entries.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
             node_id: Optional cluster node identifier (NULL in standalone).
         """
         ...
@@ -1623,6 +1656,144 @@ class WikiCacheBackend(Protocol):
 
     def close(self) -> None:
         """Close the backend and release any held resources."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# QueryEmbeddingCacheBackend (Story #1105)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class QueryEmbeddingCacheBackend(Protocol):
+    """Protocol for query-embedding cache storage (Story #1105).
+
+    Stores float32 little-endian embedding blobs keyed by
+    (cache_key, provider, model, dimension).  Supports both SQLite (solo)
+    and PostgreSQL (cluster) backends.
+
+    The composite PK prevents cross-provider / cross-model collisions: a
+    voyage-code-3 (1024 dims) vector and a cohere embed-v4.0 (1536 dims)
+    vector for the *same* query text occupy separate rows.
+
+    The ``last_used`` touch on cache hits is ASYNC/BEST-EFFORT (Bug #1181 Perf Fix #2):
+    ``record_hit`` buffers touches in a coalescing in-process dict and a background
+    thread drains them via ``touch_last_used_batch`` every ~5 seconds.  The hot query
+    path performs ZERO synchronous DB writes on a cache hit.  Approximate LRU is
+    acceptable — touches may be coalesced or delayed.
+    """
+
+    def lookup(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+    ) -> "Optional[bytes]":
+        """Return the stored embedding bytes (float32 LE) or None on miss.
+
+        Args:
+            cache_key: SHA-256 hex string of the (normalized) query text.
+            provider: Provider name, e.g. 'voyage-ai' or 'cohere'.
+            model: Model name, e.g. 'voyage-code-3'.
+            dimension: Embedding dimension, e.g. 1024.
+
+        Returns:
+            Raw bytes blob (float32 LE) or None if not present.
+        """
+        ...
+
+    def upsert(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        embedding: bytes,
+        created_at: float,
+        last_used: float,
+    ) -> None:
+        """Insert or update the embedding row.
+
+        On conflict (cache_key, provider, model, dimension) the existing row
+        is updated (embedding + last_used).
+
+        Args:
+            cache_key: SHA-256 hex string of the (normalized) query text.
+            provider: Provider name.
+            model: Model name.
+            dimension: Embedding dimension.
+            embedding: Float32 LE bytes blob.
+            created_at: Epoch seconds (first write).
+            last_used: Epoch seconds (most recent use).
+        """
+        ...
+
+    def touch_last_used(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        last_used: float,
+    ) -> None:
+        """Update last_used for an existing row (kept for direct callers/tests).
+
+        NOTE: The hot cache-hit path uses ``touch_last_used_batch`` via the
+        async flusher (Bug #1181 Perf Fix #2).  This single-row method is
+        retained for compatibility and direct testing.
+
+        Args:
+            cache_key: SHA-256 hex string.
+            provider: Provider name.
+            model: Model name.
+            dimension: Embedding dimension.
+            last_used: New last_used epoch seconds.
+        """
+        ...
+
+    def touch_last_used_batch(
+        self,
+        items: "List[Tuple[str, str, str, int, float]]",
+    ) -> None:
+        """Update last_used for multiple rows in a single batch transaction.
+
+        Bug #1181 Perf Fix #2: the async touch flusher drains the coalescing
+        buffer by calling this method with all accumulated (cache_key, provider,
+        model, dimension, last_used) tuples.  A single transaction reduces WAL
+        lock contention on SQLite and uses SET LOCAL synchronous_commit=off on
+        PostgreSQL (ephemeral LRU bookkeeping — safe).
+
+        Implementations MUST be fail-open: log a WARNING on any error and never
+        raise.  Empty list must be a no-op (no DB round-trip).
+
+        Args:
+            items: List of (cache_key, provider, model, dimension, last_used)
+                tuples.  May be empty (no-op).
+        """
+        ...
+
+    def prune_to_max(self, max_entries: int) -> int:
+        """Delete rows beyond max_entries, ordered by last_used ASC.
+
+        Args:
+            max_entries: Desired maximum number of rows after pruning.
+
+        Returns:
+            Number of rows actually deleted.
+        """
+        ...
+
+    def total_entries(self) -> int:
+        """Return the total number of rows in the cache table.
+
+        Returns:
+            Integer row count.
+        """
+        ...
+
+    def clear(self) -> None:
+        """Delete all rows from the cache table (used for testing / resets)."""
         ...
 
 

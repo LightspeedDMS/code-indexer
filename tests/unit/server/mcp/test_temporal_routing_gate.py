@@ -49,7 +49,6 @@ class TestIsTemporalQueryExistingParams:
             {"time_range": "2024-01-01..2024-12-31"},
             {"time_range_all": True},
             {"at_commit": "abc123"},
-            {"include_removed": True},
         ],
     )
     def test_existing_temporal_param_still_triggers_routing(self, params):
@@ -62,7 +61,6 @@ class TestIsTemporalQueryExistingParams:
             {"query_text": "hello"},
             {},
             {"time_range_all": False},
-            {"include_removed": False},
         ],
     )
     def test_non_temporal_params_do_not_trigger_routing(self, params):

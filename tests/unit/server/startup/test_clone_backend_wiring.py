@@ -79,6 +79,80 @@ def _make_ontap_config() -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# _check_daemon_health version enforcement (Commit 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDaemonHealthVersionCheck:
+    """_check_daemon_health rejects daemons older than v0.2.0."""
+
+    def _mock_health_response(self, data: dict):
+        """Build a mock requests module returning given data from GET /api/v1/health."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = data
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_requests = MagicMock()
+        mock_requests.get.return_value = mock_resp
+        return mock_requests
+
+    def test_passes_when_version_is_0_2_0(self):
+        """_check_daemon_health does not raise when daemon reports version 0.2.0."""
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_daemon_health,
+        )
+
+        mock_requests = self._mock_health_response(
+            {"status": "healthy", "version": "0.2.0"}
+        )
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            # Must not raise
+            _check_daemon_health("http://daemon:8081")
+
+    def test_raises_when_version_is_0_1_0(self):
+        """_check_daemon_health raises RuntimeError when daemon reports version 0.1.0."""
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_daemon_health,
+        )
+
+        mock_requests = self._mock_health_response(
+            {"status": "healthy", "version": "0.1.0"}
+        )
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match="CIDX requires 0.2.0\\+"):
+                _check_daemon_health("http://daemon:8081")
+
+    def test_raises_when_version_field_missing(self):
+        """_check_daemon_health raises RuntimeError when version field absent from response."""
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_daemon_health,
+        )
+
+        mock_requests = self._mock_health_response({"status": "healthy"})
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            with pytest.raises(RuntimeError, match="CIDX requires 0.2.0\\+"):
+                _check_daemon_health("http://daemon:8081")
+
+    def test_passes_when_version_is_0_2_1(self):
+        """_check_daemon_health does not raise for version 0.2.1 (forward compat)."""
+        import sys
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_daemon_health,
+        )
+
+        mock_requests = self._mock_health_response(
+            {"status": "healthy", "version": "0.2.1"}
+        )
+        with patch.dict(sys.modules, {"requests": mock_requests}):
+            # Must not raise
+            _check_daemon_health("http://daemon:8081")
+
+
 class TestLocalBackend:
     def test_local_backend_returns_snapshot_manager(self, tmp_path):
         """build_snapshot_manager returns VersionedSnapshotManager for local backend."""
@@ -348,3 +422,145 @@ class TestOntapBackend:
             manager = build_snapshot_manager(cfg, versioned_base="/mnt/fsx/repos")
 
         assert manager._flexclone is None
+
+
+# ---------------------------------------------------------------------------
+# versioned_base propagation (Bug fix: Story #1034 Commit 0)
+# ---------------------------------------------------------------------------
+
+
+class TestVersionedBasePropagation:
+    def test_local_backend_get_snapshot_path_respects_versioned_base(self, tmp_path):
+        """get_snapshot_path must return a path rooted under versioned_base, not /.
+
+        Bug: build_snapshot_manager called VersionedSnapshotManager(clone_backend=backend)
+        without passing versioned_base=, so _versioned_base defaulted to "" and
+        get_snapshot_path returned /.versioned/{alias}/v_{ts} (filesystem root).
+        """
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        versioned_base = str(tmp_path)
+        cfg = _make_local_config()
+        manager = build_snapshot_manager(cfg, versioned_base=versioned_base)
+
+        snapshot_path = manager.get_snapshot_path("my-alias", "1700000000")
+
+        # Must be rooted under versioned_base, NOT under filesystem root
+        assert snapshot_path.startswith(versioned_base), (
+            f"Expected path under {versioned_base!r}, got {snapshot_path!r}"
+        )
+        assert not snapshot_path.startswith("/.versioned/"), (
+            f"Path must not be rooted at filesystem root: {snapshot_path!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Commit 1: Inject snapshot_manager / clone_backend into services
+# ---------------------------------------------------------------------------
+
+
+class TestCommit1Injection:
+    """Commit 1: Verify new optional params exist on constructors with None defaults."""
+
+    def test_refresh_scheduler_accepts_snapshot_manager_param(self, tmp_path):
+        """RefreshScheduler.__init__ must accept snapshot_manager=None without error."""
+        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+        from code_indexer.global_repos.query_tracker import QueryTracker
+        from code_indexer.global_repos.cleanup_manager import CleanupManager
+        from code_indexer.global_repos.global_registry import GlobalRegistry
+        from code_indexer.config import ConfigManager
+
+        qt = QueryTracker()
+        cm = CleanupManager(qt)
+        cfg = ConfigManager(tmp_path / ".code-indexer" / "config.json")
+        reg = GlobalRegistry(str(tmp_path))
+        # Must not raise — snapshot_manager=None is the backward-compat default
+        sched = RefreshScheduler(
+            golden_repos_dir=str(tmp_path),
+            config_source=cfg,
+            query_tracker=qt,
+            cleanup_manager=cm,
+            registry=reg,
+            snapshot_manager=None,
+        )
+        assert sched._snapshot_manager is None
+
+    def test_refresh_scheduler_stores_snapshot_manager(self, tmp_path):
+        """RefreshScheduler must store the injected snapshot_manager on self._snapshot_manager."""
+        from unittest.mock import MagicMock
+        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+        from code_indexer.global_repos.query_tracker import QueryTracker
+        from code_indexer.global_repos.cleanup_manager import CleanupManager
+        from code_indexer.global_repos.global_registry import GlobalRegistry
+        from code_indexer.config import ConfigManager
+
+        qt = QueryTracker()
+        cm = CleanupManager(qt)
+        cfg = ConfigManager(tmp_path / ".code-indexer" / "config.json")
+        reg = GlobalRegistry(str(tmp_path))
+        mock_sm = MagicMock()
+        sched = RefreshScheduler(
+            golden_repos_dir=str(tmp_path),
+            config_source=cfg,
+            query_tracker=qt,
+            cleanup_manager=cm,
+            registry=reg,
+            snapshot_manager=mock_sm,
+        )
+        assert sched._snapshot_manager is mock_sm
+
+    def test_global_repos_lifecycle_manager_accepts_snapshot_manager_param(
+        self, tmp_path
+    ):
+        """GlobalReposLifecycleManager.__init__ must accept snapshot_manager=None without error."""
+        from code_indexer.server.lifecycle.global_repos_lifecycle import (
+            GlobalReposLifecycleManager,
+        )
+
+        mgr = GlobalReposLifecycleManager(
+            str(tmp_path),
+            snapshot_manager=None,
+        )
+        assert mgr.refresh_scheduler._snapshot_manager is None
+
+    def test_global_repos_lifecycle_manager_forwards_snapshot_manager(self, tmp_path):
+        """GlobalReposLifecycleManager must forward snapshot_manager to RefreshScheduler."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.lifecycle.global_repos_lifecycle import (
+            GlobalReposLifecycleManager,
+        )
+
+        mock_sm = MagicMock()
+        mgr = GlobalReposLifecycleManager(
+            str(tmp_path),
+            snapshot_manager=mock_sm,
+        )
+        assert mgr.refresh_scheduler._snapshot_manager is mock_sm
+
+    def test_activated_repo_manager_accepts_clone_backend_param(self, tmp_path):
+        """ActivatedRepoManager.__init__ must accept clone_backend=None without error."""
+        from code_indexer.server.repositories.activated_repo_manager import (
+            ActivatedRepoManager,
+        )
+
+        arm = ActivatedRepoManager(
+            data_dir=str(tmp_path),
+            clone_backend=None,
+        )
+        assert arm._clone_backend is None
+
+    def test_activated_repo_manager_stores_clone_backend(self, tmp_path):
+        """ActivatedRepoManager must store the injected clone_backend on self._clone_backend."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.repositories.activated_repo_manager import (
+            ActivatedRepoManager,
+        )
+
+        mock_backend = MagicMock()
+        arm = ActivatedRepoManager(
+            data_dir=str(tmp_path),
+            clone_backend=mock_backend,
+        )
+        assert arm._clone_backend is mock_backend

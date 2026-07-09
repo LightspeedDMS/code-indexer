@@ -45,6 +45,7 @@ POSTGRES_MIGRATED_DATABASES = frozenset(
         "oauth.db",
         "scip_audit.db",
         "refresh_tokens.db",
+        "query_embedding_cache.db",
     }
 )
 
@@ -192,6 +193,7 @@ DATABASE_DISPLAY_NAMES: Dict[str, str] = {
     "scip_audit.db": "SCIP Audit",
     "payload_cache.db": "Payload Cache",
     "api_metrics.db": "API Metrics",
+    "query_embedding_cache.db": "Embedding Cache",
 }
 
 
@@ -276,7 +278,11 @@ class DatabaseHealthService:
 
     def _resolve_db_path(self, file_name: str) -> Path:
         """Resolve the filesystem path for a given database file name."""
-        if file_name in ("cidx_server.db", "api_metrics.db"):
+        if file_name in (
+            "cidx_server.db",
+            "api_metrics.db",
+            "query_embedding_cache.db",
+        ):
             return self.server_dir / "data" / file_name
         elif file_name == "payload_cache.db":
             return self.server_dir / "data" / "golden-repos" / ".cache" / file_name

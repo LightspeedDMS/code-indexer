@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         NodeMetricsBackend,
         OAuthBackend,
         PayloadCacheBackend,
+        QueryEmbeddingCacheBackend,
         RefreshTokenBackend,
         RepoCategoryBackend,
         ResearchSessionsBackend,
@@ -97,6 +98,13 @@ class BackendRegistry:
     self_monitoring: "SelfMonitoringBackend"
     diagnostics: "DiagnosticsBackend"
     maintenance: "MaintenanceBackend"
+    query_embedding_cache: "QueryEmbeddingCacheBackend"
+    # Story #1159: Search event log backend — SQLite in solo mode, PostgreSQL in
+    # cluster mode so all nodes share one search_event_log table.
+    search_event_log: Any = field(default=None)
+    # Issue #1160: Query analytics exports backend — SQLite in solo mode, PostgreSQL
+    # in cluster mode so all nodes share one query_analytics_exports table.
+    query_analytics_exports: Any = field(default=None)
     # Optional: the shared ConnectionPool instance (PostgreSQL mode only).
     # None in SQLite mode. Exposed here so lifespan.py cluster services can
     # reuse the factory pool instead of creating a second one.
@@ -104,6 +112,11 @@ class BackendRegistry:
     # Bug #545: Dedicated critical pool for heartbeat/leader/reconciliation.
     # Separated from general pool to prevent starvation under load.
     critical_connection_pool: Optional[Any] = field(default=None)
+    # Story #1293: Query-embedding decision event backend — SQLite in solo
+    # mode, PostgreSQL in cluster mode so all nodes share one
+    # search_embed_event table (the phantom-free cache-metrics source of
+    # truth).
+    search_embed_event: Any = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +185,7 @@ class StorageFactory:
             NodeMetricsSqliteBackend,
             OAuthSqliteBackend,
             PayloadCacheSqliteBackend,
+            QueryEmbeddingCacheSqliteBackend,
             RefreshTokenSqliteBackend,
             ResearchSessionsSqliteBackend,
             SCIPAuditSqliteBackend,
@@ -187,6 +201,15 @@ class StorageFactory:
         )
         from code_indexer.server.services.group_access_manager import GroupAccessManager
         from code_indexer.server.services.audit_log_service import AuditLogService
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogSqliteBackend,
+        )
+        from code_indexer.server.services.query_analytics_export_service import (
+            QueryAnalyticsExportSqliteBackend,
+        )
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventSqliteBackend,
+        )
 
         # Main database: all backends except groups/audit share the same DB.
         db_path = str(Path(data_dir) / "cidx_server.db")
@@ -229,6 +252,12 @@ class StorageFactory:
             self_monitoring=SelfMonitoringSqliteBackend(db_path),
             diagnostics=DiagnosticsSqliteBackend(db_path),
             maintenance=MaintenanceSqliteBackend(db_path),
+            query_embedding_cache=QueryEmbeddingCacheSqliteBackend(
+                db_path=str(Path(data_dir) / "query_embedding_cache.db")
+            ),
+            search_event_log=SearchEventLogSqliteBackend(db_path=db_path),
+            query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
+            search_embed_event=SearchEmbedEventSqliteBackend(db_path=db_path),
         )
 
     # ------------------------------------------------------------------
@@ -330,6 +359,18 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.maintenance_backend import (
             MaintenancePostgresBackend,
         )
+        from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
+            QueryEmbeddingCachePostgresBackend,
+        )
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogPostgresBackend,
+        )
+        from code_indexer.server.services.query_analytics_export_service import (
+            QueryAnalyticsExportPostgresBackend,
+        )
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -380,6 +421,10 @@ class StorageFactory:
             self_monitoring=SelfMonitoringPostgresBackend(pool),
             diagnostics=DiagnosticsPostgresBackend(pool),
             maintenance=MaintenancePostgresBackend(pool),
+            query_embedding_cache=QueryEmbeddingCachePostgresBackend(pool),
+            search_event_log=SearchEventLogPostgresBackend(pool),
+            query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
+            search_embed_event=SearchEmbedEventPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

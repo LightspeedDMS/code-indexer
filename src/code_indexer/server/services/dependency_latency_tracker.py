@@ -291,7 +291,7 @@ class DependencyLatencyTracker:
         except sqlite3.ProgrammingError as exc:
             if _CLOSED_DB_SUBSTRING in str(exc).lower():
                 self._stop_event.set()
-                logger.warning(
+                logger.debug(
                     "DependencyLatencyTracker: database closed — writer thread terminating"
                 )
             raise
@@ -311,7 +311,7 @@ class DependencyLatencyTracker:
         except sqlite3.ProgrammingError as exc:
             if _CLOSED_DB_SUBSTRING in str(exc).lower():
                 self._stop_event.set()
-                logger.warning(
+                logger.debug(
                     "DependencyLatencyTracker: database closed — writer thread terminating"
                 )
             raise

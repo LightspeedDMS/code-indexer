@@ -21,7 +21,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, List, Tuple
+
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +227,7 @@ class ClaudeCliManager:
 
         try:
             with open(lock_path, "w") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
                     # Read existing config or create new
                     existing = {}
@@ -248,7 +251,7 @@ class ClaudeCliManager:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    nfs_safe_funlock(lock_file.fileno(), _used_lockf)
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -560,6 +563,7 @@ class ClaudeCliManager:
                 ["cidx", "index"],
                 cwd=str(self._meta_dir),
                 capture_output=True,
+                env=build_cidx_subprocess_env(),
                 check=False,
             )
             logger.info(

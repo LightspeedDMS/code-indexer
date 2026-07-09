@@ -11,10 +11,61 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_alias_or_index_path(
+    alias_manager: "AliasManager",
+    alias_name: str,
+    repo_entry: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Resolve alias_name to a filesystem path, falling back to the registry's
+    index_path when the alias pointer file is missing/unreadable (Bug #1315).
+
+    Both direct (-global) and omni cross-repo search resolution call this
+    shared helper (Messi Rule #4 anti-duplication) so the fallback semantics
+    stay identical between the two paths -- see
+    ``code_indexer.server.multi.multi_search_service.MultiSearchService._get_repository_path``
+    and ``code_indexer.server.mcp.handlers.search._resolve_global_repo_target``.
+
+    The alias pointer JSON (managed by ``AliasManager``) is normally created
+    at activation time and is the authoritative, current target path (it
+    tracks refresh/swap operations). The registry's own ``index_path`` field
+    is written atomically at registration time and becomes a valid fallback
+    when the alias pointer file was never created or was lost (e.g. a
+    bulk-provisioning gap) -- it is an already-trusted field from the SAME
+    registry row already used to confirm the repo exists, not a new/masking
+    fallback (Messi Rule #2 anti-fallback).
+
+    Args:
+        alias_manager: AliasManager instance scoped to the aliases directory.
+        alias_name: Alias to resolve (e.g. "my-repo-global").
+        repo_entry: Registry row dict (must contain "index_path" for the
+            fallback to be attempted), or None if the repo entry is unknown.
+
+    Returns:
+        Resolved filesystem path string, or None if neither the alias
+        pointer nor a valid on-disk index_path resolves.
+    """
+    target_path = alias_manager.read_alias(alias_name)
+    if target_path:
+        return target_path
+
+    index_path = repo_entry.get("index_path") if repo_entry else None
+    if index_path and Path(index_path).exists():
+        logger.warning(
+            "Alias pointer for '%s' missing/unreadable; falling back to "
+            "registry index_path '%s' (Bug #1315)",
+            alias_name,
+            index_path,
+        )
+        return str(index_path)
+
+    return None
 
 
 class AliasManager:
@@ -23,6 +74,12 @@ class AliasManager:
 
     Each alias is a JSON file containing metadata that points to
     the actual index directory for a golden repository.
+
+    Dual-mode write-mode redirection (Task #21):
+      - Standalone: reads .write_mode/{alias}.json from the local filesystem.
+      - Cluster: reads write_mode_markers table via WriteModePgBackend.
+        The filesystem .write_mode/ directory is NOT shared across nodes, so
+        it is never consulted when a PG backend is active.
     """
 
     def __init__(self, aliases_dir: str):
@@ -34,6 +91,99 @@ class AliasManager:
         """
         self.aliases_dir = Path(aliases_dir)
         self.aliases_dir.mkdir(parents=True, exist_ok=True)
+        # Optional PG backend for cluster-visible write-mode markers (Task #21).
+        # Type Optional[Any]: psycopg is an optional dependency — a concrete type
+        # would force its import at module load time, breaking standalone (CLI) mode.
+        self._write_mode_backend: Optional[Any] = None
+
+    def set_write_mode_backend(self, backend: Any) -> None:
+        """Wire a PostgreSQL write-mode backend for cluster mode.
+
+        When set, read_alias() exclusively uses the PG backend to check
+        write-mode markers — the local filesystem .write_mode/ directory
+        is not consulted (it is not NFS-shared across cluster nodes).
+
+        Args:
+            backend: WriteModePgBackend instance (or compatible interface).
+                     Type is Any — psycopg is an optional dependency, so a
+                     concrete type annotation would force its import at module
+                     load time, breaking standalone (CLI) mode.
+        """
+        self._write_mode_backend = backend
+        logger.info("AliasManager: using PostgreSQL write-mode backend (cluster mode)")
+
+    def _read_write_mode_source_path(self, alias_without_global: str) -> Optional[str]:
+        """Return the live source path for alias if write-mode is active, else None.
+
+        Dual-mode implementation:
+          - Cluster mode (PG backend set): queries write_mode_markers table.
+            The filesystem .write_mode/ directory is NOT consulted because it
+            is not NFS-shared and would give stale/empty results on other nodes.
+          - Standalone mode (no PG backend): reads the local filesystem marker.
+
+        Args:
+            alias_without_global: Repository alias without the -global suffix.
+
+        Returns:
+            source_path string if write-mode is active with a valid source,
+            None otherwise (write-mode inactive, no marker, or missing source_path).
+        """
+        if self._write_mode_backend is not None:
+            # Cluster mode: PG is the single source of truth for write-mode markers.
+            # Filesystem .write_mode/ is intentionally NOT checked here because it
+            # is local to each node and invisible to siblings in the cluster.
+            try:
+                marker = self._write_mode_backend.get_marker(alias_without_global)
+                if marker is None:
+                    return None
+                # marker.get() returns object; cast to Optional[str] is safe because
+                # source_path is always written as str by files.py (or None/absent).
+                source_path: Optional[str] = marker.get("source_path")  # type: ignore[assignment]
+                if source_path:
+                    return source_path
+                # Marker present but source_path absent — write session not yet
+                # redirected; fall through to normal alias resolution.
+                logger.warning(
+                    "PG write-mode marker for %s has no source_path; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                )
+                return None
+            except Exception as e:
+                logger.warning(
+                    "Failed to read PG write-mode marker for %s: %s; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                    e,
+                )
+                return None
+        else:
+            # Standalone mode: read the local filesystem marker.
+            golden_repos_dir = self.aliases_dir.parent
+            write_mode_marker = (
+                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+            )
+            if not write_mode_marker.exists():
+                return None
+            try:
+                marker_data = json.loads(write_mode_marker.read_text())
+                fs_source_path: Optional[str] = marker_data.get("source_path")
+                if fs_source_path:
+                    return fs_source_path
+                logger.warning(
+                    "Write-mode marker for %s has no source_path; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                )
+                return None
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                logger.warning(
+                    "Corrupt write-mode marker for %s: %s; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                    e,
+                )
+                return None
 
     def create_alias(
         self, alias_name: str, target_path: str, repo_name: Optional[str] = None
@@ -68,7 +218,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))
@@ -86,13 +236,11 @@ class AliasManager:
         """
         Read the target path from an alias.
 
-        Write-mode redirection (Story #231):
-        If the alias ends with '-global' and a write-mode marker file exists at
-        golden_repos_dir/.write_mode/{alias_without_global}.json with a valid
-        'source_path' field, that source_path is returned instead of the
-        versioned snapshot path.  This allows reads during an active write
-        session to see the live source directory.  If the marker is corrupt or
-        lacks 'source_path', normal resolution proceeds.
+        Write-mode redirection (Story #231, Task #21):
+        If the alias ends with '-global', check for an active write session
+        via _read_write_mode_source_path(). When found, the live source path
+        is returned instead of the versioned snapshot path, allowing reads
+        during an active write session to see the in-progress changes.
 
         Args:
             alias_name: Name of the alias
@@ -100,33 +248,18 @@ class AliasManager:
         Returns:
             Target path or None if alias doesn't exist
         """
-        # Story #231: Check write-mode marker for -global aliases before normal resolution
+        # Task #21 / Story #231: Check write-mode for -global aliases
         if alias_name.endswith("-global"):
             alias_without_global = alias_name[: -len("-global")]
-            golden_repos_dir = self.aliases_dir.parent
-            write_mode_marker = (
-                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
-            )
-            if write_mode_marker.exists():
-                try:
-                    marker_data = json.loads(write_mode_marker.read_text())
-                    source_path: Optional[str] = marker_data.get("source_path")
-                    if source_path:
-                        logger.debug(
-                            f"Write-mode active for {alias_name}: "
-                            f"redirecting reads to source {source_path}"
-                        )
-                        return source_path
-                    # source_path missing — fall through to normal resolution
-                    logger.warning(
-                        f"Write-mode marker for {alias_name} has no source_path, "
-                        "falling back to normal alias resolution"
-                    )
-                except (json.JSONDecodeError, IOError, OSError) as e:
-                    logger.warning(
-                        f"Corrupt write-mode marker for {alias_name}: {e}, "
-                        "falling back to normal alias resolution"
-                    )
+            source_path = self._read_write_mode_source_path(alias_without_global)
+            if source_path:
+                logger.debug(
+                    f"Write-mode active for {alias_name}: "
+                    f"redirecting reads to source {source_path}"
+                )
+                return source_path
+            # source_path is None — no active write session; fall through to
+            # normal alias file resolution below.
 
         alias_file = self.aliases_dir / f"{alias_name}.json"
 
@@ -200,7 +333,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             os.replace(tmp_path, str(alias_file))
             logger.debug(f"Updated refresh timestamp for alias: {alias_name}")
@@ -260,7 +393,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))

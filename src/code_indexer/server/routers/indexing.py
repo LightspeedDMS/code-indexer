@@ -8,13 +8,15 @@ with OAuth authentication and service layer integration.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, cast
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.repositories.background_jobs import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,10 @@ class GetIndexStatusResponse(BaseModel):
     description="Trigger a background re-indexing job for specified index types",
 )
 def trigger_reindex(
-    alias: str, request: TriggerReindexRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: TriggerReindexRequest,
+    http_request: Request,
+    user: User = Depends(get_current_user),
 ) -> TriggerReindexResponse:
     """Trigger re-indexing for specified index types."""
     try:
@@ -96,14 +101,32 @@ def trigger_reindex(
             ActivatedRepoIndexManager,
         )
 
-        service = ActivatedRepoIndexManager()
-        result = service.trigger_reindex(
+        _bjm = getattr(http_request.app.state, "background_job_manager", None)
+        if _bjm is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Server not fully initialized: background_job_manager unavailable",
+            )
+        service = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                http_request.app.state, "activated_repo_manager", None
+            ),
+        )
+        job_id = service.trigger_reindex(
             repo_alias=alias,
             index_types=request.index_types,
             clear=request.clear,
             username=user.username,
         )
-        return TriggerReindexResponse(**result)
+        return TriggerReindexResponse(
+            success=True,
+            job_id=job_id,
+            status=JobStatus.PENDING.value,
+            index_types=request.index_types,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            estimated_duration_minutes=None,
+        )
     except FileNotFoundError as e:
         logger.warning(
             format_error_log(
@@ -150,7 +173,9 @@ def trigger_reindex(
     description="Get the status of all index types for the repository",
 )
 def get_index_status(
-    alias: str, user: User = Depends(get_current_user)
+    alias: str,
+    http_request: Request,
+    user: User = Depends(get_current_user),
 ) -> GetIndexStatusResponse:
     """Get index status for all index types."""
     try:
@@ -159,7 +184,18 @@ def get_index_status(
             ActivatedRepoIndexManager,
         )
 
-        service = ActivatedRepoIndexManager()
+        _bjm = getattr(http_request.app.state, "background_job_manager", None)
+        if _bjm is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Server not fully initialized: background_job_manager unavailable",
+            )
+        service = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                http_request.app.state, "activated_repo_manager", None
+            ),
+        )
         result = service.get_index_status(repo_alias=alias, username=user.username)
 
         # Transform service output to match response model

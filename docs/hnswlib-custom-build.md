@@ -25,7 +25,7 @@ The PyPI version of hnswlib (v0.8.0) does not expose the `check_integrity()` met
 
 ```bash
 # 1. Clone code-indexer (if not already cloned)
-git clone https://github.com/LightspeedDMS/code-indexer.git
+git clone https://github.com/YOUR_USERNAME/code-indexer.git
 cd code-indexer
 
 # 2. Initialize hnswlib submodule
@@ -45,10 +45,10 @@ The custom `setup.py` automatically:
 To verify the custom build is installed correctly:
 
 ```python
-from code_indexer.utils.hnswlib_verification import verify_custom_hnswlib
+from code_indexer.services.hnsw_health_service import HnswHealthService
 
 try:
-    verify_custom_hnswlib()
+    HnswHealthService().check_integrity()
     print("Custom hnswlib build verified successfully!")
 except (ImportError, AttributeError) as e:
     print(f"Verification failed: {e}")
@@ -63,7 +63,7 @@ The `dependencies` list in `pyproject.toml` **does not include** `hnswlib>=0.8.0
 ```toml
 dependencies = [
     # ... other dependencies ...
-    # hnswlib is built from third_party/hnswlib submodule (Story #54)
+    # hnswlib is built from third_party/hnswlib submodule
     # DO NOT use PyPI hnswlib - it lacks check_integrity() method
     # Install: git submodule update --init && pip install -e .
 ]
@@ -173,14 +173,9 @@ results = index.knn_query(query_vector, k=10)
 
 ### Testing
 
-Unit tests for the verification utility:
+Unit tests for the HNSW health service:
 ```bash
-pytest tests/unit/utils/test_hnswlib_verification.py -v
-```
-
-Integration tests for submodule build:
-```bash
-pytest tests/integration/test_hnswlib_submodule_build.py -v
+pytest tests/unit/services/test_hnsw_health_service.py -v
 ```
 
 ## CI/CD Considerations
@@ -191,7 +186,7 @@ In CI workflows, ensure submodule initialization:
 
 ```yaml
 - name: Checkout code with submodules
-  uses: actions/checkout@v3
+  uses: actions/checkout@v4
   with:
     submodules: recursive
 
@@ -205,7 +200,7 @@ In Dockerfiles:
 
 ```dockerfile
 # Clone with submodules
-RUN git clone --recurse-submodules https://github.com/LightspeedDMS/code-indexer.git
+RUN git clone --recurse-submodules https://github.com/YOUR_USERNAME/code-indexer.git
 
 # Or initialize after clone
 WORKDIR /app
@@ -236,12 +231,11 @@ If upgrading from a version that used PyPI hnswlib:
 
 4. Verify custom build:
    ```python
-   from code_indexer.utils.hnswlib_verification import verify_custom_hnswlib
-   verify_custom_hnswlib()
+   from code_indexer.services.hnsw_health_service import HnswHealthService
+   HnswHealthService().check_integrity()
    ```
 
 ## References
 
-- Story #54: Replace PyPI hnswlib with custom build
 - hnswlib GitHub: https://github.com/nmslib/hnswlib
 - Custom commit: 8972063 (checkIntegrity method)

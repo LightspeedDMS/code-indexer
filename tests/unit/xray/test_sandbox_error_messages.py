@@ -29,18 +29,18 @@ def _make_root(source: str = "x = 1", language: str = "python"):
 class TestValidationErrorMessages:
     """Validation error messages include the forbidden node, allowed list, and hints."""
 
-    # --- A3: Lambda now accepted (Story #993 Group G) ---
+    # --- A3: Lambda removed from ALLOWED_NODES (Rust-only path) ---
 
     def test_lambda_rejection_mentions_inlining(self):
-        # Lambda was previously rejected; now allowed in Group G (Story #993).
+        # Lambda removed from ALLOWED_NODES — not transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("f = lambda x: x > 0")
-        assert result.ok is True
+        assert result.ok is False
 
-    # --- A4: FunctionDef now accepted (Story #993 Group G) ---
+    # --- A4: FunctionDef remains in ALLOWED_NODES (transpilable to Rust) ---
 
     def test_functiondef_rejection_mentions_single_expression(self):
-        # FunctionDef was previously rejected; now allowed in Group G (Story #993).
+        # FunctionDef remains in ALLOWED_NODES — transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("def helper(): return True")
         assert result.ok is True
@@ -55,32 +55,21 @@ class TestValidationErrorMessages:
         lower = result.reason.lower()
         assert "definition" in lower or "class" in lower or "function" in lower
 
-    # --- A6: Import rejection mentions SAFE_BUILTIN_NAMES ---
+    # --- A6: Import rejection mentions the forbidden node type ---
 
     def test_import_rejection_mentions_safe_builtins(self):
-        # Story #993: import rejection now lists whitelisted stdlib modules,
-        # not safe builtin names.  Verify at least one whitelisted module is named.
+        # Import is not in ALLOWED_NODES — rejected as a forbidden node.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("import os")
         assert result.ok is False
         assert "Import" in result.reason
-        # Must mention at least one whitelisted stdlib module to orient the user
-        reason = result.reason
-        assert any(
-            name in reason for name in ("re", "collections", "itertools", "functools")
-        )
 
     def test_import_from_rejection_mentions_safe_builtins(self):
-        # Story #993: import rejection now lists whitelisted stdlib modules,
-        # not safe builtin names.  Verify at least one whitelisted module is named.
+        # ImportFrom is not in ALLOWED_NODES — rejected as a forbidden node.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("from os import path")
         assert result.ok is False
         assert "ImportFrom" in result.reason or "Import" in result.reason
-        reason = result.reason
-        assert any(
-            name in reason for name in ("re", "collections", "itertools", "functools")
-        )
 
     # --- A7: Global/Nonlocal rejections mention local assignments ---
 
@@ -204,36 +193,23 @@ class TestSafeBuiltinNamesV10_4_4:
     """Validation error for Import must list exception types (Finding 3.8)."""
 
     def test_import_rejection_lists_exception_types_v10_4_4(self):
-        """Import rejection message (Story #993) lists whitelisted stdlib modules.
+        """Import is not in ALLOWED_NODES — rejected as a forbidden node type.
 
-        The new import-specific message names the allowed stdlib modules
-        (re, collections, itertools, functools) rather than exception types from
-        SAFE_BUILTIN_NAMES. Test name preserved for traceability to Finding 3.8.
+        Test name preserved for traceability to Finding 3.8.
         """
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
         sb = PythonEvaluatorSandbox()
         result = sb.validate("import os")
         assert result.ok is False
-        reason = result.reason
-        assert "re" in reason, "Import hint must mention whitelisted module 're'"
-        assert "collections" in reason, (
-            "Import hint must mention whitelisted module 'collections'"
-        )
-        assert "itertools" in reason, (
-            "Import hint must mention whitelisted module 'itertools'"
-        )
-        assert "functools" in reason, (
-            "Import hint must mention whitelisted module 'functools'"
-        )
+        assert "Import" in result.reason
 
     def test_safe_builtin_names_count_is_27_v10_4_4(self):
-        """SAFE_BUILTIN_NAMES must contain exactly 34 entries after Story #993 expansion.
+        """SAFE_BUILTIN_NAMES must contain exactly 8 entries (Rust-transpilable only).
 
-        Story #993 added 7 new entries to the original 27:
-        isinstance, type, set, frozenset, float, repr, print.
+        Reduced from 34 to 8: len, any, all, range, enumerate, sorted, min, max.
         Test name preserved for traceability to v10.4.4 Finding 3.8.
         """
         from code_indexer.xray.sandbox import SAFE_BUILTIN_NAMES
 
-        assert len(SAFE_BUILTIN_NAMES) == 34
+        assert len(SAFE_BUILTIN_NAMES) == 8

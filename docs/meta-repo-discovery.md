@@ -22,7 +22,9 @@ This mimics how humans research: first find the right book, then read it.
 
 ## Quick Start
 
-### 1. Initialize Meta-Directory
+### CLI / Standalone Mode
+
+#### 1. Initialize Meta-Directory
 
 ```bash
 cidx global init-meta
@@ -33,7 +35,7 @@ This creates:
 - AI-generated descriptions for all registered global repos
 - Registers meta-directory as `cidx-meta-global`
 
-### 2. Discover Repositories
+#### 2. Discover Repositories
 
 ```bash
 cidx query "authentication libraries" --repo cidx-meta-global --limit 5
@@ -50,7 +52,7 @@ Score: 0.78
 User registration and role-based access control with password hashing...
 ```
 
-### 3. Search Specific Repository
+#### 3. Search Specific Repository
 
 ```bash
 cidx query "JWT token validation" --repo auth-service-global --limit 10
@@ -58,7 +60,26 @@ cidx query "JWT token validation" --repo auth-service-global --limit 10
 
 This searches only the `auth-service` repository for precise results.
 
-## Meta-Repo as Well-Known Endpoint (AC1)
+### Server / MCP Mode
+
+In server mode, meta-repo descriptions are automatically maintained by the
+description-refresh scheduler. No initialization command is needed.
+
+Discover repositories via MCP:
+
+```json
+{"tool": "search_code", "repository_alias": "cidx-meta-global", "query_text": "authentication libraries", "limit": 5}
+```
+
+Then search within a specific repository:
+
+```json
+{"tool": "search_code", "repository_alias": "auth-service-global", "query_text": "JWT token validation", "limit": 10}
+```
+
+To list all registered repositories in server mode, use the `list_global_repos` MCP tool instead of `cidx global list`.
+
+## Meta-Repo as Well-Known Endpoint
 
 ### Reserved Names
 
@@ -82,36 +103,72 @@ Choose a different alias name for your repository.
 - **Well-known**: This is the standard way to find repositories
 - **AI-friendly**: Designed for AI assistants to use programmatically
 
-## Discovery Query Response Format (AC2)
+## Discovery Query Response Format
 
-Query results from `cidx-meta-global` include:
+A discovery query against `cidx-meta-global` is an ordinary semantic search
+over the repository-description files stored in the meta directory. It returns
+the same response shape as any `search_code` call: a top-level envelope
+(`success`, `results`) where `results.results` is the list of matched chunks,
+`results.total_results` is the count, and `results.query_metadata` carries the
+query echo and timing.
 
-- **Repo Name**: Base name of the repository
-- **Global Alias**: Full alias for use with `--repo` flag
-- **Relevance Score**: Similarity score (0.0 to 1.0)
-- **Description Snippet**: AI-generated summary of repository purpose
-- **Technologies**: Languages/frameworks used in the repo
+Each item in `results.results` is the serialized form of
+`QueryResult.to_dict()` (`server/query/semantic_query_manager.py`) and contains:
+
+- **`file_path`**: Path of the matched description file within the meta
+  directory (for example `auth-service.md`). The file base name is the golden
+  repository alias; append `-global` to query that repository directly.
+- **`line_number`**: Line where the matching chunk begins.
+- **`code_snippet`**: The matched text from the description file (the
+  AI-generated summary of the repository's purpose, languages, and frameworks).
+- **`similarity_score`**: Semantic similarity score (0.0 to 1.0).
+- **`repository_alias`**: Alias of the repository searched (`cidx-meta-global`).
+- **`source_repo`**: Source repository for the result. For a global-repo
+  search the handler sets this to the searched alias (`cidx-meta-global`).
+- **`source_provider`**: Embedding provider that produced the match (for
+  example `voyage-ai`).
+
+Optional fields appear only when present: `match_text` (FTS matches),
+`metadata` and `temporal_context` (temporal queries), and `fusion_score` /
+`contributing_providers` (hybrid/multi-provider queries).
 
 ### Example JSON Response (MCP/REST)
 
 ```json
 {
-  "query": "authentication libraries",
-  "repo": "cidx-meta-global",
-  "results": [
-    {
-      "repo_name": "auth-service",
-      "global_alias": "auth-service-global",
-      "relevance_score": 0.92,
-      "description_snippet": "JWT authentication service with OAuth2 support...",
-      "technologies": ["Python", "FastAPI", "JWT"],
-      "source_file": "auth-service.md"
+  "success": true,
+  "results": {
+    "results": [
+      {
+        "file_path": "auth-service.md",
+        "line_number": 1,
+        "code_snippet": "auth-service: JWT authentication service with OAuth2 support; Python, FastAPI.",
+        "similarity_score": 0.92,
+        "repository_alias": "cidx-meta-global",
+        "source_repo": "cidx-meta-global",
+        "source_provider": "voyage-ai"
+      }
+    ],
+    "total_results": 1,
+    "query_metadata": {
+      "query_text": "authentication libraries",
+      "execution_time_ms": 42,
+      "repositories_searched": 1,
+      "timeout_occurred": false,
+      "reranker_used": false,
+      "reranker_provider": null,
+      "rerank_time_ms": 0
     }
-  ]
+  }
 }
 ```
 
-## RAG Workflow Integration (AC3)
+The matched `file_path` (`auth-service.md`) names the description file; its
+base name (`auth-service`) is the golden repository alias. To search that
+repository directly, use the alias with the `-global` suffix
+(`auth-service-global`).
+
+## RAG Workflow Integration
 
 ### Complete Workflow Example
 
@@ -151,7 +208,7 @@ cidx query "JWT validation" --repo api-gateway-global --limit 10
 - **Context**: Understand which repos contain what before diving in
 - **Scalability**: Works with 10 repos or 1000 repos
 
-## Catalog Completeness (AC4)
+## Catalog Completeness
 
 ### Verify All Repos Registered
 
@@ -187,7 +244,7 @@ If a repo is registered but missing from discovery results:
 2. Run `cidx global init-meta` to regenerate descriptions
 3. Query meta-repo again to verify completeness
 
-## Catalog Freshness Indicator (AC5)
+## Catalog Freshness Indicator
 
 ### Check Meta-Repo Status
 

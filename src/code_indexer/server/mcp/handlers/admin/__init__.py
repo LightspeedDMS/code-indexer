@@ -11,6 +11,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -337,8 +338,23 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Inject app's shared background_job_manager so the job is visible
+        # to the job-status API (GET /api/jobs/{job_id}).
+        _bjm = _utils.app_module.background_job_manager
+        if _bjm is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {
+                    "success": False,
+                    "error": "Server not fully initialized: background_job_manager unavailable",
+                }
+            )
         # Create index manager and trigger reindex
-        index_manager = ActivatedRepoIndexManager()
+        index_manager = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                _utils.app_module.app.state, "activated_repo_manager", None
+            ),
+        )
         job_id = index_manager.trigger_reindex(
             repo_alias=repo_alias,
             index_types=index_types,
@@ -449,8 +465,23 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Inject app's shared managers for correct path resolution and
+        # consistency with the trigger_reindex handler.
+        _bjm = _utils.app_module.background_job_manager
+        if _bjm is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {
+                    "success": False,
+                    "error": "Server not fully initialized: background_job_manager unavailable",
+                }
+            )
         # Create index manager and get status
-        index_manager = ActivatedRepoIndexManager()
+        index_manager = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                _utils.app_module.app.state, "activated_repo_manager", None
+            ),
+        )
         status_data = index_manager.get_index_status(
             repo_alias=repo_alias,
             username=user.username,
@@ -1601,11 +1632,34 @@ def handle_trigger_dependency_analysis(
             )
 
         if not dependency_map_service.is_available():
+            # Story #1035 AC6: read active sentinel to surface job_id in error envelope
+            _active_job_id: str = "unknown"
+            _sentinel_dir_pf = (
+                dependency_map_service.get_sentinel_dir()
+                if hasattr(dependency_map_service, "get_sentinel_dir")
+                else None
+            )
+            if _sentinel_dir_pf is not None:
+                from code_indexer.server.services.shared_job_sentinel import (
+                    SharedJobSentinel,
+                )
+                from code_indexer.server.services.dependency_map_service import (
+                    ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+
+                _sentinel_pf = SharedJobSentinel(
+                    sentinel_dir=_sentinel_dir_pf,
+                    stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+                _active_info = _sentinel_pf.read_active("analysis")
+                if _active_info is not None:
+                    _active_job_id = _active_info.job_id
             return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
-                    "error": "Dependency map analysis already in progress",
-                    "job_id": None,
+                    "error": "already in progress",
+                    "job_id": _active_job_id,
+                    "mode": mode,
                 }
             )
 
@@ -1636,14 +1690,75 @@ def handle_trigger_dependency_analysis(
         # Generate job ID
         job_id = f"dep-map-{mode}-{uuid.uuid4().hex[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
 
+        # Story #1035 AC13: synchronous sentinel claim before spawning thread
+        _pre_claimed = False
+        _sentinel_obj = None
+        _sentinel_dir_sc = (
+            dependency_map_service.get_sentinel_dir()
+            if hasattr(dependency_map_service, "get_sentinel_dir")
+            else None
+        )
+        if isinstance(_sentinel_dir_sc, (str, Path)):
+            from code_indexer.server.services.shared_job_sentinel import (
+                SharedJobSentinel as _SharedJobSentinel,
+            )
+            from code_indexer.server.services.dependency_map_service import (
+                ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+            )
+
+            _sentinel_obj = _SharedJobSentinel(
+                sentinel_dir=_sentinel_dir_sc,
+                stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+            )
+            _node_id_sc = (
+                dependency_map_service._get_node_id()
+                if hasattr(dependency_map_service, "_get_node_id")
+                else "unknown"
+            )
+            _claim = _sentinel_obj.try_claim("analysis", job_id, _node_id_sc)
+            if not _claim.success:
+                _conflict_job_id = (
+                    _claim.active.job_id if _claim.active is not None else "unknown"
+                )
+                return _mcp_response(  # type: ignore[no-any-return]
+                    {
+                        "success": False,
+                        "error": "already in progress",
+                        "job_id": _conflict_job_id,
+                        "mode": mode,
+                    }
+                )
+            _pre_claimed = True
+
         # AC2/AC3: Spawn background thread for analysis
-        def run_analysis_job():
+        def run_analysis_job() -> None:
             """Background job to run dependency map analysis."""
+            from code_indexer.server.services.shared_job_sentinel import (
+                AnalysisAlreadyRunningError as _BgAnalysisAlreadyRunningError,
+            )
+            from code_indexer.server.services.job_tracker import (
+                DuplicateJobError as _BgDuplicateJobError,
+            )
+
             try:
                 if mode == "full":
-                    dependency_map_service.run_full_analysis(job_id=job_id)
+                    dependency_map_service.run_full_analysis(
+                        job_id=job_id, pre_claimed=_pre_claimed
+                    )
                 else:
-                    dependency_map_service.run_delta_analysis(job_id=job_id)
+                    dependency_map_service.run_delta_analysis(
+                        job_id=job_id, pre_claimed=_pre_claimed
+                    )
+            except (_BgDuplicateJobError, _BgAnalysisAlreadyRunningError) as e:
+                _active_dup_id = (
+                    getattr(e, "existing_job_id", None)
+                    or getattr(e, "active_job_id", None)
+                    or "unknown"
+                )
+                logger.info(
+                    "MCP dep-map trigger rejected: already in progress, job_id=%s",
+                    _active_dup_id,
+                )
             except Exception as e:
                 logger.error(
                     format_error_log(
@@ -1658,7 +1773,13 @@ def handle_trigger_dependency_analysis(
 
         # Start background daemon thread
         thread = threading.Thread(target=run_analysis_job, daemon=True)
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            # N1: release sentinel on thread-spawn failure to avoid leak
+            if _pre_claimed and _sentinel_obj is not None:
+                _sentinel_obj.release("analysis", expected_job_id=job_id)
+            raise
 
         # AC2/AC3: Return job_id immediately
         return _mcp_response(  # type: ignore[no-any-return]
@@ -1780,6 +1901,29 @@ handle_manage_group_repos.__mcp_requires_session_key__ = True  # type: ignore[at
 
 
 # =============================================================================
+# Memory Governor stats (Story 4)
+# =============================================================================
+
+
+def handle_get_memory_governor_stats(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Return the §3.5 memory-governor snapshot via MCP.
+
+    Returns the full snapshot when the governor is active, or a minimal
+    not-active response when the governor has not been initialised.
+    Never raises.
+    """
+    from code_indexer.server.services.memory_governor import get_memory_governor
+
+    gov = get_memory_governor()
+    if gov is None:
+        return {"enabled": False, "band": None, "active": False}
+    snapshot: Dict[str, Any] = gov.get_snapshot()
+    return snapshot
+
+
+# =============================================================================
 # Registration
 # =============================================================================
 
@@ -1817,3 +1961,4 @@ def _register(registry: dict) -> None:
     # are localhost-only and auto-updater driven, not exposed via MCP.
     registry["get_maintenance_status"] = handle_get_maintenance_status
     registry["trigger_dependency_analysis"] = handle_trigger_dependency_analysis
+    registry["get_memory_governor_stats"] = handle_get_memory_governor_stats

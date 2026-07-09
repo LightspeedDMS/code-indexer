@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
 
@@ -98,14 +98,52 @@ class ApiMetricsPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the table exists.
+        Initialize with a shared connection pool and ensure the buckets table exists.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
+        self._ensure_legacy_api_metrics_schema()
         self._ensure_buckets_schema()
+
+    def _ensure_legacy_api_metrics_schema(self) -> None:
+        """Create the legacy api_metrics table and indexes if they do not already exist.
+
+        This table is no longer written to by the current code, but MUST remain
+        present for rolling-restart backward compatibility: old nodes in a cluster
+        still write to it.  Never drop this table.
+        """
+        try:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_metrics (
+                        id SERIAL PRIMARY KEY,
+                        metric_type TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        node_id TEXT,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_api_metrics_pg_type_timestamp
+                    ON api_metrics(metric_type, timestamp)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_api_metrics_pg_node_id
+                    ON api_metrics(node_id)
+                    """
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "ApiMetricsPostgresBackend: legacy schema setup failed: %s", exc
+            )
 
     def _ensure_buckets_schema(self) -> None:
         """Create the api_metrics_buckets table if it does not already exist.
@@ -153,71 +191,6 @@ class ApiMetricsPostgresBackend:
             logger.warning(
                 "ApiMetricsPostgresBackend: buckets schema setup failed: %s", exc
             )
-
-    def _ensure_schema(self) -> None:
-        """Create the api_metrics table and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS api_metrics (
-                        id SERIAL PRIMARY KEY,
-                        metric_type TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        node_id TEXT,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_api_metrics_pg_type_timestamp
-                    ON api_metrics(metric_type, timestamp)
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_api_metrics_pg_node_id
-                    ON api_metrics(node_id)
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning("ApiMetricsPostgresBackend: schema setup failed: %s", exc)
-
-    def insert_metric(
-        self,
-        metric_type: str,
-        timestamp: Optional[str] = None,
-        node_id: Optional[str] = None,
-    ) -> None:
-        """Insert a single metric record.
-
-        Failures are caught and logged as warnings to prevent metric writes from
-        crashing the application.
-
-        Args:
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
-            timestamp: ISO 8601 timestamp. Uses current UTC time when None.
-            node_id: Optional cluster node identifier (NULL in standalone).
-        """
-        now = (
-            timestamp
-            if timestamp is not None
-            else datetime.now(timezone.utc).isoformat()
-        )
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO api_metrics (metric_type, timestamp, node_id)
-                    VALUES (%s, %s, %s)
-                    """,
-                    (metric_type, now, node_id),
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning("ApiMetricsPostgresBackend: insert_metric failed: %s", exc)
 
     def upsert_bucket(
         self,
@@ -279,6 +252,95 @@ class ApiMetricsPostgresBackend:
         except Exception as exc:
             logger.warning("ApiMetricsPostgresBackend: upsert_bucket failed: %s", exc)
 
+    def upsert_buckets_batch(
+        self,
+        events: Any,
+        node_id: str = "",
+    ) -> None:
+        """Upsert MANY bucket increments on ONE connection, ONE commit (Story #1083).
+
+        Mirrors ApiMetricsSqliteBackend.upsert_buckets_batch: the background metrics
+        writer drains the whole queue and calls this once per drain instead of one
+        connection+commit per metric event, collapsing the per-event transaction
+        churn into a single transaction.
+
+        Args:
+            events: Iterable of dicts, each ``{"username": str, "metric_type": str,
+                "buckets": {granularity: bucket_start_iso, ...}}``.
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+
+        Raises:
+            ValueError: If any event fails field validation (username, granularity,
+                metric_type, bucket_start).
+
+        Counts are preserved exactly: repeated keys within the batch coalesce into a
+        single ``count + N`` increment.
+        """
+        coalesced: Dict[Tuple[str, str, str, str], int] = {}
+        for event in events:
+            username = event["username"]
+            metric_type = event["metric_type"]
+            buckets = event["buckets"]
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError(
+                    f"username must be a non-empty string, got {username!r}"
+                )
+            if metric_type not in _VALID_METRIC_TYPES:
+                raise ValueError(
+                    f"Invalid metric_type {metric_type!r}. "
+                    f"Must be one of: {sorted(_VALID_METRIC_TYPES)}"
+                )
+            for granularity, bucket_start in buckets.items():
+                if granularity not in _VALID_GRANULARITIES:
+                    raise ValueError(
+                        f"Invalid granularity {granularity!r}. "
+                        f"Must be one of: {sorted(_VALID_GRANULARITIES)}"
+                    )
+                try:
+                    datetime.fromisoformat(bucket_start)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"bucket_start must be a valid ISO 8601 datetime string, "
+                        f"got {bucket_start!r}"
+                    )
+                key = (username, granularity, bucket_start, metric_type)
+                coalesced[key] = coalesced.get(key, 0) + 1
+
+        if not coalesced:
+            return
+
+        try:
+            with self._pool.connection() as conn:
+                for (
+                    username,
+                    granularity,
+                    bucket_start,
+                    metric_type,
+                ), inc in coalesced.items():
+                    conn.execute(
+                        """
+                        INSERT INTO api_metrics_buckets
+                            (username, granularity, bucket_start, metric_type, node_id, count)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (username, granularity, bucket_start, metric_type, node_id)
+                        DO UPDATE SET count = api_metrics_buckets.count + %s
+                        """,
+                        (
+                            username,
+                            granularity,
+                            bucket_start,
+                            metric_type,
+                            node_id,
+                            inc,
+                            inc,
+                        ),
+                    )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "ApiMetricsPostgresBackend: upsert_buckets_batch failed: %s", exc
+            )
+
     def cleanup_expired_buckets(self) -> None:
         """Delete expired bucket rows per granularity retention policy.
 
@@ -302,60 +364,6 @@ class ApiMetricsPostgresBackend:
             logger.warning(
                 "ApiMetricsPostgresBackend: cleanup_expired_buckets failed: %s", exc
             )
-
-    def get_metrics(
-        self,
-        window_seconds: int = 3600,
-        node_id: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Return metric counts within the rolling window.
-
-        Args:
-            window_seconds: Time window in seconds (default 3600 = 1 hour).
-            node_id: When provided, filter to metrics from this node only.
-                     When None, aggregate across all nodes.
-
-        Returns:
-            Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-        ).isoformat()
-
-        try:
-            with self._pool.connection() as conn:
-                if node_id is not None:
-                    rows = conn.execute(
-                        """
-                        SELECT metric_type, COUNT(*) as count
-                        FROM api_metrics
-                        WHERE timestamp >= %s AND node_id = %s
-                        GROUP BY metric_type
-                        """,
-                        (cutoff, node_id),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT metric_type, COUNT(*) as count
-                        FROM api_metrics
-                        WHERE timestamp >= %s
-                        GROUP BY metric_type
-                        """,
-                        (cutoff,),
-                    ).fetchall()
-        except Exception as exc:
-            logger.warning("ApiMetricsPostgresBackend: get_metrics failed: %s", exc)
-            rows = []
-
-        counts = {row[0]: row[1] for row in rows}
-        return {
-            "semantic_searches": counts.get("semantic", 0),
-            "other_index_searches": counts.get("other_index", 0),
-            "regex_searches": counts.get("regex", 0),
-            "other_api_calls": counts.get("other_api", 0),
-        }
 
     def get_metrics_bucketed(
         self,
@@ -515,38 +523,10 @@ class ApiMetricsPostgresBackend:
 
         return [(row[0], row[1], int(row[2])) for row in rows]
 
-    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
-        """Delete metric records older than max_age_seconds.
-
-        Args:
-            max_age_seconds: Records older than this many seconds are deleted
-                             (default 86400 = 24 hours).
-
-        Returns:
-            Number of rows deleted.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
-        ).isoformat()
-
-        with self._pool.connection() as conn:
-            result = conn.execute(
-                "DELETE FROM api_metrics WHERE timestamp < %s",
-                (cutoff,),
-            )
-            deleted = int(result.rowcount) if result.rowcount else 0
-            conn.commit()
-
-        if deleted:
-            logger.debug(
-                "ApiMetricsPostgresBackend: cleaned up %d old metric records", deleted
-            )
-        return deleted
-
     def reset(self) -> None:
-        """Delete all metric records (used for testing / manual resets)."""
+        """Delete all bucket records (used for testing / manual resets)."""
         with self._pool.connection() as conn:
-            conn.execute("DELETE FROM api_metrics")
+            conn.execute("DELETE FROM api_metrics_buckets")
             conn.commit()
 
     def close(self) -> None:

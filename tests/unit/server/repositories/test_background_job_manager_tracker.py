@@ -143,16 +143,18 @@ class TestBGMSubmitJobTrackerRegistration:
     (defensive try/except).
     """
 
-    def test_submit_job_calls_tracker_register_job_with_correct_args(
+    def test_submit_job_calls_tracker_register_job_if_no_conflict_for_repo_scoped(
         self, db_path, tracker
     ):
         """
-        submit_job() calls tracker.register_job() with matching job metadata.
+        Bug #1065: submit_job() calls tracker.register_job_if_no_conflict()
+        (atomic gate) for repo-scoped operations (repo_alias provided).
 
         Given a BGM with a real JobTracker
-        When submit_job() is called with operation_type, submitter_username, repo_alias
-        Then tracker.register_job is called with the same job_id, operation_type,
-             username, and repo_alias
+        When submit_job() is called with a non-empty repo_alias
+        Then tracker.register_job_if_no_conflict is called with the matching
+             job_id, operation_type, username, and repo_alias.
+        register_job (non-atomic) must NOT be called in this path.
         """
         manager = BackgroundJobManager(
             use_sqlite=True,
@@ -163,9 +165,16 @@ class TestBGMSubmitJobTrackerRegistration:
             job_tracker=tracker,
         )
         try:
-            with unittest.mock.patch.object(
-                tracker, "register_job", wraps=tracker.register_job
-            ) as mock_register:
+            with (
+                unittest.mock.patch.object(
+                    tracker,
+                    "register_job_if_no_conflict",
+                    wraps=tracker.register_job_if_no_conflict,
+                ) as mock_atomic,
+                unittest.mock.patch.object(
+                    tracker, "register_job", wraps=tracker.register_job
+                ) as mock_legacy,
+            ):
 
                 def quick_task():
                     return {"status": "ok"}
@@ -177,12 +186,69 @@ class TestBGMSubmitJobTrackerRegistration:
                     repo_alias="my-repo",
                 )
 
-                mock_register.assert_called_once_with(
+                # Atomic gate must be called exactly once for repo-scoped submit.
+                # Bug #1065 fix: is_admin and actor_username are now threaded
+                # directly into the atomic INSERT (no post-INSERT reconcile).
+                mock_atomic.assert_called_once_with(
                     job_id=job_id,
                     operation_type="test_operation",
                     username="testuser",
                     repo_alias="my-repo",
+                    is_admin=False,
+                    actor_username="testuser",
                 )
+                # Legacy non-atomic register_job must NOT be called (Bug #1065)
+                mock_legacy.assert_not_called()
+        finally:
+            manager.shutdown()
+
+    def test_submit_job_calls_tracker_register_job_for_non_repo_scoped(
+        self, db_path, tracker
+    ):
+        """
+        For non-repo-scoped operations (repo_alias=None), submit_job() falls
+        back to the legacy register_job path (no atomic index to enforce).
+        register_job_if_no_conflict must NOT be called in this path.
+        """
+        manager = BackgroundJobManager(
+            use_sqlite=True,
+            db_path=db_path,
+            background_jobs_config=BackgroundJobsConfig(
+                max_concurrent_background_jobs=10,
+            ),
+            job_tracker=tracker,
+        )
+        try:
+            with (
+                unittest.mock.patch.object(
+                    tracker, "register_job", wraps=tracker.register_job
+                ) as mock_legacy,
+                unittest.mock.patch.object(
+                    tracker,
+                    "register_job_if_no_conflict",
+                    wraps=tracker.register_job_if_no_conflict,
+                ) as mock_atomic,
+            ):
+
+                def quick_task():
+                    return {"status": "ok"}
+
+                job_id = manager.submit_job(
+                    "test_operation",
+                    quick_task,
+                    submitter_username="testuser",
+                    repo_alias=None,
+                )
+
+                # Legacy register_job called for non-repo-scoped submit
+                mock_legacy.assert_called_once_with(
+                    job_id=job_id,
+                    operation_type="test_operation",
+                    username="testuser",
+                    repo_alias=None,
+                )
+                # Atomic gate NOT called when repo_alias is None
+                mock_atomic.assert_not_called()
         finally:
             manager.shutdown()
 

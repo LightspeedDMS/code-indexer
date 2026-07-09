@@ -8,6 +8,8 @@ monitoring.
 import subprocess
 from typing import Dict, List, Tuple
 
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+
 
 class ParallelWatchManager:
     """Manage multiple parallel watch processes.
@@ -73,6 +75,11 @@ class ParallelWatchManager:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,  # Line buffered
+            # Bug #1328: absolutize any relative PYTHONPATH before the
+            # child subprocess changes cwd to repo_path, so a relative
+            # dev-mode PYTHONPATH doesn't re-anchor into the repo and get
+            # shadowed by a same-named package inside it.
+            env=build_cidx_subprocess_env(),
         )
 
         return process

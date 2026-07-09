@@ -52,9 +52,13 @@ def _make_session_key() -> str:
 
 
 def _assert_elevation_required(resp) -> None:
-    """Assert response is 403 with error=elevation_required."""
+    """Assert response is 403 HTML error page (Bug C: guard returns HTML, not JSON)."""
     assert resp.status_code == 403
-    assert resp.json().get("error") == "elevation_required"
+    content_type = resp.headers.get("content-type", "")
+    assert "text/html" in content_type, (
+        f"Expected HTML error page for elevation_required, got: {content_type}"
+    )
+    assert "/admin/" in resp.text, "HTML error page must contain back-link to /admin/"
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +159,8 @@ def test_cross_user_setup_no_elevation_returns_403(client, esm):
 
 
 def test_cross_user_setup_with_elevation_no_confirm_overwrite_returns_400(client, esm):
-    """Cross-user setup WITH elevation but missing confirm_overwrite=1 returns 400."""
+    """Cross-user setup WITH elevation but missing confirm_overwrite=1 returns 400 HTML
+    (Bug C: guard returns styled HTML error page, not raw JSON)."""
     session_key = _make_session_key()
     with _as_admin(_ADMIN), _with_elevation(esm, session_key, _ADMIN, scope="full"):
         resp = client.get(
@@ -163,7 +168,11 @@ def test_cross_user_setup_with_elevation_no_confirm_overwrite_returns_400(client
             cookies=_elevated_cookies(session_key),
         )
     assert resp.status_code == 400
-    assert resp.json().get("error") == "confirm_overwrite_required"
+    content_type = resp.headers.get("content-type", "")
+    assert "text/html" in content_type, (
+        f"Expected HTML error page for confirm_overwrite_required, got: {content_type}"
+    )
+    assert "/admin/" in resp.text, "HTML error page must contain back-link to /admin/"
 
 
 def test_cross_user_setup_with_elevation_and_confirm_overwrite_succeeds(client, esm):
@@ -438,3 +447,103 @@ def test_cross_user_setup_with_session_cookie_elevation_succeeds(client, esm):
             cookies={"session": session_cookie_value},
         )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Bug A: cross-user show mode must not require confirm_overwrite=1
+# Bug C: cross-user guard must return HTML, not raw JSON (two branches)
+# Bug D: show-mode form must have required on totp_code input
+# ---------------------------------------------------------------------------
+
+
+def test_cross_user_show_mode_with_elevation_no_confirm_overwrite_succeeds(client, esm):
+    """Bug A: mode=show is read-only; cross-user show access needs elevation only,
+    NOT confirm_overwrite=1. Previously the guard fired for all cross-user access
+    and blocked show mode with a 400 unless confirm_overwrite=1 was supplied."""
+    session_key = _make_session_key()
+    with _as_admin(_ADMIN), _with_elevation(esm, session_key, _ADMIN, scope="full"):
+        resp = client.get(
+            f"/admin/mfa/setup?user={_OTHER}&mode=show",
+            cookies=_elevated_cookies(session_key),
+        )
+    assert resp.status_code == 200
+
+
+def test_cross_user_show_mode_without_elevation_returns_403_html(client, esm):
+    """Bug A + Bug C: cross-user show without elevation must return 403 HTML
+    (not raw JSON). The error page should contain an anchor back to /admin/."""
+    with _as_admin(_ADMIN), patch(_ESM_PATH, esm):
+        resp = client.get(f"/admin/mfa/setup?user={_OTHER}&mode=show")
+    assert resp.status_code == 403
+    content_type = resp.headers.get("content-type", "")
+    assert "text/html" in content_type, (
+        f"Expected HTML response, got Content-Type: {content_type}"
+    )
+    body = resp.text
+    assert "/admin/" in body, "Error page must contain back-link to /admin/"
+
+
+def test_cross_user_non_show_mode_still_requires_confirm_overwrite(client, esm):
+    """Bug A non-regression: non-show cross-user mode (generating new secret) still
+    requires confirm_overwrite=1 even with elevation. The guard must only be relaxed
+    for mode=show, not for all cross-user operations."""
+    session_key = _make_session_key()
+    with _as_admin(_ADMIN), _with_elevation(esm, session_key, _ADMIN, scope="full"):
+        resp = client.get(
+            f"/admin/mfa/setup?user={_OTHER}",  # no mode=show, no confirm_overwrite
+            cookies=_elevated_cookies(session_key),
+        )
+    assert resp.status_code == 400
+
+
+def test_cross_user_guard_elevation_required_returns_html_not_json(client, esm):
+    """Bug C branch 1: _cross_user_setup_guard elevation_required error must return
+    HTMLResponse, not raw JSON. Browser users should see a styled error page."""
+    with _as_admin(_ADMIN), patch(_ESM_PATH, esm):
+        # No elevation window — triggers elevation_required branch
+        resp = client.get(f"/admin/mfa/setup?user={_OTHER}&confirm_overwrite=1")
+    assert resp.status_code == 403
+    content_type = resp.headers.get("content-type", "")
+    assert "text/html" in content_type, (
+        f"Expected HTML error page for elevation_required, got: {content_type}"
+    )
+    assert "/admin/" in resp.text, "HTML error page must contain back-link to /admin/"
+
+
+def test_cross_user_guard_confirm_overwrite_required_returns_html_not_json(client, esm):
+    """Bug C branch 2: _cross_user_setup_guard confirm_overwrite_required error must
+    return HTMLResponse, not raw JSON (elevated but missing confirm_overwrite param)."""
+    session_key = _make_session_key()
+    with _as_admin(_ADMIN), _with_elevation(esm, session_key, _ADMIN, scope="full"):
+        resp = client.get(
+            f"/admin/mfa/setup?user={_OTHER}",  # no confirm_overwrite
+            cookies=_elevated_cookies(session_key),
+        )
+    assert resp.status_code == 400
+    content_type = resp.headers.get("content-type", "")
+    assert "text/html" in content_type, (
+        f"Expected HTML error page for confirm_overwrite_required, got: {content_type}"
+    )
+    assert "/admin/" in resp.text, "HTML error page must contain back-link to /admin/"
+
+
+def test_show_mode_form_totp_input_has_required_attribute():
+    """Bug D: the show-mode TOTP input element itself must carry the required attribute.
+    Without it, submitting an empty form sends an empty string to Form(...),
+    producing a 422 Unprocessable Entity from FastAPI.
+    Checks the totp_code input element substring, not just any occurrence of required."""
+    from code_indexer.server.web.mfa_routes import _render_setup
+
+    html = _render_setup("qrdata", "MANUALKEY", "csrf", "testuser", show_mode=True)
+    # Find the totp_code input element; it must contain 'required'
+    # The input has name='totp_code' so locate that span and check for required
+    totp_input_start = html.find("name='totp_code'")
+    assert totp_input_start != -1, "totp_code input element not found in show_mode HTML"
+    # The required attribute lives on the same input tag; find the enclosing tag
+    tag_start = html.rfind("<input", 0, totp_input_start)
+    tag_end = html.find(">", totp_input_start)
+    assert tag_start != -1 and tag_end != -1, "Could not locate totp_code <input> tag"
+    input_tag = html[tag_start : tag_end + 1]
+    assert "required" in input_tag, (
+        f"totp_code input tag in show_mode must include 'required'; got: {input_tag!r}"
+    )

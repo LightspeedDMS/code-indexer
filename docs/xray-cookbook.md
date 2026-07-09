@@ -27,8 +27,6 @@ and `enclosing_method_body()` (resolves the enclosing method for context).
 ### Evaluator Code
 
 ```python
-import re
-
 def get_method_name(node):
     """Walk to enclosing method and extract its name."""
     body = node.enclosing_method_body()
@@ -184,10 +182,15 @@ return {"matches": results, "value": None}
 | `.start_byte` / `.end_byte` | int | Byte range |
 | `.start_point` / `.end_point` | tuple[int,int] | (row, column) |
 
-### Allowed imports
+### Available built-ins
 
-`import re`, `import collections`, `import itertools`, `import functools` --
-other stdlib modules are blocked by the sandbox whitelist.
+Evaluators cannot import any modules. The sandbox blocks all `import` and
+`from ... import` statements. Use only the provided globals (listed above) and
+the following eight safe built-ins:
+
+`len`, `any`, `all`, `range`, `enumerate`, `sorted`, `min`, `max`
+
+No other built-ins or standard library modules are available.
 
 ### Evaluator return contract
 

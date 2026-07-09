@@ -6,6 +6,7 @@ Golden repositories are stored in ~/.cidx-server/data/golden-repos/ with metadat
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 
 import errno
 import json
@@ -14,6 +15,7 @@ import re
 import shutil
 import subprocess
 import logging
+import tempfile
 import time
 import threading
 import uuid
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
 # Imported at module level so the symbol is attachable via
@@ -139,6 +142,7 @@ class GoldenRepoManager:
     _refresh_scheduler: Optional[Any] = (
         None  # RefreshScheduler (existing, re-declared for clarity)
     )
+    _snapshot_manager: Optional[Any] = None  # VersionedSnapshotManager (Story #1034)
 
     def __init__(
         self,
@@ -171,8 +175,9 @@ class GoldenRepoManager:
             resource_config = ServerResourceConfig()
         self.resource_config = resource_config
 
-        # Ensure directory structure exists
-        os.makedirs(self.golden_repos_dir, exist_ok=True)
+        # Ensure directory structure exists (Bug #1229: use safe helper so a
+        # dangling CoW/NFS symlink does not crash the worker with FileExistsError)
+        _safe_makedirs_cow(self.golden_repos_dir)
 
         # Thread safety for concurrent operations (Story #620 Priority 2A)
         self._operation_lock = threading.Lock()
@@ -271,6 +276,82 @@ class GoldenRepoManager:
                 self.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)
             logging.info(f"Loaded {len(self.golden_repos)} golden repos from SQLite")
 
+    def _resolve_golden_repo(self, alias: str) -> Optional[GoldenRepo]:
+        """
+        Resolve a golden repo by alias, reloading from the shared backend on
+        a local cache miss (Bug #1314 -- cross-worker/cross-node staleness).
+
+        `self.golden_repos` is a per-worker in-memory cache populated once at
+        `__init__` (`_load_metadata_from_sqlite`). In a multi-worker /
+        multi-node cluster (PostgreSQL storage_backend behind HAProxy), a
+        repo registered by a DIFFERENT worker/node after this worker started
+        is absent from THIS worker's local cache even though the shared
+        backend (SQLite solo / PostgreSQL cluster) already has it -- only the
+        one worker that served `add_golden_repo` knows about it locally.
+
+        Management/mutation operations (add index, refresh/branch-change,
+        index-status lookup, removal, duplicate-alias checks) MUST see
+        freshly-registered repos, so they resolve through this method
+        instead of a raw `self.golden_repos[alias]` / `alias in
+        self.golden_repos` check. On a cache miss that resolves via the
+        backend, the local cache is populated so subsequent lookups on this
+        worker are O(1) -- this keeps `golden_repos` a legitimate read
+        cache with reload-on-miss rather than the sole source of truth.
+
+        Args:
+            alias: Repository alias.
+
+        Returns:
+            The GoldenRepo if found (cache or backend), else None.
+        """
+        cached = self.golden_repos.get(alias)
+        if cached is not None:
+            return cached
+        repo_data = self._sqlite_backend.get_repo(alias)
+        if repo_data is None:
+            return None
+        repo = GoldenRepo(**repo_data)
+        self.golden_repos[alias] = repo
+        return repo
+
+    def _resolve_golden_repo_authoritative(self, alias: str) -> Optional["GoldenRepo"]:
+        """
+        Resolve a golden repo's CURRENT authoritative state directly from the
+        shared backend, bypassing the per-worker cache HIT path (Bug #1316).
+
+        `_resolve_golden_repo` is cache-first with reload-on-miss (Bug #1314):
+        correct for presence checks and immutable-field reads (clone_path), but
+        a cache HIT can serve a field value (e.g. default_branch,
+        temporal_options) that a DIFFERENT worker/node has since mutated in the
+        shared backend. Mutation-path decisions whose OUTCOME depends on such a
+        field (change_branch's "already on branch" check;
+        add_indexes_to_golden_repo's temporal_options used to build the index
+        command) MUST call this method instead, so a cross-node mutation is
+        visible immediately without a worker restart. The per-worker cache is
+        refreshed with the fresh row (or evicted if the row is gone) so
+        subsequent cache-first reads (clone_path, presence) stay consistent.
+
+        Args:
+            alias: Repository alias.
+
+        Returns:
+            Freshly-read GoldenRepo if it still exists in the shared backend,
+            else None (also evicts any stale cache entry for this alias).
+        """
+        # Anti-duplication: get_golden_repo() already performs the identical
+        # unconditional self._sqlite_backend.get_repo(alias) -> GoldenRepo(...)
+        # read (it is the long-standing public "source of truth" accessor
+        # used throughout the codebase, e.g. activated_repo_manager.py,
+        # mcp/handlers/delegation.py). Delegate to it rather than duplicating
+        # the fetch-and-construct logic; this method's only added value is
+        # the cache-refresh/eviction side effect below.
+        repo = self.get_golden_repo(alias)
+        if repo is None:
+            self.golden_repos.pop(alias, None)
+            return None
+        self.golden_repos[alias] = repo
+        return repo
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -280,6 +361,7 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         submitter_username: str = "admin",
+        skip_pre_flight_git_validation: bool = False,
     ) -> str:
         """
         Add a golden repository.
@@ -338,15 +420,39 @@ class GoldenRepoManager:
                 "and cannot be used as part of an alias name"
             )
 
-        # Validate BEFORE submitting job
-        if alias in self.golden_repos:
+        # Validate BEFORE submitting job (Bug #1314: resolve via shared
+        # backend so a duplicate-alias registered by ANOTHER worker/node is
+        # still detected, not just aliases known to this worker's cache)
+        if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
-        # Skip git validation for local:// URLs (Story #538)
-        if not repo_url.startswith("local://"):
+        # Skip git validation for local:// URLs (Story #538) or when caller
+        # explicitly opts out (Story #1092: batch-create fast path).
+        if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):
             if not self._validate_git_repository(repo_url):
                 raise GitOperationError(
                     f"Invalid or inaccessible git repository: {repo_url}"
+                )
+
+        def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
+            """Remove a partially-cloned directory so retries don't fail with
+            'destination path already exists' (Bug #1218 orphan-clone cleanup).
+            Silently no-ops if clone_path is None or does not exist.
+            """
+            if not clone_path:
+                return
+            try:
+                if os.path.exists(clone_path):
+                    shutil.rmtree(clone_path)
+                    logging.info(
+                        "Bug #1218: removed orphaned clone '%s' after registration failure",
+                        clone_path,
+                    )
+            except Exception as cleanup_exc:
+                logging.warning(
+                    "Bug #1218: failed to remove orphaned clone '%s': %s",
+                    clone_path,
+                    cleanup_exc,
                 )
 
         # Create wrapper for background execution that accepts progress_callback
@@ -354,9 +460,14 @@ class GoldenRepoManager:
         def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute add operation in background thread."""
             nonlocal default_branch
+            # Bug #1218: track clone_path so we can clean it up on failure.
+            # An orphaned clone (clone made but DB record never created) blocks
+            # retries with "destination path already exists".
+            _clone_path_for_cleanup: Optional[str] = None
             try:
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
+                _clone_path_for_cleanup = clone_path
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -416,8 +527,20 @@ class GoldenRepoManager:
                             f"Category auto-assignment failed for '{alias}': {e}"
                         )
 
-                # Automatic global activation (AC1 from Story #521)
-                # This is a non-blocking post-registration step (AC4)
+                # Automatic global activation (AC1 from Story #521).
+                #
+                # Bug #1317: a "successfully-provisioned" GLOBAL repo MUST
+                # always have its alias pointer file written. This used to
+                # be a non-blocking, best-effort step (AC4) that on failure
+                # just logged an error and left the golden_repos row
+                # committed with no pointer -- a registry-orphan-in-waiting
+                # that forced every future query onto the #1315
+                # index_path fallback as steady state instead of a rare
+                # safety net. Activation failure now rolls back the row
+                # (both the in-memory cache and the shared SQLite/PG
+                # backend) and re-raises as GitOperationError, which the
+                # outer except clause below cleans up the orphaned clone
+                # directory for -- registration is all-or-nothing.
                 try:
                     from code_indexer.global_repos.global_activation import (
                         GlobalActivator,
@@ -435,13 +558,39 @@ class GoldenRepoManager:
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
                     )
                 except Exception as activation_error:
-                    # Log error but don't fail the golden repo registration (AC4)
                     logging.error(
-                        f"Global activation failed for '{alias}': {activation_error}. "
-                        f"Golden repository is registered but not globally accessible. "
-                        f"Manual global activation can be retried later."
+                        f"Bug #1317: global activation failed for '{alias}': "
+                        f"{activation_error}. Rolling back registration so "
+                        f"the golden repo is never left without its alias "
+                        f"pointer."
                     )
-                    # Continue with successful registration response
+                    self.golden_repos.pop(alias, None)
+                    try:
+                        self._sqlite_backend.remove_repo(alias)
+                    except Exception as rollback_error:
+                        # The clone directory is removed unconditionally by
+                        # the outer `except GitOperationError` cleanup below
+                        # regardless of whether THIS rollback succeeds, so a
+                        # row that survives this failure resolves as
+                        # clone-absent -- it is covered by the
+                        # golden_repo_reconciler orphan-removal pass (not
+                        # its pointer-repair pass, since there is no clone
+                        # to repoint), unless the reconciler's circuit-
+                        # breaker trips because an implausible fraction of
+                        # repos are absent at once (see
+                        # golden_repo_reconciler.py).
+                        logging.error(
+                            f"Bug #1317: failed to roll back golden_repos "
+                            f"row for '{alias}' after activation failure: "
+                            f"{rollback_error}. The clone directory is "
+                            f"still being removed; this row will resolve "
+                            f"as clone-absent and is covered by the "
+                            f"registry reconcile sweep's orphan-removal "
+                            f"pass."
+                        )
+                    raise GitOperationError(
+                        f"Global activation failed for '{alias}': {activation_error}"
+                    ) from activation_error
 
                 # Lifecycle hook: Create .md file in cidx-meta (Story #538)
                 try:
@@ -505,19 +654,23 @@ class GoldenRepoManager:
                 }
 
             except subprocess.CalledProcessError as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: Git process failed with exit code {e.returncode}: {e.stderr}"
                 )
             except subprocess.TimeoutExpired as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: Git operation timed out after {e.timeout} seconds"
                 )
             except (OSError, IOError) as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: File system error: {str(e)}"
                 )
             except GitOperationError:
                 # Re-raise GitOperationError from sub-methods without modification
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise
 
         # Submit to BackgroundJobManager
@@ -651,6 +804,23 @@ class GoldenRepoManager:
         """
         return self._sqlite_backend.list_repos()  # type: ignore[no-any-return]
 
+    def is_globally_active(self, alias: str) -> bool:
+        """Return True if *alias* is registered and globally activated (Story #1039).
+
+        Delegates to ``GlobalActivator.is_globally_active``.
+
+        Args:
+            alias: Golden repository alias (bare form, without ``-global`` suffix).
+
+        Returns:
+            ``True`` when the alias has an active ``<alias>-global`` entry in the
+            global registry; ``False`` otherwise.
+        """
+        from code_indexer.global_repos.global_activation import GlobalActivator
+
+        activator = GlobalActivator(self.golden_repos_dir)
+        return bool(activator.is_globally_active(alias))
+
     def register_local_repo(
         self,
         alias: str,
@@ -690,8 +860,10 @@ class GoldenRepoManager:
             )
 
         with self._operation_lock:
-            # Idempotency: return False if already registered
-            if alias in self.golden_repos:
+            # Idempotency: return False if already registered (Bug #1314:
+            # resolve via shared backend so a repo registered by ANOTHER
+            # worker/node is recognized here too)
+            if self._resolve_golden_repo(alias) is not None:
                 return False
 
             # Create golden repository record
@@ -765,11 +937,12 @@ class GoldenRepoManager:
                 import subprocess
 
                 subprocess.run(
-                    ["cidx", "init"],
+                    ["cidx", "init", "--no-override-file"],
                     cwd=str(folder_path),
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 logging.info(
                     f"Initialized CIDX index structure for local repo '{alias}'"
@@ -856,8 +1029,10 @@ class GoldenRepoManager:
         if get_maintenance_state().is_maintenance_mode():
             raise MaintenanceModeError()
 
-        # Validate repository exists BEFORE submitting job
-        if alias not in self.golden_repos:
+        # Validate repository exists BEFORE submitting job (Bug #1314:
+        # resolve via shared backend so a repo registered by ANOTHER
+        # worker/node can still be removed from this worker)
+        if self._resolve_golden_repo(alias) is None:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
 
         # Create no-args wrapper for background execution
@@ -910,42 +1085,58 @@ class GoldenRepoManager:
                         f"Failed to find activated repos for cascade deletion: {e}"
                     )
 
-            # Get repository info before removal
-            golden_repo = self.golden_repos[alias]
-
-            # Perform cleanup BEFORE removing from memory
-            # Use canonical path resolution to handle versioned structure repos
+            # Bug #1317 -- provisioning atomicity guard (removal side):
+            # resolve the on-disk path BEFORE touching the registry. A
+            # GoldenRepoNotFoundError here just means "nothing to clean up
+            # on disk" -- it must never block removing the row (that IS the
+            # registry-orphan cleanup case).
             try:
-                actual_path = self.get_actual_repo_path(alias)
-                cleanup_successful = self._cleanup_repository_files(actual_path)
+                actual_path: Optional[str] = self.get_actual_repo_path(alias)
+                repo_exists_on_disk = True
             except GoldenRepoNotFoundError:
-                # If repository doesn't exist on filesystem, nothing to clean up
-                # This can happen in test scenarios or if repo was manually deleted
                 logging.info(
-                    f"Repository '{alias}' not found on filesystem during removal - skipping cleanup"
+                    f"Repository '{alias}' not found on filesystem during "
+                    f"removal - registry row will still be removed."
                 )
-                cleanup_successful = True
-            except GitOperationError as cleanup_error:
-                # Critical cleanup failures should prevent deletion
-                logging.error(
-                    f"Critical cleanup failure prevents repository deletion: {cleanup_error}"
-                )
-                raise  # Re-raise to prevent deletion
+                actual_path = None
+                repo_exists_on_disk = False
 
-            # Only remove from storage after cleanup is complete
-            del self.golden_repos[alias]
-
+            # Bug #1317: remove the registry row BEFORE deleting any on-disk
+            # files. The old order deleted files first and removed the row
+            # only afterwards -- if that row removal then failed (a
+            # transient DB/connectivity error), the "rollback" only restored
+            # the PER-WORKER in-memory dict (useless in a multi-worker /
+            # cluster deployment -- see the cluster-aware-state invariant)
+            # while the files were already gone forever, producing exactly
+            # the registry-orphan this bug is about: a golden_repos row
+            # with no corresponding clone. Removing the row first means a
+            # failure here aborts with NOTHING destroyed (row + files both
+            # still present, consistent); only after the row is confirmed
+            # gone do we touch the filesystem, so a later filesystem-cleanup
+            # failure can only ever leave a harmless orphan CLONE (files
+            # with no row), never a registry-orphan.
             try:
                 self._sqlite_backend.remove_repo(alias)
-            except Exception as save_error:
-                # If SQLite delete fails, rollback the in-memory deletion
+            except Exception as removal_error:
                 logging.error(
-                    f"Failed to remove from SQLite after deletion, rolling back: {save_error}"
+                    f"Failed to remove golden repo '{alias}' from registry: "
+                    f"{removal_error}. No files were deleted; the "
+                    f"repository remains registered and intact."
                 )
-                self.golden_repos[alias] = golden_repo  # Restore repository
                 raise GitOperationError(
-                    f"Repository deletion rollback due to SQLite removal failure: {save_error}"
+                    f"Repository deletion aborted: failed to remove "
+                    f"'{alias}' from registry: {removal_error}"
                 )
+
+            del self.golden_repos[alias]
+
+            # Filesystem cleanup happens only now, after the registry row is
+            # confirmed removed.
+            if repo_exists_on_disk:
+                assert actual_path is not None
+                cleanup_successful = self._cleanup_repository_files(actual_path)
+            else:
+                cleanup_successful = True
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
@@ -1213,7 +1404,7 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            cmd = ["git", "clone"]
+            cmd = ["git", "-c", "core.fsync=none", "clone"]
             if branch:
                 cmd.extend(["--branch", branch])
             cmd.extend([repo_url, clone_path])
@@ -1482,7 +1673,15 @@ class GoldenRepoManager:
         )
 
         # Build init command with optional --force flag
-        init_command = ["cidx", "init", "--embedding-provider", "voyage-ai"]
+        # --no-override-file prevents creating .code-indexer-override.yaml in golden repos
+        # which would block git pull if upstream tracks a file with the same name (Bug #1013)
+        init_command = [
+            "cidx",
+            "init",
+            "--embedding-provider",
+            "voyage-ai",
+            "--no-override-file",
+        ]
         if force_init:
             init_command.append("--force")
 
@@ -1553,21 +1752,45 @@ class GoldenRepoManager:
         _popen_stdout: List[str] = []
         _popen_stderr: List[str] = []
 
-        def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
-            """Run command with Popen progress, re-raising as GitOperationError on failure."""
+        def _run_popen(
+            command: List[str],
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
+        ) -> None:
+            """Run command with Popen progress, re-raising as GitOperationError on failure.
+
+            No whole-job timeout is applied (Bug #1218): the only legitimate timeout
+            is the per-request outbound embedding-provider HTTP call.
+
+            Bug #1313 round-3: env is forwarded to run_with_popen_progress so
+            the temporal (--index-commits) child subprocess can be handed
+            CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
+            temporal call site below. Defaults to None (inherit current
+            process env, unchanged for the semantic/FTS call).
+            """
             _popen_stdout.clear()
             _popen_stderr.clear()
+            # Bug #1313 round-3 regression guard: only pass the env= kwarg
+            # when it is not None, so the semantic/FTS call (and sqlite
+            # mode) keep the EXACT pre-existing call shape -- several
+            # pre-existing tests mock run_with_popen_progress with a strict
+            # (non-**kwargs) signature that does not accept an env kwarg at
+            # all.
+            _popen_kwargs: dict = dict(
+                command=command,
+                phase_name=phase_name,
+                allocator=allocator,
+                progress_callback=progress_callback,
+                all_stdout=_popen_stdout,
+                all_stderr=_popen_stderr,
+                cwd=clone_path,
+                error_label=error_label,
+            )
+            if env is not None:
+                _popen_kwargs["env"] = env
             try:
-                run_with_popen_progress(
-                    command=command,
-                    phase_name=phase_name,
-                    allocator=allocator,
-                    progress_callback=progress_callback,
-                    all_stdout=_popen_stdout,
-                    all_stderr=_popen_stderr,
-                    cwd=clone_path,
-                    error_label=error_label,
-                )
+                run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 # Check for "No files found" — acceptable for golden repo registration
                 combined = "".join(_popen_stdout) + "".join(_popen_stderr)
@@ -1594,6 +1817,7 @@ class GoldenRepoManager:
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
 
                 if result.returncode != 0:
@@ -1611,6 +1835,20 @@ class GoldenRepoManager:
                         raise GitOperationError(f"cidx init failed: {combined_output}")
 
                 logging.info(f"cidx init completed for {clone_path}")
+                _config_json_post_init = (
+                    Path(clone_path) / ".code-indexer" / "config.json"
+                )
+                if _config_json_post_init.exists():
+                    logger.warning(
+                        "[config-init-diag] post-init config.json present: path=%s mtime=%.6f",
+                        _config_json_post_init,
+                        _config_json_post_init.stat().st_mtime,
+                    )
+                else:
+                    logger.warning(
+                        "[config-init-diag] post-init config.json ABSENT: path=%s",
+                        _config_json_post_init,
+                    )
                 if progress_callback is not None:
                     progress_callback(
                         5,
@@ -1640,7 +1878,10 @@ class GoldenRepoManager:
             # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
             # at DEBUG and never interrupt indexing.
             def _run_popen_with_telemetry(
-                command: List[str], phase_name: str, error_label: str
+                command: List[str],
+                phase_name: str,
+                error_label: str,
+                env: Optional[dict] = None,
             ) -> None:
                 try:
                     from code_indexer.server.services.config_seeding import (
@@ -1654,7 +1895,9 @@ class GoldenRepoManager:
                         _seed_exc,
                     )
                 try:
-                    _run_popen(command, phase_name=phase_name, error_label=error_label)
+                    _run_popen(
+                        command, phase_name=phase_name, error_label=error_label, env=env
+                    )
                 finally:
                     try:
                         from code_indexer.services.provider_health_bridge import (
@@ -1669,21 +1912,59 @@ class GoldenRepoManager:
                         )
 
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
+            _config_json_pre_index = Path(clone_path) / ".code-indexer" / "config.json"
+            if _config_json_pre_index.exists():
+                logger.warning(
+                    "[config-init-diag] pre-index config.json present: path=%s mtime=%.6f cwd=%s",
+                    _config_json_pre_index,
+                    _config_json_pre_index.stat().st_mtime,
+                    clone_path,
+                )
+            else:
+                logger.warning(
+                    "[config-init-diag] pre-index config.json ABSENT: path=%s cwd=%s",
+                    _config_json_pre_index,
+                    clone_path,
+                )
             logging.info(f"Executing cidx index --fts for {clone_path}")
             _run_popen_with_telemetry(
                 ["cidx", "index", "--fts", "--progress-json"],
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
+                env=build_cidx_subprocess_env(),
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
             # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
             if temporal_command is not None:
+                # Bug #1313 round-3: in postgres/cluster mode, hand the child
+                # subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs
+                # the PostgreSQL temporal-metadata backend instead of
+                # silently falling back to SQLite-on-NFS. sqlite/solo mode
+                # (or a failed bootstrap read) yields env=None -- byte
+                # -unchanged existing behavior. ONLY this temporal call site
+                # is postgres-aware; the semantic/FTS call above is
+                # untouched.
+                from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                    build_temporal_child_env,
+                )
+                from ..services.config_service import get_config_service
+
+                _temporal_env = build_temporal_child_env(
+                    get_config_service().get_config()
+                )
+                _temporal_env = (
+                    build_cidx_subprocess_env(_temporal_env)
+                    if _temporal_env is not None
+                    else None
+                )
+
                 logging.info(f"Executing cidx index --index-commits for {clone_path}")
                 _run_popen_with_telemetry(
                     temporal_command,
                     phase_name="temporal",
                     error_label="temporal indexing",
+                    env=_temporal_env,
                 )
                 logging.info(f"cidx index --index-commits completed for {clone_path}")
 
@@ -1736,8 +2017,25 @@ class GoldenRepoManager:
             with open(config_path) as f:
                 config_data = json.load(f)
             config_data["embedding_providers"] = providers
-            with open(config_path, "w") as f:
-                json.dump(config_data, f)
+
+            # Atomic write via tempfile.mkstemp + os.replace to avoid a truncation
+            # window.  A plain open("w") truncates config.json to 0 bytes before
+            # writing, so any concurrent reader (e.g. detect_current_mode() called
+            # by a cidx index subprocess) sees an empty file, gets JSONDecodeError,
+            # returns "uninitialized", and fails with "Command 'index' is not
+            # available in no configuration found" (Phase 3 registration race).
+            parent_dir = config_path.parent
+            tmp_fd, tmp_name = tempfile.mkstemp(dir=str(parent_dir), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w") as tmp_f:
+                    json.dump(config_data, tmp_f)
+                os.replace(tmp_name, str(config_path))
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except Exception:
+                    pass
+                raise
 
             logging.info("Wrote embedding_providers=%s to %s", providers, config_path)
         except Exception as exc:
@@ -1802,11 +2100,19 @@ class GoldenRepoManager:
                 # Try init with force flag if it wasn't already used
                 logging.info("Attempting init conflict resolution with --force flag")
                 result = subprocess.run(
-                    ["cidx", "init", "--embedding-provider", "voyage-ai", "--force"],
+                    [
+                        "cidx",
+                        "init",
+                        "--embedding-provider",
+                        "voyage-ai",
+                        "--force",
+                        "--no-override-file",
+                    ],
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_init_conflict_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 return result.returncode == 0
             else:
@@ -1819,11 +2125,18 @@ class GoldenRepoManager:
                     shutil.rmtree(config_dir)
 
                 result = subprocess.run(
-                    ["cidx", "init", "--embedding-provider", "voyage-ai"],
+                    [
+                        "cidx",
+                        "init",
+                        "--embedding-provider",
+                        "voyage-ai",
+                        "--no-override-file",
+                    ],
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_init_conflict_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 return result.returncode == 0
 
@@ -1872,6 +2185,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_service_cleanup_timeout,
+                env=build_cidx_subprocess_env(),
             )
 
             # Wait for service cleanup using proper event-based waiting
@@ -1889,6 +2203,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_service_conflict_timeout,
+                env=build_cidx_subprocess_env(),
             )
             return result.returncode == 0
 
@@ -1939,6 +2254,7 @@ class GoldenRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=self.resource_config.git_process_check_timeout,
+                    env=build_cidx_subprocess_env(),
                 )
                 # If status shows no services or fails with "not running", cleanup is complete
                 if result.returncode != 0 or "not running" in result.stdout.lower():
@@ -1979,7 +2295,17 @@ class GoldenRepoManager:
         normalizer = GitUrlNormalizer()
         matching_repos = []
 
-        for repo in self.golden_repos.values():
+        # Bug #1314: iterate a FRESH snapshot from the shared backend (not
+        # the stale in-memory `golden_repos` dict) so duplicate-URL
+        # detection sees repos registered by other workers/nodes too.
+        for repo_data in self._sqlite_backend.list_repos():
+            repo = GoldenRepo(**repo_data)
+            # local:// is an internal scheme (cidx-meta, langfuse, etc.) that has
+            # no canonical git URL and can never match a canonical-URL search.
+            # Skip it before normalization to avoid a spurious WARNING (Bug #1188).
+            if repo.repo_url.startswith("local://"):
+                continue
+
             try:
                 # Normalize the repository's URL
                 normalized = normalizer.normalize(repo.repo_url)
@@ -2074,7 +2400,9 @@ class GoldenRepoManager:
         Returns:
             True if repository exists, False otherwise
         """
-        return alias in self.golden_repos
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is recognized here too.
+        return self._resolve_golden_repo(alias) is not None
 
     def get_wiki_enabled(self, alias: str) -> bool:
         """Check if wiki is enabled for a golden repo (Story #280)."""
@@ -2151,13 +2479,14 @@ class GoldenRepoManager:
                 f"Invalid alias '{alias}': cannot contain path traversal characters (\\)"
             )
 
-        # Check if alias exists in metadata
-        if alias not in self.golden_repos:
+        # Check if alias exists in metadata (Bug #1314: resolve via shared
+        # backend on a local cache miss so a repo registered by ANOTHER
+        # worker/node is found here too)
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(
                 f"Golden repository '{alias}' not found in metadata"
             )
-
-        golden_repo = self.golden_repos[alias]
         metadata_path = golden_repo.clone_path
 
         # Get logger for this module
@@ -2293,7 +2622,7 @@ class GoldenRepoManager:
     ) -> None:
         """Fetch remote and validate that target_branch exists (AC3)."""
         subprocess.run(
-            ["git", "fetch", "origin"],
+            ["git", "-c", "core.fsync=none", "fetch", "origin"],
             cwd=base_clone_path,
             capture_output=True,
             text=True,
@@ -2332,7 +2661,7 @@ class GoldenRepoManager:
             env=build_non_interactive_git_env(),
         )
         subprocess.run(
-            ["git", "pull", "origin", target_branch],
+            ["git", "-c", "core.fsync=none", "pull", "origin", target_branch],
             cwd=base_clone_path,
             capture_output=True,
             text=True,
@@ -2355,6 +2684,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 check=True,
+                env=build_cidx_subprocess_env(),
             )
             if result.stdout:
                 logger.debug(
@@ -2381,17 +2711,23 @@ class GoldenRepoManager:
         cidx_fix_timeout: int,
     ) -> str:
         """Create CoW snapshot and return its path."""
-        versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
-        os.makedirs(versioned_base, exist_ok=True)
-        snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
-
-        subprocess.run(
-            ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
-            capture_output=True,
-            text=True,
-            timeout=cow_timeout,
-            check=True,
-        )
+        if self._snapshot_manager is not None:
+            # Story #1034: route through VersionedSnapshotManager (single source of truth)
+            snapshot_path = str(
+                self._snapshot_manager.create_snapshot(alias, base_clone_path)
+            )
+        else:
+            # Standalone CLI fallback: no manager wired (e.g., test contexts or CLI usage)
+            versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
+            os.makedirs(versioned_base, exist_ok=True)
+            snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
+            subprocess.run(
+                ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
+                capture_output=True,
+                text=True,
+                timeout=cow_timeout,
+                check=True,
+            )
         # fix-config on clone only (non-fatal)
         try:
             subprocess.run(
@@ -2401,6 +2737,7 @@ class GoldenRepoManager:
                 text=True,
                 timeout=cidx_fix_timeout,
                 check=False,
+                env=build_cidx_subprocess_env(),
             )
         except Exception as exc:
             logger.warning(
@@ -2551,6 +2888,26 @@ class GoldenRepoManager:
                 f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
             )
 
+    def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
+        """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
+
+        Delegates to the wired :class:`VersionedSnapshotManager` facade (which
+        knows the backend mount point and recognizes both canonical and legacy
+        cow-daemon shapes). When no snapshot_manager is wired, falls back to the
+        module-level canonical predicate (recognizes the local ``.versioned``
+        layout). ``None`` / empty inputs return False (never raise) — this is
+        the None-guard the add-index gate previously lacked.
+        """
+        if not path:
+            return False
+        if self._snapshot_manager is not None:
+            return bool(self._snapshot_manager.is_versioned_snapshot(path))
+        from code_indexer.server.storage.shared.snapshot_paths import (
+            is_versioned_snapshot,
+        )
+
+        return bool(is_versioned_snapshot(path))
+
     def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
         """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
         # Import here to avoid circular dependency (alias_manager imports from server)
@@ -2583,7 +2940,16 @@ class GoldenRepoManager:
                 _cache_evict_err,
             )
 
-        if current_target and ".versioned" in current_target:
+        # Bug #1084 Phase A4: schedule cleanup only for versioned snapshots, never
+        # the master base clone (golden-repos/{alias}/). Canonical predicate
+        # recognizes local + cow-daemon (canonical + legacy) shapes; explicit
+        # master-path comparison keeps the master-guard backend-independent.
+        master_path = os.path.join(self.golden_repos_dir, alias)
+        if (
+            current_target
+            and self._is_versioned_snapshot(current_target)
+            and current_target != master_path
+        ):
             try:
                 # Import here to avoid circular dependency (app imports from repos)
                 from code_indexer.server import app as app_module
@@ -2599,6 +2965,23 @@ class GoldenRepoManager:
                 logger.warning(
                     f"[change_branch] Cleanup scheduling failed (non-fatal): {exc}"
                 )
+
+        # Bug #1084 Phase A6: keep-last-N retention (defense in depth) on the
+        # change-branch swap. Runs regardless of the master-guard branch above so
+        # accumulated snapshots are trimmed. Non-fatal — reached via app.state.
+        try:
+            from code_indexer.server import app as app_module
+
+            lifecycle = getattr(app_module.app.state, "global_lifecycle_manager", None)
+            scheduler = (
+                getattr(lifecycle, "refresh_scheduler", None) if lifecycle else None
+            )
+            if scheduler is not None:
+                scheduler._enforce_retention(global_alias, new_snapshot_path)
+        except Exception as exc:
+            logger.warning(
+                f"[change_branch] Retention enforcement failed (non-fatal): {exc}"
+            )
 
     def change_branch(
         self, alias: str, target_branch: str, progress_callback=None
@@ -2626,10 +3009,15 @@ class GoldenRepoManager:
         ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
-        if alias not in self.golden_repos:
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is found here too.
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" short-circuit
+        # below depends on default_branch, which another worker/node may
+        # have already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         if target_branch == golden_repo.default_branch:
             return {"success": True, "message": f"Already on branch '{target_branch}'"}
 
@@ -2729,7 +3117,7 @@ class GoldenRepoManager:
             self._sqlite_backend.invalidate_description_refresh_tracking(alias)
             self._sqlite_backend.invalidate_dependency_map_tracking(alias)
             with self._operation_lock:
-                old = self.golden_repos[alias]
+                old = golden_repo
                 self.golden_repos[alias] = GoldenRepo(
                     alias=old.alias,
                     repo_url=old.repo_url,
@@ -2783,10 +3171,16 @@ class GoldenRepoManager:
         ):
             raise ValueError(f"Invalid branch name: '{target_branch}'")
 
-        if alias not in self.golden_repos:
+        # Bug #1314: resolve via shared backend on a local cache miss so a
+        # repo registered by ANOTHER worker/node is found here too (this is
+        # the manager-level entry point behind refresh_golden_repo).
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" outcome below
+        # depends on default_branch, which another worker/node may have
+        # already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
+        if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         if target_branch == golden_repo.default_branch:
             return {"success": True, "job_id": None}
 
@@ -2860,8 +3254,10 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found or any index_type is invalid
         """
-        # Validate alias exists
-        if alias not in self.golden_repos:
+        # Validate alias exists (Bug #1314: resolve via shared backend on a
+        # local cache miss so a repo registered by ANOTHER worker/node is
+        # found here too -- this is the named add_golden_repo_index symptom)
+        if self._resolve_golden_repo(alias) is None:
             raise ValueError(f"Golden repository '{alias}' not found")
 
         # Validate all index types up front
@@ -2889,8 +3285,20 @@ class GoldenRepoManager:
                     )
 
             try:
-                # Get repository details
-                repo = self.golden_repos[alias]
+                # Get repository details.
+                # Bug #1316: resolve AUTHORITATIVELY (unconditional shared-
+                # backend read), not via the raw per-worker cache -- this
+                # worker's cache may hold a STALE temporal_options value
+                # even though ANOTHER node has since saved fresh options via
+                # save_temporal_options(). Reading the stale cache here would
+                # build the temporal index command (max_commits, since_date,
+                # diff_context, all_branches) from the wrong values.
+                repo = self._resolve_golden_repo_authoritative(alias)
+                if repo is None:
+                    raise GoldenRepoError(
+                        f"Golden repository '{alias}' was removed before "
+                        "indexing could start"
+                    )
                 # Use canonical path resolution (base clone, not versioned snapshot)
                 repo_path = self.get_actual_repo_path(alias)
 
@@ -2927,25 +3335,36 @@ class GoldenRepoManager:
                     command: List[str],
                     phase_name: str,
                     error_label: str,
+                    env: Optional[dict] = None,
                 ) -> None:
                     """Delegate to shared run_with_popen_progress utility.
 
                     Catches IndexingSubprocessError (raised by the shared utility
                     to avoid circular imports) and re-raises as GoldenRepoError
                     which is the expected error type for callers of this path.
+
+                    Bug #1313 round-4 (Codex Finding 1): env is forwarded so the
+                    temporal (--index-commits) child subprocess can be handed
+                    CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode --
+                    see the temporal branch below. Only passed to the shared
+                    utility when not None, so the semantic/fts call keeps the
+                    EXACT pre-existing call shape (no env kwarg at all).
                     """
                     nonlocal all_stdout, all_stderr
+                    _shared_kwargs: dict = dict(
+                        command=command,
+                        phase_name=phase_name,
+                        allocator=allocator,
+                        progress_callback=progress_callback,
+                        all_stdout=_stdout_lines,
+                        all_stderr=_stderr_lines,
+                        cwd=str(repo_path),
+                        error_label=error_label,
+                    )
+                    if env is not None:
+                        _shared_kwargs["env"] = env
                     try:
-                        _run_with_popen_progress_shared(
-                            command=command,
-                            phase_name=phase_name,
-                            allocator=allocator,
-                            progress_callback=progress_callback,
-                            all_stdout=_stdout_lines,
-                            all_stderr=_stderr_lines,
-                            cwd=str(repo_path),
-                            error_label=error_label,
-                        )
+                        _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
                         raise GoldenRepoError(str(e)) from e
                     finally:
@@ -2956,10 +3375,11 @@ class GoldenRepoManager:
 
                 # Ensure repo is initialized before running cidx index commands (idempotent)
                 init_result = subprocess.run(
-                    ["cidx", "init"],
+                    ["cidx", "init", "--no-override-file"],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 init_output = (init_result.stdout or "") + (init_result.stderr or "")
                 if (
@@ -2989,6 +3409,7 @@ class GoldenRepoManager:
                             command,
                             phase_name="semantic",
                             error_label="create semantic index",
+                            env=build_cidx_subprocess_env(),
                         )
 
                     elif index_type == "fts":
@@ -3005,6 +3426,7 @@ class GoldenRepoManager:
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            env=build_cidx_subprocess_env(),
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""
@@ -3060,10 +3482,33 @@ class GoldenRepoManager:
                         if temporal_options.get("all_branches"):
                             command.append("--all-branches")
 
+                        # Bug #1313 round-4 (Codex Finding 1): in postgres/cluster
+                        # mode, hand the child subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR
+                        # so it installs the PostgreSQL temporal-metadata backend
+                        # instead of silently falling back to SQLite-on-NFS.
+                        # sqlite/solo mode (or a failed bootstrap read) yields
+                        # env=None -- byte-unchanged existing behavior.
+                        from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                            build_temporal_child_env,
+                        )
+                        from code_indexer.server.services.config_service import (
+                            get_config_service,
+                        )
+
+                        _temporal_env = build_temporal_child_env(
+                            get_config_service().get_config()
+                        )
+                        _temporal_env = (
+                            build_cidx_subprocess_env(_temporal_env)
+                            if _temporal_env is not None
+                            else None
+                        )
+
                         _run_with_popen_progress(
                             command,
                             phase_name="temporal",
                             error_label="create temporal index",
+                            env=_temporal_env,
                         )
 
                         # Bug #131: Update enable_temporal flag in BOTH tables
@@ -3079,33 +3524,40 @@ class GoldenRepoManager:
 
                         global_alias_temporal = f"{alias}-global"
                         try:
-                            from code_indexer.global_repos.global_registry import (
-                                GlobalRegistry,
-                            )
-                            from pathlib import Path as PathLib
-
-                            data_dir = PathLib(self.data_dir)
-                            golden_repos_dir = data_dir / "golden-repos"
-                            sqlite_db_path = str(data_dir / "cidx_server.db")
-
-                            registry = GlobalRegistry(
-                                str(golden_repos_dir),
-                                use_sqlite=True,
-                                db_path=sqlite_db_path,
-                            )
-                            if (
-                                registry._sqlite_backend is not None
-                                and registry._sqlite_backend.update_enable_temporal(
-                                    global_alias_temporal, True
-                                )
-                            ):
+                            _grb = getattr(self, "_global_repos_backend", None)
+                            if _grb is not None:
+                                _grb.update_enable_temporal(global_alias_temporal, True)
                                 logging.info(
-                                    f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos"
+                                    f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos (PG)"
                                 )
                             else:
-                                logging.warning(
-                                    f"Failed to update enable_temporal for {global_alias_temporal} in global_repos"
+                                from code_indexer.global_repos.global_registry import (
+                                    GlobalRegistry,
                                 )
+                                from pathlib import Path as PathLib
+
+                                data_dir = PathLib(self.data_dir)
+                                golden_repos_dir = data_dir / "golden-repos"
+                                sqlite_db_path = str(data_dir / "cidx_server.db")
+
+                                registry = GlobalRegistry(
+                                    str(golden_repos_dir),
+                                    use_sqlite=True,
+                                    db_path=sqlite_db_path,
+                                )
+                                if (
+                                    registry._sqlite_backend is not None
+                                    and registry._sqlite_backend.update_enable_temporal(
+                                        global_alias_temporal, True
+                                    )
+                                ):
+                                    logging.info(
+                                        f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos"
+                                    )
+                                else:
+                                    logging.warning(
+                                        f"Failed to update enable_temporal for {global_alias_temporal} in global_repos"
+                                    )
                         except Exception as e:
                             logging.error(
                                 f"Error updating global_repos table for {global_alias_temporal}: {e}"
@@ -3125,6 +3577,7 @@ class GoldenRepoManager:
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            env=build_cidx_subprocess_env(),
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""
@@ -3172,13 +3625,32 @@ class GoldenRepoManager:
                         new_target=new_snapshot,
                         old_target=current_target,
                     )
-                    # Only schedule cleanup for versioned snapshots (never for master clone)
-                    if ".versioned" in current_target:
+                    # Bug #1084 Phase A4: schedule cleanup only for versioned
+                    # snapshots, never the master clone. Canonical predicate
+                    # recognizes local + cow-daemon (canonical + legacy) shapes;
+                    # None-guarded (this gate previously raised TypeError when
+                    # current_target was None).
+                    master_clone_path = os.path.join(self.golden_repos_dir, alias)
+                    if (
+                        current_target
+                        and self._is_versioned_snapshot(current_target)
+                        and current_target != master_clone_path
+                    ):
                         scheduler.cleanup_manager.schedule_cleanup(current_target)
                     else:
                         logging.info(
                             f"[add_index] Preserving master golden repo (not scheduling cleanup): "
                             f"{current_target}"
+                        )
+
+                    # Bug #1084 Phase A6: keep-last-N retention (defense in depth)
+                    # on the add-index swap. Non-fatal.
+                    try:
+                        scheduler._enforce_retention(global_alias, new_snapshot)
+                    except Exception as _retention_exc:
+                        logging.warning(
+                            f"[add_index] Retention enforcement failed (non-fatal): "
+                            f"{_retention_exc}"
                         )
 
                 # CoW snapshot phase: end marker at 100% after swap completes
@@ -3341,11 +3813,12 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found
         """
-        # Validate alias exists
-        if alias not in self.golden_repos:
+        # Validate alias exists (Bug #1314: resolve via shared backend on a
+        # local cache miss so a repo registered by ANOTHER worker/node is
+        # found here too -- this is the named get_golden_repo_indexes symptom)
+        golden_repo = self._resolve_golden_repo(alias)
+        if golden_repo is None:
             raise ValueError(f"Golden repository '{alias}' not found")
-
-        golden_repo = self.golden_repos[alias]
         # Use canonical path resolution to handle versioned structure repos
         actual_path = self.get_actual_repo_path(alias)
         repo_dir = Path(actual_path)

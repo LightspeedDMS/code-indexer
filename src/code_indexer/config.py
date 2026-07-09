@@ -2,13 +2,42 @@
 
 import json
 import logging
+import threading as _threading
 import yaml  # type: ignore
 from pathlib import Path
 from typing import List, Optional, Any, Literal, Tuple, Dict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+# Story #1082 Scenario 3: codebase_dir mismatch WARNING de-spam.
+# The per-load reconciliation (Bug #1033 NFS multi-mount override) MUST keep
+# running on every load -- only the per-query WARNING spam is suppressed. We
+# remember which config-file paths have already warned (process-local, never
+# persisted to shared state, so no normalized codebase_dir is written anywhere)
+# and log the mismatch at most once per distinct config path.
+_codebase_dir_warned_paths: "set[str]" = set()
+_codebase_dir_warn_lock = _threading.Lock()
+
+
+def _should_warn_codebase_dir_mismatch(config_path_key: str) -> bool:
+    """Return True the FIRST time a given config path reports a mismatch.
+
+    Thread-safe; subsequent calls for the same path return False (de-spam).
+    """
+    with _codebase_dir_warn_lock:
+        if config_path_key in _codebase_dir_warned_paths:
+            return False
+        _codebase_dir_warned_paths.add(config_path_key)
+        return True
+
+
+def _reset_codebase_dir_warn_memo_for_tests() -> None:
+    """Clear the per-config-path WARNING memo (test-only hook)."""
+    with _codebase_dir_warn_lock:
+        _codebase_dir_warned_paths.clear()
 
 
 def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
@@ -142,6 +171,10 @@ class VoyageAIConfig(BaseModel):
     parallel_requests: int = Field(
         default=8, description="Number of concurrent requests to VoyageAI API"
     )
+    temporal_parallel_requests: Optional[int] = Field(
+        default=None,
+        description="Number of concurrent git-diff subprocess threads (temporal indexing only). None falls back to parallel_requests.",
+    )
     batch_size: int = Field(
         default=128,
         description="Maximum number of texts to send in a single batch request",
@@ -198,6 +231,10 @@ class CohereConfig(BaseModel):
     # Parallel processing configuration (mirrors VoyageAIConfig)
     parallel_requests: int = Field(
         default=8, description="Number of concurrent requests to Cohere API"
+    )
+    temporal_parallel_requests: Optional[int] = Field(
+        default=None,
+        description="Number of concurrent git-diff subprocess threads (temporal indexing only). None falls back to parallel_requests.",
     )
     batch_size: int = Field(
         default=96,
@@ -394,6 +431,49 @@ class TemporalConfig(BaseModel):
         le=50,
         description="Number of context lines in git diffs (0-50, default 5)",
     )
+
+    # Story #1290: pluggable TemporalEmbedder adapters.
+    embedders: List[str] = Field(
+        default_factory=lambda: ["voyage-context-4"],
+        description=(
+            "Set of temporal embedder adapter names to build shards for "
+            "(e.g. voyage-context-4, cohere-embed-v4)."
+        ),
+    )
+    active_embedder: str = Field(
+        default="voyage-context-4",
+        description="Embedder adapter name used for temporal recall by default.",
+    )
+    aggregation_chunk_chars: int = Field(
+        default=4096,
+        gt=0,
+        description=(
+            "Character size used to chunk the per-commit aggregated document "
+            "(message + diffs) before embedding."
+        ),
+    )
+
+    @field_validator("embedders")
+    @classmethod
+    def _validate_embedders_non_empty_and_dedup(cls, v: List[str]) -> List[str]:
+        """embedders must be non-empty; duplicates are removed preserving order."""
+        deduped: List[str] = []
+        for name in v:
+            if name not in deduped:
+                deduped.append(name)
+        if not deduped:
+            raise ValueError("embedders must not be empty")
+        return deduped
+
+    @model_validator(mode="after")
+    def _validate_active_embedder_is_member(self) -> "TemporalConfig":
+        """active_embedder must be a member of embedders."""
+        if self.active_embedder not in self.embedders:
+            raise ValueError(
+                f"active_embedder {self.active_embedder!r} must be a member of "
+                f"embedders {self.embedders!r}"
+            )
+        return self
 
 
 class GlobalRefreshConfig(BaseModel):
@@ -723,6 +803,29 @@ class ConfigManager:
                         config_dir = self.config_path.parent.parent
                         path = (config_dir / path).resolve()
                     data["codebase_dir"] = str(path)
+                    # Bug #1033: reconcile against actual config file location.
+                    # On NFS clusters, nodes may mount the same share at different paths.
+                    actual_dir = self.config_path.resolve().parent.parent
+                    if path.is_absolute() and actual_dir != path.resolve():
+                        # Story #1082: the reconciliation (override) below is
+                        # LOAD-BEARING and runs every load; only the WARNING is
+                        # de-spammed to at most once per distinct config path so
+                        # the per-query hot path no longer floods the log
+                        # (e.g. 9,634 warnings in one run). No normalized
+                        # codebase_dir is persisted to shared state -- the memo
+                        # is process-local config-path bookkeeping only.
+                        if _should_warn_codebase_dir_mismatch(str(self.config_path)):
+                            logger.warning(
+                                "codebase_dir mismatch: stored=%s, actual=%s. "
+                                "Using actual path (config at %s). This warning "
+                                "is logged once per config path; the per-node "
+                                "override is applied on every load.",
+                                path,
+                                actual_dir,
+                                self.config_path,
+                            )
+                        path = actual_dir
+                        data["codebase_dir"] = str(path)
 
                 self._config = Config(**data)
 

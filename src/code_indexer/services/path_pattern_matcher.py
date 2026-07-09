@@ -11,7 +11,38 @@ Provides glob-style pattern matching with cross-platform support:
 
 import pathspec
 from pathlib import PurePosixPath
-from typing import List
+from typing import List, Optional
+
+
+def parse_exclude_patterns(exclude_path: Optional[str]) -> List[str]:
+    """
+    Split a comma-separated exclude_path string into independent glob patterns.
+
+    This is the single source of truth for parsing the exclude_path parameter.
+    Both the semantic leg and the FTS leg must call this before applying exclusions.
+
+    Args:
+        exclude_path: Raw exclude_path string (may be None, empty, single pattern,
+            or comma-separated patterns).  Whitespace around each pattern is stripped.
+            Empty fragments (from leading/trailing/double commas) are dropped.
+
+    Returns:
+        List of non-empty, trimmed pattern strings.  Returns [] for None, empty,
+        or whitespace-only input.
+
+    Examples:
+        >>> parse_exclude_patterns(None)
+        []
+        >>> parse_exclude_patterns("**/node_modules/**")
+        ['**/node_modules/**']
+        >>> parse_exclude_patterns("code/dir-a/**,code/dir-b/**")
+        ['code/dir-a/**', 'code/dir-b/**']
+        >>> parse_exclude_patterns("  *.min.js , **/vendor/**  ")
+        ['*.min.js', '**/vendor/**']
+    """
+    if not exclude_path or not exclude_path.strip():
+        return []
+    return [p.strip() for p in exclude_path.split(",") if p.strip()]
 
 
 class PathPatternMatcher:
@@ -100,6 +131,44 @@ class PathPatternMatcher:
             # Fallback: just replace backslashes
             return path.replace("\\", "/")
 
+    def _normalize_pattern_for_gitwildmatch(self, pattern: str) -> str:
+        """
+        Normalize a user-supplied glob pattern so that a leading ``*/`` matches
+        at any depth (including root level), not only exactly one path segment.
+
+        With pathspec gitwildmatch, ``*/tests/*`` requires exactly one segment
+        before ``tests``, so it matches ``src/tests/foo.py`` but silently misses
+        both ``tests/foo.py`` (root) and ``a/b/tests/foo.py`` (two-or-more
+        segments deep).  This is bug #1211.
+
+        Fix: replace a leading ``*/`` with ``**/`` so pathspec interprets it as
+        "zero or more segments before the next token" — identical semantics to
+        what users intend when they write ``*/tests/*``.
+
+        Patterns that already start with ``**/`` or have no leading ``*/`` are
+        returned unchanged, preserving existing behaviour for every other form.
+
+        Args:
+            pattern: Normalized (forward-slash) glob pattern.
+
+        Returns:
+            Pattern suitable for pathspec gitwildmatch compilation.
+
+        Examples:
+            >>> matcher = PathPatternMatcher()
+            >>> matcher._normalize_pattern_for_gitwildmatch("*/tests/*")
+            '**/tests/*'
+            >>> matcher._normalize_pattern_for_gitwildmatch("**/tests/**")
+            '**/tests/**'
+            >>> matcher._normalize_pattern_for_gitwildmatch("tests/*")
+            'tests/*'
+            >>> matcher._normalize_pattern_for_gitwildmatch("*.min.js")
+            '*.min.js'
+        """
+        if pattern.startswith("*/"):
+            return "**/" + pattern[2:]
+        return pattern
+
     def matches_pattern(self, path: str, pattern: str) -> bool:
         """
         Check if a path matches a glob pattern using gitignore-style matching.
@@ -107,6 +176,12 @@ class PathPatternMatcher:
         This method uses pathspec library for consistent gitignore-style glob matching,
         which properly handles ** patterns as "this directory and all subdirectories"
         rather than requiring at least one subdirectory level.
+
+        Patterns starting with ``*/`` are automatically normalized to ``**/`` so
+        they match at any depth including the repository root (bug #1211).
+        ``*/tests/*`` therefore matches both ``tests/foo.py`` (root) and
+        ``src/tests/foo.py`` (nested).  ``tests/*`` (no leading ``*/``) is
+        left unchanged and continues to match root level only.
 
         Args:
             path: File path to check
@@ -121,6 +196,8 @@ class PathPatternMatcher:
 
         Examples:
             >>> matcher = PathPatternMatcher()
+            >>> matcher.matches_pattern("tests/test.py", "*/tests/*")
+            True
             >>> matcher.matches_pattern("src/tests/test.py", "*/tests/*")
             True
             >>> matcher.matches_pattern("src/module.py", "*/tests/*")
@@ -142,6 +219,12 @@ class PathPatternMatcher:
 
         if not normalized_pattern:
             return False
+
+        # Translate leading */ to **/ so root-level paths are not missed
+        # (bug #1211: */tests/* skipped tests/foo.py under gitwildmatch).
+        normalized_pattern = self._normalize_pattern_for_gitwildmatch(
+            normalized_pattern
+        )
 
         try:
             # Check if pattern is in cache

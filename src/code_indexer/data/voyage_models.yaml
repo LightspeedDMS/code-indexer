@@ -68,6 +68,20 @@ voyage_models:
     default_dimension: 1024
     description: "Optimized for legal documents"
 
+  # Contextualized embeddings model (Story #1290 / Epic #1289): per-commit
+  # temporal indexing. Output constrained to 1024 dims per the story's hard
+  # requirement (not the full set the provider supports).
+  voyage-context-4:
+    token_limit: 120000
+    context_length: 32000
+    dimensions: [1024]
+    default_dimension: 1024
+    description: "Contextualized embeddings for per-commit temporal indexing"
+    # Story #1292 (AC1): documented Voyage default rate, read by
+    # scripts/analysis/temporal_vector_projection.py instead of a bare
+    # hard-coded literal. Source: https://docs.voyageai.com/docs/pricing (2026).
+    pricing_usd_per_million_tokens: 0.12
+
 # API Constraints
 api_constraints:
   max_texts_per_request: 1000

@@ -89,7 +89,10 @@ var _state = {
         searchQuery: '',
         showHidden: false,
         loading: false,
-        error: null
+        error: null,
+        progress: 0,
+        progressDetail: '',
+        pollTimer: null
     },
     github: {
         repos: [],
@@ -100,7 +103,10 @@ var _state = {
         searchQuery: '',
         showHidden: false,
         loading: false,
-        error: null
+        error: null,
+        progress: 0,
+        progressDetail: '',
+        pollTimer: null
     }
 };
 
@@ -152,53 +158,90 @@ function switchPlatform(platform) {
 
 function fetchAll(platform, force) {
     var st = _state[platform];
+    // Stop any existing poll timer before starting fresh
+    if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     st.loading = true;
     st.error = null;
+    st.progress = 0;
+    st.progressDetail = '';
     renderPanel(platform);
+    startDiscoveryJob(platform);
+}
 
-    var url = '/admin/api/discovery/' + platform + '/all';
-    if (force) {
-        url += '?force=true';
-    }
-    if (st.showHidden) {
-        url += (url.indexOf('?') === -1 ? '?' : '&') + 'show_hidden=true';
-    }
+// ---------------------------------------------------------------------------
+// Background job discovery flow (Story #1157)
+// ---------------------------------------------------------------------------
 
-    fetch(url, { credentials: 'same-origin' })
-        .then(function(resp) {
-            if (!resp.ok) {
-                return resp.json().catch(function() {
-                    return { error: 'HTTP ' + resp.status };
-                }).then(function(body) {
-                    throw new Error(body.error || ('HTTP ' + resp.status));
-                });
-            }
-            return resp.json();
-        })
-        .then(function(data) {
-            st.loading = false;
-            st.repos = data.repositories || [];
-            st.currentPage = 1;
-            // On refresh, prune selections that are no longer in dataset
-            if (force) {
-                var urlSet = new Set(st.repos.map(function(r) { return r.clone_url_https; }));
-                Array.from(selectedRepos.keys()).forEach(function(key) {
-                    var parts = key.split(':');
-                    var keyPlatform = parts[0];
-                    var keyUrl = parts.slice(1).join(':');
-                    if (keyPlatform === platform && !urlSet.has(keyUrl)) {
-                        selectedRepos.delete(key);
-                    }
-                });
-            }
-            renderPanel(platform);
-            updateSelectionUI();
-        })
-        .catch(function(err) {
-            st.loading = false;
-            st.error = err.message || String(err);
-            renderPanel(platform);
+async function startDiscoveryJob(platform) {
+    var st = _state[platform];
+    try {
+        var resp = await fetch('/admin/api/discovery/' + platform + '/start', {
+            method: 'POST',
+            credentials: 'same-origin'
         });
+        if (!resp.ok) {
+            var body = await resp.json().catch(function() { return {error: 'HTTP ' + resp.status}; });
+            st.loading = false;
+            st.error = body.error || ('HTTP ' + resp.status);
+            renderPanel(platform);
+            return;
+        }
+        var data = await resp.json();
+        pollJob(platform, data.job_id);
+    } catch(e) {
+        st.loading = false;
+        st.error = e.message;
+        renderPanel(platform);
+    }
+}
+
+function pollJob(platform, job_id) {
+    var st = _state[platform];
+    if (st.pollTimer) clearInterval(st.pollTimer);
+    st.pollTimer = setInterval(async function() {
+        try {
+            var resp = await fetch('/api/jobs/' + job_id, {credentials: 'same-origin'});
+            if (!resp.ok) return;
+            var job = await resp.json();
+            st.progress = job.progress || 0;
+            st.progressDetail = job.phase_detail || '';
+            renderPanel(platform);
+            if (job.status === 'failed') {
+                clearInterval(st.pollTimer); st.pollTimer = null;
+                st.loading = false;
+                st.error = job.error || 'Discovery failed';
+                renderPanel(platform);
+            } else if (job.status === 'completed' || job.status === 'completed_partial') {
+                clearInterval(st.pollTimer); st.pollTimer = null;
+                consumeResult(platform, job_id);
+            }
+        } catch(e) { /* keep polling */ }
+    }, 2000);
+}
+
+async function consumeResult(platform, job_id) {
+    var st = _state[platform];
+    try {
+        var resp = await fetch('/admin/api/discovery/' + platform + '/result/' + job_id, {
+            credentials: 'same-origin'
+        });
+        if (!resp.ok) {
+            st.loading = false;
+            st.error = 'Could not load discovery result';
+            renderPanel(platform);
+            return;
+        }
+        var result = await resp.json();
+        st.loading = false;
+        st.repos = result.repositories || [];
+        st.currentPage = 1;
+        renderPanel(platform);
+        if (typeof updateSelectionUI === 'function') updateSelectionUI();
+    } catch(e) {
+        st.loading = false;
+        st.error = e.message;
+        renderPanel(platform);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +363,14 @@ function renderPanel(platform) {
     var st = _state[platform];
 
     if (st.loading) {
-        container.innerHTML = '<div class="loading-container"><p>Loading repositories...</p></div>';
+        container.innerHTML =
+            '<div class="loading-container">' +
+                '<p>Loading repositories...</p>' +
+                '<div class="progress-bar-container">' +
+                    '<div class="progress-bar-fill" style="width: ' + (st.progress || 0) + '%"></div>' +
+                '</div>' +
+                '<div class="progress-detail">' + (st.progress || 0) + '% ' + escHtml(st.progressDetail || '') + '</div>' +
+            '</div>';
         return;
     }
 
@@ -1420,6 +1470,32 @@ document.addEventListener('DOMContentLoaded', function() {
 /* Actions cell */
 .actions-cell {
     white-space: nowrap;
+}
+
+/* Story #1157: Discovery job progress bar */
+.progress-bar-container {
+    width: 100%;
+    max-width: 400px;
+    height: 8px;
+    background-color: var(--muted-color, #dee2e6);
+    border-radius: 4px;
+    margin: 0.5rem auto;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background-color: var(--primary, #1095c1);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+    min-width: 0;
+}
+
+.progress-detail {
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--muted-color, #6c757d);
+    margin-top: 0.25rem;
 }
 </style>
 {% endblock %}

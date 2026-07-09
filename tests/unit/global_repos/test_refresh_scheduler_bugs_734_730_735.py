@@ -4,8 +4,10 @@ Regression tests for Bugs #734, #730, #735 in RefreshScheduler.
 Bug #734: cleanup_stale_write_mode_markers(force=True) at startup (in start()) has no
 try/except — if it raises the scheduler thread is never launched.
 
-Bug #730: subprocess.run() for 'cidx scip generate' in _index_source() has no timeout=
-kwarg — a hung SCIP process blocks the refresh cycle indefinitely.
+Bug #730 (SUPERSEDED by Bug #1218): subprocess.run() for 'cidx scip generate' in
+_index_source() previously had no timeout= kwarg.  Bug #1218 removes ALL overarching
+per-job timeouts on the indexing+SCIP path (they caused large-repo partial/corrupt
+indexes).  The test now asserts the timeout kwarg is ABSENT.
 
 Bug #735: _scheduler_loop() has no exponential backoff on consecutive failures — a
 permanently-broken upstream (e.g. corrupted DB) spams error logs at fixed cadence forever.
@@ -16,7 +18,6 @@ import inspect
 import logging
 import pathlib
 import textwrap
-import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -189,34 +190,36 @@ def _find_scip_subprocess_run_call(source: str) -> ast.Call:
 
 class TestBug730ScipGenerateHasTimeout:
     """
-    Bug #730: subprocess.run() for 'cidx scip generate' in _index_source() is
-    called without a timeout= kwarg.  A hung SCIP indexer blocks the thread
-    indefinitely.
+    Bug #730 superseded by Bug #1218.
 
-    Fix: pass timeout=<scip_generation_timeout_seconds> to subprocess.run().
+    Bug #730 originally required a timeout= on the SCIP subprocess.run call.
+    Bug #1218 removes ALL overarching per-job timeouts on the indexing+SCIP path
+    because they killed large-repo indexing mid-flight (partial/corrupt index).
 
-    Verification: AST-parse _index_source() source, locate the exact
-    subprocess.run(scip_command, ...) call node, and assert a 'timeout' keyword
-    argument is present on that specific call.  Unrelated timeout= kwargs
-    elsewhere in the method cannot satisfy this assertion.
+    This class now verifies the ABSENCE of timeout= on subprocess.run(scip_command, ...)
+    to guard against the timeout being re-introduced by well-meaning but incorrect fixes.
     """
 
-    def test_bug_730_scip_generate_has_timeout(self):
+    def test_bug_730_scip_generate_has_no_timeout(self):
         """
-        _index_source() source must contain a subprocess.run(scip_command, ...)
-        call that has a 'timeout' keyword argument.
+        _index_source() source must NOT have a 'timeout' keyword argument on the
+        subprocess.run(scip_command, ...) call (Bug #1218).
+
+        Overarching SCIP timeouts caused large-repo indexing to be killed
+        mid-flight, producing a partial/corrupt index.  The only legitimate
+        timeouts are per-request outbound embedding-provider HTTP calls.
         """
         source = inspect.getsource(RefreshScheduler._index_source)
 
         # AST-parse to find the exact subprocess.run(scip_command, ...) call
         scip_call = _find_scip_subprocess_run_call(source)
 
-        # Check that a 'timeout' keyword argument is present on that call
+        # Check that NO 'timeout' keyword argument is present on that call
         timeout_kwargs = [kw for kw in scip_call.keywords if kw.arg == "timeout"]
-        assert timeout_kwargs, (
-            "subprocess.run(scip_command, ...) in _index_source() is missing the "
-            "'timeout' keyword argument (Bug #730). "
-            "Add timeout=<scip_generation_timeout_seconds> to the call."
+        assert not timeout_kwargs, (
+            "subprocess.run(scip_command, ...) in _index_source() still has a "
+            "'timeout' keyword argument. "
+            "Bug #1218 removes all overarching per-job timeouts on the indexing+SCIP path."
         )
 
 
@@ -235,37 +238,79 @@ class TestBug735ExponentialBackoffOnConsecutiveFailures:
     and use that as the wait timeout instead of the normal poll interval.
     Reset counter to 0 on each successful iteration.
 
-    Verification: inject a registry that always raises.  Patch threading.Event.wait
-    at the class level (patch.object on threading.Event) to capture timeout values
-    across iterations without mutating live objects, then assert non-decreasing and
-    strictly-growing growth between the first and second failure.
+    Verification strategy (load-safe):
+    - Assert the backoff FORMULA directly (no live scheduler loop, no wall-clock).
+    - Use patch.object on the SPECIFIC scheduler INSTANCE's _stop_event (not the
+      threading.Event CLASS), so parallel tests cannot inject phantom wait calls.
     """
 
     def test_bug_735_exponential_backoff_on_consecutive_failures(
         self, scheduler, mock_registry, caplog
     ):
         """
-        With registry.list_global_repos() always raising, consecutive wait
-        timeouts must grow (each >= previous), demonstrating exponential backoff.
+        Two-part deterministic verification of Bug #735 fix:
+
+        Part A — Formula contract: assert that min(30 * 2**(k-1), MAX) is
+        non-decreasing and strictly grows between k=1 and k=2.  This fails
+        immediately if the formula is changed to a flat interval or removed.
+
+        Part B — Live loop behavioral: patch only the SPECIFIC INSTANCE's
+        _stop_event so captured wait timeouts are isolated from parallel tests.
+        With registry.list_global_repos() always raising, the loop must emit
+        backoff values that match the formula.
         """
+        # Part A: Verify the formula directly — no I/O, no threads, no wall-clock.
+        # If someone removes the backoff or flattens it to a constant, this fails.
+        MAX_BACKOFF_SECONDS = 3600  # must match production constant
+        BASE = 30
+
+        formula_timeouts = [
+            min(BASE * (2 ** (k - 1)), MAX_BACKOFF_SECONDS) for k in range(1, 6)
+        ]
+
+        # Non-decreasing
+        for i in range(1, len(formula_timeouts)):
+            assert formula_timeouts[i] >= formula_timeouts[i - 1], (
+                f"Backoff formula is not non-decreasing at k={i + 1}: "
+                f"{formula_timeouts[i]} < {formula_timeouts[i - 1]}"
+            )
+
+        # At least one strict doubling between k=1 and k=2
+        assert formula_timeouts[1] > formula_timeouts[0], (
+            f"Backoff formula must strictly grow from k=1 ({formula_timeouts[0]}) "
+            f"to k=2 ({formula_timeouts[1]})"
+        )
+
+        # Ceiling is respected
+        assert max(formula_timeouts) <= MAX_BACKOFF_SECONDS, (
+            f"Backoff formula exceeded MAX_BACKOFF_SECONDS ceiling: {formula_timeouts}"
+        )
+
+        # Part B: Run a short live loop, patching only THIS instance's _stop_event
+        # to capture wait calls without affecting any other threading.Event object.
         mock_registry.list_global_repos.side_effect = RuntimeError(
             "simulated persistent registry failure"
         )
 
         wait_timeouts: list = []
         MAX_ITERATIONS = 3
+        original_wait = scheduler._stop_event.wait
 
-        def capturing_wait(self_event, timeout=None):
+        def capturing_instance_wait(timeout=None):
             wait_timeouts.append(timeout)
             if len(wait_timeouts) >= MAX_ITERATIONS:
                 scheduler._running = False
-            # Return False — event not set, loop should continue normally
+            # Mimic non-set: return False so the loop continues normally
             return False
 
-        with caplog.at_level(logging.ERROR):
-            with patch.object(threading.Event, "wait", capturing_wait):
+        # Patch only the BOUND METHOD on this specific Event instance.
+        scheduler._stop_event.wait = capturing_instance_wait  # type: ignore[method-assign]
+        try:
+            with caplog.at_level(logging.ERROR):
                 scheduler._running = True
                 scheduler._scheduler_loop()
+        finally:
+            scheduler._stop_event.wait = original_wait  # type: ignore[method-assign]
 
         assert len(wait_timeouts) >= MAX_ITERATIONS, (
             f"Expected at least {MAX_ITERATIONS} wait() calls, got {len(wait_timeouts)}"
@@ -280,7 +325,6 @@ class TestBug735ExponentialBackoffOnConsecutiveFailures:
             )
 
         # The second timeout must be strictly larger than the first
-        # (at least one doubling must have occurred)
         assert wait_timeouts[1] > wait_timeouts[0], (
             f"Second wait timeout ({wait_timeouts[1]}) must be strictly greater than "
             f"first ({wait_timeouts[0]}) — exponential backoff requires at least one "

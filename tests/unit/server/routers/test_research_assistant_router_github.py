@@ -30,10 +30,10 @@ def reset_github_token_cache():
 class TestGetGitHubToken:
     """Test _get_github_token() helper function."""
 
-    @patch("code_indexer.server.services.ci_token_manager.CITokenManager")
+    @patch("code_indexer.server.services.ci_token_manager.create_token_manager")
     @patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": "/test/server/dir"})
     def test_get_github_token_returns_token(
-        self, mock_token_manager_class: MagicMock
+        self, mock_create_token_manager: MagicMock
     ) -> None:
         """Test _get_github_token() returns token string when CITokenManager has a GitHub token."""
         # Import here to ensure patching is in effect
@@ -44,7 +44,7 @@ class TestGetGitHubToken:
         mock_token_data = MagicMock()
         mock_token_data.token = "github_token_abc123"
         mock_token_manager.get_token.return_value = mock_token_data
-        mock_token_manager_class.return_value = mock_token_manager
+        mock_create_token_manager.return_value = mock_token_manager
 
         # Execute
         result = _get_github_token()
@@ -53,10 +53,10 @@ class TestGetGitHubToken:
         assert result == "github_token_abc123"
         mock_token_manager.get_token.assert_called_once_with("github")
 
-    @patch("code_indexer.server.services.ci_token_manager.CITokenManager")
+    @patch("code_indexer.server.services.ci_token_manager.create_token_manager")
     @patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": "/test/server/dir"})
     def test_get_github_token_returns_none_when_missing(
-        self, mock_token_manager_class: MagicMock
+        self, mock_create_token_manager: MagicMock
     ) -> None:
         """Test _get_github_token() returns None when no GitHub token is stored."""
         # Import here to ensure patching is in effect
@@ -65,7 +65,7 @@ class TestGetGitHubToken:
         # Setup mock - get_token returns None
         mock_token_manager = MagicMock()
         mock_token_manager.get_token.return_value = None
-        mock_token_manager_class.return_value = mock_token_manager
+        mock_create_token_manager.return_value = mock_token_manager
 
         # Execute
         result = _get_github_token()
@@ -74,17 +74,17 @@ class TestGetGitHubToken:
         assert result is None
         mock_token_manager.get_token.assert_called_once_with("github")
 
-    @patch("code_indexer.server.services.ci_token_manager.CITokenManager")
+    @patch("code_indexer.server.services.ci_token_manager.create_token_manager")
     @patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": "/test/server/dir"})
     def test_get_github_token_returns_none_on_error(
-        self, mock_token_manager_class: MagicMock
+        self, mock_create_token_manager: MagicMock
     ) -> None:
         """Test _get_github_token() returns None when CITokenManager throws an exception."""
         # Import here to ensure patching is in effect
         from code_indexer.server.routers.research_assistant import _get_github_token
 
         # Setup mock to raise exception
-        mock_token_manager_class.side_effect = Exception("Database connection failed")
+        mock_create_token_manager.side_effect = Exception("Database connection failed")
 
         # Execute - should not raise
         result = _get_github_token()

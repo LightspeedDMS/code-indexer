@@ -9,6 +9,8 @@ import subprocess
 import concurrent.futures
 from typing import List, Dict, Tuple
 
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+
 
 class ParallelCommandExecutor:
     """Execute commands across multiple repositories in parallel.
@@ -92,6 +94,11 @@ class ParallelCommandExecutor:
         # By forcing COLUMNS=200, we ensure metadata lines don't wrap and break parsing.
         env = os.environ.copy()
         env["COLUMNS"] = "200"
+        # Bug #1328: absolutize any relative PYTHONPATH before the child
+        # subprocess changes cwd to repo_path, so a relative dev-mode
+        # PYTHONPATH doesn't re-anchor into the repo and get shadowed by a
+        # same-named package inside it.
+        env = build_cidx_subprocess_env(env)
 
         result = subprocess.run(
             cmd,

@@ -14,6 +14,18 @@ from unittest.mock import Mock, patch
 
 from code_indexer.services.voyage_ai import VoyageAIClient
 
+# voyage-code-3 requires exactly 1024-dim embeddings (see
+# _VOYAGE_MODEL_DIMENSIONS / VoyageAIClient._validate_embeddings). Mock
+# embeddings in these tests MUST be dimension-correct so the legitimate
+# dimension-validation guard does not fire before the None-detection layer
+# under test is reached (Bug #1284 -- prior 3-dim fixtures were stale).
+_VOYAGE_CODE_3_DIMENSIONS = 1024
+
+
+def _valid_embedding(value: float = 0.1) -> list:
+    """Build a dimension-correct voyage-code-3 mock embedding."""
+    return [value] * _VOYAGE_CODE_3_DIMENSIONS
+
 
 class TestLayer3APIValidation:
     """Test Layer 3: API response validation in voyage_ai.py"""
@@ -31,9 +43,9 @@ class TestLayer3APIValidation:
         # Mock API response with None embedding
         mock_response = {
             "data": [
-                {"embedding": [1.0, 2.0, 3.0]},
+                {"embedding": _valid_embedding(1.0)},
                 {"embedding": None},  # API returned None
-                {"embedding": [4.0, 5.0, 6.0]},
+                {"embedding": _valid_embedding(4.0)},
             ],
             "usage": {"total_tokens": 100},
         }
@@ -58,7 +70,7 @@ class TestLayer3APIValidation:
         # Mock responses - first batch OK, second batch has None
         mock_response_1 = {
             "data": [
-                {"embedding": [1.0, 2.0, 3.0]},
+                {"embedding": _valid_embedding(1.0)},
             ],
             "usage": {"total_tokens": 50},
         }
@@ -104,7 +116,7 @@ class TestLayer3APIValidation:
         }
         mock_response_2 = {
             "data": [
-                {"embedding": [1.0, 2.0, 3.0]},
+                {"embedding": _valid_embedding(1.0)},
             ],
             "usage": {"total_tokens": 50},
         }

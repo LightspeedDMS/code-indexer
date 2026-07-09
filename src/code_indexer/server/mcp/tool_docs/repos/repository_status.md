@@ -39,7 +39,7 @@ outputSchema:
       description: Echo of the requested detail level
     status:
       type: object
-      description: "Repository status. For kind='activated': same fields as former get_repository_status. For kind='global': same fields as former global_repo_status (alias, repo_name, url, last_refresh, enable_temporal)."
+      description: "Repository status. For kind='activated': same fields as former get_repository_status. For kind='global': alias, repo_name, url, last_refresh, enable_temporal, next_refresh (null when not scheduled), enable_scip. next_refresh and enable_scip are global-repo-only fields (not present for kind='activated')."
     statistics:
       type: object
       description: "Repository statistics (only present when detail='stats'). Same fields as former get_repository_statistics."
@@ -69,7 +69,7 @@ ENVELOPE SHAPE:
 
 FIELD PRESERVATION:
 - For kind='activated': status contains the same fields formerly returned by get_repository_status (user_alias, golden_repo_alias, repo_url, activation_status, file_count, index_size, last_updated, enable_temporal, branches_list, etc.)
-- For kind='global': status contains the same fields formerly returned by global_repo_status (alias, repo_name, url, last_refresh, enable_temporal) — now nested under 'status' instead of flat top-level
+- For kind='global': status contains alias, repo_name, url, last_refresh, enable_temporal, next_refresh (null when not scheduled), enable_scip — nested under 'status'. next_refresh and enable_scip are global-repo-only (not present for kind='activated').
 - When detail='stats': statistics contains the same fields formerly returned by get_repository_statistics (repository_id, files, storage, activity, health)
 
 MIGRATION TABLE:

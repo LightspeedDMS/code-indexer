@@ -27,22 +27,31 @@ class FilesystemBackend(VectorStoreBackend):
                 └── (vector storage files)
     """
 
-    def __init__(self, project_root: Path, hnsw_index_cache: Any = None):
+    def __init__(
+        self,
+        project_root: Path,
+        hnsw_index_cache: Any = None,
+        memory_governor: Any = None,
+    ):
         """Initialize FilesystemBackend.
 
         Args:
             project_root: Root directory of the project being indexed
             hnsw_index_cache: Optional HNSW index cache for server performance (Story #526)
                              Server mode passes this explicitly. None for CLI mode.
+            memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
+                             Server mode passes get_memory_governor(); CLI leaves it None.
         """
         super().__init__(project_root)
         self.vectors_dir = self.project_root / ".code-indexer" / "index"
 
         # Story #526: Server passes cache explicitly, CLI leaves it None
         self.hnsw_index_cache = hnsw_index_cache
-
-        if hnsw_index_cache is not None:
-            logger.info("HNSW index caching enabled (server mode)")
+        # Story #1213 Story 3: Server passes governor; CLI leaves it None
+        self.memory_governor = memory_governor
+        # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
+        # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
+        # constructed once per server query, so this fired on every hot-path call.
 
     def initialize(self) -> None:
         """Initialize filesystem storage by creating index directory.
@@ -125,16 +134,39 @@ class FilesystemBackend(VectorStoreBackend):
         For filesystem backend, this returns a FilesystemVectorStore instance.
 
         Story #526: Passes hnsw_index_cache to enable server-side caching.
+        Bug #1078: Passes id_index_cache (global singleton) when in server mode
+                   (indicated by hnsw_index_cache being set), otherwise None.
 
         Returns:
             FilesystemVectorStore instance configured for this project
         """
         from ..storage.filesystem_vector_store import FilesystemVectorStore
 
+        # Bug #1078: server mode (hnsw_index_cache present) -> inject id_index cache.
+        # Local import avoids pulling server modules into CLI startup path.
+        id_index_cache = None
+        skip_staleness = False
+        if self.hnsw_index_cache is not None:
+            from ..server.cache.id_index_cache import get_global_id_index_cache
+
+            id_index_cache = get_global_id_index_cache()
+
+            # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable .versioned snapshots.
+            # Import is server-mode-only (guarded by hnsw_index_cache) so CLI never pulls
+            # in server modules. Predicate is purely structural (no filesystem access).
+            from ..server.services.query_path_cache import (
+                is_immutable_versioned_snapshot,
+            )
+
+            skip_staleness = is_immutable_versioned_snapshot(str(self.project_root))
+
         return FilesystemVectorStore(
             base_path=self.vectors_dir,
             project_root=self.project_root,
             hnsw_index_cache=self.hnsw_index_cache,
+            id_index_cache=id_index_cache,
+            skip_staleness_check=skip_staleness,
+            memory_governor=self.memory_governor,
         )
 
     def health_check(self) -> bool:

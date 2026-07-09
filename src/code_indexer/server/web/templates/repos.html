@@ -23,7 +23,7 @@
 <!-- Success/Error Messages -->
 {% if success_message %}
 <article class="message-success">
-    <p>{{ success_message }}</p>
+    <p>{{ success_message | safe }}</p>
 </article>
 {% endif %}
 

@@ -12,8 +12,9 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -138,13 +139,22 @@ class DataRetentionScheduler:
         job_id = f"data-retention-{uuid.uuid4().hex[:8]}"
 
         if self._job_tracker is not None:
-            self._job_tracker.register_job(
-                job_id,
-                "data_retention_cleanup",
-                username="system",
-                repo_alias="server",
-            )
-            self._job_tracker.update_status(job_id, status="running")
+            try:
+                self._job_tracker.register_job_if_no_conflict(
+                    job_id,
+                    "data_retention_cleanup",
+                    username="system",
+                    repo_alias="server",
+                )
+                self._job_tracker.update_status(job_id, status="running")
+            except DuplicateJobError:
+                # Another worker already claimed this cleanup cycle — skip silently.
+                # This is expected and benign under multi-worker deployments (Bug #1184).
+                logger.debug(
+                    "DataRetentionScheduler: data_retention_cleanup already claimed "
+                    "by another worker; skipping"
+                )
+                return
 
         try:
             if self._storage_mode == "postgres" and self._backend_registry is not None:
@@ -155,7 +165,14 @@ class DataRetentionScheduler:
             logger.info("DataRetentionScheduler: cleanup complete %s", result)
 
             if self._job_tracker is not None:
-                self._job_tracker.complete_job(job_id, result=result)
+                failed_tables: List[str] = result.get("failed_tables", [])
+                if failed_tables:
+                    self._job_tracker.fail_job(
+                        job_id,
+                        error=f"Per-table cleanup errors: {', '.join(failed_tables)}",
+                    )
+                else:
+                    self._job_tracker.complete_job(job_id, result=result)
 
         except Exception as e:
             logger.error("DataRetentionScheduler: cleanup failed: %s", e, exc_info=True)
@@ -163,39 +180,69 @@ class DataRetentionScheduler:
                 self._job_tracker.fail_job(job_id, error=str(e))
 
     def _execute_cleanup_sqlite(self) -> dict:
-        """Run cleanup cycle using direct SQLite access (sqlite mode)."""
-        cfg = self._config_service.get_config().data_retention_config
+        """Run cleanup cycle using direct SQLite access (sqlite mode).
 
-        logs_deleted = self._cleanup_table(
+        Each table is cleaned independently — an exception from one table
+        is caught, logged, and recorded as 0 rows deleted so that the
+        remaining tables are not skipped (Bug #1068).
+
+        Failed tables are collected in the returned dict's 'failed_tables'
+        list so the job outcome is set to fail_job when any table errored,
+        rather than silently reporting success (Bug #1068 anti-silent-failure).
+        """
+        cfg = self._config_service.get_config().data_retention_config
+        failed_tables: List[str] = []
+
+        logs_deleted = self._safe_cleanup_table(
             self._log_db_path,
             "logs",
             "timestamp",
             retention_hours=cfg.operational_logs_retention_hours,
+            failed_tables=failed_tables,
         )
 
-        audit_logs_deleted = self._cleanup_table(
+        audit_logs_deleted = self._safe_cleanup_table(
             self._groups_db_path,
             "audit_logs",
             "timestamp",
             retention_hours=cfg.audit_logs_retention_hours,
+            failed_tables=failed_tables,
         )
 
-        sync_jobs_deleted = self._cleanup_table(
+        sync_jobs_deleted = self._safe_cleanup_table(
             self._main_db_path,
             "sync_jobs",
             "completed_at",
             retention_hours=cfg.sync_jobs_retention_hours,
             status_filter="status IN ('completed', 'failed')",
+            failed_tables=failed_tables,
         )
 
-        dep_map_history_deleted = self._cleanup_dep_map_history(cfg)
+        dep_map_history_deleted = self._safe_cleanup_dep_map_history(
+            cfg, failed_tables=failed_tables
+        )
 
-        background_jobs_deleted = self._cleanup_table(
+        background_jobs_deleted = self._safe_cleanup_table(
             self._main_db_path,
             "background_jobs",
             "completed_at",
             retention_hours=cfg.background_jobs_retention_hours,
             status_filter="status IN ('completed', 'failed', 'cancelled')",
+            failed_tables=failed_tables,
+        )
+
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
         )
 
         return {
@@ -204,48 +251,99 @@ class DataRetentionScheduler:
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
+                + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
+            "failed_tables": failed_tables,
         }
 
     def _execute_cleanup_pg(self) -> dict:
-        """Run cleanup cycle via backend protocol methods (postgres mode)."""
+        """Run cleanup cycle via backend protocol methods (postgres mode).
+
+        Each backend is called independently — an exception from one is
+        caught, logged, and recorded as 0 rows deleted so that the
+        remaining backends are not skipped (Bug #1068).
+
+        Failed tables are collected in the returned dict's 'failed_tables'
+        list so the job outcome is set to fail_job when any table errored,
+        rather than silently reporting success (Bug #1068 anti-silent-failure).
+        """
         cfg = self._config_service.get_config().data_retention_config
         reg = self._backend_registry
+        failed_tables: List[str] = []
 
         # LogsBackend.cleanup_old_logs takes days_to_keep
         logs_days = max(1, cfg.operational_logs_retention_hours // 24)
-        logs_deleted = reg.logs.cleanup_old_logs(days_to_keep=logs_days)  # type: ignore[union-attr]
+        logs_deleted = self._safe_pg_call(
+            "logs",
+            lambda: reg.logs.cleanup_old_logs(days_to_keep=logs_days),  # type: ignore[union-attr]
+            failed_tables=failed_tables,
+        )
 
         # AuditLogBackend.cleanup_old_logs takes cutoff_iso
         audit_cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=cfg.audit_logs_retention_hours)
         ).isoformat()
-        audit_logs_deleted = reg.audit_log.cleanup_old_logs(cutoff_iso=audit_cutoff)  # type: ignore[union-attr]
+        audit_logs_deleted = self._safe_pg_call(
+            "audit_logs",
+            lambda: reg.audit_log.cleanup_old_logs(cutoff_iso=audit_cutoff),  # type: ignore[union-attr]
+            failed_tables=failed_tables,
+        )
 
         # SyncJobsBackend.cleanup_old_completed takes cutoff_iso
         sync_cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=cfg.sync_jobs_retention_hours)
         ).isoformat()
-        sync_jobs_deleted = reg.sync_jobs.cleanup_old_completed(cutoff_iso=sync_cutoff)  # type: ignore[union-attr]
+        sync_jobs_deleted = self._safe_pg_call(
+            "sync_jobs",
+            lambda: reg.sync_jobs.cleanup_old_completed(cutoff_iso=sync_cutoff),  # type: ignore[union-attr]
+            failed_tables=failed_tables,
+        )
 
         # DependencyMapTrackingBackend.cleanup_old_history takes cutoff_iso
         dep_cutoff = (
             datetime.now(timezone.utc)
             - timedelta(hours=cfg.dep_map_history_retention_hours)
         ).isoformat()
-        dep_map_history_deleted = reg.dependency_map_tracking.cleanup_old_history(  # type: ignore[union-attr]
-            cutoff_iso=dep_cutoff
+        dep_map_history_deleted = self._safe_pg_call(
+            "dependency_map_tracking",
+            lambda: reg.dependency_map_tracking.cleanup_old_history(  # type: ignore[union-attr]
+                cutoff_iso=dep_cutoff
+            ),
+            failed_tables=failed_tables,
         )
 
         # BackgroundJobsBackend.cleanup_old_jobs takes max_age_hours
-        background_jobs_deleted = reg.background_jobs.cleanup_old_jobs(  # type: ignore[union-attr]
-            max_age_hours=cfg.background_jobs_retention_hours
+        background_jobs_deleted = self._safe_pg_call(
+            "background_jobs",
+            lambda: reg.background_jobs.cleanup_old_jobs(  # type: ignore[union-attr]
+                max_age_hours=cfg.background_jobs_retention_hours
+            ),
+            failed_tables=failed_tables,
+        )
+
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
         )
 
         return {
@@ -254,13 +352,20 @@ class DataRetentionScheduler:
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
+                + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
+            "failed_tables": failed_tables,
         }
 
     def _cleanup_dep_map_history(self, cfg: Any) -> int:
@@ -274,6 +379,189 @@ class DataRetentionScheduler:
             "last_run",
             retention_hours=cfg.dep_map_history_retention_hours,
         )
+
+    # ------------------------------------------------------------------
+    # Per-table safe wrappers (Bug #1068)
+    # ------------------------------------------------------------------
+
+    def _safe_cleanup_table(
+        self,
+        db_path: Path,
+        table_name: str,
+        timestamp_col: str,
+        retention_hours: int,
+        status_filter: Optional[str] = None,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """
+        Call _cleanup_table, catching and logging any exception so that one
+        broken table never aborts the cleanup cycle for the others.
+
+        Returns 0 when an exception occurs (same as 'table does not exist').
+        When failed_tables is supplied, the table name is appended to it on
+        failure so callers can surface per-table errors in the job outcome
+        (Bug #1068 anti-silent-failure).
+        """
+        try:
+            return self._cleanup_table(
+                db_path,
+                table_name,
+                timestamp_col,
+                retention_hours=retention_hours,
+                status_filter=status_filter,
+            )
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: cleanup of table '%s' failed: %s",
+                table_name,
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append(table_name)
+            return 0
+
+    def _safe_cleanup_dep_map_history(
+        self, cfg: Any, failed_tables: Optional[List[str]] = None
+    ) -> int:
+        """
+        Per-table-safe wrapper around _cleanup_dep_map_history (Bug #1068).
+
+        When failed_tables is supplied, 'dependency_map_tracking' is appended
+        to it on failure so callers can surface the error in the job outcome.
+        """
+        try:
+            return self._cleanup_dep_map_history(cfg)
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: cleanup of table 'dependency_map_tracking' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("dependency_map_tracking")
+            return 0
+
+    def _safe_pg_call(
+        self, table_name: str, call: Any, failed_tables: Optional[List[str]] = None
+    ) -> int:
+        """
+        Execute a single PG backend cleanup call, catching and logging any
+        exception so that one broken backend never aborts the cycle (Bug #1068).
+
+        Returns 0 when an exception occurs.
+        When failed_tables is supplied, the table name is appended to it on
+        failure so callers can surface per-table errors in the job outcome
+        (Bug #1068 anti-silent-failure).
+        """
+        try:
+            result: int = call()
+            return result if isinstance(result, int) else 0
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: PG cleanup of '%s' failed: %s",
+                table_name,
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append(table_name)
+            return 0
+
+    def _safe_prune_token_blacklist(
+        self,
+        jwt_expiration_minutes: int,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from token_blacklist (Story #1163 AC2).
+
+        TTL is derived from jwt_expiration_minutes (the token lifetime) so
+        rows cannot be pruned before the JWT they represent could still be
+        considered valid.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'token_blacklist' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.app import get_token_blacklist
+
+            ttl_seconds = jwt_expiration_minutes * 60
+            return int(get_token_blacklist().prune_expired(ttl_seconds=ttl_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'token_blacklist' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("token_blacklist")
+            return 0
+
+    def _safe_prune_elevated_sessions(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from elevated_sessions (Bug #1221).
+
+        TTL is the manager's configured max_age_seconds so rows cannot be
+        pruned before the elevation window they represent has fully expired.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'elevated_sessions' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager,
+            )
+
+            max_age_seconds = elevated_session_manager._max_age
+            return int(elevated_session_manager.prune_expired(max_age_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'elevated_sessions' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("elevated_sessions")
+            return 0
+
+    def _safe_prune_oidc_state_tokens(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from oidc_state_tokens (Bug #1224).
+
+        TTL is already encoded in each row's expires_at column, so deletion
+        predicate is simply expires_at <= NOW().
+
+        Uses oidc_routes.state_manager (the instance wired with the PG pool
+        in cluster mode, or the shared-SQLite instance in solo mode) so the
+        correct backend is pruned.  Returns 0 when SSO is not configured
+        (state_manager is None).
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'oidc_state_tokens' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.oidc import routes as oidc_routes
+
+            mgr = oidc_routes.state_manager
+            if mgr is None:
+                return 0
+            return int(mgr.prune_expired())
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'oidc_state_tokens' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("oidc_state_tokens")
+            return 0
 
     # ------------------------------------------------------------------
     # Low-level batched DELETE

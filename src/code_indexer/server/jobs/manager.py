@@ -22,6 +22,12 @@ from typing import Dict, List, Optional, Any, cast
 from urllib.parse import urlparse
 import re
 
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
+
 # System resource monitoring
 try:
     import psutil
@@ -116,6 +122,8 @@ class SyncJobManager:
 
         self._jobs: Dict[str, SyncJob] = {}
         self._lock = threading.Lock()
+        # Maps file descriptor -> used_lockf flag for NFS-safe lock/unlock pairing
+        self._fd_lockf_map: Dict[int, bool] = {}
         self.storage_path = storage_path
         self.backup_retention_count = backup_retention_count
         self.file_lock_timeout = file_lock_timeout
@@ -181,8 +189,11 @@ class SyncJobManager:
                     # Windows file locking
                     msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore
                 else:
-                    # Unix file locking
-                    fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Unix file locking (NFS-safe: tries flock first, falls back to lockf)
+                    _used_lockf = nfs_safe_flock(
+                        file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                    self._fd_lockf_map[file_handle.fileno()] = _used_lockf
 
                 logging.debug(
                     f"File lock acquired for {getattr(file_handle, 'name', 'unknown file')}"
@@ -209,7 +220,10 @@ class SyncJobManager:
             if platform.system() == "Windows" and "msvcrt" in globals():
                 msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore
             else:
-                fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+                # Unix file unlocking (NFS-safe: use mechanism that matched acquisition)
+                fd = file_handle.fileno()
+                _used_lockf = self._fd_lockf_map.pop(fd, False)
+                nfs_safe_funlock(fd, _used_lockf)
 
             logging.debug(
                 f"File lock released for {getattr(file_handle, 'name', 'unknown file')}"
@@ -884,7 +898,7 @@ class SyncJobManager:
                 with open(temp_file, "w") as f:
                     json.dump(complete_data, f, indent=2)
                     f.flush()  # Ensure data is written
-                    os.fsync(f.fileno())  # Force write to disk
+                    nfs_safe_fsync(f.fileno())  # Force write to disk, NFS-safe
                     logging.debug(
                         f"Wrote {len(serializable_jobs)} jobs to temp file with checksum: {cast(Dict[str, Any], metadata['_metadata'])['checksum'][:8]}..."
                     )
@@ -994,7 +1008,7 @@ class SyncJobManager:
 
                     # Convert string dates back to datetime objects
                     for field in ["created_at", "started_at", "completed_at"]:
-                        if job_dict.get(field):
+                        if job_dict.get(field) and isinstance(job_dict[field], str):
                             job_dict[field] = datetime.fromisoformat(job_dict[field])
 
                     # Create job object from loaded data

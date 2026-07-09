@@ -1,8 +1,7 @@
 """User Mandate Section 4: Safe Builtins Allowlist — Positive Tests (Story #970).
 
-For each of the 18 safe builtins (len, str, int, bool, list, tuple, dict,
-min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr):
-(hasattr added in M1 Codex review finding)
+Only the 8 transpilable builtins are allowed: len, any, all, range, enumerate,
+sorted, min, max.  All other builtins were removed (Rust-only path).
 
   1. Construct evaluator code that uses the builtin and returns a bool.
   2. Assert the evaluator runs successfully (no failure mode).
@@ -54,40 +53,12 @@ def _run_safe(code: str) -> EvalResult:
 
 # Each tuple: (builtin_name, evaluator_code, expected_bool)
 # The code must use the builtin and return a predictable bool.
+# NOTE: only the 8 allowed builtins (len, any, all, range, enumerate, sorted,
+# min, max) may be used — list(), str(), int() etc. are no longer safe.
 _SAFE_BUILTIN_CASES = [
     (
         "len",
         "return len([1, 2, 3]) > 0",
-        True,
-    ),
-    (
-        "str",
-        "return str(42) == '42'",
-        True,
-    ),
-    (
-        "int",
-        "return int('7') == 7",
-        True,
-    ),
-    (
-        "bool",
-        "return bool(1) is True",
-        True,
-    ),
-    (
-        "list",
-        "return list((1, 2)) == [1, 2]",
-        True,
-    ),
-    (
-        "tuple",
-        "return tuple([1, 2]) == (1, 2)",
-        True,
-    ),
-    (
-        "dict",
-        "return dict([('a', 1)]).get('a') == 1",
         True,
     ),
     (
@@ -98,11 +69,6 @@ _SAFE_BUILTIN_CASES = [
     (
         "max",
         "return max(3, 1, 2) == 3",
-        True,
-    ),
-    (
-        "sum",
-        "return sum([1, 2, 3]) == 6",
         True,
     ),
     (
@@ -117,27 +83,19 @@ _SAFE_BUILTIN_CASES = [
     ),
     (
         "range",
-        "return len(list(range(5))) == 5",
+        # Use len() + a for-loop counter instead of list(range(...))
+        "count = 0\nfor _ in range(5):\n    count += 1\nreturn count == 5",
         True,
     ),
     (
         "enumerate",
-        "return list(enumerate([10, 20]))[0] == (0, 10)",
-        True,
-    ),
-    (
-        "zip",
-        "return list(zip([1, 2], [3, 4])) == [(1, 3), (2, 4)]",
+        # Iterate with enumerate; check first index via assignment, no list()
+        "first_idx = -1\nfor idx, _ in enumerate([10, 20]):\n    if first_idx == -1:\n        first_idx = idx\nreturn first_idx == 0",
         True,
     ),
     (
         "sorted",
         "return sorted([3, 1, 2]) == [1, 2, 3]",
-        True,
-    ),
-    (
-        "reversed",
-        "return list(reversed([1, 2, 3])) == [3, 2, 1]",
         True,
     ),
 ]
@@ -165,49 +123,17 @@ def test_safe_builtin_available_and_returns_expected(
 
 
 def test_safe_builtin_names_set_matches_spec() -> None:
-    """Verify SAFE_BUILTIN_NAMES contains exactly the 34 specified builtins.
-
-    v10.4.0 added 9 exception types needed for try/except blocks (Group D).
-    Story #993 added 7 more: isinstance, type, set, frozenset, float, repr, print.
-    """
+    """Verify SAFE_BUILTIN_NAMES contains exactly the 8 transpilable builtins."""
     expected = frozenset(
         {
             "len",
-            "str",
-            "int",
-            "bool",
-            "list",
-            "tuple",
-            "dict",
-            "min",
-            "max",
-            "sum",
             "any",
             "all",
             "range",
             "enumerate",
-            "zip",
             "sorted",
-            "reversed",
-            "hasattr",  # moved from STRIPPED_BUILTINS in M1 Codex review finding
-            # Exception types added in v10.4.0 for try/except support (Group D)
-            "Exception",
-            "ValueError",
-            "TypeError",
-            "RuntimeError",
-            "AttributeError",
-            "KeyError",
-            "IndexError",
-            "NameError",
-            "StopIteration",
-            # Added in Story #993 for expanded evaluator expressiveness
-            "isinstance",
-            "type",
-            "set",
-            "frozenset",
-            "float",
-            "repr",
-            "print",
+            "min",
+            "max",
         }
     )
     assert SAFE_BUILTIN_NAMES == expected, (
@@ -223,93 +149,9 @@ def test_safe_and_stripped_builtins_are_disjoint() -> None:
     assert not overlap, f"Builtins in both safe and stripped sets: {overlap}"
 
 
-# ---------------------------------------------------------------------------
-# M1: hasattr moved from STRIPPED_BUILTINS to SAFE_BUILTIN_NAMES
-# ---------------------------------------------------------------------------
-
-
-def test_hasattr_moved_to_safe_builtins() -> None:
-    """hasattr must be in SAFE_BUILTIN_NAMES and NOT in STRIPPED_BUILTINS (M1)."""
-    assert "hasattr" in SAFE_BUILTIN_NAMES, (
-        "hasattr must be in SAFE_BUILTIN_NAMES — it has no escalation power "
-        "beyond what the dunder blocklist already prevents at AST validation time."
-    )
-    assert "hasattr" not in PythonEvaluatorSandbox.STRIPPED_BUILTINS, (
-        "hasattr must NOT remain in STRIPPED_BUILTINS after M1 migration."
-    )
-
-
-def test_hasattr_works_in_evaluator() -> None:
-    """hasattr(node, 'children') succeeds in the evaluator after M1 (M1)."""
-    sb = PythonEvaluatorSandbox()
-    engine = AstSearchEngine()
-    node = engine.parse("x = 1", "python")
-    result = sb.run(
-        "return hasattr(node, 'children')",
-        node=node,
-        root=node,
-        source="x = 1",
-        lang="python",
-        file_path="/tmp/x.py",
-    )
-    assert result.failure is None, (
-        f"hasattr must succeed in evaluator, got failure={result.failure!r}, "
-        f"detail={result.detail!r}"
-    )
-    assert result.value is True, (
-        f"hasattr(node, 'children') must return True, got {result.value!r}"
-    )
-
-
-def test_safe_builtin_names_set_has_34_entries() -> None:
-    """After Story #993, SAFE_BUILTIN_NAMES must contain exactly 34 builtins.
-
-    18 original entries (17 + hasattr from M1) plus 9 exception types added
-    in v10.4.0 for try/except block support (Group D), plus 7 more added in
-    Story #993: isinstance, type, set, frozenset, float, repr, print.
-    """
-    expected = frozenset(
-        {
-            "len",
-            "str",
-            "int",
-            "bool",
-            "list",
-            "tuple",
-            "dict",
-            "min",
-            "max",
-            "sum",
-            "any",
-            "all",
-            "range",
-            "enumerate",
-            "zip",
-            "sorted",
-            "reversed",
-            "hasattr",
-            # Exception types added in v10.4.0 for try/except support (Group D)
-            "Exception",
-            "ValueError",
-            "TypeError",
-            "RuntimeError",
-            "AttributeError",
-            "KeyError",
-            "IndexError",
-            "NameError",
-            "StopIteration",
-            # Added in Story #993 for expanded evaluator expressiveness
-            "isinstance",
-            "type",
-            "set",
-            "frozenset",
-            "float",
-            "repr",
-            "print",
-        }
-    )
-    assert SAFE_BUILTIN_NAMES == expected, (
-        f"SAFE_BUILTIN_NAMES mismatch after Story #993. "
-        f"Extra: {SAFE_BUILTIN_NAMES - expected}, "
-        f"Missing: {expected - SAFE_BUILTIN_NAMES}"
+def test_safe_builtin_names_count() -> None:
+    """SAFE_BUILTIN_NAMES must contain exactly 8 entries (Rust-transpilable only)."""
+    assert len(SAFE_BUILTIN_NAMES) == 8, (
+        f"Expected 8 entries in SAFE_BUILTIN_NAMES, got {len(SAFE_BUILTIN_NAMES)}: "
+        f"{sorted(SAFE_BUILTIN_NAMES)}"
     )

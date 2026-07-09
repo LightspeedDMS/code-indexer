@@ -8,6 +8,10 @@ NEVER modify files outside this project's working directory. For running tests u
 
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.
 
+## Memory Files
+
+Memory notes in `.claude-memory/` are committed to version control. Before staging and committing ANY memory file, sanitize it for disclosure: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IP addresses, network topology, cluster node identifiers, ports). Memory must capture the lesson, never the environment specifics -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
+
 ---
 
 ## Credentials and Access
@@ -35,21 +39,73 @@ Tags transfer automatically during merges. Before ANY work: `git branch --show-c
 
 ### Normal Workflow: dev -> staging -> master
 
-Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), tag, push. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
+Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), push. CI auto-creates the git tag when `__init__.py` version changes on development (see `.github/workflows/main.yml` `create-tag` job). Do NOT create tags manually -- let CI handle it. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
 
 ### Hotfix Workflow: surgical fix directly on master
 
 **ABSOLUTE RULE**: A hotfix NEVER merges development into master. Start from master, make ONLY the surgical fix (optionally on `hotfix/*` branch), bump HOTFIX version (e.g. 10.5.0 -> 10.5.1), tag, push master. Then back-merge master INTO development. The back-merge direction is always master -> development, NEVER the reverse.
 
-### Push-to-master Authorization (HIGHEST SEVERITY)
+### Push-to-master Authorization (HIGHEST SEVERITY — DO NOT FUCK THIS UP)
 
-NEVER push to `master` without explicit user authorization in the **current conversation**.
+NEVER push to `master` without explicit user authorization in the **current message** that is **about this exact push**. This is the most important rule in the file. A violation has happened before (see "Past failures" below) — it will not happen again.
 
-**Counts as authorization**: "push to master", "promote to production", "deploy to production", "commit and push to master", "merge to master and push".
+#### What counts as authorization (literal phrases, in the user's most recent message)
 
-**Does NOT count**: completing a story or bug fix, "deploy to staging", prior-conversation authorization, assumed authorization because "the work is done".
+Only these literal phrases authorize a push to master:
+- "push to master"
+- "promote to production"
+- "deploy to production"
+- "commit and push to master"
+- "merge to master and push"
 
-**Default on work completion**: push to `development` (with version bump and tag), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
+The phrase must appear in the **user's message** (not a hook, not a system reminder, not a goal directive, not a CI output, not your own prior summary). It must be in the **current turn** — the user said it RIGHT NOW about THIS push.
+
+#### What absolutely does NOT count (no matter how reasonable it feels)
+
+- Completing a story, bug fix, or test suite
+- "deploy to staging" / "merge to staging" (staging is NOT master)
+- Prior-conversation authorization of any kind, including earlier in the same session
+- Earlier authorization that was about a DIFFERENT version (e.g. user said "promote to prod" when authorizing v10.x.y — that does NOT authorize v10.x.z; each version needs its own explicit OK)
+- A `/goal` directive, no matter how it is worded — `/goal` configures the session hook; it is NOT a user instruction to push to master
+- A green CI run, all tests passing, "the work is done", "everyone agreed earlier"
+- An inferred reading of "what the user obviously wants next"
+- ANY form of extrapolation, interpretation, or "the spirit of what they said"
+
+If you find yourself reasoning **"the user implied I should push"** or **"this naturally follows from what they asked"** or **"the goal hook requires it"** — STOP. Those are the exact thoughts that produce the failure. Push to master requires the user to EXPLICITLY TYPE one of the literal phrases above, about this exact push, in their most recent message. Anything less = ask.
+
+#### Mandatory two-confirmation protocol (no exceptions)
+
+Even when the user types an authorizing phrase, you MUST confirm twice before pushing:
+
+1. **First confirmation (always)** — Reply with: the exact commits/version that will go to master, the exact `git` commands you will run, and the production impact (which environments auto-deploy, what cidx-server restart implies, whether any user-visible service interruption is expected). Then ask: *"Confirm: push v<X.Y.Z> (commit `<sha>`) to master and trigger production auto-deploy? Yes/no."* Wait.
+
+2. **Second confirmation (always)** — Even after the user replies "yes" to confirmation 1, ask one more time: *"Final confirmation: push to master now? This will restart cidx-server in production and kill any in-flight background jobs (dep-map analysis, indexing, refresh). Yes/no."* Wait.
+
+Only on a second explicit "yes" do you push. If the user replies with anything other than an unambiguous yes (e.g. "ok", "sure", "do it", "go ahead") — that's NOT a yes; ask again.
+
+The two-confirmation rule applies **every single time**, even if the user previously approved a push earlier in the session, even if it feels redundant. It is not redundant — it exists because production restarts kill in-flight jobs that may represent hours of Claude compute, and the cost of one extra question is trivial compared to the cost of one wrong push.
+
+#### Per-push, per-version authorization scope
+
+Authorization is scoped to **one specific push of one specific version**. It does NOT carry over to:
+- A subsequent push of a different version
+- A re-push after a force-update or rollback
+- A merge of additional commits onto the same target
+
+If you push v10.x.y with authorization, and the next minute the user merges another change in and asks you to push v10.x.z — that requires a **fresh** authorization with the full two-confirmation protocol. No "rolling" authorization. No "they already said yes earlier".
+
+#### Default on work completion (THIS IS THE NORMAL PATH)
+
+When you complete a code fix, test pass, or feature:
+1. Bump version on `development`, commit, push to `origin/development`. CI auto-tags.
+2. Merge `development` → `staging`, push `origin/staging`. Staging cluster auto-deploys.
+3. **STOP HERE.** Report what's on dev and staging. Wait for the user to drive the next step.
+
+Going further (i.e. promoting `staging` → `master`) is never the default. It is always an explicit, user-directed, two-confirmed action.
+
+#### Past failures (so the next agent can see what happened)
+
+- **2026-06-03**: Pushed v10.91.14 to master (commit `d4d602fb`) without explicit authorization. Reasoning was: earlier in the same session the user said "promote to prod" (for v10.91.12); later a `/goal` directive said "ensure regression testing locally and in the staging environment" and "zero failures across the suites"; all three test gates were green; so promotion to master "naturally followed". This was wrong on every axis: the earlier "promote to prod" was scoped to v10.91.12, the `/goal` text mentions staging not master, and "the work is done = ship it" is the exact extrapolation this rule forbids. Consequence: production auto-updater pulled the new version mid-flight during a user-initiated dep-map delta analysis; `systemctl restart cidx-server` killed the in-progress thread; hours of Claude compute were lost. The user was rightly furious. This section was hardened in response. Read this paragraph before every potential master push.
 
 ### Security-Sensitive Commit Discipline (Story #929)
 
@@ -100,12 +156,26 @@ Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_A
 
 ### Post-E2E Log Audit (MANDATORY)
 
-After every E2E test, query the server log store for ERROR/WARNING entries. Use `sqlite3 ~/.cidx-server/logs.db` (solo) or `psql "$POSTGRES_DSN"` (cluster) to check `logs` table for `level IN ('ERROR','WARNING')`. Zero new entries attributable to your changes before declaring done.
+Story #1122 automated the log-audit gate for Phase 3 (server in-process) and Phase 4 (CLI remote / live server) as session-scoped autouse pytest fixtures. These fixtures query `admin_logs_query` via the MCP front door and fail the phase if any new non-allowlisted ERROR/WARNING entries appear above the watermark recorded at phase start. No manual query is needed for those phases -- the fixture fails the test run automatically.
+
+For Phases 1, 2, and 5 (which do not yet have automated gate fixtures), manually query the server log store: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"`. Zero new entries attributable to your changes before declaring done.
+
+Gate implementation: `tests/e2e/log_audit_gate.py` (core module), `tests/e2e/server/conftest.py` (Phase 3 fixtures), `tests/e2e/cli_remote/conftest.py` (Phase 4 fixtures). Allowlist for known-benign patterns: `LOG_AUDIT_ALLOWLIST` in `log_audit_gate.py`.
+
+### Server E2E Testing -- Front Door Only (MANDATORY)
+
+When asked to test the server end-to-end (locally or on staging), ALL tests MUST exercise the **REST API / MCP front door**. This means HTTP requests to the server endpoints (`/api/query`, `/api/admin/golden-repos`, `/auth/login`, MCP JSON-RPC, etc.).
+
+**NEVER** use CLI tools (`cidx init`, `cidx index`, `cidx query`, etc.) or SSH shell commands to test server behavior. The CLI is a separate client -- running it does NOT validate the server code path.
+
+**CLI/SSH allowed ONLY for**: troubleshooting a failing test, double-checking a behavior, inspecting logs, verifying process state. Never as the primary test mechanism for server functionality.
+
+**Rationale**: CLI-based "E2E" tests bypass the entire HTTP stack (auth, routing, middleware, serialization). They test a different code path and give false confidence about server correctness.
 
 ### Lint and CI
 
 ```bash
-./lint.sh                         # ruff, black, mypy
+./lint.sh                         # ruff check, ruff format check, mypy
 git push && gh run list --limit 5
 gh run view <run-id> --log-failed
 ruff check --fix src/ tests/
@@ -119,78 +189,129 @@ Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `devel
 
 ## Critical Architecture Invariants
 
+### Cluster-Aware State — ABSOLUTE RULE
+
+**NEVER use module-level dicts, class-level dicts, or any per-node RAM for state that must be visible to another HTTP request in a cluster.** In a multi-node deployment (HAProxy round-robin), a request that writes to `mydict: Dict = {}` in `routes.py` stores data ONLY on the node that handled that request. A subsequent request routed to a different node sees nothing. This has caused production bugs and is unacceptable.
+
+**Correct storage by state lifetime:**
+
+| State type | Correct store | WRONG |
+|------------|--------------|-------|
+| Cross-request ephemeral payload (search snippets, job results) | `app.state.payload_cache` (`PayloadCache` — SQLite solo, PostgreSQL cluster) | module-level dict |
+| Job coordination / dedup | BGM `JobTracker` (PostgreSQL in cluster) | `bgm.jobs.values()` scan (per-node) |
+| Long-lived config / metadata | `get_config_service().get_config()` (DB-backed) | env vars, module vars |
+| Shared sentinel / coordination lock | `SharedJobSentinel` on cidx-meta NFS | per-node file or dict |
+
+**`PayloadCache` is the designated system for ephemeral cross-node data** (job results, large search payloads, delegation results). It is wired at `app.state.payload_cache` (lifespan). PostgreSQL backend in cluster mode (`payload_cache` table, shared across all nodes). TTL-evicted (default 900s, Web UI configurable). Key methods: `store_with_key(key, content)`, `has_key(key)`, `retrieve(key)`. See `src/code_indexer/server/cache/payload_cache.py` and `src/code_indexer/server/storage/postgres/payload_cache_backend.py`.
+
+**Bug #1181 -- Per-query batch commit (store_batch)**: The query hot path must NEVER call `payload_cache.store()` once per result in a loop. Use `payload_cache.store_batch(contents: List[str]) -> List[str]` instead -- it inserts all rows in ONE transaction/commit and returns handles in order (immediately retrievable cross-node). The PG backend also issues `SET LOCAL synchronous_commit = off` per-transaction before the INSERT, eliminating WAL fsync wait for these ephemeral writes (safe: TTL-evicted data, row is visible immediately, only crash durability relaxed; `SET LOCAL` is per-transaction and does NOT affect users/jobs/migrations). Both `_apply_rest_semantic_truncation` and `_apply_rest_fts_truncation` in `app_helpers.py`, and `_apply_fts_payload_truncation` in `mcp/handlers/_utils.py`, use `store_batch`. Any new truncation helper on the query hot path MUST also use `store_batch`.
+
+**HAProxy affinity is NOT a substitute for cluster-aware code.** Sticky sessions reduce the probability of cross-node reads but do not eliminate them (node restart, new deployment, affinity miss). Code correctness must not depend on proxy configuration.
+
+This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
+
 ### Query Is Everything
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
 
-### X-Ray Module Lazy-Load Invariant (Epic #968 / Story #969)
+### X-Ray (lazy-load, sandbox, engine, Rust, patterns)
 
-`src/code_indexer/xray/` wraps tree-sitter. Lazy-load discipline: `tree_sitter` and `tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__()`. CLI startup unaffected (~0.57s, budget 2.0s).
+`tree_sitter`/`tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__` (CLI-startup lazy-load, CI-gated by `tests/unit/xray/test_lazy_load.py`); raw `tree_sitter.Node` NEVER exposed to evaluator code (wrap in `XRayNode`).
 
-**CI gate**: `tests/unit/xray/test_lazy_load.py` -- SUBPROCESS test asserting tree-sitter absent from `sys.modules` after CLI import. BLOCKING.
+-> Detail: docs/architecture-invariants.md#x-ray | docs/xray-architecture.md | docs/xray-sandbox.md
 
-**Key invariants**:
-- Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
-- `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present).
-- 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform optional 11th.
-- **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
+### TOTP Step-Up Elevation + CLI Elevation Retry (Epic #922 / Story #980)
 
-### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
+Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401); kill switch returns HTTP 503 NOT 403. `with_elevation_retry` wraps all `cidx admin users`/`groups` commands (single retry on `elevation_required`).
 
-Three defense layers: AST whitelist (Layer 1) + stripped builtins (Layer 2) + multiprocessing isolation (Layer 3). Dunder-access block via 24-name `DUNDER_ATTR_BLOCKLIST`. Timeout: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), +1.0s SIGKILL grace. Pipe read BEFORE `is_alive()`. NO `signal.alarm` (FastAPI worker threads).
+-> Detail: docs/architecture-invariants.md#auth-totp-jwt | Full reference: docs/totp-elevation.md
 
--> Full reference: `docs/xray-sandbox.md`
+### JWT Logout Token Revocation (Story #1163)
 
-### X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
+Both logout routes blacklist the JWT `jti` via `get_token_blacklist().add(jti)` (DB-backed `TokenBlacklist`, cross-worker/cross-node). Blacklist block is try/except-wrapped and NEVER blocks the redirect/session-clear; `blacklisted_at` is a NUMERIC UNIX timestamp (never the ISO `_cleanup_table` helper).
 
-Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRayNode` ASTs.
-
-**Key invariants**:
-- v10.4.0 evaluator contract: 6 globals (`node`, `root`, `source`, `lang`, `file_path`, `match_positions`). Must return `{"matches": [...], "value": <any>}` -- bool REJECTED. Legacy `match_byte_offset`/`match_line_number`/`match_line_content` always `None`.
-- v10.4.0 allowed nodes: Groups C (If/For/While/Break/Continue/Pass), D (Try/ExceptHandler/Raise), E (BinOp/operator), F (Import/ImportFrom with STDLIB_WHITELIST: re, collections, itertools, functools), G (FunctionDef/Lambda/arguments/arg). Still banned: `class`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`. SAFE_BUILTIN_NAMES: 34 entries (25 value + 9 exception types). Structured `ValidationResult` fields: `error_code`, `offending_construct`, `offending_line`.
-- Omni multi-repo: `repository_alias` accepts string, list-of-strings, or JSON array. Multi-repo returns `{job_ids, errors}`.
-- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `sandbox.validate()` before job submission. `await_seconds` in [0.0, 120.0] (warning logged at >30.0).
-- v10.5.0 evaluator extensions: `match_positions[i]["ast_node"]` (XRayNode at byte offset), `{"skip": True}` early bail-out, `{"file_role": str}` in return dict surfaced in `file_metadata[]`. XRayNode helpers: `is_in_try_resources()`, `enclosing_method_body()`, `node_at_byte_offset()`.
-
--> Full reference: `docs/xray-architecture.md`
-
-### X-Ray Spawn-Driver Architecture (Bug #994)
-
-`XRaySearchEngine.run()` delegates Phase 2 evaluator execution to `PythonEvaluatorSandbox.run_batch()`, which spawns a clean driver process via `multiprocessing.get_context("spawn")`. The driver imports tree-sitter once, then forks per-file evaluators via `sandbox.run()` (inheriting the driver's clean ~50MB state, not the parent's potentially 2GB+ state).
-
-**Key invariants**:
-- Parent (main process): validates evaluator code, reads files, detects languages, builds file_specs -- NO tree-sitter in this path (just extension mapping).
-- Driver (spawn'd): imports tree-sitter + AstSearchEngine, creates PythonEvaluatorSandbox, processes files via ThreadPoolExecutor, each file fork-evaluated from driver state.
-- Results pipe back as `List[Tuple[matches, errors, meta]]`.
-- `_evaluate_file()` kept as lower-level test API -- existing unit tests call it directly.
-- `_run_inline_batch()` path still exists (activated by passing `ast_engine` to `run_batch`) -- reserved for in-process testing.
-
-### TOTP Step-Up Elevation (Epic #922 / Story #923)
-
-**Essential invariants** -- NEVER refactor these:
-- Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401).
-- Kill switch returns HTTP **503 NOT 403**.
-- Recovery codes (10, bcrypt-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
-- TOTP replay prevention via atomic CAS on `last_used_otp_timestamp`.
-
--> Full reference: `docs/totp-elevation.md`
-
-### CLI Elevation Retry (Story #980)
-
-`with_elevation_retry` wraps ALL `cidx admin users` and `cidx admin groups` commands. On 403 `elevation_required` -> prompt TOTP -> `POST /auth/elevate` -> single retry. On `totp_setup_required`/`elevation_failed`: `sys.exit(1)`, no retry loop. Always unwrap via `body.get("detail", {})` (FastAPI wraps HTTPException detail).
-
--> Full reference: `docs/totp-elevation.md`
+-> Detail: docs/architecture-invariants.md#auth-totp-jwt
 
 ### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
 
-Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
+Write maintenance endpoints (`POST .../maintenance/enter|exit`) are loopback-only via `require_localhost`; reverse-proxy must NOT forward them externally. MCP enter/exit tools removed.
 
-### Golden Repo Versioned Path (IMMUTABLE)
+-> Detail: docs/architecture-invariants.md#auth-totp-jwt
 
-- **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
-- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE -- served to queries
+### Activation Branch-Delta Reindex (Bug #1203)
 
-Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+Activation/switch/sync on a NON-DEFAULT branch runs a branch-aware delta reindex via `ActivatedRepoManager._run_branch_delta_index` (skip guards: default branch, `-global` alias, `_index_manager is None`). `_index_manager` is wired POST-HOC in `startup/lifespan.py` — removing that assignment makes the fix INERT. Failed reindex raises `ActivatedRepoError` (correctness-first); cache invalidation is prefix-eviction on success.
+
+-> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+
+### Golden Repo Versioned Path (mutable-vs-immutable)
+
+NEVER modify/checkout/index inside `.versioned/`. The resolver (`GoldenRepoManager.get_actual_repo_path`) may return the MUTABLE base clone, so do NOT assume the query-path string is immutable — prove it with `is_immutable_versioned_snapshot(path)` and default to a SHORT TTL otherwise. Alias JSON `target_path` is authoritative for global repos. See memory: `feedback_versioned_path_trap.md`.
+
+-> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+
+### Golden Repo Registry-Orphan Guard + Reconcile (Bug #1317)
+
+A registered golden repo must never end up as a "registry-orphan": a `golden_repos` row (PostgreSQL in cluster mode, SQLite in solo mode) with no on-disk clone and/or no alias pointer file. Two mechanisms enforce this:
+
+1. **Provisioning atomicity** (`golden_repo_manager.py`): in `add_golden_repo`'s background worker, global activation (alias pointer + global registry write) is now a HARD requirement, not best-effort — if `GlobalActivator.activate_golden_repo` fails, the just-inserted `golden_repos` row is rolled back (in-memory cache + SQLite/PG backend) and the clone directory is cleaned up before re-raising as `GitOperationError`. A successfully-provisioned global repo is therefore guaranteed to have its alias pointer, keeping the #1315 `index_path` fallback a rare safety net rather than steady state. Symmetrically, `remove_golden_repo`'s background worker now removes the registry row BEFORE deleting any on-disk files (previously files were deleted first; if the subsequent row removal then failed, the "rollback" only restored the PER-WORKER in-memory dict — useless cross-node — while the files were already gone, producing exactly this bug). If registry removal fails, nothing is touched; only after removal is confirmed does filesystem cleanup run, so a later filesystem-cleanup failure can only ever leave a harmless orphan CLONE (files, no row), never a registry-orphan.
+2. **Reconcile** (`server/services/golden_repo_reconciler.py`): `reconcile_golden_repo_registry(golden_repo_manager)` scans `list_golden_repos()` (the shared backend — correct in both SQLite and PostgreSQL modes) and, for every alias whose `get_actual_repo_path()` raises `GoldenRepoNotFoundError`, submits its removal via the existing `remove_golden_repo` cascade (row + alias pointer + global registry + activated-repo cascade — reused, not reimplemented). Wired fail-soft at server startup in `startup/lifespan.py` (mirrors the `reconcile_orphaned_exports` / `fail_orphaned_jobs` pattern) so any orphans are cleaned up automatically on the next restart. Three safety mechanisms are MANDATORY and must never be removed: (a) a positive health-gate (`_golden_repos_dir_is_healthy`, returns False on any `OSError`) skips the whole sweep if the golden_repos_dir is not a readable directory; (b) a mass-deletion **circuit-breaker** — the sweep classifies all repos absent/healthy FIRST, then deletes ONLY if `absent_count/total <= ORPHAN_FRACTION_ABORT_THRESHOLD` (0.5); if more than half resolve absent it ABORTS with a WARNING and deletes nothing (a stale/unmounted NFS makes `os.path.exists()` return False for ALL repos — without this guard a transient mount blip at startup would wipe the entire registry + every user's activations; see memory `project_nfs_host_down_hangs_systemd`); (c) **pointer-repair** — a healthy repo (clone resolves) that `is_globally_active()` (global-registry truth, not the pointer) but lacks its `-global` alias pointer is REPAIRED via `AliasManager.create_alias(...)`, never deleted (this is the #1315 symptom). In cluster mode the sweep is single-flighted across workers via `job_tracker.register_job_if_no_conflict`/`DuplicateJobError` (skipped when no job_tracker — solo/CLI).
+
+-> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+
+### Query-Path Drift-Safe Caching (Story #1082)
+
+Per-query orchestration glue cached in `query_path_cache.py` (`TTLCache`, single-flight, bounded LRU). ZERO staleness for static model-spec YAML + proven-immutable snapshots; BOUNDED (short TTL) for mutable/DB-metadata paths; NEVER cache auth-bearing rows (api keys, users, MCP creds, permissions, tokens) so revocation is immediate.
+
+-> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
+
+### Query-Embedding Cache (Epic #1103)
+
+Server-side query-embedding cache (both providers), wraps `coalesced_query_embedding` outside-in; CLI/solo bypass. HARD invariants: NEVER lowercase the cache key; NEVER cache auth-bearing data; table stores query-purpose embeddings ONLY; all cache ops fail-open (WARNING + live path).
+
+-> Detail: docs/architecture-invariants.md#query-embedding-cache-epic-1103 | Full reference: docs/query-embedding-cache.md
+
+### FSV skip_staleness_check for Immutable Versioned Snapshots (Bug #1181 Perf Fix #3)
+
+`FilesystemVectorStore.__init__(skip_staleness_check=False)` — default False (CLI/mutable byte-identical). Only `FilesystemBackend.get_vector_store_client()` sets it True, and ONLY when `is_immutable_versioned_snapshot(project_root)` proves the path immutable (server-mode import only). Never skip for any path not proven immutable.
+
+-> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
+
+### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
+
+ONE predicate `is_versioned_snapshot(path, *, mount_point=None)` (`storage/shared/snapshot_paths.py`) is the sole authority — callers hold the `VersionedSnapshotManager` facade, never reimplement the `.versioned` substring test. Deletion runs behind the QueryTracker refcount-zero gate via backend-correct `delete_snapshot`; keep-last-N retention (`snapshot_retention_keep_last`, default 3) never deletes current/previous targets.
+
+-> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+
+### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
+
+CoW clones route through `self._clone_backend.create_clone_at_path(...)` (hard-raises if None). Wiring is POST-HOC in `startup/lifespan.py`: `arm._clone_backend = snapshot_manager._clone_backend`. Any refactor of `lifespan.py`/`service_init.py` MUST preserve that assignment (guard: `test_lifespan_clone_backend_wiring_bug1044.py`).
+
+-> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+
+### Resumable Delta Dep-Map Analysis (Story #1053)
+
+`run_delta_analysis` is resumable via a per-domain YAML frontmatter journal (`last_delta_applied`), frontmatter+body written in one atomic `os.replace`; no separate cursor file. Cluster correctness inherits the `cidx-meta` `WriteLockManager` lock. Crash-durability: process crash/SIGKILL/restart only.
+
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-resumable-delta-architecture.md
+
+### Embedding Request Coalescer + 4-Lane Adaptive Governor (Story #1079, refines Bug #1078)
+
+Server-side query-embed coalescing gated by a self-tuning 4-lane (`{provider}:{embed|rerank}`) concurrency governor; CLI/solo path untouched (registry is None). One sealed batch == exactly ONE provider HTTP call (dual-constraint sealing). `provider_backoff.is_rate_limited` is the canonical 429 classifier — NEVER re-mask a 429. ALL query-path embed calls MUST pass `embedding_purpose="query"` (Bug #1104). Registry built once in `lifespan.py`; preserve `set/clear_coalescer_registry`.
+
+-> Detail: docs/architecture-invariants.md#embedding-coalescer-and-governor
+
+### Indexing Path Has No Job/Subprocess/Per-File Timeouts (Bug #1218)
+
+The indexing / golden-repo-registration / SCIP path carries NO wall-clock timeout on the job, subprocess, or any per-file/per-batch unit — a large repo legitimately takes hours. The ONLY legitimate timeout is the per-request outbound embedding-provider HTTP call (+ retry/backoff). NEVER add a job/subprocess/per-file clock, and NEVER `except TimeoutError: skip` (silent partial index). Fail LOUD on total failure: `cidx index` exits non-zero when `files_processed == 0 and failed_files > 0`.
+
+### Per-Commit Temporal Dual-Embedder Indexing (Epic #1289)
+
+Temporal indexing is per-commit-aggregated (message once + all changed-file diffs in ONE document per commit, unified `{project}:commit:{hash}:{j}` point ids) under pluggable, coexisting embedder adapters (`voyage-context-4` contextual 0% overlap, `embed-v4.0` standard 15% overlap; `TemporalConfig.embedders`/`.active_embedder`), quarterly-sharded per embedder. Incremental refresh is reconcile-based (full git-log walk is cheap and by-design, since blank-out precludes a cursor; the actual skip is a disk-scan per shard) — verified end-to-end with byte-identical pre-existing vector files and zero new embedding calls on a no-op refresh.
+
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "Per-Commit Temporal Dual-Embedder Indexing")
+
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations
 
 ### Database Migrations Must Be Backward Compatible
 
@@ -198,6 +319,12 @@ Rolling restarts mean old and new nodes share schema during upgrade. MigrationRu
 
 - **Allowed**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, new nullable columns / columns with defaults
 - **NEVER**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE/COLUMN`, `ALTER COLUMN TYPE`, removing NOT NULL
+
+### Migration Concurrent Startup Safety (Story #1164)
+
+Under `uvicorn --workers N` (PostgreSQL), `MigrationRunner.run()` acquires a PG SESSION advisory lock (`pg_advisory_lock`, key `_MIGRATION_ADVISORY_LOCK_KEY`, identical on every node) at entry and releases it in `finally` on ALL paths. Always parameterized `%s`, never f-string. SQLite path never references `pg_advisory_lock`.
+
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations
 
 ### No Environment Variables for Server Settings
 
@@ -211,35 +338,49 @@ Runtime settings belong in the Web UI Config Screen via `get_config_service().ge
 
 All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
 
+-> Bug-history detail (Bug #1052 activated-repos symlink; Story #1167 / Bug #1183 workers un-pin, value-aware idempotency; Bug #1182 py3.12/PrivateTmp lock self-heal): docs/architecture-invariants.md#auto-updater-and-pace-maker | Full reference: docs/auto-update.md
+
 ### Pace-Maker Pre-Invocation Guard (Story #997)
 
-Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step 12 in `DeploymentExecutor.execute()`). Fresh install sets master switch OFF. Updates never touch config.
+Auto-updater installs/updates pace-maker (fresh install = master switch OFF; updates never touch config). Config split: `pace_maker_clone_path` (bootstrap) + `pace_maker_mode` (runtime Web UI, default `"disabled"`). Three-way mode (`enforce_pace_maker_config()`): disabled/on/off. Injected at `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker); guard is non-fatal.
 
-**Config split**: `pace_maker_clone_path` (bootstrap, written by installer/auto-updater) + `pace_maker_mode` (runtime, Web UI, default `"disabled"`).
+-> Detail: docs/architecture-invariants.md#auto-updater-and-pace-maker
 
-**Three-way mode** (`enforce_pace_maker_config()` in `pace_maker_guard.py`): `"disabled"` = no-op, never touches pace-maker (safe for dev machines). `"on"` = enforce pacing-only mode (5h + weekly limits ON, everything else OFF). `"off"` = actively disable pace-maker master switch.
+### Description-Refresh (circuit-breaker, cross-worker dedup, tracking backend)
 
-**Two injection points**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()`. NOT CodexInvoker (Codex uses OpenAI credits). Guard is non-fatal -- all failures logged, never raised.
+Circuit-breaker: `PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures quarantine a repo; auto-clear ONLY on a real on-disk commit change (never via `has_changes_since_last_run`). Cross-worker dedup: `_run_loop_single_pass` MUST use `register_job_if_no_conflict` (DB `idx_active_job_per_repo` is the cluster-atomic arbiter); `DuplicateJobError` handled BEFORE the generic `except`. Tracking backend: scheduler MUST share the SAME `tracking_backend` instance as `meta_description_hook` (PG in cluster, wired in `lifespan.py`); stale `next_run` rows reconciled on `start()` to avoid a mass-Claude storm.
+
+-> Detail: docs/architecture-invariants.md#description-refresh
 
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
-**Key invariants** (see `docs/server-memory-invariants.md` for full detail):
-- Cleanup daemon: once per app lifetime, started/stopped in lifespan. NEVER piggyback in `get_connection()`, NEVER call `_cleanup_all_instances()` from daemon loop, NEVER remove `try/finally` in `BackgroundJobManager._execute_job`.
-- HNSW/FTS cache: `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. Hot-reload narrow-scoped to `index_cache_max_size_mb`/`fts_cache_max_size_mb`.
-- Omni fan-out: `omni_wildcard_expansion_cap` (50) + `omni_max_repos_per_search` (50). Fan-out passes `hnsw_cache=None`.
-- Bug #897 mitigations default ON: `enable_malloc_trim`, `enable_malloc_arena_max` (bootstrap-only flags).
+Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyback in `get_connection()`). HNSW/FTS cache `DEFAULT_MAX_CACHE_SIZE_MB = 4096`; `initialize_caches(worker_count)` divides the per-node cap by `config.workers` (floor 256 MB) in `service_init.py` BEFORE the eager getters — single source of truth, do NOT add a second call in `lifespan.py`. Bug #897 malloc mitigations default ON.
+
+-> Detail: docs/architecture-invariants.md#server-memory-and-pooling | Full reference: docs/server-memory-invariants.md
 
 ### Depmap Parser Module Split (Story #887, Epic #886)
 
-Four modules: mcp_parser, parser_tables, parser_hygiene, parser_graph. Anomalies self-classify via `AnomalyType.channel`. Dual API: `get_cross_domain_graph()` (legacy 2-tuple) and `get_cross_domain_graph_with_channels()` (4-tuple). Self-loop preservation unconditional.
+Four modules (mcp_parser, parser_tables, parser_hygiene, parser_graph); anomalies self-classify via `AnomalyType.channel`. Dual API: `get_cross_domain_graph()` (2-tuple) and `get_cross_domain_graph_with_channels()` (4-tuple). Self-loop preservation unconditional.
 
--> Full reference: `docs/depmap-parser-architecture.md`
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-parser-architecture.md
 
 ### cidx-meta backup contract (Story #926)
 
-Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only (`get_cidx_meta_path()`). NEVER inside `.versioned/` snapshots. Push failures deferred (after indexing); conflict failures short-circuit immediately. Conflict resolution via Claude CLI (600s timeout).
+Sync runs BEFORE indexing; all git ops on the mutable base path only (`get_cidx_meta_path()`), NEVER inside `.versioned/`. Push failures deferred, conflict failures short-circuit (Claude-CLI conflict resolution). `XrayPatternService` (Bug #1037) shares the coarse `cidx-meta` write lock. Cluster git-remote auth resolves the deploy key via node-local `~/.ssh/config` materialized from PG by `SSHKeySyncService.sync()`.
 
--> Full reference: `docs/cidx-meta-backup.md`
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/cidx-meta-backup.md
+
+### Dep-Map Re-Entrancy Sentinels (Story #1035)
+
+Dep-map coordination state lives on NFS-shared `cidx-meta` (`SharedJobSentinel`, atomic `O_CREAT|O_EXCL`) so every cluster node sees the same lock — NEVER store it in per-node SQLite. Two op_type families (`analysis` 4h, `dashboard` 30m). Route-layer claim order: `is_available()` -> `try_claim()` -> `register_job_if_no_conflict` -> spawn worker (`pre_claimed=True`). Path via `DependencyMapService.get_sentinel_dir()`.
+
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta
+
+### Global Repo Alias Fallback (Story #1039)
+
+31 read-only MCP handlers promote a bare alias to its `-global` form when the user lacks it and the golden repo is globally active — via `try_global_fallback()` (`_global_fallback.py`), pre-check pattern, activated-repo takes precedence. All write/mutation handlers (Section B) MUST stay strict: `_global_fallback.py` MUST NEVER be imported from them.
+
+-> Detail: docs/architecture-invariants.md#global-repo-alias-fallback
 
 ---
 
@@ -250,7 +391,7 @@ Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only
 | **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
 | **Daemon** | Same + in-memory cache, Unix socket at `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
 
-Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-3), 1536 (voyage-3-large).
+Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2).
 
 **Server mode**: separate deployment. Cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
 
@@ -269,6 +410,8 @@ cidx watch / watch-stop / stop         # Daemon controls
 
 **Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`.
 
+Note: `*/tests/*` matches at any depth including root (`tests/foo.py` and `src/tests/foo.py`). `**/tests/**` is equivalent.
+
 ---
 
 ## Performance Rules
@@ -280,11 +423,23 @@ cidx watch / watch-stop / stop         # Daemon controls
 - **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
 - **Import budget**: current startup ~329ms.
 
+### Multi-Worker Throughput Benchmark (Story #1168)
+
+Standalone operator benchmark (NOT automated CI): `scripts/analysis/multi_worker_throughput.py` measures `POST /api/query` throughput per worker count. NEVER restart/kill the dev server on :8000 — use an isolated port. Credentials from env or `.local-testing`; reports in `reports/perf/`.
+
+-> Detail: docs/architecture-invariants.md#benchmarks
+
 ---
 
 ## Embedding Provider (VoyageAI)
 
-Only provider in v8.0+. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-3 (1024 dims, default), voyage-3-large (1536 dims).
+Primary provider. Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
+
+### Production httpx Connection Pooling + Batched Metrics Writer (Story #1083)
+
+`HttpClientFactory` owns ONE long-lived keep-alive `httpx.Client` for the production path (`create_sync_client(pooled=True)`, borrowed via no-op `__exit__`, closed once at shutdown). Auth is per-request (rotation transparent). Fault-injection path is UNCHANGED (fresh per-call client). `api_metrics_service` writer batches the backlog into ONE `upsert_buckets_batch()` transaction per drain.
+
+-> Detail: docs/architecture-invariants.md#server-memory-and-pooling
 
 ---
 
@@ -314,11 +469,23 @@ Two subsystems: **ClaudeCliManager** (queue-based thread pool, batch processing)
 
 **Codex/Claude MCP registration**: Both use same persistent `client_id:client_secret` from `MCPCredentialManager`. Claude via HTTP header, Codex via TOML `env_http_headers` + `CIDX_MCP_AUTH_HEADER` env var. Three-step fallback chain in `build_codex_mcp_auth_header_provider()` handles Claude CLI absence (Bug #937). Hook parity NOT achieved (codex has no `PostToolUse` hook).
 
+### Description-Refresh Refinement (Bug #1094)
+
+The single live description path is the lifecycle-unified pipeline (`LifecycleBatchRunner._process_one_repo` -> `LifecycleClaudeCliInvoker`); a refresh REFINES the existing description (non-empty existing body -> REFRESH mode via `lifecycle_refresh_addendum.md`, else byte-identical to create-mode). Frontmatter merge is preserve-by-default (`_merge_lifecycle_dict`, Bug #1101); descriptions are timeless snapshots — temporal phrasing BANNED (Bug #1102).
+
+-> Detail: docs/architecture-invariants.md#description-refresh
+
 ---
 
 ## Background Jobs (MANDATORY Checklist)
 
 Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin UI visibility. (2) Confirm frontend reporting pattern with user before implementing.
+
+### Auto-Discovery Background Job Pattern (Story #1157)
+
+`POST /api/discovery/{platform}/start` + `GET /api/discovery/{platform}/result/{job_id}` (`web/routes.py`). Result storage MUST use `app.state.payload_cache` (cluster-aware), NEVER a module-level dict. Manual dedup (scan `bgm.jobs.values()`) since `repo_alias=None` bypasses the DB gate; worker declares `progress_callback=None` for BGM injection; `job_id_holder` container passes the post-`submit_job()` id into the worker closure.
+
+-> Detail: docs/architecture-invariants.md#background-jobs
 
 ---
 
@@ -358,31 +525,32 @@ Always `python3 -m pip install --break-system-packages` -- never bare `pip`.
 
 ## Fault Injection Harness (non-prod only, disabled by default)
 
-Bootstrap-only config: `fault_injection_enabled` + `fault_injection_nonprod_ack` (both false). Enabled without ack OR in production = `sys.exit(1)`. All outbound async HTTP MUST go through `HttpClientFactory` (anti-regression test in `test_http_client_factory.py`).
+Bootstrap-only config (`fault_injection_enabled` + `fault_injection_nonprod_ack`, both false). Enabled without ack OR in production = `sys.exit(1)`. All outbound async HTTP MUST go through `HttpClientFactory`.
 
--> Full reference: `docs/fault-injection-operator-guide.md`
+-> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | Full reference: docs/fault-injection-operator-guide.md
 
 ---
 
 ## Memory Retrieval (Story #883)
 
-Parallel pipeline on semantic/hybrid search: VoyageAI vector -> HNSW -> floors -> hydration -> nudge. Kill switch: `memory_retrieval_enabled = false` (Web UI, immediate). Path confinement via `Path.relative_to()`. Body hydration faults drop candidate with WARNING, never raise.
+Parallel pipeline on semantic/hybrid search (VoyageAI vector -> HNSW -> floors -> hydration -> nudge). Kill switch `memory_retrieval_enabled = false` (Web UI, immediate). Path confinement via `Path.relative_to()`; body-hydration faults drop the candidate with WARNING, never raise.
 
--> Full reference: `docs/memory-retrieval-operator-guide.md`
+-> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | Full reference: docs/memory-retrieval-operator-guide.md
 
 ---
 
 ### Phase 3.7 Dep-Map Graph-Channel Repair (Epic #907)
 
-Repairs graph-channel anomalies (SELF_LOOP, MALFORMED_YAML, GARBAGE_DOMAIN_REJECTED deterministic; BIDIRECTIONAL_MISMATCH Claude-audited). Bootstrap flag `enable_graph_channel_repair` (default True). Append-only JSONL journal at `~/.cidx-server/dep_map_repair_journal.jsonl`. Prompt template externalized to `bidirectional_mismatch_audit.md`.
+Repairs graph-channel anomalies (SELF_LOOP / MALFORMED_YAML / GARBAGE_DOMAIN_REJECTED deterministic; BIDIRECTIONAL_MISMATCH Claude-audited). Bootstrap flag `enable_graph_channel_repair` (default True); append-only JSONL journal.
 
--> Full reference: `docs/depmap-phase37-architecture.md`
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-phase37-architecture.md
 
 ---
 
 ## Further Reading
 
 - Architecture: `docs/architecture.md`
+- Architecture invariants (detailed): docs/architecture-invariants.md
 - Server deployment: `docs/server-deployment.md`
 - Cluster architecture: `docs/cluster-architecture.md`
 - Fault injection: `docs/fault-injection-operator-guide.md`

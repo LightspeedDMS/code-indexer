@@ -1,8 +1,8 @@
 """
 Tests for ApiMetricsService background writer thread (Story #672).
 
-Tests non-blocking hot path, queue-full behavior, increment_* username
-propagation, and backward-compatible get_metrics().
+Tests non-blocking hot path, queue-full behavior, and increment_* username
+propagation.
 """
 
 import queue
@@ -214,60 +214,41 @@ class TestUsernameDefaultAnonymous:
 
 
 class TestWriterLoopNodeId:
-    """Test that _writer_loop forwards node_id to every upsert_bucket call."""
+    """Test that the batched writer forwards node_id to upsert_buckets_batch.
 
-    def test_writer_loop_passes_node_id_to_upsert(self, tmp_path):
-        """When _node_id is set, each upsert_bucket call must receive that node_id."""
+    Story #1083: the writer now drains queued events and writes them via a single
+    upsert_buckets_batch(events, node_id=...) call instead of per-event
+    upsert_bucket — so node_id is forwarded once per batch.
+    """
+
+    def test_writer_loop_passes_node_id_to_batch_upsert(self, tmp_path):
+        """When _node_id is set, the batched write must receive that node_id."""
         from unittest.mock import MagicMock
         from code_indexer.server.services.api_metrics_service import ApiMetricsService
 
         db_file = str(tmp_path / "test_metrics.db")
 
-        # Build a mock backend that records every upsert_bucket invocation
+        # Build a mock backend that records every upsert_buckets_batch invocation
         mock_backend = MagicMock()
-        mock_backend.upsert_bucket = MagicMock()
+        mock_backend.upsert_buckets_batch = MagicMock()
 
         service = ApiMetricsService()
         service.initialize(
             db_file, storage_backend=mock_backend, node_id="test-node-42"
         )
+        try:
+            service.increment_semantic_search(username="alice")
 
-        service.increment_semantic_search(username="alice")
-
-        # Wait for the background writer to drain the queue
-        assert _poll_until(lambda: mock_backend.upsert_bucket.called), (
-            "upsert_bucket must be called within timeout"
-        )
-
-        # Every upsert_bucket call for this metric must carry node_id="test-node-42"
-        for actual_call in mock_backend.upsert_bucket.call_args_list:
-            _, kwargs = actual_call
-            assert kwargs.get("node_id") == "test-node-42", (
-                f"Expected node_id='test-node-42' but got {kwargs!r}"
+            # Wait for the background writer to drain the queue
+            assert _poll_until(lambda: mock_backend.upsert_buckets_batch.called), (
+                "upsert_buckets_batch must be called within timeout"
             )
 
-
-class TestGetMetricsBackwardCompat:
-    """Test that get_metrics() still works after the background writer is added."""
-
-    def test_get_metrics_returns_expected_keys(self, service_and_db):
-        """get_metrics() must return dict with all four expected keys."""
-        service, _db_file = service_and_db
-
-        result = service.get_metrics(window_seconds=60)
-
-        assert "semantic_searches" in result
-        assert "other_index_searches" in result
-        assert "regex_searches" in result
-        assert "other_api_calls" in result
-
-    def test_get_metrics_returns_zero_when_no_data(self, service_and_db):
-        """get_metrics() must return zero counts when no metrics have been recorded."""
-        service, _db_file = service_and_db
-
-        result = service.get_metrics(window_seconds=60)
-
-        assert result["semantic_searches"] == 0
-        assert result["other_index_searches"] == 0
-        assert result["regex_searches"] == 0
-        assert result["other_api_calls"] == 0
+            # Every batched write must carry node_id="test-node-42"
+            for actual_call in mock_backend.upsert_buckets_batch.call_args_list:
+                _, kwargs = actual_call
+                assert kwargs.get("node_id") == "test-node-42", (
+                    f"Expected node_id='test-node-42' but got {kwargs!r}"
+                )
+        finally:
+            service.stop_writer()

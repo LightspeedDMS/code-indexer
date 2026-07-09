@@ -277,11 +277,13 @@ class DependencyMapDashboardService:
     def _get_stored_hashes(self) -> Dict[str, str]:
         """Parse commit_hashes JSON from tracking backend, returning empty dict on error."""
         tracking = self._tracking_backend.get_tracking()
-        commit_hashes_json = tracking.get("commit_hashes")
-        if not commit_hashes_json:
+        commit_hashes_raw = tracking.get("commit_hashes")
+        if not commit_hashes_raw:
             return {}
+        if isinstance(commit_hashes_raw, dict):
+            return cast(Dict[str, str], commit_hashes_raw)
         try:
-            return cast(Dict[str, str], json.loads(commit_hashes_json))
+            return cast(Dict[str, str], json.loads(commit_hashes_raw))
         except (json.JSONDecodeError, TypeError):
             logger.warning(
                 "dependency_map_dashboard: failed to parse commit_hashes JSON"
@@ -307,7 +309,14 @@ class DependencyMapDashboardService:
             return []
 
         activated = self._dependency_map_service.get_activated_repos()
-        current_aliases = {r["alias"] for r in activated}
+        # Build alias set with both -global and bare forms for matching.
+        # stored_hashes uses bare names; golden repos use -global suffix.
+        current_aliases: set = set()
+        for r in activated:
+            a = r["alias"]
+            current_aliases.add(a)
+            if a.endswith("-global"):
+                current_aliases.add(a[: -len("-global")])
 
         # Fetch last_run from tracking for the last_analyzed timestamp
         tracking = self._tracking_backend.get_tracking()
@@ -320,13 +329,22 @@ class DependencyMapDashboardService:
             if not alias:
                 continue
 
+            # Golden repos use "-global" suffixed aliases but commit_hashes
+            # are stored with bare names. Strip suffix for comparison.
+            tracking_alias = (
+                alias[: -len("-global")] if alias.endswith("-global") else alias
+            )
+
             current_commit = self._get_current_commit(alias, repo.get("clone_path", ""))
 
-            if alias not in stored_hashes:
+            if tracking_alias not in stored_hashes:
                 status = "NEW"
                 status_color = "BLUE"
                 last_analyzed = None
-            elif current_commit is not None and current_commit == stored_hashes[alias]:
+            elif (
+                current_commit is not None
+                and current_commit == stored_hashes[tracking_alias]
+            ):
                 status = "OK"
                 status_color = "GREEN"
                 last_analyzed = last_run
@@ -340,7 +358,8 @@ class DependencyMapDashboardService:
                     "alias": alias,
                     "status": status,
                     "status_color": status_color,
-                    "domains": domain_map.get(alias, []),
+                    "domains": domain_map.get(alias, [])
+                    or domain_map.get(tracking_alias, []),
                     "last_analyzed": last_analyzed,
                 }
             )
@@ -434,6 +453,11 @@ class DependencyMapDashboardService:
         """
         if not iso_str:
             return None
+
+        if isinstance(iso_str, datetime):
+            if iso_str.tzinfo is None:
+                return iso_str.replace(tzinfo=timezone.utc)
+            return iso_str
 
         formats = [
             "%Y-%m-%dT%H:%M:%S.%f%z",

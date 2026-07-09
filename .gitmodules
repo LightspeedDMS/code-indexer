@@ -1,5 +1,6 @@
-# third_party/hnswlib is VENDORED (not a submodule) in code-indexer-internal so the
-# EKS image build is self-contained — no submodule init / network fetch in CI.
+[submodule "third_party/hnswlib"]
+	path = third_party/hnswlib
+	url = https://github.com/LightspeedDMS/hnswlib.git
 [submodule "test-fixtures/multimodal-mock-repo"]
 	path = test-fixtures/multimodal-mock-repo
 	url = https://github.com/LightspeedDMS/code-indexer-mock-test-repo.git

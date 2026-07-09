@@ -16,7 +16,12 @@ import math
 import os
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from code_indexer.server.services.jittered_dispatcher import (
+    DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+    dispatch_parallel_with_jitter,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -32,6 +37,83 @@ from code_indexer.global_repos.unified_response_parser import (
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _merge_lifecycle_dict(
+    existing: Dict[str, Any], new_lifecycle: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Preserve-by-default merge for the lifecycle sub-dict (Bug #1101).
+
+    Contract:
+      - All keys from existing are preserved in the result.
+      - A key from new_lifecycle overwrites an existing key ONLY when the new
+        value is present (not None) AND non-empty (not "" and not empty list/dict).
+      - Keys present only in new_lifecycle with a present, non-empty value are
+        added to the result (new analysis findings are never suppressed).
+      - For sub-dict values (e.g. ci, branching): applied recursively so that
+        nested keys follow the same preserve-by-default contract.
+      - For list values (e.g. ci.required_checks): the existing list is preserved
+        unless the new list is strictly a superset or a genuinely different list.
+        Specifically: if the new list would LOSE items that exist in the current
+        list (subset degradation), the existing list is preserved.
+
+    Args:
+        existing: The pre-existing lifecycle dict from cidx-meta/<alias>.md.
+        new_lifecycle: The lifecycle dict returned by the model on this refresh.
+
+    Returns:
+        Merged dict that is a superset of both inputs with preserve-by-default
+        semantics: existing values survive unless new analysis positively
+        contradicts them with a present, non-empty, non-degrading value.
+    """
+    result: Dict[str, Any] = dict(existing)
+
+    for key, new_val in new_lifecycle.items():
+        existing_val = existing.get(key)
+
+        # Rule 1: If new value is None or empty scalar — preserve existing.
+        if new_val is None:
+            continue
+        if isinstance(new_val, str) and not new_val.strip():
+            continue
+
+        # Rule 2: Both are dicts — recurse for nested keys.
+        if isinstance(new_val, dict) and isinstance(existing_val, dict):
+            result[key] = _merge_lifecycle_dict(existing_val, new_val)
+            continue
+
+        # Rule 3: Both are lists — preserve existing when new is a strict subset
+        # (model degradation: new list contains fewer items than existing).
+        if isinstance(new_val, list) and isinstance(existing_val, list):
+            # Convert to sets for subset check (order-independent).
+            existing_set = set(str(x) for x in existing_val)
+            new_set = set(str(x) for x in new_val)
+            if new_set < existing_set:
+                # New list is a strict subset — model dropped items; preserve existing.
+                continue
+            # New list adds items or is equal/different — new wins.
+            result[key] = new_val
+            continue
+
+        # Rule 4: Scalar — check for substring-subset degradation before accepting.
+        # If both values are non-empty strings and the new value is a strict
+        # substring of the existing value (e.g. "hatchling" ⊂ "uv/hatchling"),
+        # the model has DEGRADED the existing richer value; preserve existing.
+        # When neither is a substring of the other (e.g. "setuptools" vs
+        # "hatchling"), the new value is genuinely contradicting — new wins.
+        if (
+            isinstance(new_val, str)
+            and isinstance(existing_val, str)
+            and existing_val  # existing is non-empty
+            and new_val in existing_val  # new is a substring of existing
+            and new_val != existing_val  # strictly shorter (not identical)
+        ):
+            continue  # degradation — preserve the richer existing value
+
+        result[key] = new_val
+
+    return result
+
+
 def _merge_frontmatter(
     existing: Dict[str, Any], new_lifecycle: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -41,7 +123,9 @@ def _merge_frontmatter(
     Contract:
       - All keys from existing are preserved in the result.
       - All keys from new_lifecycle are present in the result.
-      - On key collision, new_lifecycle wins (lifecycle data is the source of truth).
+      - On key collision, new_lifecycle wins (lifecycle data is the source of truth)
+        EXCEPT for the 'lifecycle' sub-dict which uses preserve-by-default deep
+        merge via _merge_lifecycle_dict (Bug #1101).
       - Result is a superset of both input dicts — no key is silently dropped.
 
     Args:
@@ -53,7 +137,17 @@ def _merge_frontmatter(
         Merged dict with existing keys preserved and new_lifecycle keys overwriting
         on collision.
     """
-    return {**existing, **new_lifecycle}
+    merged = {**existing, **new_lifecycle}
+
+    # Bug #1101: the lifecycle sub-dict must use preserve-by-default deep merge
+    # so existing sub-keys are not silently dropped when the model omits or
+    # degrades them.  Apply only when both sides have a dict-shaped lifecycle.
+    existing_lc = existing.get("lifecycle")
+    new_lc = new_lifecycle.get("lifecycle")
+    if isinstance(existing_lc, dict) and isinstance(new_lc, dict):
+        merged["lifecycle"] = _merge_lifecycle_dict(existing_lc, new_lc)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +212,7 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
 
+    cidx_meta_path.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -423,6 +518,7 @@ class LifecycleBatchRunner:
         estimated_seconds_per_repo: int = _DEFAULT_ESTIMATED_SECONDS_PER_REPO,
         sub_batch_size_override: Optional[int] = None,
         tracking_backend: Optional[Any] = None,
+        journal_callback: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         if not isinstance(golden_repos_dir, (str, os.PathLike)):
             raise ValueError(
@@ -460,6 +556,7 @@ class LifecycleBatchRunner:
         self._estimated_seconds_per_repo: int = estimated_seconds_per_repo
         self._sub_batch_size_override: Optional[int] = sub_batch_size_override
         self._tracking_backend: Optional[Any] = tracking_backend
+        self._journal_callback: Optional[Callable[[str, str], None]] = journal_callback
 
     @staticmethod
     def compute_sub_batch_size(
@@ -484,24 +581,24 @@ class LifecycleBatchRunner:
         self,
         repo_aliases: List[str],
         parent_job_id: str,
-    ) -> None:
+    ) -> Dict[str, str]:
         """
         Run lifecycle detection for all aliases, sub-batching to stay within
         the write-lock TTL.
 
         Per-repo failures are logged at ERROR level and do not abort the batch.
-        Lock acquisition failure aborts immediately with LifecycleLockUnavailableError.
+        Per-repo lock acquisition failures are reported like other per-repo failures.
 
         Args:
             repo_aliases: Aliases to process.
             parent_job_id: Job identifier for progress/completion reporting.
 
-        Raises:
-            LifecycleLockUnavailableError: if cidx-meta write lock cannot be
-                acquired for any sub-batch. complete_job and signal_dirty are
-                NOT called in this case.
+        Returns:
+            Mapping of failed alias to human-readable error message. Successful
+            aliases are absent from the mapping.
         """
         total = len(repo_aliases)
+        failed: Dict[str, str] = {}
 
         self._job_tracker.update_status(
             job_id=parent_job_id,
@@ -527,18 +624,33 @@ class LifecycleBatchRunner:
         )
 
         for sub_batch in sub_batches:
-            self._run_sub_batch(sub_batch, parent_job_id)
+            failed.update(self._run_sub_batch(sub_batch, parent_job_id))
 
         # Signal debouncer ONCE after all sub-batches have been released.
         self._debouncer.signal_dirty()
 
-        # Terminal transition — complete_job, not update_status("completed").
-        self._job_tracker.complete_job(
-            job_id=parent_job_id,
-            result={"phase": "lifecycle", "done": total, "total": total},
-        )
+        if total > 0 and failed and len(failed) == total:
+            error_summary = "; ".join(
+                f"{alias}: {message}" for alias, message in failed.items()
+            )
+            self._job_tracker.fail_job(parent_job_id, error=error_summary)
+        else:
+            # Terminal transition — complete_job, not update_status("completed").
+            self._job_tracker.complete_job(
+                job_id=parent_job_id,
+                result={
+                    "phase": "lifecycle",
+                    "done": total,
+                    "total": total,
+                    "failed_aliases": list(failed.keys()),
+                },
+            )
 
-    def _run_sub_batch(self, sub_batch: List[str], parent_job_id: str) -> None:
+        return failed
+
+    def _run_sub_batch(
+        self, sub_batch: List[str], parent_job_id: str
+    ) -> Dict[str, str]:
         """
         Process all aliases in sub_batch concurrently under an already-held lock.
 
@@ -546,26 +658,52 @@ class LifecycleBatchRunner:
         sub-batch — all repos in the batch are attempted. Only BaseException
         subclasses that are not Exception (e.g. KeyboardInterrupt) propagate.
         """
-        with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
-            futures = {
-                pool.submit(self._process_one_repo, alias, parent_job_id): alias
-                for alias in sub_batch
-            }
-            for future in as_completed(futures):
-                alias = futures[future]
-                exc = future.exception()
-                if exc is not None:
-                    if isinstance(exc, Exception):
-                        # Log the failure; the sub-batch continues for other repos.
-                        _logger.error(
-                            "lifecycle-runner: failed to process alias %r: %s: %s",
-                            alias,
-                            type(exc).__name__,
-                            exc,
+        failed: Dict[str, str] = {}
+        futures_list = dispatch_parallel_with_jitter(
+            sub_batch,
+            concurrency=self._concurrency,
+            base_jitter_seconds=DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+            worker_fn=lambda alias: self._process_one_repo(alias, parent_job_id),
+        )
+        futures_to_alias = dict(zip(futures_list, sub_batch))
+        for future in as_completed(futures_list):
+            alias = futures_to_alias[future]
+            exc = future.exception()
+            if exc is not None:
+                if isinstance(exc, Exception):
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    failed[alias] = error_message
+                    # Log the failure; the sub-batch continues for other repos.
+                    _logger.error(
+                        "lifecycle-runner: failed to process alias %r: %s: %s",
+                        alias,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    if self._journal_callback is not None:
+                        try:
+                            self._journal_callback(
+                                alias,
+                                f"failed: {error_message}",
+                            )
+                        except Exception as cb_exc:
+                            _logger.debug(
+                                "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                                cb_exc,
+                            )
+                else:
+                    # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
+                    raise exc
+            else:
+                if self._journal_callback is not None:
+                    try:
+                        self._journal_callback(alias, "succeeded")
+                    except Exception as cb_exc:
+                        _logger.debug(
+                            "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                            cb_exc,
                         )
-                    else:
-                        # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
-                        raise exc
+        return failed
 
     def _process_one_repo(self, alias: str, parent_job_id: str) -> None:
         """
@@ -590,7 +728,33 @@ class LifecycleBatchRunner:
         from code_indexer.global_repos.repo_analyzer import split_frontmatter_and_body
 
         repo_path = self._golden_repos_dir / alias
-        result = self._claude_cli_invoker(alias, repo_path)
+        meta_md_path = Path(self._golden_repos_dir) / "cidx-meta" / f"{alias}.md"
+
+        # #1094 refresh-awareness: read the existing description (if any) BEFORE
+        # invoking the CLI so the LLM can REFINE it instead of replacing it from
+        # scratch.  A corrupt frontmatter is detected here so we raise WITHOUT
+        # burning a Claude invocation (Messi Rule #13 — fail-closed, fail-fast).
+        existing_description: Optional[str] = None
+        existing_last_analyzed: Optional[str] = None
+        if meta_md_path.exists():
+            pre_raw = meta_md_path.read_text(encoding="utf-8")
+            pre_fm, pre_body = split_frontmatter_and_body(pre_raw)
+            if not pre_fm and pre_raw.startswith("---"):
+                raise ValueError(
+                    f"Corrupt frontmatter in {meta_md_path}: file starts with "
+                    "'---' but YAML could not be parsed. Manual inspection required."
+                )
+            if pre_body and pre_body.strip():
+                existing_description = pre_body
+            la = pre_fm.get("last_analyzed") if pre_fm else None
+            existing_last_analyzed = str(la) if la is not None else None
+
+        result = self._claude_cli_invoker(
+            alias,
+            repo_path,
+            existing_description=existing_description,
+            last_analyzed=existing_last_analyzed,
+        )
 
         # Bug #940: acquire the per-alias write lock BEFORE reading the existing
         # frontmatter so the entire read-merge-write sequence is atomic.
@@ -604,11 +768,15 @@ class LifecycleBatchRunner:
                 "lifecycle write aborted"
             )
         try:
+            # #1094: stamp a FRESH last_analyzed on every successful write so the
+            # next refresh has an accurate `git log --since` change-scoping anchor.
+            # Placed in new_lifecycle_fm so it WINS over any stale existing value
+            # during _merge_frontmatter (new_lifecycle_fm overrides on collision).
             new_lifecycle_fm: Dict[str, Any] = {
                 "lifecycle": result.lifecycle,
                 "lifecycle_schema_version": CURRENT_LIFECYCLE_SCHEMA_VERSION,
+                "last_analyzed": datetime.now(timezone.utc).isoformat(),
             }
-            meta_md_path = Path(self._golden_repos_dir) / "cidx-meta" / f"{alias}.md"
             if meta_md_path.exists():
                 raw_content = meta_md_path.read_text(encoding="utf-8")
                 existing_fm, _ = split_frontmatter_and_body(raw_content)

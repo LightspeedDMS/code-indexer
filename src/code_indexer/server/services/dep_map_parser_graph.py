@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 _warned_missing_domains: set = set()
 _warned_missing_domains_lock: threading.Lock = threading.Lock()
 
+# Per-path dedup set: once a malformed domain file has been warned about, subsequent
+# calls log at DEBUG level only (Bug #1114 — suppress repeated malformed-YAML noise).
+# The MALFORMED_YAML anomaly is still recorded on EVERY call; only the log level
+# is demoted for repeated occurrences of the same path.
+_warned_malformed_domains: set = set()
+_warned_malformed_domains_lock: threading.Lock = threading.Lock()
+
 # Column indices (mirrors dep_map_parser_tables constants; re-declared locally
 # to avoid cross-module constant coupling for these graph-specific usages).
 _COL_OUTGOING_TARGET_DOMAIN = 2
@@ -283,11 +290,27 @@ def parse_domain_file_for_graph(
         )
         return
     except Exception as exc:
-        logger.warning(
-            "parse_domain_file_for_graph: failed to read/parse %s",
-            md_file,
-            exc_info=True,
-        )
+        # Bug #1114: de-spam repeated malformed-YAML warnings for the same path.
+        # Warn once (with traceback) then demote to DEBUG for subsequent calls.
+        # The MALFORMED_YAML anomaly is still recorded on every call.
+        domain_path_str = str(md_file)
+        with _warned_malformed_domains_lock:
+            already_warned = domain_path_str in _warned_malformed_domains
+            if not already_warned:
+                _warned_malformed_domains.add(domain_path_str)
+        if not already_warned:
+            logger.warning(
+                "parse_domain_file_for_graph: failed to read/parse %s"
+                " (suppressing future repeats)",
+                domain_path_str,
+                exc_info=True,
+            )
+        else:
+            logger.debug(
+                "parse_domain_file_for_graph: still failing to read/parse %s: %s",
+                domain_path_str,
+                exc,
+            )
         anomalies.append(
             AnomalyEntry(
                 type=AnomalyType.MALFORMED_YAML,

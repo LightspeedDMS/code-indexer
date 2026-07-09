@@ -16,6 +16,7 @@ import logging
 
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
 from .user_manager import UserManager, User
+from .api_key_manager import ApiKeyManager
 from code_indexer.server.logging_utils import format_error_log
 
 # Module-level singleton for TOTP step-up elevation (Story #923 AC5).
@@ -39,6 +40,8 @@ oauth_manager: Optional["OAuthManager"] = (
     None  # Forward reference to avoid circular dependency
 )
 mcp_credential_manager: Optional["MCPCredentialManager"] = None
+# Bug #1144: API key bearer authentication — set by app_wiring.py alongside jwt_manager
+api_key_manager: Optional[ApiKeyManager] = None
 # Story #563: Server config reference for non-SSO API restriction check
 server_config: Optional["ServerConfig"] = None
 
@@ -255,6 +258,25 @@ def get_current_user(
         )
 
     token = credentials.credentials
+
+    # Bug #1144: API key bearer dispatch — cidx_sk_ tokens handled here before JWT.
+    # JWTs and OAuth opaque tokens never start with this prefix, so they fall through
+    # to the OAuth / JWT paths below without any extra overhead.
+    if token.startswith(ApiKeyManager.KEY_PREFIX):
+        if api_key_manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Authentication not properly initialized",
+            )
+        api_user = api_key_manager.authenticate_bearer(token)
+        if api_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": _build_www_authenticate_header()},
+            )
+        _check_non_sso_api_restriction(api_user)
+        return api_user
 
     # Try OAuth token validation first (if oauth_manager is available)
     if oauth_manager:

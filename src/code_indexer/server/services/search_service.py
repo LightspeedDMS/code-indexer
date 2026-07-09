@@ -21,6 +21,10 @@ from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.search_embed_event_emit import (
+    emit_embed_error_event,
+    emit_embed_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +41,68 @@ def _get_http_client_factory() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     needing to set up the full app.state (following _get_golden_repos_dir() pattern).
 
-    Raises:
-        AttributeError: If lifespan did not set app.state.http_client_factory
-            (should never happen in production; startup guarantees it is set).
+    Returns None when app.state.http_client_factory is not set (e.g. CLI
+    in-process / unit tests). EmbeddingProviderFactory.create accepts
+    http_client_factory=None and falls back to per-call client creation, which
+    is correct for the non-server path. Matches the _get_query_executor() pattern.
     """
     from ..app import app as _app
 
-    return _app.state.http_client_factory
+    return getattr(_app.state, "http_client_factory", None)
+
+
+def _get_query_executor() -> Any:
+    """Get the shared, long-lived query ThreadPoolExecutor from app.state.
+
+    perf: the server lifespan creates ONE app-level ThreadPoolExecutor
+    (app.state.query_executor) so the FilesystemVectorStore embed||index-load
+    fan-out reuses threads across concurrent requests instead of each request
+    creating/destroying its own pool (which serialized on CPython's
+    process-wide _global_shutdown_lock).
+
+    Returns the executor when running under the server lifespan, or None when
+    app.state has no query_executor (e.g. CLI in-process / unit tests). The
+    None case is an explicit, readable signal that the per-call leaf pool
+    should be used — NOT a silent global (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_http_client_factory()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "query_executor", None)
+
+
+def _get_repo_config_cache() -> Any:
+    """Get the shared repo-config cache registry from app.state (or None).
+
+    Story #1082: the server lifespan installs ONE RepoConfigCache
+    (app.state.repo_config_cache) so per-query config.json parsing + path
+    resolution is served from a drift-safe cache instead of re-parsing on every
+    request. Returns None when running outside the server lifespan (CLI
+    in-process / unit tests), which is an explicit, readable signal that config
+    should be loaded directly -- NOT a silent fallback (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_query_executor()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "repo_config_cache", None)
+
+
+def _load_repo_config(repo_path: str) -> Any:
+    """Load the parsed Config for a repo path, via the cache when wired.
+
+    When the app.state RepoConfigCache registry is present, the config is served
+    from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
+    SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
+    config is loaded directly (identical to the pre-#1082 behavior).
+    """
+    registry = _get_repo_config_cache()
+    if registry is not None:
+        return registry.get_config(repo_path)
+    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
 
 
 def _get_golden_repos_dir() -> str:
@@ -181,6 +240,7 @@ class SemanticSearchService:
             accuracy=search_request.accuracy,
             hnsw_cache=hnsw_cache,
             precomputed_query_vector=precomputed_query_vector,
+            no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
         )
 
         return SemanticSearchResponse(
@@ -223,6 +283,7 @@ class SemanticSearchService:
             exclude_path=search_request.exclude_path,
             accuracy=search_request.accuracy,
             provider_name_override=provider_name,
+            no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
         )
 
         return SemanticSearchResponse(
@@ -272,11 +333,16 @@ class SemanticSearchService:
 
         if exclude_path:
             from code_indexer.services.path_filter_builder import PathFilterBuilder
+            from code_indexer.services.path_pattern_matcher import (
+                parse_exclude_patterns,
+            )
 
             builder = PathFilterBuilder()
-            exclusion = builder.build_exclusion_filter([exclude_path])
-            if exclusion.get("must_not"):
-                must_not.extend(exclusion["must_not"])
+            patterns = parse_exclude_patterns(exclude_path)
+            if patterns:
+                exclusion = builder.build_exclusion_filter(patterns)
+                if exclusion.get("must_not"):
+                    must_not.extend(exclusion["must_not"])
 
         result: dict = {}
         if must:
@@ -300,6 +366,7 @@ class SemanticSearchService:
         provider_name_override: Optional[str] = None,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -325,14 +392,16 @@ class SemanticSearchService:
             RuntimeError: If embedding generation or vector search fails
         """
         try:
-            # Load repository-specific configuration
-            config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
-            config = config_manager.get_config()
+            # Load repository-specific configuration.
+            # Story #1082: served from the drift-safe RepoConfigCache when the
+            # server lifespan has wired it (NO-TTL for proven-immutable
+            # .versioned/ snapshots, SHORT-TTL otherwise); identical direct load
+            # under CLI in-process. Removes per-query json.load + path resolve()
+            # from the GIL-bound hot path.
+            config = _load_repo_config(repo_path)
 
-            logger.info(
-                f"Loaded repository config from {repo_path}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
+            # "Loaded repository config" INFO log was removed from this hot path.
 
             # Create backend using BackendFactory (Story #526: pass server cache).
             # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
@@ -348,17 +417,17 @@ class SemanticSearchService:
             else:
                 resolved_hnsw_cache = hnsw_cache
 
+            from ..services.memory_governor import get_memory_governor
+
             backend = BackendFactory.create(
                 config=config,
                 project_root=Path(repo_path),
                 hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
             )
             vector_store_client = backend.get_vector_store_client()
 
-            logger.info(
-                f"Using backend: {type(backend).__name__}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using backend" INFO removed.
 
             # Create embedding service — use provider_name_override when set (Story #593).
             # Bug #899: pass http_client_factory so FaultInjectingSyncTransport intercepts
@@ -369,49 +438,12 @@ class SemanticSearchService:
                 http_client_factory=_get_http_client_factory(),
             )
 
-            # Fork interim query-embedding cache: on a HIT reuse the cached vector
-            # via the precomputed path (no VoyageAI call); on a MISS embed once
-            # and populate. Keyed by provider:model:query so providers/models never
-            # collide. No-op when disabled (default). Never breaks search — any
-            # error falls back to the normal uncached embedding path below.
-            if precomputed_query_vector is None:
-                from code_indexer.server.cache.query_vector_cache import (
-                    get_query_vector_cache,
-                )
-
-                _qv_cache = get_query_vector_cache()
-                if _qv_cache is not None:
-                    try:
-                        _qv_key = _qv_cache.make_key(
-                            embedding_service.get_provider_name(),
-                            embedding_service.get_current_model(),
-                            query,
-                        )
-                        _cached_vec = _qv_cache.get(_qv_key)
-                        if _cached_vec is not None:
-                            precomputed_query_vector = _cached_vec
-                        else:
-                            precomputed_query_vector = embedding_service.get_embedding(
-                                query
-                            )
-                            _qv_cache.put(_qv_key, precomputed_query_vector)
-                    except Exception as _qv_exc:
-                        logger.debug(
-                            "Query-vector cache skipped: %s",
-                            _qv_exc,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        precomputed_query_vector = None
-
             # Resolve correct collection name based on repository configuration
             collection_name = vector_store_client.resolve_collection_name(
                 config, embedding_service
             )
 
-            logger.info(
-                f"Using collection: {collection_name}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using collection" INFO removed.
 
             # Build filter_conditions from request parameters (Story #375)
             filter_conditions = self._build_filter_conditions(
@@ -434,48 +466,90 @@ class SemanticSearchService:
                 accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
                 ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
 
-                # Story #883 Component 1: reuse a precomputed Voyage vector when
-                # provided (avoids a second API call in the parallel memory branch).
-                if precomputed_query_vector is not None:
-                    from code_indexer.server.services.memory_candidate_retriever import (
-                        _PrecomputedEmbeddingProvider,
-                    )
-
-                    effective_embedding_provider = _PrecomputedEmbeddingProvider(
-                        precomputed_query_vector
-                    )
-                else:
-                    effective_embedding_provider = embedding_service
-
+                # Story #883 Component 1 / Bug #1148: reuse a precomputed vector when
+                # provided (avoids a second API call in the parallel memory branch and
+                # in the omni per-repo reuse path).
+                #
+                # Fix: pass the precomputed vector directly as precomputed_query_vector=
+                # to FSV.search(), which skips generate_embedding() entirely.
+                # Do NOT wrap it in _PrecomputedEmbeddingProvider and pass as
+                # embedding_provider — that adaptor lacks get_provider_name(), so
+                # coalesced_query_embedding() crashes with AttributeError on every
+                # omni repo (producing zero results).
+                # The real embedding_service is always passed as embedding_provider
+                # (required for resolve_collection_name and the default single-repo path).
                 search_kwargs = dict(
                     query=query,
-                    embedding_provider=effective_embedding_provider,
+                    embedding_provider=embedding_service,
                     collection_name=collection_name,
                     limit=limit,
                     return_timing=True,
                     ef=ef_value,
+                    # perf: reuse the server's shared long-lived executor for the
+                    # embed||index-load fan-out (None under CLI in-process -> leaf
+                    # falls back to a per-call pool).
+                    parallel_executor=_get_query_executor(),
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
+                if precomputed_query_vector is not None:
+                    # Omni per-repo reuse: supply the precomputed vector so FSV skips
+                    # generate_embedding() (no coalesced_query_embedding call, no
+                    # get_provider_name call, no second cache metric event).
+                    search_kwargs["precomputed_query_vector"] = precomputed_query_vector
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
                 search_results, _ = vector_store_client.search(**search_kwargs)
             else:
                 # Backend: sequential execution with pre-computed embedding.
-                # Reuse the (possibly cache-populated) precomputed vector when set.
-                query_embedding = (
-                    precomputed_query_vector
-                    if precomputed_query_vector is not None
-                    else embedding_service.get_embedding(query)
+                # Bug #1078: gate through concurrency governor to cap concurrent
+                # provider HTTP calls per account-level rate budget.
+                from code_indexer.server.services.governed_call import (
+                    coalesced_query_embedding,
                 )
+
+                # Story #1293 S1b [A6]: a failed LIVE embedding attempt (e.g.
+                # the failover primary provider) is recorded as a durable
+                # outcome=error event BEFORE the exception propagates (the
+                # caller, e.g. execute_failover_query, then falls over to a
+                # secondary provider whose own success emits its own event).
+                try:
+                    query_embedding, _embed_meta = coalesced_query_embedding(
+                        embedding_service,
+                        query,
+                        embedding_purpose="query",
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    )
+                except Exception:
+                    emit_embed_error_event(embedding_service.get_provider_name())
+                    raise
+                # Story #1159 Root Cause 4: write embedding-cache metadata to the
+                # active SearchEventContext so voyage cache fields are recorded.
+                from code_indexer.server.services.search_event_context import (
+                    _search_event_ctx,
+                )
+
+                _event_ctx = _search_event_ctx.get(None)
+                if _event_ctx is not None:
+                    if "cohere" in embedding_service.get_provider_name().lower():
+                        _event_ctx.cohere_cache_hit = _embed_meta.key_found
+                        _event_ctx.cohere_cache_mode = _embed_meta.cache_mode
+                        _event_ctx.cohere_latency_ms = _embed_meta.provider_latency_ms
+                    else:
+                        _event_ctx.voyage_cache_hit = _embed_meta.key_found
+                        _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+                        _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+                # Story #1293: emit the durable search_embed_event row for this
+                # inline (non-FSV) direct call. No-op when meta isn't yet
+                # classified (Path A coalescer path — Story #1293 S1b) or when
+                # no writer is installed (CLI/solo/pre-lifespan).
+                emit_embed_event(_embed_meta)
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,
                     collection_name=collection_name,
                 )
 
-            logger.info(
-                f"Found {len(search_results)} results",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
             # Format results for response
             formatted_results = []
@@ -560,7 +634,10 @@ class SemanticSearchService:
         Raises:
             FileNotFoundError: If repository not found in global repositories
         """
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
         from .. import app as app_module
 
         # Get golden_repos_dir from app.state
@@ -584,9 +661,12 @@ class SemanticSearchService:
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
-        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        # Use AliasManager to get current target path (registry path becomes stale after refresh),
+        # falling back to the registry's index_path when the alias pointer is missing (Bug #1315).
         alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repo_id)
+        target_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_id, repo_entry=repo_entry
+        )
 
         if not target_path:
             raise FileNotFoundError(

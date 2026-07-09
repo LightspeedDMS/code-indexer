@@ -4,14 +4,20 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import random
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union, Set
+from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    # Imported only for type-checking so the runtime CLI startup import budget
+    # is unaffected (concurrent.futures stays a lazy import inside search()).
+    from concurrent.futures import Executor
 import threading
 import numpy as np
 import logging
@@ -21,7 +27,102 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
-from ..utils.file_lock import exclusive_file_lock
+
+
+class LocalIndexNotFoundError(RuntimeError):
+    """Raised when a local HNSW index file is missing for a collection.
+
+    This is a storage-layer error: the embedding provider completed successfully
+    but the on-disk HNSW index does not exist.  Callers that discriminate between
+    provider failures and local-storage failures (e.g. the parallel-query health
+    monitor) must catch this exception type separately from generic provider errors
+    so that a missing local index does not sin-bin the embedding provider.
+
+    Remediation: run ``cidx index --rebuild-index`` in the affected repository.
+    """
+
+
+# Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
+# at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
+# CLI path never enters the `if parallel_executor is not None` branch with these
+# imported, so ImportError is only expected in stripped unit-test environments.
+try:
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+except ImportError:  # pragma: no cover
+    coalesced_query_embedding = None  # type: ignore[assignment]
+
+try:
+    from code_indexer.server.services.embedding_cache_audit import (
+        _run_deep_fidelity_audit,
+    )
+except ImportError:  # pragma: no cover
+    _run_deep_fidelity_audit = None  # type: ignore[assignment]
+
+# Story #1293 (Epic #1288) S1b [A8]: the shared emit helper. Lazy-import-safe
+# (same pattern as coalesced_query_embedding above) so the CLI startup import
+# budget is unaffected -- emit_embed_event() itself no-ops when no writer is
+# installed (CLI / solo / pre-lifespan), so calling it unconditionally here is
+# safe on every path.
+try:
+    from code_indexer.server.services.search_embed_event_emit import (
+        emit_embed_error_event,
+        emit_embed_event,
+    )
+except ImportError:  # pragma: no cover
+    emit_embed_event = None  # type: ignore[assignment]
+    emit_embed_error_event = None  # type: ignore[assignment]
+
+
+def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -> None:
+    """Story #1159: write embedding-cache metadata to the active SearchEventContext.
+
+    Must be called from the MAIN REQUEST THREAD (not from a ThreadPoolExecutor
+    worker) because Python 3.9 does not propagate ContextVar state into threads.
+    Logs a warning on failure so query results are never blocked by telemetry.
+
+    Args:
+        embed_meta: EmbeddingCacheMetadata returned by coalesced_query_embedding.
+        provider_name: Provider name string (e.g. "voyage-ai" or "cohere").
+            Used to select the correct ctx field set (cohere_* vs voyage_*).
+    """
+    try:
+        from code_indexer.server.services.search_event_context import _search_event_ctx
+
+        event_ctx = _search_event_ctx.get(None)
+        if event_ctx is not None:
+            if "cohere" in provider_name.lower():
+                event_ctx.cohere_cache_hit = embed_meta.key_found
+                event_ctx.cohere_cache_mode = embed_meta.cache_mode
+                event_ctx.cohere_latency_ms = embed_meta.provider_latency_ms
+            else:
+                event_ctx.voyage_cache_hit = embed_meta.key_found
+                event_ctx.voyage_cache_mode = embed_meta.cache_mode
+                event_ctx.voyage_latency_ms = embed_meta.provider_latency_ms
+    except Exception as _exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "search_event_log: failed to write embed_meta to ctx: %s", _exc
+        )
+
+    # Story #1293 (Epic #1288) S1b [A8]: emit the durable search_embed_event
+    # row for this FSV worker-thread embed, driven entirely by the meta
+    # returned from the worker. This call happens on the MAIN (calling)
+    # thread -- the same thread whose correlation_id ContextVar is correct
+    # (the worker thread's own context is never used for emission). No-op
+    # when role/outcome aren't yet classified or no writer is installed.
+    if emit_embed_event is not None:
+        try:
+            emit_embed_event(embed_meta)
+        except Exception as _emit_exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "search_embed_event: emit_embed_event failed: %s", _emit_exc
+            )
+
 
 # Minimum and default timeout (seconds) for git subprocess calls.
 # GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
@@ -217,6 +318,9 @@ class FilesystemVectorStore:
         base_path: Path,
         project_root: Optional[Path] = None,
         hnsw_index_cache: Optional[Any] = None,
+        id_index_cache: Optional[Any] = None,
+        skip_staleness_check: bool = False,
+        memory_governor: Optional[Any] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -224,6 +328,13 @@ class FilesystemVectorStore:
             base_path: Base directory for all collections
             project_root: Root directory of the project being indexed (for git operations)
             hnsw_index_cache: Optional HNSW index cache for server-side performance (Story #526)
+            id_index_cache: Optional id_index cache for server-side performance (Bug #1078)
+            skip_staleness_check: When True, skip _compute_file_hash in the git-repo Tier 1
+                branch for immutable versioned snapshots (Bug #1181 Perf Fix #3). Default
+                False preserves byte-identical CLI and mutable-path behavior.
+            memory_governor: Optional MemoryGovernor for Story #1213 Story 3. Server mode
+                passes get_memory_governor(); CLI leaves it None so eviction behavior is
+                byte-identical to Bug #1171.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -242,9 +353,6 @@ class FilesystemVectorStore:
         # Initialize components
         self.quantizer = VectorQuantizer(depth_factor=4, reduced_dimensions=64)
         self.matrix_manager = ProjectionMatrixManager()
-
-        # Thread safety for file writes
-        self._write_lock = threading.Lock()
 
         # ID index cache: {collection_name: {point_id: file_path}}
         self._id_index: Dict[str, Dict[str, Path]] = {}
@@ -269,6 +377,20 @@ class FilesystemVectorStore:
         # Story #526: Server-side HNSW index cache for 1800x performance improvement
         # When set, caches hnswlib.Index objects with TTL-based eviction
         self.hnsw_index_cache = hnsw_index_cache
+
+        # Bug #1078: Server-side id_index cache to eliminate per-query pathlib deserialization
+        # (~33% GIL time). Mirrors HNSW cache pattern. None in CLI/standalone mode.
+        self.id_index_cache = id_index_cache
+
+        # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable versioned snapshots.
+        # Set True by the server layer when project_root is a proven-immutable .versioned path.
+        # Default False preserves byte-identical CLI and mutable-path behavior.
+        self.skip_staleness_check: bool = skip_staleness_check
+
+        # Story #1213 Story 3: MemoryGovernor reference for conditional eviction.
+        # Server mode injects get_memory_governor() via FilesystemBackend.get_vector_store_client().
+        # CLI/solo leaves this None so eviction is byte-identical to Bug #1171.
+        self.memory_governor: Optional[Any] = memory_governor
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -375,8 +497,7 @@ class FilesystemVectorStore:
             metadata["subdirectory"] = subdirectory
 
         metadata_path = collection_path / "collection_meta.json"
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+        self._atomic_write_json(metadata_path, metadata, fsync=True)
 
         # Initialize ID index for this collection
         with self._id_index_lock:
@@ -387,18 +508,33 @@ class FilesystemVectorStore:
     def collection_exists(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> bool:
-        """Check if collection exists.
+        """Check if collection exists and has a valid metadata file.
+
+        A collection is considered to exist only when its ``collection_meta.json``
+        is present, non-empty, parses as JSON, and contains a ``vector_size``
+        field.  An empty or corrupt file (e.g. from a crashed write) returns
+        False so the indexing path recreates the collection cleanly (Bug #1223
+        Defect B self-heal).
 
         Args:
             collection_name: Name of the collection
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
-            True if collection exists
+            True if collection exists with a valid metadata file
         """
         collection_path = self._get_collection_path(collection_name, subdirectory)
         metadata_path = collection_path / "collection_meta.json"
-        return metadata_path.exists()
+        if not metadata_path.exists():
+            return False
+        try:
+            content = metadata_path.read_text()
+            if not content.strip():
+                return False
+            meta = json.loads(content)
+            return "vector_size" in meta
+        except (json.JSONDecodeError, OSError):
+            return False
 
     def list_collections(self) -> List[str]:
         """List all collections.
@@ -698,6 +834,9 @@ class FilesystemVectorStore:
         # Invalidate HNSW cache if present (server-side cache must be refreshed)
         if self.hnsw_index_cache is not None:
             self.hnsw_index_cache.invalidate(str(collection_path))
+        # Bug #1078: invalidate id_index cache in lockstep with HNSW (same rebuild event)
+        if self.id_index_cache is not None:
+            self.id_index_cache.invalidate(str(collection_path))
 
         self.logger.info(
             f"Filtered HNSW rebuild complete for '{collection_name}': "
@@ -878,7 +1017,46 @@ class FilesystemVectorStore:
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
-        projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        try:
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        except FileNotFoundError:
+            # Bug #1264: the shard-prep self-heal in temporal_indexer.py (Bug
+            # #1242) only covers shards it enumerates ahead of the write, in a
+            # different module from this call. Any other path that reaches
+            # upsert_points() for a collection whose projection_matrix.npy is
+            # missing on disk still hard-crashed here. Self-heal AT the write
+            # chokepoint itself instead: reuse the exact copy/regenerate logic
+            # from Bug #1242 (no duplicated matrix-creation logic), then retry
+            # the load once. A genuine failure to heal still propagates loudly.
+            vector_size = self._get_vector_size(collection_name)
+            source_collection_path: Optional[Path] = None
+            if TemporalMetadataStore.is_temporal_collection(collection_name):
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    base_collection_name,
+                )
+
+                base_name = base_collection_name(collection_name)
+                if base_name != collection_name:
+                    base_path = self._get_collection_path(base_name, subdirectory)
+                    if base_path.exists():
+                        source_collection_path = base_path
+
+            self.logger.warning(
+                "Bug #1264: projection_matrix.npy missing for collection '%s' "
+                "at write time -- self-healing (source=%s)",
+                collection_name,
+                source_collection_path,
+            )
+
+            from code_indexer.services.temporal.temporal_projection_matrix import (
+                _ensure_shard_has_projection_matrix,
+            )
+
+            _ensure_shard_has_projection_matrix(
+                collection_path, source_collection_path, vector_size
+            )
+            self.matrix_manager._matrix_cache.pop(str(collection_path.absolute()), None)
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
 
         # Get expected vector dimensions from projection matrix
         expected_dims = projection_matrix.shape[0]
@@ -1013,6 +1191,16 @@ class FilesystemVectorStore:
                             orphan_id
                         )
 
+        # Bug #1206 Fix 1: For temporal collections, accumulate (point_id, payload) rows
+        # so we can call save_metadata_batch ONCE per upsert_points call instead of
+        # once per vector (which caused N connect/commit/fsync cycles under 8 threads).
+        # hash_prefix is deterministic (sha256(point_id)[:16]), so we compute it upfront
+        # and use it for filenames without touching the DB in the per-vector loop.
+        is_temporal = TemporalMetadataStore.is_temporal_collection(collection_name)
+        temporal_batch_rows: List[
+            tuple
+        ] = []  # accumulates (point_id, payload) for batch
+
         # Process all points
         total_points = len(points)
         for idx, point in enumerate(points, 1):
@@ -1076,12 +1264,17 @@ class FilesystemVectorStore:
             dir_path.mkdir(parents=True, exist_ok=True)
 
             # Story #669: Use hash-based filenames for temporal collections (v2 format)
-            # This prevents OSError when point_ids exceed 255 characters
-            if TemporalMetadataStore.is_temporal_collection(collection_name):
-                # V2 format: hash-based filename (28 chars total)
+            # This prevents OSError when point_ids exceed 255 characters.
+            # Bug #1206 Fix 1: compute hash_prefix from the deterministic formula
+            # WITHOUT calling save_metadata per vector.  The DB batch write happens
+            # AFTER all vector files are written (save_metadata_batch call below).
+            if is_temporal:
+                # V2 format: hash-based filename (28 chars total).
+                # hash_prefix is sha256(point_id)[:16] — same as generate_hash_prefix().
                 metadata_store = self._get_temporal_metadata_store()
-                hash_prefix = metadata_store.save_metadata(point_id, payload)
+                hash_prefix = metadata_store.generate_hash_prefix(point_id)
                 vector_file = dir_path / f"vector_{hash_prefix}.json"
+                temporal_batch_rows.append((point_id, payload))
             else:
                 # Original format: point_id with slashes replaced (non-temporal collections)
                 vector_file = dir_path / f"vector_{point_id.replace('/', '_')}.json"
@@ -1131,6 +1324,17 @@ class FilesystemVectorStore:
             with self._path_index_lock:
                 if collection_name in self._path_indexes and file_path:
                     self._path_indexes[collection_name].add_point(file_path, point_id)
+
+        # Bug #1206 Fix 1: flush the accumulated temporal metadata batch in ONE
+        # transaction after all vector files have been written.  This is the
+        # flush-after-success ordering: vectors on disk first, then metadata DB
+        # commit, so a crash between writes leaves vectors without metadata —
+        # the indexer re-indexes on resume (deterministic point_id → hash_prefix
+        # means the re-index OVERWRITEs, no duplicates).
+        if is_temporal and temporal_batch_rows:
+            metadata_store = self._get_temporal_metadata_store()
+            metadata_store.save_metadata_batch(temporal_batch_rows)
+            metadata_store.checkpoint_wal()
 
         # HNSW-001: Watch mode real-time HNSW update
         if watch_mode:
@@ -1410,24 +1614,52 @@ class FilesystemVectorStore:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return None
 
-    def _atomic_write_json(self, file_path: Path, data: Dict[str, Any]) -> None:
+    def _atomic_write_json(
+        self, file_path: Path, data: Dict[str, Any], fsync: bool = False
+    ) -> None:
         """Atomically write JSON data to file.
 
-        Uses write-to-temp-then-rename pattern for thread safety.
+        Uses write-to-temp-then-rename pattern for atomicity.  Each file write
+        is independent: the OS-level atomic rename guarantees that a reader
+        sees either the old file or the new file, never a partial write.  No
+        process-wide lock is needed — concurrent writes to DISTINCT files
+        proceed in parallel (Bug #1206 Fix 3).
+
+        On any exception the ``.tmp`` file is cleaned up so no orphans
+        accumulate (Bug #1223 Defect A).
 
         Args:
             file_path: Target file path
             data: Data to serialize as JSON
+            fsync: If True, call ``f.flush()`` + ``os.fsync()`` before the
+                rename to ensure the data is durable on disk before the old
+                file is replaced.  Use True for critical metadata files
+                (e.g. ``collection_meta.json``).  Leave False (default) for
+                high-frequency per-vector data files where fsync would be a
+                performance bottleneck (Bug #1223 perf fix).
         """
-        with self._write_lock:
-            # Write to temporary file first
-            tmp_file = file_path.with_suffix(".tmp")
+        # Use a per-call unique tmp filename so concurrent writes to the same
+        # target file each own their tmp file and don't race on rename/delete.
+        tmp_file = file_path.with_name(
+            f"{file_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
 
+        try:
             with open(tmp_file, "w") as f:
                 json.dump(data, f, indent=2)
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
 
-            # Atomic rename
+            # Atomic rename — visible to readers only after this completes.
+            # Last writer wins; all intermediate writers produce valid JSON files.
             tmp_file.replace(file_path)
+        except Exception:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def load_id_index(self, collection_name: str) -> set:
         """Load ID index and return set of existing point IDs.
@@ -2347,12 +2579,15 @@ class FilesystemVectorStore:
         prefetch_limit: Optional[int] = None,
         ef: int = 50,
         subdirectory: Optional[str] = None,
+        parallel_executor: Optional["Executor"] = None,
+        no_embedding_cache_shortcut: bool = False,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
         This method ALWAYS executes in parallel mode:
         - Thread 1: Load HNSW index + ID mapping
-        - Thread 2: Generate query embedding
+        - Thread 2: Generate query embedding (skipped when precomputed_query_vector is supplied)
         - Wait for both, then perform search
 
         Parallel execution reduces query latency by 350-467ms by overlapping I/O-bound
@@ -2369,6 +2604,19 @@ class FilesystemVectorStore:
             lazy_load: If True, load payloads on-demand with early exit (optimization for restrictive filters)
             prefetch_limit: How many candidate IDs to fetch from HNSW (default: limit * 2 or limit * 15 for lazy_load)
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
+            parallel_executor: Optional SHARED, long-lived ThreadPoolExecutor for the
+                index-load || embedding fan-out. SERVER PATH: the server injects its
+                app-level query executor here so concurrent requests reuse threads
+                instead of each creating/destroying a per-request pool (which serialized
+                on CPython's process-wide _global_shutdown_lock). CLI/SOLO/DAEMON PATH:
+                leave None — a per-call ThreadPoolExecutor(max_workers=2) is created and
+                cleaned up exactly as before (single-user, no concurrency/churn problem).
+            precomputed_query_vector: Optional pre-computed embedding vector.
+                When supplied (omni per-repo reuse path, Bug #1148), the
+                generate_embedding() step is skipped entirely: coalesced_query_embedding
+                is NOT called, no cache metric event fires, and no get_provider_name()
+                call is made on the embedding_provider.  The supplied vector is used
+                directly for the HNSW nearest-neighbour search.
 
         Returns:
             List of results with id, score, payload (including content), and staleness
@@ -2388,10 +2636,20 @@ class FilesystemVectorStore:
         if not self.collection_exists(collection_name, subdirectory):
             return ([], timing) if return_timing else []
 
-        # Load metadata to get vector size
+        # Load metadata to get vector size.
+        # A missing collection_meta.json (TOCTOU race, half-written clone, NFS hiccup)
+        # is a LOCAL storage failure — not a provider failure.  Catch FileNotFoundError
+        # here and re-raise as LocalIndexNotFoundError so the parallel-dispatch handler
+        # in semantic_query_manager.py skips sin-binning the embedding provider.
         meta_file = collection_path / "collection_meta.json"
-        with open(meta_file) as f:
-            metadata = json.load(f)
+        try:
+            with open(meta_file) as f:
+                metadata = json.load(f)
+        except FileNotFoundError as exc:
+            raise LocalIndexNotFoundError(
+                f"collection_meta.json missing for collection '{collection_name}'. "
+                f"Run: cidx index --rebuild-index"
+            ) from exc
 
         # === CHECK HNSW STALENESS ===
         # Bug #668: NEVER rebuild HNSW during a query. Rebuilding is the indexer's
@@ -2434,10 +2692,26 @@ class FilesystemVectorStore:
                 cache_key = str(collection_path.resolve())
 
                 def hnsw_loader():
-                    """Loader function for cache miss."""
-                    index = hnsw_manager.load_index(
-                        collection_path, max_elements=100000
-                    )
+                    """Loader function for cache miss.
+
+                    Bug #1236 GAP A: a corrupt .bin raises RuntimeError from hnswlib.
+                    Reclassify as LocalIndexNotFoundError so the parallel-dispatch
+                    handler in semantic_query_manager.py does NOT sin-bin the provider.
+                    """
+                    from .hnsw_index_manager import _is_corrupt_index_error as _cic
+
+                    try:
+                        index = hnsw_manager.load_index(
+                            collection_path, max_elements=100000
+                        )
+                    except RuntimeError as _exc:
+                        if _cic(_exc):
+                            raise LocalIndexNotFoundError(
+                                f"HNSW index is corrupt for collection "
+                                f"'{collection_name}'. "
+                                f"Run: cidx index --rebuild-index"
+                            ) from _exc
+                        raise
                     # Load ID mapping from metadata for cache entry
                     id_mapping = hnsw_manager._load_id_mapping(collection_path)
                     return index, id_mapping
@@ -2447,44 +2721,148 @@ class FilesystemVectorStore:
                     cache_key, hnsw_loader
                 )
             else:
-                # No cache - load directly (original behavior)
-                hnsw_index = hnsw_manager.load_index(
-                    collection_path, max_elements=100000
-                )
+                # No cache - load directly (original behavior).
+                # Bug #1236 GAP A: a corrupt .bin raises RuntimeError from hnswlib.
+                # Reclassify as LocalIndexNotFoundError so the parallel-dispatch handler
+                # in semantic_query_manager.py does NOT sin-bin the embedding provider.
+                from .hnsw_index_manager import _is_corrupt_index_error as _cic
+
+                try:
+                    hnsw_index = hnsw_manager.load_index(
+                        collection_path, max_elements=100000
+                    )
+                except RuntimeError as _exc:
+                    if _cic(_exc):
+                        raise LocalIndexNotFoundError(
+                            f"HNSW index is corrupt for collection '{collection_name}'. "
+                            f"Run: cidx index --rebuild-index"
+                        ) from _exc
+                    raise
 
             hnsw_load_ms = (time.time() - t_hnsw) * 1000
 
             # Load ID index in same thread (parallel with embedding generation)
             t_id = time.time()
-            with self._id_index_lock:
-                if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
-                    )
-                id_index = self._id_index[collection_name]
+            if self.id_index_cache is not None:
+                # Bug #1078: use shared cross-query cache (server mode)
+                id_index = self.id_index_cache.get_or_load(
+                    str(collection_path.resolve()),
+                    lambda: self._load_id_index(collection_name),
+                )
+            else:
+                with self._id_index_lock:
+                    if collection_name not in self._id_index:
+                        self._id_index[collection_name] = self._load_id_index(
+                            collection_name
+                        )
+                    id_index = self._id_index[collection_name]
             id_load_ms = (time.time() - t_id) * 1000
 
             return hnsw_index, id_index, hnsw_load_ms, id_load_ms
 
         def generate_embedding():
-            """Generate query embedding in parallel thread."""
+            """Generate query embedding in parallel thread.
+
+            Bug #1078: the HTTP call is gated through the concurrency governor so
+            at most K concurrent serving-path embedding requests reach VoyageAI/Cohere.
+            The HNSW-load worker (load_index) runs freely — it makes no provider calls.
+
+            Story #1110 (S6 Chunk B): allocate _audit_ctx dict and thread it into
+            coalesced_query_embedding.  On a sampled cache hit the function populates
+            the dict in-place; the 3-tuple return carries it back to search().
+            """
+            _audit_ctx: Dict[str, Any] = {}
             t0 = time.time()
-            embedding = embedding_provider.get_embedding(
-                query, embedding_purpose="query"
+            embedding, _embed_meta = coalesced_query_embedding(
+                embedding_provider,
+                query,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                audit_ctx=_audit_ctx,
             )
             embedding_time_ms = (time.time() - t0) * 1000
-            return embedding, embedding_time_ms
+            # Story #1159: return _embed_meta so the MAIN THREAD can write to
+            # _search_event_ctx.  ContextVar is not visible inside worker threads
+            # (Python 3.9 ThreadPoolExecutor does not propagate context), so the
+            # write must happen in the calling thread after the future resolves.
+            return embedding, embedding_time_ms, _audit_ctx, _embed_meta
 
-        # Execute both operations in parallel using ThreadPoolExecutor
+        # Execute both operations in parallel.
+        #
+        # Anti-fallback explicit branch (Messi #2): the SERVER passes a shared,
+        # long-lived executor; the CLI/solo/daemon does NOT. This is intentionally
+        # two readable paths, never a silent global.
+        #
+        # SERVER PATH (parallel_executor injected): submit to the shared pool and
+        # gather — DO NOT shut it down (it is owned by the app lifespan). This
+        # eliminates the per-request ThreadPoolExecutor create/destroy churn that
+        # serialized concurrent queries on CPython's _global_shutdown_lock.
+        #
+        # CLI PATH (parallel_executor is None): single-user, not concurrent — keep
+        # the original per-call ThreadPoolExecutor(max_workers=2) context manager,
+        # so CLI behaviour and the CLI startup import budget are unchanged.
+        #
+        # PRECOMPUTED PATH (Bug #1148 omni per-repo reuse): when precomputed_query_vector
+        # is supplied, generate_embedding() is skipped entirely.  Only load_index() runs
+        # (in the thread pool on the server path, or inline on the CLI path).
+        # coalesced_query_embedding is never called — no get_provider_name(), no second
+        # cache metric event, no AttributeError.
         parallel_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both tasks
-            index_future = executor.submit(load_index)
-            embedding_future = executor.submit(generate_embedding)
-
-            # Wait for both to complete and gather results
+        if precomputed_query_vector is not None:
+            # Precomputed path: skip generate_embedding(), use supplied vector directly.
+            if parallel_executor is not None:
+                hnsw_index, id_index, hnsw_load_ms, id_load_ms = (
+                    parallel_executor.submit(load_index).result()
+                )
+            else:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    hnsw_index, id_index, hnsw_load_ms, id_load_ms = executor.submit(
+                        load_index
+                    ).result()
+            query_vector: List[float] = precomputed_query_vector
+            embedding_ms: float = 0.0
+            audit_ctx: Dict[str, Any] = {}
+        elif parallel_executor is not None:
+            index_future = parallel_executor.submit(load_index)
+            embedding_future = parallel_executor.submit(generate_embedding)
+            # .result() re-raises any sub-task exception in the caller's thread —
+            # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-            query_vector, embedding_ms = embedding_future.result()
+            try:
+                query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                    embedding_future.result()
+                )
+            except Exception:
+                # Story #1293 S1b [A6]: a failed LIVE embedding attempt (e.g.
+                # the failover primary provider) is recorded as a durable
+                # outcome=error event BEFORE the exception propagates.
+                if emit_embed_error_event is not None:
+                    emit_embed_error_event(embedding_provider.get_provider_name())
+                raise
+            # Story #1159: write embed metadata in main thread — ContextVar is not
+            # propagated into ThreadPoolExecutor workers (Python 3.9).
+            _write_embed_meta_to_event_ctx(
+                _embed_meta, embedding_provider.get_provider_name()
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                index_future = executor.submit(load_index)
+                embedding_future = executor.submit(generate_embedding)
+
+                # Wait for both to complete and gather results
+                hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
+                try:
+                    query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                        embedding_future.result()
+                    )
+                except Exception:
+                    if emit_embed_error_event is not None:
+                        emit_embed_error_event(embedding_provider.get_provider_name())
+                    raise
+            # Story #1159: write embed metadata in main thread.
+            _write_embed_meta_to_event_ctx(
+                _embed_meta, embedding_provider.get_provider_name()
+            )
 
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000
@@ -2505,7 +2883,7 @@ class FilesystemVectorStore:
 
         # Validate results
         if hnsw_index is None:
-            raise RuntimeError(
+            raise LocalIndexNotFoundError(
                 f"HNSW index not found for collection '{collection_name}'. "
                 f"Run: cidx index --rebuild-index"
             )
@@ -2535,6 +2913,26 @@ class FilesystemVectorStore:
             ef=ef,  # HNSW query parameter - passed from search method
         )
         timing["hnsw_search_ms"] = (time.time() - t0) * 1000
+
+        # Story #1110 (S6 Chunk B): deep-fidelity audit hook (fail-open).
+        # Fires only when the coalesced embedding path sampled this request.
+        # _run_deep_fidelity_audit is already fail-open internally; we also
+        # guard externally so a bug in the import or the call never breaks search.
+        if audit_ctx.get("sampled") and _run_deep_fidelity_audit is not None:
+            try:
+                _run_deep_fidelity_audit(
+                    audit_ctx=audit_ctx,
+                    hnsw_index=hnsw_index,
+                    hnsw_manager=hnsw_manager,
+                    collection_path=collection_path,
+                    ef=ef,
+                    primary_candidate_ids=candidate_ids,
+                    embedding_provider=embedding_provider,
+                    query=query,
+                    embed_key=_embed_meta.embed_key,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # fail-open: audit never breaks primary search
 
         # ID index already loaded in parallel section
         # Re-acquire lock for thread-safe reference assignment
@@ -2716,6 +3114,17 @@ class FilesystemVectorStore:
                     with open(full_path) as f:
                         lines = f.readlines()
                         chunk_content = "".join(lines[(start_line - 1) : end_line])
+
+                    # Bug #1181 Perf Fix #3: for immutable versioned snapshots the file
+                    # cannot have changed since indexing, so skip the second whole-file
+                    # read + SHA-1 (_compute_file_hash) and return fresh immediately.
+                    if self.skip_staleness_check:
+                        return chunk_content, {
+                            "is_stale": False,
+                            "staleness_indicator": None,
+                            "staleness_reason": None,
+                            "hash_mismatch": False,
+                        }
 
                     # Compute current file hash
                     current_hash = self._compute_file_hash(full_path)
@@ -3321,6 +3730,10 @@ class FilesystemVectorStore:
         """
         import json
 
+        from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
+        # fcntl imported at module level for lock flag constants
+
         # Calculate unique file count from vectors
         unique_files = set()
 
@@ -3353,22 +3766,30 @@ class FilesystemVectorStore:
         # Update collection metadata with file locking (daemon-safe)
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
+        lock_file.touch(exist_ok=True)
 
-        with exclusive_file_lock(lock_file):
-            # Read current metadata
-            with open(meta_file) as f:
-                metadata = json.load(f)
+        with open(lock_file, "r+") as lock_f:
+            # Acquire exclusive lock (blocks if daemon is writing) — NFS-safe
+            _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
 
-            # Update unique_file_count
-            metadata["unique_file_count"] = unique_file_count
+            try:
+                # Read current metadata
+                with open(meta_file) as f:
+                    metadata = json.load(f)
 
-            # Save metadata atomically
-            with open(meta_file, "w") as f:
-                json.dump(metadata, f, indent=2)
+                # Update unique_file_count
+                metadata["unique_file_count"] = unique_file_count
 
-            self.logger.debug(
-                f"Updated collection metadata: {unique_file_count} unique files"
-            )
+                # Save metadata atomically (Bug #1223: use atomic write helper)
+                self._atomic_write_json(meta_file, metadata, fsync=True)
+
+                self.logger.debug(
+                    f"Updated collection metadata: {unique_file_count} unique files"
+                )
+
+            finally:
+                # Release lock
+                nfs_safe_funlock(lock_f.fileno(), _used_lockf)
 
         return unique_file_count
 

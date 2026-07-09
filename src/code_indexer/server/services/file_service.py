@@ -8,15 +8,15 @@ All operations use real file system operations with proper pagination and filter
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
 import os
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, Set, cast
 from datetime import datetime, timezone
 import logging
 import math
 import hashlib
-import threading
-import time
-from collections import OrderedDict
 
 import pathspec
 
@@ -30,20 +30,13 @@ from ..services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# list_files / browse_directory bottleneck fix.
-#
-# _collect_files walks the FULL repo tree (rglob + per-file stat + a per-file
-# config lookup) to build a FileInfo list, and list_files/browse_directory
-# called it UNCACHED on every request. A client paging through a repo re-walked
-# the whole tree each call; on NFS-backed large repos (prod FSx) that is tens of
-# thousands of stat round-trips -> the 30-90s / 504 pathology seen in prod.
-#
-# Cache the collected list per repo_path with a short TTL. Immutable versioned
-# golden-repo snapshots carry a v_{timestamp} path, so a refresh changes the
-# path and misses naturally; the TTL bounds staleness for mutable activated repos.
-# Process-wide because FileService is instantiated per request.
-# ---------------------------------------------------------------------------
+# Per-request latency: _collect_files walks the FULL repo tree (rglob + a stat
+# and an is_indexed check per file). On large repos this dominates list_files /
+# browse latency and it ran on every request. Cache the collected listing per
+# repo_path for a short TTL so repeated calls (a client paging a repo) reuse the
+# walk. Keyed on repo_path: immutable versioned golden-repo snapshots change path
+# on refresh and miss naturally; mutable paths are eventually-consistent within
+# the TTL.
 _COLLECT_CACHE_TTL_SECONDS = 30.0
 _COLLECT_CACHE_MAX_REPOS = 64
 _collect_cache: "OrderedDict[str, Tuple[float, List[FileInfo]]]" = OrderedDict()
@@ -252,6 +245,23 @@ class FileListingService:
 
             return cast(str, activated_path)
 
+        except FileNotFoundError as e:
+            # Expected not-found: a repo simply absent on disk (e.g. a stale
+            # activation record whose directory is gone). Callers (Story #1039
+            # global recovery + clean not-found response) depend on this raise,
+            # but it is NOT a server error -- log at DEBUG, never ERROR, to
+            # avoid [CACHE-GENERAL-011] spam for an expected condition.
+            logger.debug(
+                format_error_log(
+                    "CACHE-GENERAL-011",
+                    "Repository path not found (expected)",
+                    repo_id=repo_id,
+                    username=username,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-011"),
+            )
+            raise
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -263,18 +273,16 @@ class FileListingService:
                 ),
                 extra=get_log_extra("CACHE-GENERAL-011"),
             )
-            if isinstance(e, FileNotFoundError):
-                raise
             raise RuntimeError(f"Unable to access repository {repo_id}: {e}")
 
     def _collect_files(self, repo_path: str) -> List[FileInfo]:
-        """Collect all files in the repo, CACHED per repo_path (bottleneck fix).
+        """Collect all files in the repo, CACHED per repo_path.
 
-        The underlying walk (``_collect_files_uncached``) is O(files) with
-        per-file stats; on large NFS-backed repos it cost 30-90s per call and
-        list_files/browse_directory ran it on every request. Results are cached
+        The underlying walk (:meth:`_collect_files_uncached`) is O(files) with a
+        stat + an is_indexed check per file; on large repos it cost tens of
+        seconds and list_files/browse ran it on every request. Results are cached
         for ``_COLLECT_CACHE_TTL_SECONDS`` so repeated calls (a client paging a
-        repo) reuse the walk. Keyed on repo_path: immutable versioned golden-repo
+        repo) reuse the walk. Keyed on repo_path; immutable versioned golden-repo
         snapshots change path on refresh and miss naturally.
         """
         now = time.monotonic()
@@ -286,8 +294,13 @@ class FileListingService:
 
         files = self._collect_files_uncached(repo_path)
 
+        # Anchor expiry to POST-walk time (not the pre-walk `now` captured
+        # above). A walk that takes longer than the TTL must not be born
+        # already-expired -- that would deliver zero cache benefit for
+        # exactly the slow repos this cache targets.
+        expiry = time.monotonic() + _COLLECT_CACHE_TTL_SECONDS
         with _collect_cache_lock:
-            _collect_cache[repo_path] = (now + _COLLECT_CACHE_TTL_SECONDS, files)
+            _collect_cache[repo_path] = (expiry, files)
             _collect_cache.move_to_end(repo_path)
             while len(_collect_cache) > _COLLECT_CACHE_MAX_REPOS:
                 _collect_cache.popitem(last=False)
@@ -296,9 +309,9 @@ class FileListingService:
     def _get_indexable_extensions(self) -> Set[str]:
         """Indexable extensions from config, fetched ONCE per collection.
 
-        Previously ``_is_file_indexed`` called ``get_config_service().get_config()``
-        once PER FILE inside the collection loop; hoisting it here removes O(files)
-        config lookups.
+        ``_is_file_indexed`` reads ``get_config_service().get_config()`` and
+        ``indexing_config.indexable_extensions`` once PER FILE; hoisting it here
+        removes O(files) config lookups from the collection loop.
         """
         config = get_config_service().get_config()
         if config.indexing_config is None:
@@ -327,7 +340,7 @@ class FileListingService:
         gitignore_spec = self._load_gitignore_spec(repo_root)
 
         # Hoist the indexable-extensions lookup out of the per-file loop below
-        # (it was one get_config() call PER FILE).
+        # (it was one get_config() call PER FILE via _is_file_indexed()).
         indexable_extensions = self._get_indexable_extensions()
 
         try:

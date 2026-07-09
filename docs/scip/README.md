@@ -1,7 +1,5 @@
 # SCIP Code Intelligence
 
-✅ FACT-CHECKED (2025-12-31)
-
 SCIP (Source Code Intelligence Protocol) provides precise code navigation, cross-references, and dependency analysis for CIDX. Unlike semantic search which finds similar code by meaning, SCIP provides exact symbol definitions, references, and relationships.
 
 ## Table of Contents

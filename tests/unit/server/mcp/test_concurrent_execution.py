@@ -63,7 +63,7 @@ def mock_omni_search_dependencies(search_side_effect=None):
 
         with patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns",
-            side_effect=lambda x, user=None: x,
+            side_effect=lambda x, user=None, **kwargs: x,
         ):
             mock_instance = Mock()
 
@@ -80,6 +80,7 @@ def mock_omni_search_dependencies(search_side_effect=None):
                 mock_instance.search = Mock(return_value=default_response)
 
             mock_class = Mock(return_value=mock_instance)
+            mock_class.get_instance = Mock(return_value=mock_instance)
 
             mss_module.MultiSearchService = mock_class
             try:

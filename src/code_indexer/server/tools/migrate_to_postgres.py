@@ -16,11 +16,32 @@ Usage:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
+import os
+import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# psycopg is optional at import time — loaded lazily for CLI use.
+# _reencrypt_tokens uses this module-level reference so tests can patch it.
+psycopg: Optional[Any] = None
+try:
+    import psycopg as psycopg  # type: ignore[no-redef]  # noqa: PLC0415
+except ImportError:
+    logger.warning(
+        "psycopg (v3) not available at import time; "
+        "token re-encryption will raise if attempted."
+    )
+
+# Encryption constants for token re-encryption (must match CITokenManager / GitCredentialManager)
+_REENCRYPT_PBKDF2_ITERATIONS = 100000
+_REENCRYPT_AES_KEY_SIZE = 32
+_REENCRYPT_AES_BLOCK_SIZE = 16
 
 
 # ---------------------------------------------------------------------------
@@ -29,14 +50,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MAIN_DB_TABLES_ORDERED: List[str] = [
     "users",
+    "user_mfa",
+    "user_recovery_codes",
     "user_api_keys",
     "user_mcp_credentials",
     "user_oidc_identities",
     "invalidated_sessions",
     "password_change_timestamps",
     "repo_categories",
+    "server_config",
     "global_repos",
     "golden_repos_metadata",
+    "activated_repos",
     "background_jobs",
     "sync_jobs",
     "ci_tokens",
@@ -44,6 +69,7 @@ MAIN_DB_TABLES_ORDERED: List[str] = [
     "ssh_key_hosts",
     "description_refresh_tracking",
     "dependency_map_tracking",
+    "dependency_map_run_history",
     "self_monitoring_scans",
     "self_monitoring_issues",
     "research_sessions",
@@ -51,6 +77,7 @@ MAIN_DB_TABLES_ORDERED: List[str] = [
     "diagnostic_results",
     "wiki_cache",
     "wiki_sidebar_cache",
+    "wiki_article_views",
     "user_git_credentials",
 ]
 
@@ -109,6 +136,9 @@ JSON_COLUMNS: Dict[str, set] = {
     "dependency_map_tracking": {"commit_hashes"},
     "diagnostic_results": {"results_json"},
     "wiki_sidebar_cache": {"sidebar_json"},
+    "server_config": {"config_json"},
+    "activated_repos": {"metadata_json"},
+    "dependency_map_run_history": {"phase_timings_json"},
 }
 
 # ---------------------------------------------------------------------------
@@ -137,6 +167,8 @@ BOOLEAN_COLUMNS: Dict[str, set] = {
     "users": {"is_admin", "is_sso"},
     "token_families": {"is_revoked"},
     "refresh_tokens": {"is_used"},
+    "user_mfa": {"mfa_enabled"},
+    "activated_repos": {"is_composite", "wiki_enabled"},
 }
 
 # ---------------------------------------------------------------------------
@@ -153,6 +185,17 @@ EPOCH_TIMESTAMP_COLUMNS: Dict[str, set] = {
 
 COLUMN_RENAMES: Dict[str, Dict[str, str]] = {
     "wiki_cache": {"metadata_json": "metadata"},
+}
+
+NULL_DEFAULT_COLUMNS: Dict[str, Dict[str, Any]] = {
+    "dependency_map_run_history": {
+        "pass1_duration_s": 0.0,
+        "pass2_duration_s": 0.0,
+    },
+}
+
+UPSERT_OVERWRITE_TABLES: Dict[str, str] = {
+    "server_config": "config_key",
 }
 
 
@@ -173,6 +216,7 @@ class SqliteToPostgresMigrator:
         oauth_db_path: Optional[str] = None,
         scip_audit_db_path: Optional[str] = None,
         refresh_tokens_db_path: Optional[str] = None,
+        server_dir: Optional[str] = None,
     ) -> None:
         """
         Initialise the migrator.
@@ -184,6 +228,8 @@ class SqliteToPostgresMigrator:
             oauth_db_path: Optional path to oauth.db SQLite file.
             scip_audit_db_path: Optional path to scip_audit.db SQLite file (Story #516).
             refresh_tokens_db_path: Optional path to refresh_tokens.db SQLite file (Story #515).
+            server_dir: Optional path to CIDX server data directory (e.g., ~/.cidx-server).
+                        When provided, token re-encryption is performed after migration.
         """
         self._sqlite_path = sqlite_db_path
         self._groups_path = groups_db_path
@@ -191,6 +237,7 @@ class SqliteToPostgresMigrator:
         self._oauth_path = oauth_db_path
         self._scip_audit_path = scip_audit_db_path
         self._refresh_tokens_path = refresh_tokens_db_path
+        self._server_dir = server_dir
 
     # ------------------------------------------------------------------
     # Public API
@@ -245,6 +292,14 @@ class SqliteToPostgresMigrator:
                     "status": f"error: {exc}",
                 }
                 logger.error(f"Failed to migrate table '{table_name}': {exc}")
+
+        if self._server_dir:
+            try:
+                report["token_reencryption"] = self._reencrypt_tokens()
+            except Exception as exc:
+                # Non-fatal: log and record error so caller sees it without aborting the report
+                logger.error("Token re-encryption failed: %s", exc)
+                report["token_reencryption"] = {"error": str(exc)}
 
         return report
 
@@ -442,7 +497,8 @@ class SqliteToPostgresMigrator:
             dest_col = renames.get(col, col)
 
             if value is None:
-                result[dest_col] = None
+                null_defaults = NULL_DEFAULT_COLUMNS.get(table_name, {})
+                result[dest_col] = null_defaults.get(col, None)
                 continue
 
             if col in json_cols:
@@ -522,6 +578,42 @@ class SqliteToPostgresMigrator:
                     f"ALTER TABLE {table_name} ENABLE TRIGGER ALL"  # noqa: S608
                 )
             pg_conn.commit()
+
+            # Sync SERIAL sequences after migration to prevent PK collisions.
+            # Rows inserted with explicit IDs (from SQLite) don't advance the
+            # PG sequence. Without this, the next auto-increment insert reuses
+            # a low value that already exists (e.g. dependency_map_run_history).
+            if inserted > 0:
+                try:
+                    cur = pg_conn.cursor()
+                    cur.execute(
+                        "SELECT column_name, pg_get_serial_sequence(%s, column_name) "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = %s AND table_schema = 'public' "
+                        "AND column_default LIKE 'nextval%%'",
+                        (table_name, table_name),
+                    )
+                    for col_name, seq_name in cur.fetchall():
+                        if seq_name:
+                            cur.execute(
+                                f"SELECT setval('{seq_name}', "  # noqa: S608
+                                f"COALESCE((SELECT MAX({col_name}) "
+                                f"FROM {table_name}), 0) + 1, false)"
+                            )
+                            logger.info(
+                                "Synced sequence %s for %s.%s",
+                                seq_name,
+                                table_name,
+                                col_name,
+                            )
+                    pg_conn.commit()
+                except Exception as seq_err:
+                    logger.warning(
+                        "Failed to sync sequences for %s: %s",
+                        table_name,
+                        seq_err,
+                    )
+                    pg_conn.rollback()
         except Exception:
             pg_conn.rollback()
             pg_conn.close()
@@ -563,7 +655,11 @@ class SqliteToPostgresMigrator:
         skip_fk_errors: bool = False,
     ) -> int:
         """
-        Insert rows into a PostgreSQL table using ON CONFLICT DO NOTHING.
+        Insert rows into a PostgreSQL table.
+
+        Uses ON CONFLICT DO NOTHING for most tables. For tables listed in
+        UPSERT_OVERWRITE_TABLES, uses ON CONFLICT DO UPDATE SET to ensure
+        migrated SQLite data overwrites pre-seeded defaults.
 
         Args:
             pg_conn: Active psycopg v3 connection.
@@ -581,11 +677,22 @@ class SqliteToPostgresMigrator:
         columns = list(rows[0].keys())
         col_list = ", ".join(columns)
         placeholders = ", ".join(f"%({col})s" for col in columns)
-        sql = (
-            f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
-            f"VALUES ({placeholders}) "
-            f"ON CONFLICT DO NOTHING"
-        )
+
+        pk_col = UPSERT_OVERWRITE_TABLES.get(table_name)
+        if pk_col:
+            update_cols = [c for c in columns if c != pk_col]
+            set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+            sql = (
+                f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT ({pk_col}) DO UPDATE SET {set_clause}"
+            )
+        else:
+            sql = (
+                f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT DO NOTHING"
+            )
 
         total_inserted = 0
         skipped = 0
@@ -637,6 +744,214 @@ class SqliteToPostgresMigrator:
 
         return psycopg.connect(self._pg_conn_str)
 
+    def _reencrypt_tokens(self) -> Dict[str, int]:
+        """Re-encrypt tokens from hostname key to cluster (.jwt_secret) key.
+
+        Returns dict of table->count, or {} when skipped.
+        """
+        if not self._server_dir:
+            logger.info("No --server-dir provided, skipping token re-encryption")
+            return {}
+        if not isinstance(self._server_dir, (str, os.PathLike)):
+            logger.warning(
+                "Invalid --server-dir type %r, skipping", type(self._server_dir)
+            )
+            return {}
+        server_path = Path(self._server_dir)
+        if not server_path.is_dir():
+            logger.warning(
+                "--server-dir %s is not a directory, skipping token re-encryption",
+                server_path,
+            )
+            return {}
+        # Story #999: prefer .encryption_key_salt (set by ensure_encryption_key_salt);
+        # fall back to .jwt_secret for backward compat with pre-#999 installations.
+        salt_file = server_path / ".encryption_key_salt"
+        jwt_file = server_path / ".jwt_secret"
+        if salt_file.exists():
+            new_salt = salt_file.read_text()
+        elif jwt_file.exists():
+            new_salt = jwt_file.read_text().strip()
+        else:
+            logger.info(
+                "No .encryption_key_salt or .jwt_secret at %s, skipping token re-encryption",
+                server_path,
+            )
+            return {}
+        old_key = _reencrypt_derive_key(os.uname().nodename)
+        new_key = _reencrypt_derive_key(new_salt)
+        if old_key == new_key:
+            logger.info("Encryption keys identical, skipping token re-encryption")
+            return {}
+        _TABLE_CONFIGS = [
+            (
+                "ci_tokens",
+                "SELECT platform, encrypted_token FROM ci_tokens",
+                "UPDATE ci_tokens SET encrypted_token = %s WHERE platform = %s",
+            ),
+            (
+                "user_git_credentials",
+                "SELECT credential_id, encrypted_token FROM user_git_credentials "
+                "WHERE encrypted_token IS NOT NULL",
+                "UPDATE user_git_credentials SET encrypted_token = %s WHERE credential_id = %s",
+            ),
+        ]
+        results: Dict[str, int] = {}
+        assert psycopg is not None, "psycopg must be available at this call site"
+        with psycopg.connect(self._pg_conn_str) as conn:
+            for table_name, select_sql, update_sql in _TABLE_CONFIGS:
+                count = _reencrypt_table_rows(
+                    conn, select_sql, update_sql, old_key, new_key, table_name
+                )
+                logger.info("Re-encrypted %d %s", count, table_name)
+                results[table_name] = count
+            conn.commit()
+        return results
+
+    @staticmethod
+    def _validate_nfs_mount(nfs_mount: str) -> Optional[str]:
+        """Validate nfs_mount argument. Returns error string or None if valid."""
+        if not nfs_mount or not isinstance(nfs_mount, str):
+            return f"NFS mount must be a non-empty string, got: {nfs_mount!r}"
+        if not Path(nfs_mount).is_absolute():
+            return f"NFS mount must be absolute path, got: {nfs_mount}"
+        if not Path(nfs_mount).exists():
+            return f"NFS mount point does not exist: {nfs_mount}"
+        return None
+
+    @staticmethod
+    def _consolidate_old_claude_projects_nfs(
+        nfs_base: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """Move old {nfs_base}/.claude-projects/ into {nfs_base}/.claude/projects/.
+
+        Files that already exist at the destination are skipped (no overwrite).
+        Attempts rmdir() after migration; if items remain due to collisions, logs
+        a warning and reports partial status so skipped items survive for manual cleanup.
+
+        Returns a consolidation report dict if the old dir existed, else None.
+        """
+        old_projects = nfs_base / ".claude-projects"
+        if not old_projects.exists() or not old_projects.is_dir():
+            return None
+
+        new_projects = nfs_base / ".claude" / "projects"
+        new_projects.mkdir(parents=True, exist_ok=True)
+        moved_count = 0
+        for item in old_projects.iterdir():
+            dest = new_projects / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+                moved_count += 1
+
+        status = "ok"
+        try:
+            old_projects.rmdir()
+        except OSError as exc:
+            status = "partial"
+            logger.warning(
+                "Old .claude-projects/ not empty after migration (collision items "
+                "remain); leaving for manual cleanup: %s",
+                exc,
+            )
+
+        logger.info("Consolidated %d items from old .claude-projects/", moved_count)
+        return {"status": status, "items_moved": moved_count}
+
+    def migrate_nfs(
+        self,
+        nfs_mount: str,
+        home_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Migrate local Claude home and research directories to NFS shared storage.
+
+        Sets up symlinks so all cluster nodes share Claude state:
+          ~/.claude/               -> {nfs_mount}/.claude/
+          ~/.cidx-server/research/ -> {nfs_mount}/.cidx-research/
+
+        Handles migration from old .claude-projects/ layout. Idempotent.
+
+        Args:
+            nfs_mount: Absolute path to the NFS mount point.
+            home_path: Override for the home directory. Defaults to Path.home().
+                       Intended for testing; production callers omit this.
+
+        Returns:
+            A migration report dict with keys per directory.
+        """
+        report: Dict[str, Any] = {}
+
+        error = self._validate_nfs_mount(nfs_mount)
+        if error:
+            report["error"] = error
+            return report
+
+        nfs_base = Path(nfs_mount)
+        home = home_path if home_path is not None else Path.home()
+
+        consolidation = self._consolidate_old_claude_projects_nfs(nfs_base)
+        if consolidation is not None:
+            report["claude_projects_consolidation"] = consolidation
+
+        report["claude_home"] = self._migrate_dir_to_nfs(
+            home / ".claude", nfs_base / ".claude"
+        )
+        report["research"] = self._migrate_dir_to_nfs(
+            home / ".cidx-server" / "research", nfs_base / ".cidx-research"
+        )
+        return report
+
+    @staticmethod
+    def _migrate_dir_to_nfs(local_path: Path, nfs_target: Path) -> Dict[str, Any]:
+        """Migrate a single directory to NFS and create symlink.
+
+        If local_path is already a correct symlink to nfs_target, returns early.
+        Moves non-symlink contents to nfs_target (skipping collisions).
+        Attempts rmdir() after migration; if items remain due to collisions or
+        permission errors, logs a warning but continues to create the symlink.
+
+        Returns dict with migration status and items_moved count.
+        """
+        result: Dict[str, Any] = {
+            "local": str(local_path),
+            "nfs_target": str(nfs_target),
+            "status": "ok",
+            "items_moved": 0,
+        }
+
+        if local_path.is_symlink():
+            if local_path.readlink() == nfs_target:
+                result["status"] = "already_symlinked"
+                return result
+            local_path.unlink()
+
+        nfs_target.mkdir(parents=True, exist_ok=True)
+
+        if local_path.exists() and local_path.is_dir():
+            for item in local_path.iterdir():
+                if item.is_symlink():
+                    item.unlink()
+                    continue
+                dest = nfs_target / item.name
+                if not dest.exists():
+                    shutil.move(str(item), str(dest))
+                    result["items_moved"] += 1
+            try:
+                local_path.rmdir()
+            except OSError as exc:
+                logger.warning(
+                    "Source directory %s not empty after NFS migration "
+                    "(collision items remain); leaving for manual cleanup: %s",
+                    local_path,
+                    exc,
+                )
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.symlink_to(nfs_target)
+        logger.info("Created NFS symlink: %s -> %s", local_path, nfs_target)
+
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -659,6 +974,79 @@ def _parse_json_column(value: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             return value
     return value
+
+
+# ---------------------------------------------------------------------------
+# Token re-encryption helpers (standalone key -> cluster key)
+# ---------------------------------------------------------------------------
+
+
+def _reencrypt_derive_key(salt_input: str) -> bytes:
+    """Derive AES-256 encryption key from a string salt using PBKDF2-HMAC-SHA256."""
+    salt = hashlib.sha256(salt_input.encode("utf-8")).digest()
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        b"cidx-token-encryption-key",
+        salt,
+        _REENCRYPT_PBKDF2_ITERATIONS,
+        dklen=_REENCRYPT_AES_KEY_SIZE,
+    )
+
+
+def _reencrypt_decrypt_token(encrypted_token: str, key: bytes) -> str:
+    """Decrypt a base64-encoded AES-256-CBC token using the given key."""
+    from cryptography.hazmat.backends import default_backend  # noqa: PLC0415
+    from cryptography.hazmat.primitives import padding  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
+
+    combined = base64.b64decode(encrypted_token.encode("utf-8"))
+    iv = combined[:_REENCRYPT_AES_BLOCK_SIZE]
+    enc_data = combined[_REENCRYPT_AES_BLOCK_SIZE:]
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(enc_data) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+
+
+def _reencrypt_encrypt_token(token: str, key: bytes) -> str:
+    """Encrypt a plaintext token with AES-256-CBC and return base64-encoded result."""
+    from cryptography.hazmat.backends import default_backend  # noqa: PLC0415
+    from cryptography.hazmat.primitives import padding  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
+
+    iv = os.urandom(_REENCRYPT_AES_BLOCK_SIZE)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(token.encode("utf-8")) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    return base64.b64encode(
+        iv + encryptor.update(padded) + encryptor.finalize()
+    ).decode("utf-8")
+
+
+def _reencrypt_table_rows(
+    conn: Any,
+    select_sql: str,
+    update_sql: str,
+    old_key: bytes,
+    new_key: bytes,
+    label: str,
+) -> int:
+    """Re-encrypt all token rows in a table. Returns count of successfully re-encrypted rows."""
+    rows = conn.execute(select_sql).fetchall()
+    count = 0
+    for row in rows:
+        row_id = row[0]
+        enc_token = row[1]
+        try:
+            plaintext = _reencrypt_decrypt_token(enc_token, old_key)
+            new_enc = _reencrypt_encrypt_token(plaintext, new_key)
+            conn.execute(update_sql, (new_enc, row_id))
+            count += 1
+        except Exception as exc:
+            logger.warning("Failed to re-encrypt %s id=%s: %s", label, row_id, exc)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +1093,12 @@ def _build_arg_parser():  # type: ignore[return]
         help="Path to refresh_tokens.db SQLite file (optional, Story #515).",
     )
     parser.add_argument(
+        "--server-dir",
+        default=None,
+        help="Path to CIDX server data directory (e.g., ~/.cidx-server). "
+        "Required for token re-encryption during cluster migration.",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         default=False,
@@ -714,6 +1108,13 @@ def _build_arg_parser():  # type: ignore[return]
         "--table",
         default=None,
         help="Migrate only this table (optional).",
+    )
+    parser.add_argument(
+        "--nfs-mount",
+        default=None,
+        help="NFS mount point for cluster shared storage (e.g. /mnt/cow-storage). "
+        "When provided, migrates ~/.claude/ and ~/.cidx-server/research/ to NFS "
+        "with symlinks for cluster-wide sharing.",
     )
     return parser
 
@@ -737,6 +1138,7 @@ def main() -> None:
         oauth_db_path=getattr(args, "oauth_path", None),
         scip_audit_db_path=getattr(args, "scip_audit_path", None),
         refresh_tokens_db_path=getattr(args, "refresh_tokens_path", None),
+        server_dir=getattr(args, "server_dir", None),
     )
 
     if args.validate_only:
@@ -765,6 +1167,26 @@ def main() -> None:
         print("WARNING: Row counts do not match. Review errors above.")
         sys.exit(1)
     print("Migration complete. All row counts match.")
+
+    # NFS migration (optional, for cluster setup)
+    nfs_mount = getattr(args, "nfs_mount", None)
+    if nfs_mount:
+        print("\nRunning NFS migration...")
+        nfs_report = migrator.migrate_nfs(nfs_mount)
+        _print_nfs_report(nfs_report)
+
+
+def _print_nfs_report(report: Dict[str, Any]) -> None:
+    """Print a human-readable NFS migration report to stdout."""
+    if "error" in report:
+        print(f"\nNFS migration error: {report['error']}")
+        return
+    print("\nNFS migration report:")
+    for key, info in report.items():
+        if isinstance(info, dict) and "status" in info:
+            status = info["status"]
+            moved = info.get("items_moved", "n/a")
+            print(f"  {key}: {status} (items moved: {moved})")
 
 
 def _print_migration_report(report: Dict[str, Any]) -> None:

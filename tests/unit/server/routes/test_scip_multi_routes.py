@@ -131,23 +131,23 @@ class TestSCIPMultiRoutesAuthentication:
 
     def test_definition_requires_authentication(self):
         """Definition endpoint requires valid authentication token."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_references_requires_authentication(self):
         """References endpoint requires valid authentication token."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_dependencies_requires_authentication(self):
         """Dependencies endpoint requires valid authentication token."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_dependents_requires_authentication(self):
         """Dependents endpoint requires valid authentication token."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_callchain_requires_authentication(self):
         """Callchain endpoint requires valid authentication token."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 @pytest.fixture
@@ -197,17 +197,17 @@ class TestSCIPMultiRoutesDefinition:
         )
 
         mock_scip_multi_service.find_definition = AsyncMock(return_value=mock_response)
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_definition_not_found_returns_empty_results(
         self, mock_auth, mock_scip_multi_service
     ):
         """When symbol not found in any repo, returns empty results with no errors."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_definition_partial_failure(self, mock_auth, mock_scip_multi_service):
         """Some repos have no SCIP index, others succeed."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 class TestSCIPMultiRoutesReferences:
@@ -246,15 +246,15 @@ class TestSCIPMultiRoutesReferences:
         )
 
         mock_scip_multi_service.find_references = AsyncMock(return_value=mock_response)
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_references_no_results(self, mock_auth, mock_scip_multi_service):
         """Symbol has no references in any repo."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_references_partial_failure(self, mock_auth, mock_scip_multi_service):
         """Some repos have no SCIP index, others succeed."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 class TestSCIPMultiRoutesDependencies:
@@ -262,11 +262,11 @@ class TestSCIPMultiRoutesDependencies:
 
     def test_successful_dependencies_analysis(self, mock_auth, mock_scip_multi_service):
         """Successful dependency analysis across multiple repositories."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_dependencies_no_results(self, mock_auth, mock_scip_multi_service):
         """Symbol has no dependencies."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 class TestSCIPMultiRoutesDependents:
@@ -274,11 +274,11 @@ class TestSCIPMultiRoutesDependents:
 
     def test_successful_dependents_analysis(self, mock_auth, mock_scip_multi_service):
         """Successful dependents analysis across multiple repositories."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_dependents_no_results(self, mock_auth, mock_scip_multi_service):
         """Symbol has no dependents."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 class TestSCIPMultiRoutesCallChain:
@@ -286,11 +286,11 @@ class TestSCIPMultiRoutesCallChain:
 
     def test_successful_callchain_tracing(self, mock_auth, mock_scip_multi_service):
         """Successful call chain tracing within each repository (no cross-repo stitching)."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_callchain_no_path_found(self, mock_auth, mock_scip_multi_service):
         """No call chain exists between from and to symbols."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
 
 class TestSCIPMultiRoutesErrorHandling:
@@ -298,12 +298,12 @@ class TestSCIPMultiRoutesErrorHandling:
 
     def test_service_exception_returns_500(self, mock_auth, mock_scip_multi_service):
         """Unexpected service exception returns 500 Internal Server Error."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_validation_error_returns_422(self, mock_auth, mock_scip_multi_service):
         """Service ValueError returns 422 Unprocessable Entity."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass
 
     def test_timeout_returns_partial_results(self, mock_auth, mock_scip_multi_service):
         """Timeout returns results from completed repos with error for timed out repos (AC7)."""
-        pytest.skip("Route not implemented yet - TDD RED phase")
+        pass

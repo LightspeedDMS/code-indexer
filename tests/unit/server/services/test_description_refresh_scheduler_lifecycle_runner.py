@@ -82,7 +82,8 @@ def atomic_db_path(tmp_path):
             extended_error TEXT,
             language_resolution_status TEXT,
             progress_info TEXT,
-            metadata TEXT
+            metadata TEXT,
+            actor_username TEXT
         )"""
         )
         conn.execute(
@@ -184,7 +185,8 @@ def _full_schema_init(db_file: str) -> None:
             extended_error TEXT,
             language_resolution_status TEXT,
             progress_info TEXT,
-            metadata TEXT
+            metadata TEXT,
+            actor_username TEXT
         )"""
         )
         conn.execute(

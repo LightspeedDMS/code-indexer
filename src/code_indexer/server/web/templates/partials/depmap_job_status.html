@@ -81,7 +81,7 @@
                 <span class="metric-label">Last Run</span>
                 <span class="metric-value" style="white-space: nowrap;">
                     {% if job_status.last_run %}
-                        {{ job_status.last_run[:16] | replace("T", " ") }}
+                        {{ (job_status.last_run|string)[:16] | replace("T", " ") }}
                     {% else %}
                         Never
                     {% endif %}
@@ -91,7 +91,7 @@
                 <span class="metric-label">Next Run</span>
                 <span class="metric-value" style="white-space: nowrap;">
                     {% if job_status.next_run %}
-                        {{ job_status.next_run[:16] | replace("T", " ") }}
+                        {{ (job_status.next_run|string)[:16] | replace("T", " ") }}
                     {% else %}
                         Not scheduled
                     {% endif %}
@@ -107,20 +107,21 @@
         </header>
         <div style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;">
             <div style="display: flex; gap: 0.5rem;">
-                <button hx-post="/admin/dependency-map/trigger"
+                <button class="depmap-trigger-btn"
+                        hx-post="/admin/dependency-map/trigger"
                         hx-vals='{"mode": "full"}'
                         hx-swap="none"
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
                     Full Analysis
                 </button>
-                <button class="secondary"
+                <button class="secondary depmap-trigger-btn"
                         hx-post="/admin/dependency-map/trigger"
                         hx-vals='{"mode": "delta"}'
                         hx-swap="none"
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
                     Delta Refresh
                 </button>
-                <button class="outline small"
+                <button class="outline small depmap-trigger-btn"
                         hx-post="/admin/dependency-map/trigger-refinement"
                         hx-swap="none"
                         hx-headers='{"X-Requested-With": "XMLHttpRequest"}'
@@ -207,7 +208,7 @@
                 {% for run in job_status.run_history %}
                 <tr>
                     <td style="white-space: nowrap;">
-                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}—{% endif %}
+                        {% if run.timestamp %}{{ (run.timestamp|string)[:16] | replace("T", " ") }}{% else %}—{% endif %}
                     </td>
                     <td>
                         {% if run.run_type %}
@@ -244,6 +245,31 @@
 </article>
 {% endif %}
 
+<!-- Story #1040: HTMX afterRequest handler for trigger buttons (prevents JSON leaking into innerHTML) -->
+<script>
+(function() {
+    if (!window._depmapTriggerListenerAdded) {
+        window._depmapTriggerListenerAdded = true;
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            var elt = evt.detail.elt;
+            if (!elt || !elt.classList || !elt.classList.contains('depmap-trigger-btn')) return;
+            var statusEl = document.getElementById('depmap-trigger-status');
+            if (!statusEl) return;
+            var xhr = evt.detail.xhr;
+            if (xhr.status === 204 || xhr.status === 200) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Analysis triggered</small>';
+            } else if (xhr.status === 409) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis already in progress</small>';
+            } else if (xhr.status === 403) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Elevation required — use the TOTP dialog first</small>';
+            } else {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Trigger failed (HTTP ' + xhr.status + ')</small>';
+            }
+        });
+    }
+})();
+</script>
+
 <!-- Story #342: Repair button click response handler -->
 <script>
 (function() {
@@ -254,7 +280,7 @@
                 var statusEl = document.getElementById('depmap-trigger-status');
                 if (!statusEl) return;
                 var xhr = evt.detail.xhr;
-                if (xhr.status === 202) {
+                if (xhr.status === 204) {
                     statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Repair triggered</small>';
                 } else if (xhr.status === 409) {
                     statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis in progress</small>';

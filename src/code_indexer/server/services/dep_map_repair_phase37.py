@@ -24,6 +24,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
+
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
 
@@ -233,7 +235,7 @@ class RepairJournal:
             with open(self.journal_path, "a", encoding="utf-8") as fh:
                 fh.write(line)
                 fh.flush()
-                os.fsync(fh.fileno())
+                nfs_safe_fsync(fh.fileno())
         finally:
             _write_lock.release()
 
@@ -286,7 +288,7 @@ def atomic_write_text(target_path: Path, content: str, errors: List[str]) -> boo
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_fh:
             tmp_fh.write(content)
             tmp_fh.flush()
-            os.fsync(tmp_fh.fileno())
+            nfs_safe_fsync(tmp_fh.fileno())
         os.replace(tmp_path_str, target_path)
         return True
     except OSError as exc:

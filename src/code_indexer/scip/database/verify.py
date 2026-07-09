@@ -217,17 +217,9 @@ class SCIPDatabaseVerifier:
                     sample_ok = False
                 else:
                     db_display_name, db_kind = result
-                    # Verify display_name matches if present -- but SKIP local
-                    # symbols ("local N"). Locals have no structured descriptor,
-                    # so the builder derives display_name from the occurrence
-                    # identifier (e.g. "args", "g") which legitimately differs
-                    # from the protobuf symbol_info.display_name. Comparing them
-                    # produced false-negative verification failures that marked
-                    # otherwise-valid, fully-queryable databases as failed.
-                    is_local = symbol_name.startswith("local ")
+                    # Verify display_name matches if present
                     if (
-                        not is_local
-                        and symbol_info.display_name
+                        symbol_info.display_name
                         and db_display_name != symbol_info.display_name
                     ):
                         errors.append(

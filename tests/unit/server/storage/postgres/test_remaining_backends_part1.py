@@ -60,9 +60,40 @@ class TestCITokensPostgresBackend:
             CITokensPostgresBackend,
         )
 
-        required = {"save_token", "get_token", "delete_token", "list_tokens", "close"}
+        required = {
+            "save_token",
+            "get_token",
+            "delete_token",
+            "list_tokens",
+            "update_encrypted_token",
+            "close",
+        }
         for method in required:
             assert hasattr(CITokensPostgresBackend, method), f"Missing method: {method}"
+
+    def test_update_encrypted_token_present_and_callable(self) -> None:
+        """update_encrypted_token must exist and be callable (Finding 1 — Story #999)."""
+        from code_indexer.server.storage.postgres.ci_tokens_backend import (
+            CITokensPostgresBackend,
+        )
+
+        assert hasattr(CITokensPostgresBackend, "update_encrypted_token")
+        assert callable(CITokensPostgresBackend.update_encrypted_token)
+
+    def test_update_encrypted_token_uses_percent_s_placeholder(self) -> None:
+        """update_encrypted_token must use %s placeholders (psycopg v3)."""
+        from code_indexer.server.storage.postgres.ci_tokens_backend import (
+            CITokensPostgresBackend,
+        )
+
+        pool = _make_pool()
+        backend = CITokensPostgresBackend(pool)
+        backend.update_encrypted_token("github", "new-encrypted-value")
+
+        conn = _get_conn(pool)
+        sql = conn.execute.call_args[0][0]
+        assert "%s" in sql
+        assert "?" not in sql
 
     def test_save_token_uses_percent_s_placeholder(self) -> None:
         """save_token must use %s placeholders (psycopg v3), not ? (sqlite3)."""

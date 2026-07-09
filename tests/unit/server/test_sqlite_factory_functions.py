@@ -9,7 +9,6 @@ Story #702: Migrate Central JSON Files to SQLite
 
 from pathlib import Path
 from unittest.mock import Mock, patch
-import pytest
 
 
 class TestTokenManagerFactoryFunction:
@@ -51,6 +50,60 @@ class TestTokenManagerFactoryFunction:
                 assert call_kwargs["server_dir"] == str(tmp_path)
                 expected_db_path = str(tmp_path / "data" / "cidx_server.db")
                 assert call_kwargs["db_path"] == expected_db_path
+
+    def test_token_manager_postgres_mode_passes_pg_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given _get_token_manager() factory function
+        When storage_mode is "postgres"
+        Then create_token_manager receives a CITokensPostgresBackend as storage_backend
+        (Finding 2 — Story #999).
+        """
+        from code_indexer.server.storage.postgres.ci_tokens_backend import (
+            CITokensPostgresBackend,
+        )
+
+        mock_config = Mock()
+        mock_config.storage_mode = "postgres"
+        mock_config.postgres_dsn = "postgresql://localhost/test"
+
+        mock_config_manager = Mock()
+        mock_config_manager.server_dir = tmp_path
+
+        mock_config_service = Mock()
+        mock_config_service.config_manager = mock_config_manager
+        mock_config_service.get_config.return_value = mock_config
+
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
+            with patch(
+                "code_indexer.server.web.routes.get_config_service",
+                return_value=mock_config_service,
+            ):
+                with patch(
+                    "code_indexer.server.services.ci_token_manager.create_token_manager"
+                ) as mock_factory:
+                    mock_factory.return_value = Mock()
+
+                    with patch(
+                        "code_indexer.server.storage.postgres.connection_pool.ConnectionPool"
+                    ) as mock_pool_cls:
+                        mock_pool_cls.return_value = Mock()
+
+                        from code_indexer.server.web.routes import _get_token_manager
+
+                        _get_token_manager()
+
+                        mock_factory.assert_called_once()
+                        call_kwargs = mock_factory.call_args[1]
+                        assert "storage_backend" in call_kwargs
+                        assert isinstance(
+                            call_kwargs["storage_backend"], CITokensPostgresBackend
+                        )
+                        assert call_kwargs.get("storage_mode") == "postgres"
 
 
 class TestTokenAuthenticatorSqliteUsage:
@@ -137,18 +190,6 @@ class TestSSHKeyManagerFactoryFunction:
                 assert call_kwargs["metadata_dir"] == tmp_path / "data" / "ssh_keys"
 
 
-class TestSSHKeysRouterFactoryFunction:
-    """Tests for get_ssh_key_manager() in routers/ssh_keys.py (Issue #3)."""
-
-    def test_ssh_keys_router_uses_sqlite_backend(self, tmp_path: Path) -> None:
-        """
-        Given get_ssh_key_manager() in ssh_keys router
-        When called
-        Then it creates SSHKeyManager with use_sqlite=True and correct db_path
-        """
-        pytest.skip("Placeholder - implementation will be tested after fix")
-
-
 class TestMCPSSHKeyManagerFactory:
     """Tests for get_ssh_key_manager() in mcp/handlers.py (Issue #3)."""
 
@@ -225,31 +266,3 @@ class TestSyncJobManagerFactoryFunction:
 
             assert call_kwargs["use_sqlite"] is True
             assert call_kwargs["db_path"] == str(db_path)
-
-
-class TestCommitterResolutionServiceSSHKeyManager:
-    """Tests for SSHKeyManager in CommitterResolutionService (Issue #3)."""
-
-    def test_committer_resolution_uses_sqlite_ssh_key_manager(
-        self, tmp_path: Path
-    ) -> None:
-        """
-        Given CommitterResolutionService created without explicit ssh_key_manager
-        When it creates a default SSHKeyManager
-        Then it should use SQLite backend
-        """
-        pytest.skip("Placeholder - requires injecting SSHKeyManager with SQLite config")
-
-
-class TestMigrationOrchestratorSSHKeyManager:
-    """Tests for SSHKeyManager in MigrationOrchestrator (Issue #3)."""
-
-    def test_migration_orchestrator_uses_sqlite_ssh_key_manager(
-        self, tmp_path: Path
-    ) -> None:
-        """
-        Given MigrationOrchestrator is created
-        When it initializes SSHKeyManager
-        Then it should use SQLite backend
-        """
-        pytest.skip("Placeholder - requires modifying MigrationOrchestrator")

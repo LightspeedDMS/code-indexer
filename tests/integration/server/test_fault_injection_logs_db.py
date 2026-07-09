@@ -89,6 +89,11 @@ class TestFaultInjectionLogsDbBoundary:
             correlation_id=correlation_id,
         )
 
+        # Bug #1078: SQLiteLogHandler.emit() only enqueues; the actual INSERT
+        # happens on the writer thread. Synchronously drain that queue so this
+        # read is deterministic (replaces the prior race against the writer).
+        _handler.flush()
+
         conn = sqlite3.connect(str(logs_db))
         conn.row_factory = sqlite3.Row
         try:

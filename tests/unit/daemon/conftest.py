@@ -55,18 +55,38 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         embedding = embedding / np.linalg.norm(embedding)
         return embedding.tolist()  # type: ignore[no-any-return]
 
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
-        """Generate embedding for a single text."""
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: Optional[str] = None,
+    ) -> List[float]:
+        """Generate embedding for a single text.
+
+        Mirrors the real provider signatures (VoyageAIEmbeddingProvider,
+        CohereEmbeddingProvider) which accept a keyword-only
+        `embedding_purpose` argument (Bug #1104 / Bug #1304 mock drift fix).
+        """
         return self._generate_embedding_from_text(text)
 
     def get_embeddings_batch(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: Optional[str] = None,
+        retry: bool = True,
     ) -> List[List[float]]:
         """Generate embeddings for multiple texts in batch."""
         return [self._generate_embedding_from_text(t) for t in texts]
 
     def get_embedding_with_metadata(
-        self, text: str, model: Optional[str] = None
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: Optional[str] = None,
     ) -> EmbeddingResult:
         """Generate embedding with metadata."""
         return EmbeddingResult(
@@ -77,7 +97,11 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         )
 
     def get_embeddings_batch_with_metadata(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: Optional[str] = None,
     ) -> BatchEmbeddingResult:
         """Generate batch embeddings with metadata."""
         return BatchEmbeddingResult(

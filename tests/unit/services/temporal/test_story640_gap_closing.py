@@ -10,8 +10,7 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
@@ -38,16 +37,24 @@ from code_indexer.services.provider_health_monitor import (
 def _make_voyage_config():
     config = MagicMock()
     config.embedding_provider = "voyage-ai"
-    config.voyage_ai.model = "voyage-code-3"
+    # Real VoyageAIConfig (not a bare MagicMock) so model_copy() actually
+    # pins the constructed client's model (Story #1290 provider construction).
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
     config.cohere.model = "embed-v4.0"
+    # Story #1290: temporal recall discovery/provider-construction now keys
+    # off config.temporal.embedders, NOT config.voyage_ai.model/config.cohere.model.
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 
 def _make_cohere_config():
     config = MagicMock()
     config.embedding_provider = "cohere"
-    config.voyage_ai.model = "voyage-code-3"
+    config.voyage_ai = VoyageAIConfig(model="voyage-code-3")
     config.cohere.model = "embed-v4.0"
+    config.temporal.embedders = ["voyage-code-3"]
+    config.temporal.active_embedder = "voyage-code-3"
     return config
 
 
@@ -104,6 +111,7 @@ def _assert_success_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.return_value = mock_results
@@ -136,18 +144,20 @@ def _assert_failure_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.side_effect = RuntimeError("embedding unavailable")
         mock_svc_cls.return_value = mock_svc
-        with pytest.raises(RuntimeError, match="embedding unavailable"):
-            execute_temporal_query_with_fusion(
-                config=config,
-                index_path=index_path,
-                vector_store=mock_vector_store,
-                query_text="search",
-                limit=5,
-            )
+        # Story #1171: dispatch fault-tolerates per-shard failures (catch + record + continue)
+        # rather than re-raising. Call without pytest.raises — failure IS recorded in monitor.
+        execute_temporal_query_with_fusion(
+            config=config,
+            index_path=index_path,
+            vector_store=mock_vector_store,
+            query_text="search",
+            limit=5,
+        )
     status = monitor.get_health(health_key).get(health_key)
     assert status is not None, (
         "record_temporal_failure NOT called: no health data after failed query"
@@ -166,16 +176,47 @@ def _run_indexer_and_capture_thread_count(
     tmp_path,
 ) -> int:
     """Run TemporalIndexer.index_commits() and return the thread count passed to VCM."""
+    from code_indexer.services.temporal.embedders.base import TemporalEmbedder
+    from code_indexer.services.temporal.embedders.registry import (
+        register_embedder,
+        unregister_embedder_for_tests,
+    )
     from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
+
+    # Story #1291: index_commits() now availability-gates the ACTIVE embedder
+    # (fail-loud if unresolvable) -- register a lightweight deterministic
+    # fake so this thread-count test (an orthogonal concern) isn't affected.
+    fake_embedder_name = f"fake-story640-{collection_suffix}"
+
+    class _FakeEmbedder(TemporalEmbedder):
+        name = fake_embedder_name
+        model_slug = collection_suffix
+        dimensions = 4
+        overlap_percentage = 0.0
+
+        def __init__(self, config=None):
+            pass
+
+        def embed_commit_chunks(self, chunks):
+            return [[0.0] * self.dimensions for _ in chunks]
+
+        def embed_query(self, text):
+            return [0.0] * self.dimensions
+
+    register_embedder(fake_embedder_name, lambda config: _FakeEmbedder(config))
 
     mock_config = MagicMock()
     mock_config.embedding_provider = provider
     mock_config.cohere.parallel_requests = cohere_parallel
+    mock_config.cohere.temporal_parallel_requests = None
     mock_config.voyage_ai.parallel_requests = voyage_parallel
+    mock_config.voyage_ai.temporal_parallel_requests = None
     mock_config.voyage_ai.max_concurrent_batches_per_commit = 10
     mock_config.voyage_ai.model = "voyage-code-3"
     mock_config.cohere.model = "embed-v4.0"
     mock_config.temporal.diff_context_lines = 3
+    mock_config.temporal.active_embedder = fake_embedder_name
+    mock_config.temporal.embedders = [fake_embedder_name]
     mock_config.file_extensions = []
     mock_config.override_config = None
 
@@ -204,21 +245,24 @@ def _run_indexer_and_capture_thread_count(
         ctx.__exit__ = MagicMock(return_value=False)
         return ctx
 
-    with (
-        patch(
-            "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager",
-            side_effect=fake_vcm,
-        ),
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_indexer.subprocess.run",
-            side_effect=_fake_subprocess_run_one_commit,
-        ),
-    ):
-        mock_factory.create.return_value = MagicMock()
-        indexer.index_commits()
+    try:
+        with (
+            patch(
+                "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager",
+                side_effect=fake_vcm,
+            ),
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ) as mock_factory,
+            patch(
+                "code_indexer.services.temporal.temporal_indexer.subprocess.run",
+                side_effect=_fake_subprocess_run_one_commit,
+            ),
+        ):
+            mock_factory.create.return_value = MagicMock()
+            indexer.index_commits()
+    finally:
+        unregister_embedder_for_tests(fake_embedder_name)
 
     return captured[0] if captured else -1
 
@@ -245,78 +289,42 @@ def test_sanitize_model_name_public_function():
 
 
 def test_create_embedding_provider_for_collection_voyage():
-    """Voyage collection name must resolve to the VoyageAI embedding provider."""
-    config = _make_voyage_config()
+    """Story #1290: a collection slug matching a config.temporal.embedders entry
+    must resolve to a VoyageAIClient pinned to that embedder's model name --
+    no EmbeddingProviderFactory involvement."""
+    config = _make_voyage_config()  # temporal.embedders = ["voyage-code-3"]
     collection_name = (
         f"{TEMPORAL_COLLECTION_PREFIX}{sanitize_model_name('voyage-code-3')}"
     )
-    mock_voyage_provider = MagicMock(name="VoyageProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai", "cohere"]
-        mock_get_model.side_effect = lambda p, cfg: (
-            "voyage-code-3" if p == "voyage-ai" else "embed-v4.0"
-        )
-        mock_factory.create.return_value = mock_voyage_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config, provider_name="voyage-ai")
-    assert provider is mock_voyage_provider
+    assert provider.get_provider_name() == "voyage-ai"
+    assert provider.get_current_model() == "voyage-code-3"
 
 
-def test_create_embedding_provider_for_collection_cohere():
-    """Cohere collection name must resolve to the Cohere embedding provider."""
-    config = _make_cohere_config()
+def test_create_embedding_provider_for_collection_unmatched_slug_uses_active_embedder():
+    """A collection slug that matches NO configured embedder must fall back to
+    config.temporal.active_embedder (Story #1290: cohere temporal embedders are
+    not yet implemented, so an unmatched cohere-style slug exercises this
+    fallback path rather than a dedicated cohere adapter)."""
+    config = _make_cohere_config()  # temporal.embedders = ["voyage-code-3"]
     collection_name = f"{TEMPORAL_COLLECTION_PREFIX}{sanitize_model_name('embed-v4.0')}"
-    mock_cohere_provider = MagicMock(name="CohereProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai", "cohere"]
-        mock_get_model.side_effect = lambda p, cfg: (
-            "voyage-code-3" if p == "voyage-ai" else "embed-v4.0"
-        )
-        mock_factory.create.return_value = mock_cohere_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config, provider_name="cohere")
-    assert provider is mock_cohere_provider
+    assert provider.get_current_model() == config.temporal.active_embedder
 
 
 def test_create_embedding_provider_for_collection_legacy_fallback():
-    """Legacy collection name ('code-indexer-temporal') must fall back to primary provider."""
+    """Legacy collection name ('code-indexer-temporal') must fall back to
+    config.temporal.active_embedder."""
     config = _make_voyage_config()
     collection_name = "code-indexer-temporal"  # legacy: no model slug
-    mock_provider = MagicMock(name="FallbackProvider")
 
-    with (
-        patch(
-            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-        ) as mock_factory,
-        patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch.get_model_name_for_provider"
-        ) as mock_get_model,
-    ):
-        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
-        mock_get_model.return_value = "voyage-code-3"
-        mock_factory.create.return_value = mock_provider
-        provider = _create_embedding_provider_for_collection(config, collection_name)
+    provider = _create_embedding_provider_for_collection(config, collection_name)
 
-    mock_factory.create.assert_called_once_with(config)
-    assert provider is mock_provider
+    assert provider.get_current_model() == config.temporal.active_embedder
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +383,13 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
         healthy_collection = "code-indexer-temporal-voyage_code_3"
         unhealthy_collection = "code-indexer-temporal-embed_v4_0"
         (index_path / healthy_collection).mkdir()
+        (index_path / healthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
         (index_path / unhealthy_collection).mkdir()
+        (index_path / unhealthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
 
         monitor = ProviderHealthMonitor.get_instance()
         health_key = make_temporal_health_key(unhealthy_collection)
@@ -402,6 +416,7 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
             ) as mock_factory,
         ):
+            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
             mock_factory.create.return_value = MagicMock()
             execute_temporal_query_with_fusion(
                 config=config,
@@ -433,6 +448,7 @@ def test_record_success_failure_wired(tmp_path):
     index_path.mkdir()
     collection_name = "code-indexer-temporal-voyage_code_3"
     (index_path / collection_name).mkdir()
+    (index_path / collection_name / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
     mock_vector_store = MagicMock()
     mock_vector_store.project_root = tmp_path

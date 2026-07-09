@@ -18,7 +18,10 @@ class BackendFactory:
 
     @staticmethod
     def create(
-        config: "Config", project_root: Path, hnsw_cache: Optional[Any] = None
+        config: "Config",
+        project_root: Path,
+        hnsw_cache: Optional[Any] = None,
+        memory_governor: Optional[Any] = None,
     ) -> VectorStoreBackend:
         """Create appropriate backend from configuration.
 
@@ -26,6 +29,8 @@ class BackendFactory:
             config: Configuration object
             project_root: Root directory of the project being indexed
             hnsw_cache: Optional HNSW cache instance (server mode passes this)
+            memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
+                Server mode passes get_memory_governor(); CLI leaves it None.
 
         Returns:
             FilesystemBackend instance
@@ -35,17 +40,21 @@ class BackendFactory:
         """
         # ServerConfig has no vector_store attribute; default to filesystem (only supported backend)
         if not hasattr(config, "vector_store") or config.vector_store is None:
-            logger.info("Creating FilesystemBackend (no vector_store config)")
+            logger.debug("Creating FilesystemBackend (no vector_store config)")
             return FilesystemBackend(
-                project_root=project_root, hnsw_index_cache=hnsw_cache
+                project_root=project_root,
+                hnsw_index_cache=hnsw_cache,
+                memory_governor=memory_governor,
             )
 
         provider = config.vector_store.provider
 
         if provider == "filesystem":
-            logger.info("Creating FilesystemBackend")
+            logger.debug("Creating FilesystemBackend")
             return FilesystemBackend(
-                project_root=project_root, hnsw_index_cache=hnsw_cache
+                project_root=project_root,
+                hnsw_index_cache=hnsw_cache,
+                memory_governor=memory_governor,
             )
         else:
             raise ValueError(f"Unsupported vector store provider: {provider}")

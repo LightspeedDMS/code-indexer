@@ -12,9 +12,9 @@ inputSchema:
       description: 'Opaque cache handle returned in the cache_handle field of a truncated xray_search or xray_explore result. Also returned in the fetch_tool_hint field of the truncated response.'
     page:
       type: integer
-      description: 'Page number (0-indexed). Defaults to 0 for first page. Use has_more field in the response to determine if additional pages exist.'
-      default: 0
-      minimum: 0
+      description: 'Page number (1-indexed). Defaults to 1 for first page. Use has_more field in the response to determine if additional pages exist.'
+      default: 1
+      minimum: 1
   required:
     - cache_handle
 outputSchema:
@@ -28,7 +28,7 @@ outputSchema:
       description: 'Full payload content for the requested page.'
     page:
       type: integer
-      description: 'Current page number (0-indexed).'
+      description: 'Current page number (1-indexed).'
     total_pages:
       type: integer
       description: 'Total number of pages available for this handle.'
@@ -49,21 +49,21 @@ Retrieve the full payload for a truncated xray_search or xray_explore result.
 
 When an xray_search or xray_explore job produces a result larger than the server's payload preview cap (configurable via Web UI payload_preview_size_chars, default ~2000 chars), the result is truncated. The truncated response includes a cache_handle and a fetch_tool_hint field naming this tool.
 
-Use this tool to retrieve the full content using that handle. For very large results, paginate by incrementing the page parameter (0-indexed) until has_more is false.
+Use this tool to retrieve the full content using that handle. For very large results, paginate by incrementing the page parameter (1-indexed) until has_more is false.
 
 ## Workflow
 
 1. Run xray_search or xray_explore and poll the job to COMPLETED.
 2. If the result contains has_more: true and a cache_handle field, the result was truncated.
 3. Call cidx_fetch_cached_payload with that cache_handle to retrieve the full payload.
-4. If the response has has_more: true, call again with page=1, page=2, etc. until has_more: false.
+4. If the response has has_more: true, call again with page=2, page=3, etc. until has_more: false.
 
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | cache_handle | str | yes | -- | Opaque cache handle from the truncated xray result's cache_handle field. |
-| page | int | no | 0 | Page number (0-indexed). Call repeatedly until has_more: false. |
+| page | int | no | 1 | Page number (1-indexed). Call repeatedly until has_more: false. |
 
 ## Error Codes
 
@@ -90,7 +90,7 @@ Handles expire when the server session ends or after a server-configured TTL. If
 ```json
 {
   "cache_handle": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "page": 1
+  "page": 2
 }
 ```
 

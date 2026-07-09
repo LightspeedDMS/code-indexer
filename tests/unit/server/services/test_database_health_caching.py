@@ -167,6 +167,7 @@ class TestDatabaseHealthCaching:
                 "scip_audit.db": Path(temp_dir) / "scip_audit.db",
                 "payload_cache.db": golden_cache / "payload_cache.db",
                 "api_metrics.db": data_dir / "api_metrics.db",
+                "query_embedding_cache.db": data_dir / "query_embedding_cache.db",
             }
 
             for db_path in db_paths.values():

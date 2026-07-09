@@ -48,6 +48,21 @@ def manager(data_dir):
         created_at="2025-01-01T00:00:00Z",
     )
     mgr._sqlite_backend = MagicMock()
+    # Bug #1316: change_branch resolves authoritatively via
+    # _resolve_golden_repo_authoritative, which unconditionally calls
+    # _sqlite_backend.get_repo(alias) -- configure it to mirror the
+    # pre-populated cache entry above.
+    mgr._sqlite_backend.get_repo.return_value = {
+        "alias": "my-repo",
+        "repo_url": "https://github.com/org/repo.git",
+        "default_branch": "main",
+        "clone_path": "/golden-repos/my-repo",
+        "created_at": "2025-01-01T00:00:00Z",
+        "enable_temporal": False,
+        "temporal_options": None,
+        "category_id": None,
+        "category_auto_assigned": False,
+    }
     mgr.resource_config = None
     return mgr
 

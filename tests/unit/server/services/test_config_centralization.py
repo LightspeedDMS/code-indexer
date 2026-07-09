@@ -32,6 +32,10 @@ def _make_mock_pool(select_row=None):
     mock_conn.execute.return_value = mock_cursor
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
+    # cursor(row_factory=...) used as context manager must delegate execute()
+    # to mock_conn.execute so that side_effect tricks in tests still work.
+    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
     mock_pool.connection.return_value = mock_conn
     return mock_pool, mock_conn
 
@@ -88,6 +92,10 @@ class TestCheckConfigUpdate:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
+        # cursor(row_factory=...) used as context manager must return mock_conn
+        # so that cur.execute() routes through mock_conn.execute() side_effect.
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value = mock_conn
 
         # check_config_update SELECT returns version 2
@@ -156,8 +164,13 @@ class TestSaveConfigCluster:
         with open(config_path) as f:
             saved = json.load(f)
         # Bootstrap keys should be in file
-        assert "host" in saved
-        assert "port" in saved
+        assert "server_dir" in saved
+        assert "storage_mode" in saved
+        # Story #1196: host/port are runtime-only now -- the Story #1197 AC6
+        # transition write-path inclusion has been removed, so they must NOT
+        # be written to config.json anymore.
+        assert "host" not in saved
+        assert "port" not in saved
 
 
 class TestSeedRuntimeToPg:
@@ -168,6 +181,10 @@ class TestSeedRuntimeToPg:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
+        # cursor(row_factory=...) used as context manager must return mock_conn
+        # so that cur.execute() routes through mock_conn.execute() side_effect.
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value = mock_conn
 
         # Finding 4 fix: _seed_runtime_to_pg now does INSERT then SELECT.
@@ -332,13 +349,22 @@ class TestInitializeRuntimeDb:
         assert "service_display_name" in runtime_dict
         assert runtime_dict["service_display_name"] == original_display_name
 
-        # Assert: config.json stripped to bootstrap only
+        # Assert: config.json stripped to bootstrap-only keys.
+        # Story #1196: the Story #1197 TRANSITION_PRESERVE_KEYS allow-list has
+        # been removed (next-release cleanup) -- workers/log_level/host/port
+        # are runtime-only now and no longer survive the strip.
         config_path = os.path.join(tmp_server_dir, "config.json")
         with open(config_path) as f:
             saved = json.load(f)
         for key in saved:
             assert key in BOOTSTRAP_KEYS, (
-                f"Non-bootstrap key '{key}' in config.json after migration"
+                f"Unexpected key '{key}' in config.json after migration "
+                f"(must be in BOOTSTRAP_KEYS)"
+            )
+        for launch_key in ("workers", "log_level", "host", "port"):
+            assert launch_key not in saved, (
+                f"Story #1196: '{launch_key}' must NOT survive the strip -- the "
+                "transition allow-list was removed"
             )
 
         # Assert: backup created
@@ -479,11 +505,17 @@ class TestSaveConfigSqlite:
         )
         svc.set_connection_pool(mock_pool)
 
-        # Re-mock for save (UPDATE + SELECT version)
+        # Re-mock for save (SELECT config_json + UPDATE + SELECT version).
+        # _save_runtime_to_pg now reads current generation before writing (AC2).
+        snap_cursor = MagicMock()
+        snap_cursor.fetchone.return_value = {
+            "config_json": json.dumps(runtime_dict),
+            "version": 10,
+        }
         update_cursor = MagicMock()
         select_cursor = MagicMock()
         select_cursor.fetchone.return_value = {"version": 11}
-        mock_conn.execute.side_effect = [update_cursor, select_cursor]
+        mock_conn.execute.side_effect = [snap_cursor, update_cursor, select_cursor]
 
         config = svc.get_config()
         config.service_display_name = "ClusterSave"

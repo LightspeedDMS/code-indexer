@@ -1,16 +1,15 @@
-"""Test for Story #476: chunk_type parameter missing from filter_conditions.
+"""Test for Story #1290 AC12: chunk_type is a POST-filter, not a vector-store filter.
 
-ROOT CAUSE:
-The query_temporal() method accepts chunk_type parameter but never adds it
-to filter_conditions that are passed to the vector store search. This means:
-1. Vector store searches across ALL chunk types (commit_message AND commit_diff)
-2. Post-filter at line 635-639 tries to filter by chunk_type
-3. But if commit_message chunks aren't semantically similar enough to the query,
-   they never make it into the search results to be post-filtered
+Story #476 (pre-#1290) attempted to fix a chunk_type bug by pushing a
+`{"key": "type", ...}` condition into vector-store filter_conditions. That
+approach is now obsolete: Story #1290's per-commit payloads ALWAYS carry
+`type == "commit_chunk"` (a single constant, no longer "commit_message" vs
+"commit_diff"), so a `type`-keyed vector-store filter would match nothing.
 
-FIX:
-Add chunk_type to filter_conditions before calling vector_store.search()
-so the vector store only searches within the requested chunk type.
+chunk_type is instead validated up front (AC12: only "commit_message" or
+"commit_diff" accepted) and applied as an is_head-based POST-filter in
+_filter_by_time_range: "commit_message" keeps only head chunks; "commit_diff"
+is a no-op (matches all chunks). This test verifies that contract end-to-end.
 """
 
 from pathlib import Path
@@ -21,27 +20,22 @@ from code_indexer.services.temporal.temporal_search_service import (
 )
 
 
-def test_chunk_type_added_to_filter_conditions():
-    """Test that chunk_type parameter is added to filter_conditions for vector store.
-
-    This is the root cause test. The bug is that chunk_type is accepted as a
-    parameter but never added to filter_conditions, so the vector store searches
-    across ALL chunk types instead of filtering at the vector store level.
-    """
+def test_chunk_type_is_not_pushed_as_a_type_match_filter_condition():
+    """chunk_type must NOT be converted into a `{"key": "type", ...}` vector-store
+    filter -- every payload's `type` is the constant "commit_chunk" post-#1290,
+    so such a filter would always match zero rows."""
     # Setup
     config_manager = Mock()
     project_root = Path("/fake/project")
 
-    # Mock vector store client to capture filter_conditions
-    # Return a single mock result to avoid RuntimeError from empty results
-    # Note: For non-FilesystemVectorStore mocks, search() returns list directly (not tuple)
     mock_result = {
         "id": "test:commit:abc:0",
         "score": 0.85,
         "payload": {
-            "type": "commit_message",
+            "type": "commit_chunk",
+            "is_head": True,
             "commit_hash": "abc",
-            "path": "dummy",
+            "primary_path": "dummy",
             "commit_timestamp": 1704088800,
         },
         "chunk_text": "test content",
@@ -62,38 +56,32 @@ def test_chunk_type_added_to_filter_conditions():
     )
 
     # Execute query with chunk_type filter
-    service.query_temporal(
+    results = service.query_temporal(
         query="temporal",
         time_range=ALL_TIME_RANGE,
-        chunk_type="commit_message",  # This should be added to filter_conditions
+        chunk_type="commit_message",  # AC12: is_head-based POST-filter
         limit=10,
     )
 
-    # Verify vector_store.search was called
     assert vector_store_client.search.called, (
         "Vector store search should have been called"
     )
 
-    # Get the filter_conditions that were passed to the vector store
     call_args = vector_store_client.search.call_args
     filter_conditions = (
         call_args[1].get("filter_conditions", {}) if call_args[1] else {}
     )
-
-    # ASSERTION: filter_conditions should contain chunk_type filter
-    # This will FAIL with current implementation
     must_conditions = filter_conditions.get("must", [])
 
-    # Look for a condition that filters by type field
     type_filter_found = any(
-        condition.get("key") == "type"
-        and condition.get("match", {}).get("value") == "commit_message"
-        for condition in must_conditions
+        condition.get("key") == "type" for condition in must_conditions
+    )
+    assert not type_filter_found, (
+        f"chunk_type must NOT be pushed as a `type`-keyed vector-store filter "
+        f"(every payload's type is the constant 'commit_chunk' post-#1290); "
+        f"got filter_conditions: {filter_conditions}"
     )
 
-    assert type_filter_found, (
-        f"Expected chunk_type filter in filter_conditions, but got: {filter_conditions}\n"
-        f"The chunk_type='commit_message' parameter should be converted to:\n"
-        f"  {{'key': 'type', 'match': {{'value': 'commit_message'}}}}\n"
-        f"and added to filter_conditions['must'] before calling vector_store.search()"
-    )
+    # And the post-filter still correctly returns the head-chunk result.
+    assert len(results.results) == 1
+    assert results.results[0].metadata["is_head"] is True

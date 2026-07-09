@@ -83,10 +83,11 @@ class TestAC1LoaderGuards:
 class TestAC1CanonicalFields:
     """AC1: ScipConfig retains canonical fields removed from IndexingConfig."""
 
-    def test_scip_config_retains_indexing_timeout_seconds(self, default_config):
-        """ScipConfig.indexing_timeout_seconds must remain as canonical field."""
+    def test_scip_config_no_longer_has_indexing_timeout_seconds(self, default_config):
+        """Bug #1218: indexing_timeout_seconds was removed from ScipConfig.
+        Overarching job timeouts caused large-repo indexing to be killed mid-flight."""
         assert default_config.scip_config is not None
-        assert hasattr(default_config.scip_config, "indexing_timeout_seconds")
+        assert not hasattr(default_config.scip_config, "indexing_timeout_seconds")
 
     def test_scip_config_retains_temporal_stale_threshold_days(self, default_config):
         """ScipConfig.temporal_stale_threshold_days must remain as canonical field."""

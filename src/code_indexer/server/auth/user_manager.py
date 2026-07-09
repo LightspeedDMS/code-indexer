@@ -196,29 +196,13 @@ class UserManager:
             # SQLite backend (Story #702)
             existing = self._sqlite_backend.get_user("admin")
             if existing is None:
-                # Create initial admin user. Idempotent under concurrency: with
-                # multiple uvicorn workers (or pods) cold-starting a fresh DB,
-                # several can pass the get_user()==None check and race to INSERT.
-                # The loser hits a unique-constraint violation -- treat "admin
-                # already exists after our attempt" as success rather than
-                # crashing the worker (the previous behaviour: UniqueViolation on
-                # users_pkey took the worker down on first boot).
+                # Create initial admin user
                 admin_password_hash = self.password_manager.hash_password("admin")
-                try:
-                    self._sqlite_backend.create_user(
-                        username="admin",
-                        password_hash=admin_password_hash,
-                        role="admin",
-                    )
-                except Exception:
-                    if self._sqlite_backend.get_user("admin") is None:
-                        raise  # genuine failure, not a lost seed race
-                    import logging
-
-                    logging.getLogger(__name__).info(
-                        "seed_initial_admin: admin already created by a "
-                        "concurrent starter; continuing"
-                    )
+                self._sqlite_backend.create_user(
+                    username="admin",
+                    password_hash=admin_password_hash,
+                    role="admin",
+                )
         else:
             # JSON file storage (backward compatible)
             users_data = self._load_users()
@@ -706,6 +690,7 @@ class UserManager:
         key_prefix: str,
         name: Optional[str],
         created_at: str,
+        key_sha256: Optional[str] = None,
     ) -> bool:
         """
         Add an API key to user's api_keys array.
@@ -713,10 +698,12 @@ class UserManager:
         Args:
             username: Username
             key_id: Unique key ID
-            key_hash: Hashed API key
+            key_hash: Hashed API key (bcrypt)
             key_prefix: Key prefix for display (e.g., "cidx_sk_a1b2")
             name: Optional name for the key
             created_at: ISO format timestamp
+            key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+                (Bug #1144). None for legacy callers.
 
         Returns:
             True if added, False if user not found
@@ -733,6 +720,7 @@ class UserManager:
                 key_hash=key_hash,
                 key_prefix=key_prefix,
                 name=name,
+                key_sha256=key_sha256,
             )
             return True
         else:
@@ -742,17 +730,51 @@ class UserManager:
                 return False
             if "api_keys" not in users_data[username]:
                 users_data[username]["api_keys"] = []
-            users_data[username]["api_keys"].append(
-                {
-                    "key_id": key_id,
-                    "name": name,
-                    "hash": key_hash,
-                    "key_prefix": key_prefix,
-                    "created_at": created_at,
-                }
-            )
+            entry: Dict[str, Any] = {
+                "key_id": key_id,
+                "name": name,
+                "hash": key_hash,
+                "key_prefix": key_prefix,
+                "created_at": created_at,
+            }
+            if key_sha256 is not None:
+                entry["key_sha256"] = key_sha256
+            users_data[username]["api_keys"].append(entry)
             self._save_users(users_data)
             return True
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """
+        Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed lookup — no bcrypt scanning. Returns None when not found
+        (including legacy rows with no key_sha256).
+
+        NEVER cached — live DB read so revocation takes effect immediately.
+
+        Args:
+            sha256_hex: SHA-256 hex digest of the raw API key
+
+        Returns:
+            Dict with key_id, username, key_hash (and other metadata) or None.
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            return self._sqlite_backend.get_api_key_by_sha256(sha256_hex)  # type: ignore[no-any-return]
+
+        # JSON file storage (backward compatible) — iterate all users/keys
+        users_data = self._load_users()
+        for username, user_data in users_data.items():
+            for key_entry in user_data.get("api_keys", []):
+                if key_entry.get("key_sha256") == sha256_hex:
+                    return {
+                        "key_id": key_entry["key_id"],
+                        "username": username,
+                        "key_hash": key_entry.get("hash", ""),
+                        "key_prefix": key_entry.get("key_prefix", ""),
+                        "name": key_entry.get("name"),
+                        "created_at": key_entry.get("created_at", ""),
+                    }
+        return None
 
     def get_api_keys(self, username: str) -> List[Dict[str, Any]]:
         """

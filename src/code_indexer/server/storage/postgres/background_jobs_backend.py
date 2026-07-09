@@ -16,10 +16,29 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+
+# ---------------------------------------------------------------------------
+# Deadlock retry constants (Bug #1235 GAP B)
+# ---------------------------------------------------------------------------
+
+# PG SQLSTATE codes that indicate a transient locking conflict — safe to retry.
+_RETRYABLE_PG_SQLSTATES = frozenset(
+    {
+        "40P01",  # deadlock_detected
+        "40001",  # serialization_failure
+    }
+)
+
+# Maximum retry attempts for update_job on a transient PG locking failure.
+_UPDATE_JOB_MAX_RETRIES = 3
+
+# Base backoff in seconds; each retry waits attempt_index * _UPDATE_JOB_BACKOFF_BASE.
+_UPDATE_JOB_BACKOFF_BASE = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +72,8 @@ _SELECT_COLS = """
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
     language_resolution_status, progress_info, metadata,
-    executing_node, claimed_at, current_phase, phase_detail
+    executing_node, claimed_at, current_phase, phase_detail,
+    actor_username
 """
 
 
@@ -119,11 +139,13 @@ class BackgroundJobsPostgresBackend:
             "extended_error": _json_col(row[16]),
             "language_resolution_status": _json_col(row[17]),
             "progress_info": row[18] if len(row) > 18 else None,
-            "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
+            "metadata": _json_col(row[19]) if len(row) > 19 else None,
             "executing_node": row[20] if len(row) > 20 else None,
             "claimed_at": row[21] if len(row) > 21 else None,
             "current_phase": row[22] if len(row) > 22 else None,
             "phase_detail": row[23] if len(row) > 23 else None,
+            # Story #1032 AC12: actor_username audit trail
+            "actor_username": row[24] if len(row) > 24 else None,
         }
 
     # ------------------------------------------------------------------
@@ -156,6 +178,7 @@ class BackgroundJobsPostgresBackend:
         claimed_at: Optional[str] = None,
         current_phase: Optional[str] = None,
         phase_detail: Optional[str] = None,
+        actor_username: Optional[str] = None,
     ) -> None:
         """Insert a new background job row.
 
@@ -176,7 +199,8 @@ class BackgroundJobsPostgresBackend:
                             failure_reason, extended_error, language_resolution_status,
                             progress_info, metadata,
                             executing_node, claimed_at,
-                            current_phase, phase_detail
+                            current_phase, phase_detail,
+                            actor_username
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s,
@@ -184,8 +208,10 @@ class BackgroundJobsPostgresBackend:
                             %s, %s, %s,
                             %s, %s,
                             %s, %s,
-                            %s, %s
+                            %s, %s,
+                            %s
                         )
+                        ON CONFLICT (job_id) DO NOTHING
                         """,
                         (
                             job_id,
@@ -218,16 +244,15 @@ class BackgroundJobsPostgresBackend:
                                 if language_resolution_status is not None
                                 else None
                             ),
-                            (
-                                json.dumps(progress_info)
-                                if isinstance(progress_info, dict)
-                                else progress_info
-                            ),
+                            json.dumps(progress_info)
+                            if isinstance(progress_info, dict)
+                            else progress_info,
                             json.dumps(metadata) if metadata is not None else None,
                             executing_node,
                             claimed_at,
                             current_phase,
                             phase_detail,
+                            actor_username,
                         ),
                     )
         except Exception as exc:
@@ -246,6 +271,74 @@ class BackgroundJobsPostgresBackend:
                 raise
             raise
         logger.debug("Saved background job: %s", job_id)
+
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT that surfaces violations.
+
+        The Postgres save_job already uses a plain INSERT (ON CONFLICT (job_id)
+        DO NOTHING covers only PK collisions, not the partial unique index
+        idx_active_job_per_repo). So duplicate active-job violations already raise
+        UniqueViolation. This method is the Protocol-compliant entry point that
+        job_tracker._atomic_insert_impl uses on the backend path.
+
+        Raises:
+            psycopg.errors.UniqueViolation: When idx_active_job_per_repo rejects
+                the INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+        self.save_job(
+            job_id=job_id,
+            operation_type=operation_type,
+            status=status,
+            created_at=created_at,
+            username=username,
+            progress=progress,
+            started_at=started_at,
+            completed_at=completed_at,
+            result=result,
+            error=error,
+            is_admin=is_admin,
+            cancelled=cancelled,
+            repo_alias=repo_alias,
+            resolution_attempts=resolution_attempts,
+            claude_actions=claude_actions,
+            failure_reason=failure_reason,
+            extended_error=extended_error,
+            language_resolution_status=language_resolution_status,
+            current_phase=current_phase,
+            phase_detail=phase_detail,
+            progress_info=progress_info,
+            metadata=metadata,
+            executing_node=executing_node,
+            claimed_at=claimed_at,
+            actor_username=actor_username,
+        )
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Return job dict by job_id, or None if not found."""
@@ -277,6 +370,7 @@ class BackgroundJobsPostgresBackend:
             "claude_actions",
             "extended_error",
             "language_resolution_status",
+            "metadata",
         }
         updates: List[str] = []
         params: List[Any] = []
@@ -308,9 +402,63 @@ class BackgroundJobsPostgresBackend:
             params.append(executing_node)
 
         sql = f"UPDATE background_jobs SET {', '.join(updates)} {where}"
+
+        # Bug #1235 GAP B: PG deadlock/serialization failures on background_jobs
+        # writes are transient under multi-worker concurrent access.  Retry up to
+        # _UPDATE_JOB_MAX_RETRIES times with a fresh connection each attempt.
+        # Non-retryable errors propagate immediately without retry.
+        #
+        # Detection: psycopg3 exposes the SQLSTATE as exc.sqlstate on its error
+        # classes.  We also accept the instance-level attribute for forward compat.
+        def _is_retryable(exc: BaseException) -> bool:
+            """Return True if *exc* is a transient PG locking error worth retrying."""
+            sqlstate = getattr(exc, "sqlstate", None)
+            if sqlstate in _RETRYABLE_PG_SQLSTATES:
+                return True
+            # Fallback: check via psycopg error class names (import may fail in tests)
+            try:
+                import psycopg.errors as _pge
+
+                return isinstance(
+                    exc, (_pge.DeadlockDetected, _pge.SerializationFailure)
+                )
+            except ImportError:
+                return False
+
+        last_exc: Optional[BaseException] = None
+        for attempt in range(_UPDATE_JOB_MAX_RETRIES):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, params)
+                return  # success — exit retry loop
+            except Exception as exc:
+                if not _is_retryable(exc):
+                    raise  # non-transient — propagate immediately
+                last_exc = exc
+                if attempt < _UPDATE_JOB_MAX_RETRIES - 1:
+                    logger.warning(
+                        "update_job: PG deadlock/serialization on attempt %d "
+                        "(job_id=%s, sqlstate=%s); retrying",
+                        attempt + 1,
+                        job_id,
+                        getattr(exc, "sqlstate", type(exc).__name__),
+                    )
+                    time.sleep((attempt + 1) * _UPDATE_JOB_BACKOFF_BASE)
+        # All retries exhausted — re-raise the last deadlock/serialization error
+        raise last_exc  # type: ignore[misc]
+
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed. Called on startup."""
+        sql = (
+            "UPDATE background_jobs SET status = 'failed', error = %s, "
+            "completed_at = NOW() "
+            "WHERE status IN ('running', 'pending')"
+        )
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, params)
+                cur.execute(sql, (error,))
+                return int(cur.rowcount)
 
     def list_jobs(
         self,
@@ -319,6 +467,7 @@ class BackgroundJobsPostgresBackend:
         operation_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List background jobs with optional filtering and pagination."""
         conditions: List[str] = []
@@ -333,6 +482,12 @@ class BackgroundJobsPostgresBackend:
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)
+        if exclude_operation_types:
+            placeholders = ", ".join(["%s"] * len(exclude_operation_types))
+            conditions.append(
+                f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+            )
+            params.extend(exclude_operation_types)
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
@@ -347,22 +502,40 @@ class BackgroundJobsPostgresBackend:
                 rows = cur.fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def list_jobs_filtered(
-        self,
+    # Safety cap for list_job_ids_filtered: worst-case upper bound.
+    # At 14k jobs/day with 30-day retention the table holds ~420k rows; a cap
+    # of 50,000 is an order-of-magnitude ceiling that keeps the query bounded.
+    _JOB_IDS_CAP = 50_000
+
+    @staticmethod
+    def _build_jobs_filter_where(
         status: Optional[str] = None,
         operation_type: Optional[str] = None,
         search_text: Optional[str] = None,
+        username: Optional[str] = None,
         exclude_ids: Optional[Any] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
     ) -> tuple:
-        """
-        Return (list_of_job_dicts, total_count) with dynamic WHERE filters.
+        """Build the WHERE clause and params list for background_jobs queries.
 
-        Mirrors BackgroundJobsSqliteBackend.list_jobs_filtered() behaviour.
+        Uses %s paramstyle (PostgreSQL).  Returns (where_clause: str, params: list).
+        Both list_jobs_filtered and list_job_ids_filtered call this helper so
+        the filter logic cannot drift between the two methods.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            username: When set, scope results to this owner's jobs (H2 non-admin)
+            exclude_ids: Set of job_ids to exclude
         """
         conditions: List[str] = []
         params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = %s")
+            params.append(username)
 
         if status:
             conditions.append("status = %s")
@@ -386,6 +559,30 @@ class BackgroundJobsPostgresBackend:
             params.extend(exclude_list)
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        return where, params
+
+    def list_jobs_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        exclude_ids: Optional[Any] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        username: Optional[str] = None,
+    ) -> tuple:
+        """
+        Return (list_of_job_dicts, total_count) with dynamic WHERE filters.
+
+        Mirrors BackgroundJobsSqliteBackend.list_jobs_filtered() behaviour.
+        """
+        where, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+            exclude_ids=exclude_ids,
+        )
 
         # Total count (ignores limit/offset)
         count_sql = f"SELECT COUNT(*) FROM background_jobs{where}"
@@ -405,6 +602,46 @@ class BackgroundJobsPostgresBackend:
 
         jobs = [self._row_to_dict(r) for r in rows]
         return jobs, total_count
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set:
+        """Return the set of job_ids matching the given filters.
+
+        Uses the same WHERE clause as list_jobs_filtered (via
+        _build_jobs_filter_where) so the two methods cannot drift.
+
+        A safety cap (default _JOB_IDS_CAP = 50,000) is applied as LIMIT so
+        this query is always bounded regardless of table size.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match (same columns as list_jobs_filtered)
+            username: When set, scope results to this owner's jobs
+            cap: Override the default safety cap (for testing)
+
+        Returns:
+            set[str] of matching job_ids.
+        """
+        effective_cap = cap if cap is not None else self._JOB_IDS_CAP
+        where, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+        )
+        query = f"SELECT job_id FROM background_jobs{where} ORDER BY created_at DESC LIMIT %s"
+        params_with_cap = list(params) + [effective_cap]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params_with_cap)
+                return {row[0] for row in cur.fetchall()}
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID. Returns True if a row was deleted."""
@@ -515,6 +752,37 @@ class BackgroundJobsPostgresBackend:
         if count > 0:
             logger.info("Cleaned up %d orphaned jobs on server startup", count)
         return count
+
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering, no LIMIT/OFFSET on
+        the match itself (LIMIT 1 is applied only to cap the result to one row).
+        Called by JobTracker._find_blocking_active_job_id after a unique-index
+        violation to locate the blocking row without risking a pagination miss
+        (Bug #1220).
+
+        Args:
+            operation_type: Operation type to match exactly.
+            repo_alias: Repository alias to match exactly.
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        sql = (
+            "SELECT job_id FROM background_jobs "
+            "WHERE operation_type = %s AND repo_alias = %s "
+            "AND status IN ('pending', 'running') LIMIT 1"
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (operation_type, repo_alias))
+                row = cur.fetchone()
+        return str(row[0]) if row is not None else None
 
     def close(self) -> None:
         """Close the underlying connection pool."""

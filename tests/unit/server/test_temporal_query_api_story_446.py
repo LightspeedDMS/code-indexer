@@ -3,10 +3,13 @@ Unit tests for Temporal Query API parameters (Story #446).
 
 Tests the REST API integration of temporal parameters:
 - time_range: Time range filter (YYYY-MM-DD..YYYY-MM-DD)
-- at_commit: Query at specific commit
-- include_removed: Include deleted files
-- show_evolution: Show code evolution timeline
-- evolution_limit: Limit evolution entries
+- at_commit: Query at specific commit (point-in-time scoping, Bug #1301)
+
+Bug #1301: `include_removed`, `show_evolution`, and `evolution_limit` were
+retired -- they were advertised but were permanent silent no-ops on the
+per-commit temporal index (Epic #1289). They no longer exist on
+SemanticQueryRequest. Per-file diff timelines belong to the existing git
+tools (git_file_history, git_log, git_blame, git_diff) instead.
 
 TDD Cycle:
 1. Write failing tests for each acceptance criterion
@@ -15,7 +18,6 @@ TDD Cycle:
 """
 
 import pytest
-from pydantic import ValidationError
 
 try:
     from code_indexer.server.app import SemanticQueryRequest
@@ -64,97 +66,23 @@ class TestTemporalParametersStory446:
         # Assert
         assert request.at_commit is None
 
-    def test_include_removed_parameter_exists(self):
-        """AC3: Test include_removed parameter exists on SemanticQueryRequest"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test query", include_removed=True)
+    def test_temporal_parameters_combined(self):
+        """AC6: Test time_range and at_commit can be used together.
 
-        # Assert
-        assert hasattr(request, "include_removed")
-        assert request.include_removed is True
-
-    def test_include_removed_parameter_defaults_false(self):
-        """AC3: Test include_removed defaults to False"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test")
-
-        # Assert
-        assert request.include_removed is False
-
-    def test_show_evolution_parameter_exists(self):
-        """AC4: Test show_evolution parameter exists on SemanticQueryRequest"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test query", show_evolution=True)
-
-        # Assert
-        assert hasattr(request, "show_evolution")
-        assert request.show_evolution is True
-
-    def test_show_evolution_parameter_defaults_false(self):
-        """AC4: Test show_evolution defaults to False"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test")
-
-        # Assert
-        assert request.show_evolution is False
-
-    def test_evolution_limit_parameter_exists(self):
-        """AC5: Test evolution_limit parameter exists on SemanticQueryRequest"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test query", evolution_limit=10)
-
-        # Assert
-        assert hasattr(request, "evolution_limit")
-        assert request.evolution_limit == 10
-
-    def test_evolution_limit_parameter_optional(self):
-        """AC5: Test evolution_limit is optional (defaults to None)"""
-        # Arrange & Act
-        request = SemanticQueryRequest(query_text="test")
-
-        # Assert
-        assert request.evolution_limit is None
-
-    def test_evolution_limit_validation_positive(self):
-        """AC5: Test evolution_limit must be >= 1"""
-        # Arrange, Act & Assert - valid value
-        request = SemanticQueryRequest(query_text="test", evolution_limit=1)
-        assert request.evolution_limit == 1
-
-    def test_evolution_limit_validation_rejects_zero(self):
-        """AC5: Test evolution_limit rejects 0"""
-        # Arrange, Act & Assert
-        with pytest.raises(ValidationError) as exc_info:
-            SemanticQueryRequest(query_text="test", evolution_limit=0)
-        error_msg = str(exc_info.value)
-        assert "evolution_limit" in error_msg.lower()
-
-    def test_evolution_limit_validation_rejects_negative(self):
-        """AC5: Test evolution_limit rejects negative values"""
-        # Arrange, Act & Assert
-        with pytest.raises(ValidationError) as exc_info:
-            SemanticQueryRequest(query_text="test", evolution_limit=-5)
-        error_msg = str(exc_info.value)
-        assert "evolution_limit" in error_msg.lower()
-
-    def test_all_temporal_parameters_combined(self):
-        """AC6: Test all 5 temporal parameters can be used together"""
+        Bug #1301: this previously combined 5 params (including the now-
+        retired include_removed/show_evolution/evolution_limit); narrowed
+        to the 2 params that still exist.
+        """
         # Arrange & Act
         request = SemanticQueryRequest(
             query_text="authentication logic",
             time_range="2024-01-01..2024-12-31",
             at_commit="main",
-            include_removed=True,
-            show_evolution=True,
-            evolution_limit=5,
         )
 
         # Assert
         assert request.time_range == "2024-01-01..2024-12-31"
         assert request.at_commit == "main"
-        assert request.include_removed is True
-        assert request.show_evolution is True
-        assert request.evolution_limit == 5
 
     def test_temporal_parameters_backward_compatible(self):
         """AC7: Test backward compatibility - existing queries work without temporal params"""
@@ -169,9 +97,6 @@ class TestTemporalParametersStory446:
         # Assert - temporal parameters use defaults
         assert request.time_range is None
         assert request.at_commit is None
-        assert request.include_removed is False
-        assert request.show_evolution is False
-        assert request.evolution_limit is None
 
     def test_temporal_parameters_with_fts_mode(self):
         """AC8: Test temporal parameters work with FTS search mode"""
@@ -190,14 +115,12 @@ class TestTemporalParametersStory446:
         request = SemanticQueryRequest(
             query_text="test",
             search_mode="hybrid",
-            show_evolution=True,
-            evolution_limit=3,
+            at_commit="main",
         )
 
         # Assert
         assert request.search_mode == "hybrid"
-        assert request.show_evolution is True
-        assert request.evolution_limit == 3
+        assert request.at_commit == "main"
 
 
 class TestTemporalParameterDescriptions:
@@ -220,36 +143,6 @@ class TestTemporalParameterDescriptions:
         assert field is not None
         assert field.description is not None
         assert "commit" in field.description.lower()
-
-    def test_include_removed_has_description(self):
-        """Test include_removed parameter has description"""
-        from code_indexer.server.app import SemanticQueryRequest
-
-        field = SemanticQueryRequest.model_fields.get("include_removed")
-        assert field is not None
-        assert field.description is not None
-        assert "removed" in field.description.lower()
-
-    def test_show_evolution_has_description(self):
-        """Test show_evolution parameter has description"""
-        from code_indexer.server.app import SemanticQueryRequest
-
-        field = SemanticQueryRequest.model_fields.get("show_evolution")
-        assert field is not None
-        assert field.description is not None
-        assert "evolution" in field.description.lower()
-
-    def test_evolution_limit_has_description(self):
-        """Test evolution_limit parameter has description"""
-        from code_indexer.server.app import SemanticQueryRequest
-
-        field = SemanticQueryRequest.model_fields.get("evolution_limit")
-        assert field is not None
-        assert field.description is not None
-        assert (
-            "evolution" in field.description.lower()
-            or "limit" in field.description.lower()
-        )
 
 
 class TestWarningFieldManualTestIssue1:
@@ -334,26 +227,21 @@ class TestValidationErrorSurfacingManualTestIssue2:
         # which endpoint should catch and convert to HTTP 400
 
     def test_invalid_at_commit_returns_400(self):
-        """Test invalid at_commit (non-existent commit) should return HTTP 400"""
-        # This test validates the endpoint behavior
-        # Backend should raise ValueError for invalid commit references
-        # Endpoint should catch and convert to HTTP 400
+        """Test invalid at_commit (non-existent commit) should return HTTP 400.
+
+        Bug #1301: at_commit is now actually resolved+validated via
+        resolve_commit_timestamp() (see
+        tests/unit/services/temporal/test_at_commit_scoping_1301.py for the
+        real ValueError-raising behavior against a real git repo). This test
+        keeps documenting the REST-model-level acceptance of the field.
+        """
         from code_indexer.server.app import SemanticQueryRequest
 
         # Valid format should work
         request = SemanticQueryRequest(query_text="test", at_commit="main")
         assert request.at_commit == "main"
 
-        # Note: Backend validation of commit existence happens in query_user_repositories
-        # Invalid commits should trigger ValueError which endpoint catches
-
-    def test_invalid_evolution_limit_zero_caught_by_pydantic(self):
-        """Test evolution_limit=0 is already caught by Pydantic validation"""
-        from code_indexer.server.app import SemanticQueryRequest
-
-        # evolution_limit=0 should be rejected by Pydantic
-        with pytest.raises(ValidationError) as exc_info:
-            SemanticQueryRequest(query_text="test", evolution_limit=0)
-
-        error_msg = str(exc_info.value)
-        assert "evolution_limit" in error_msg.lower()
+        # Note: Backend validation of commit existence happens in
+        # resolve_commit_timestamp() (temporal_search_service.py), called
+        # from execute_temporal_query_with_fusion(). Invalid commits raise
+        # ValueError which the endpoint catches and converts to HTTP 400.

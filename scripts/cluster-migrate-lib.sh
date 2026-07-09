@@ -102,21 +102,34 @@ validate_local_paths() {
 }
 
 validate_nfs_mount() {
-    # In dry-run mode, skip live NFS validation — print intent only.
+    # Storage node hosts shared storage locally; other nodes use NFS.
+    local dry_msg missing_msg not_writable_msg ok_msg
+    if $IS_STORAGE_NODE; then
+        dry_msg="Storage node: would validate local path at $ONTAP_MOUNT (no NFS self-mount)"
+        missing_msg="Storage node local path does not exist: $ONTAP_MOUNT"
+        not_writable_msg="Storage node local path is not writable: $ONTAP_MOUNT"
+        ok_msg="Storage node: using local path (no NFS self-mount): $ONTAP_MOUNT"
+    else
+        dry_msg="Would validate NFS mount at $ONTAP_MOUNT"
+        missing_msg="NFS mount point does not exist or is not mounted: $ONTAP_MOUNT"
+        not_writable_msg="NFS mount is not writable: $ONTAP_MOUNT"
+        ok_msg="NFS mount is accessible and writable: $ONTAP_MOUNT"
+    fi
+
     if $DRY_RUN; then
-        log_dry "Would validate NFS mount at $ONTAP_MOUNT"
+        log_dry "$dry_msg"
         return
     fi
     if [[ ! -d "$ONTAP_MOUNT" ]]; then
-        _prereq_error "NFS mount point does not exist or is not mounted: $ONTAP_MOUNT"
+        _prereq_error "$missing_msg"
         return
     fi
     local test_file="${ONTAP_MOUNT}/.cidx-migrate-test-$$"
     if ! touch "$test_file" 2>/dev/null; then
-        _prereq_error "NFS mount is not writable: $ONTAP_MOUNT"
+        _prereq_error "$not_writable_msg"
     else
         rm -f "$test_file"
-        log_info "NFS mount is accessible and writable: $ONTAP_MOUNT"
+        log_info "$ok_msg"
     fi
 }
 

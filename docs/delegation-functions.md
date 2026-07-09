@@ -128,7 +128,7 @@ Configure delegation via the CIDX Web UI (Settings > Claude Delegation) or direc
   "claude_server_credential_type": "password",
   "claude_server_credential": "<encrypted>",
   "skip_ssl_verify": false,
-  "cidx_callback_url": "http://cidx-server.internal:8000"
+  "cidx_callback_url": "http://cidx-server.internal:8090"
 }
 ```
 

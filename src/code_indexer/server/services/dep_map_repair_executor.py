@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
+from code_indexer.server.services.jittered_dispatcher import (
+    DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS,
+    sleep_with_jitter,
+)
+
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
 
@@ -51,6 +56,7 @@ from code_indexer.server.services.dep_map_repair_phase37 import (
     run_phase37,
 )
 from code_indexer.server.services.dep_map_repair_malformed_yaml import (
+    repair_single_malformed_yaml_anomaly,
     run_malformed_yaml_repairs,
 )
 from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
@@ -66,7 +72,7 @@ from code_indexer.server.services.dep_map_file_utils import (
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
 )
 from code_indexer.server.services.dep_map_health_detector import (
-    REPAIRABLE_ANOMALY_TYPES,
+    PHASE1_REANALYSIS_ANOMALY_TYPES,
     DepMapHealthDetector,
     HealthReport,
 )
@@ -420,7 +426,7 @@ class DepMapRepairExecutor:
         broken_domains = [
             a
             for a in health_report.anomalies
-            if a.type in REPAIRABLE_ANOMALY_TYPES and a.domain is not None
+            if a.type in PHASE1_REANALYSIS_ANOMALY_TYPES and a.domain is not None
         ]
 
         if not broken_domains:
@@ -428,7 +434,10 @@ class DepMapRepairExecutor:
 
         domain_list = self._load_domains_json(output_dir)
 
-        for anomaly in broken_domains:
+        for anomaly_idx, anomaly in enumerate(broken_domains):
+            # Bug #1056: jitter between Claude CLI calls to avoid thundering-herd.
+            if anomaly_idx > 0:
+                sleep_with_jitter(DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS)
             domain_info = next(
                 (d for d in domain_list if d.get("name") == anomaly.domain), None
             )
@@ -441,13 +450,15 @@ class DepMapRepairExecutor:
 
             for attempt in range(1, self.MAX_DOMAIN_RETRIES + 1):
                 try:
-                    # Bug B fix: delete broken file before analyzer runs,
-                    # so Claude starts fresh rather than building on broken content
-                    domain_file = output_dir / f"{anomaly.domain}.md"
-                    if domain_file.exists():
-                        domain_file.unlink()
-                        self._log(f"Removed broken domain file: {anomaly.domain}")
-
+                    # Bug #1260 fix: do NOT delete the broken domain file before
+                    # the analyzer runs. Deleting it here defeated the
+                    # previous_domain_dir "EXTEND, IMPROVE, and CORRECT" reuse
+                    # block (Story #342 Bug 2) -- that block is gated on the
+                    # domain file existing, so pre-emptively unlinking it made
+                    # the reuse plumbing permanently dead code. Leaving the
+                    # file in place lets the analyzer see and build upon the
+                    # existing (possibly partially correct) content instead of
+                    # always regenerating the domain from scratch.
                     self._domain_analyzer(output_dir, domain_info, domain_list, [])
                     domain_file = output_dir / f"{anomaly.domain}.md"
                     if domain_file.exists() and domain_file.stat().st_size > 0:
@@ -949,6 +960,8 @@ class DepMapRepairExecutor:
         """
         from pathlib import Path as _Path
 
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
+
         prompt_template_path = (
             _Path(__file__).parent.parent
             / "mcp"
@@ -956,22 +969,26 @@ class DepMapRepairExecutor:
             / "bidirectional_mismatch_audit.md"
         )
         journal = None if journal_disabled else RepairJournal()
-        audit_one_bidirectional_mismatch(
-            output_dir=output_dir,
-            anomaly=anomaly,
-            domains_json=domains_json,
-            invoke_llm_fn=self._invoke_llm_fn,
-            repo_path_resolver=self._repo_path_resolver,
-            journal=journal,
-            fixed=fixed,
-            errors=errors,
-            prompt_template_path=prompt_template_path,
-            dry_run=dry_run,
-            effective_mode=effective_mode,
-            would_be_writes=would_be_writes,
-            extra_verdict_counts=extra_verdict_counts,
-            extra_action_counts=extra_action_counts,
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
         )
+        for example in examples:
+            audit_one_bidirectional_mismatch(
+                output_dir=output_dir,
+                anomaly=example,
+                domains_json=domains_json,
+                invoke_llm_fn=self._invoke_llm_fn,
+                repo_path_resolver=self._repo_path_resolver,
+                journal=journal,
+                fixed=fixed,
+                errors=errors,
+                prompt_template_path=prompt_template_path,
+                dry_run=dry_run,
+                effective_mode=effective_mode,
+                would_be_writes=would_be_writes,
+                extra_verdict_counts=extra_verdict_counts,
+                extra_action_counts=extra_action_counts,
+            )
 
     def _repair_self_loop(
         self,
@@ -986,7 +1003,34 @@ class DepMapRepairExecutor:
         """Remove one SELF_LOOP row from a domain .md file and journal the repair.
 
         Delegates to phase37 step functions. Never raises (AC8). Idempotent (AC4).
+        Handles both AnomalyEntry and AnomalyAggregate (Bug #1054).
         """
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
+
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
+        )
+        for example in examples:
+            self._repair_self_loop_one(
+                output_dir=output_dir,
+                anomaly=example,
+                fixed=fixed,
+                errors=errors,
+                journal_path=journal_path,
+                journal=journal,
+            )
+
+    def _repair_self_loop_one(
+        self,
+        output_dir: Path,
+        anomaly: "AnomalyEntry",
+        fixed: List[str],
+        errors: List[str],
+        *,
+        journal_path: Optional[Path] = None,
+        journal: Optional["RepairJournal"] = None,
+    ) -> None:
+        """Repair a single SELF_LOOP AnomalyEntry."""
         raw_file = anomaly.file
         if ".." in raw_file:
             errors.append(f"Phase 3.7: unsafe path rejected (traversal): {raw_file!r}")
@@ -1038,22 +1082,26 @@ class DepMapRepairExecutor:
 
         All logic lives in dep_map_repair_malformed_yaml.repair_single_malformed_yaml_anomaly.
         Domain lock is acquired inside rewrite_malformed_yaml_file (Story #917).
+        Handles both AnomalyEntry and AnomalyAggregate (Bug #1054).
         """
-        from code_indexer.server.services.dep_map_repair_malformed_yaml import (
-            repair_single_malformed_yaml_anomaly,
-        )
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
 
-        repair_single_malformed_yaml_anomaly(
-            output_dir,
-            anomaly,
-            self._load_domains_json(output_dir),
-            fixed,
-            errors,
-            domain_analyzer=self._domain_analyzer,
-            log_fn=self._log,
-            locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
-            is_safe_domain_name_fn=self._is_safe_domain_name,
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
         )
+        domains_json = self._load_domains_json(output_dir)
+        for example in examples:
+            repair_single_malformed_yaml_anomaly(
+                output_dir,
+                example,
+                domains_json,
+                fixed,
+                errors,
+                domain_analyzer=self._domain_analyzer,
+                log_fn=self._log,
+                locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
+                is_safe_domain_name_fn=self._is_safe_domain_name,
+            )
 
     @staticmethod
     def _extract_prose_fragment(message: str) -> str:

@@ -16,6 +16,8 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -81,7 +83,9 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
-            username=user.username, user_alias=user_alias
+            username=user.username,
+            user_alias=user_alias,
+            actor_username=user.username,  # AC12: MCP caller is both actor and owner
         )
         return _mcp_response(
             {
@@ -567,6 +571,7 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
 
 
 # Story #196: Whitelist of MCP-relevant fields for activated repos
+# Story #1032 AC4: deactivation_job added — null or {job_id, status}
 _ACTIVATED_REPO_FIELDS = {
     "user_alias",
     "golden_repo_alias",
@@ -577,7 +582,49 @@ _ACTIVATED_REPO_FIELDS = {
     "repo_category",
     "is_composite",
     "golden_repo_aliases",
+    "deactivation_job",
 }
+
+# Maximum jobs to fetch when building deactivation map for list_repositories.
+_MCP_DEACT_JOB_LOOKUP_LIMIT = 500
+
+
+def _build_mcp_deactivating_map() -> dict:
+    """Build a map from (username, repo_alias) -> {job_id, status} for active deactivations.
+
+    Returns empty dict when background_job_manager is unavailable or on any error.
+    Fetches with is_admin=True so admin-submitted deactivations appear for all users.
+    Filters client-side for operation_type=deactivate_repository and pending/running status.
+    """
+    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    if bjm is None:
+        return {}
+    try:
+        result = bjm.list_jobs(
+            username="",
+            is_admin=True,
+            limit=_MCP_DEACT_JOB_LOOKUP_LIMIT,
+            offset=0,
+        )
+        deact_map: dict = {}
+        for job in result.get("jobs", []):
+            if job.get("operation_type") != "deactivate_repository":
+                continue
+            if job.get("status") not in ("pending", "running"):
+                continue
+            repo_alias = job.get("repo_alias")
+            username = job.get("username")
+            if repo_alias and username:
+                deact_map[(username, repo_alias)] = {
+                    "job_id": job["job_id"],
+                    "status": job["status"],
+                }
+        return deact_map
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch deactivation jobs for MCP repo listing: %s", exc
+        )
+        return {}
 
 
 def _load_global_repos_normalized() -> list:
@@ -669,6 +716,15 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 user.username
             )
         )
+
+        # AC4 (Story #1032): annotate each raw repo with deactivation_job before
+        # field-stripping so the whitelisted field passes through.
+        deact_map = _build_mcp_deactivating_map()
+        for repo in raw_activated:
+            repo_alias = repo.get("user_alias", "")
+            repo_username = repo.get("username", user.username)
+            repo["deactivation_job"] = deact_map.get((repo_username, repo_alias))
+
         activated_repos = [
             {k: v for k, v in repo.items() if k in _ACTIVATED_REPO_FIELDS}
             for repo in raw_activated
@@ -753,6 +809,27 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
         include_remote = params.get("include_remote", False)
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         repo_path, error_response = _resolve_branch_repo_path(repository_alias, user)
         if error_response is not None:
@@ -878,7 +955,11 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "job_id": None,
                 }
             )
-        if alias not in _utils.app_module.golden_repo_manager.golden_repos:
+        # Bug #1314: resolve via golden_repo_exists() (shared-backend-backed,
+        # reloads on a local cache miss) instead of a raw in-memory dict
+        # membership check, so a repo registered by ANOTHER worker/node in
+        # the cluster is found here too.
+        if not _utils.app_module.golden_repo_manager.golden_repo_exists(alias):
             return _mcp_response(
                 {
                     "success": False,
@@ -1094,7 +1175,9 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         elif operation == "update":
             try:
                 _utils.app_module.activated_repo_manager.deactivate_repository(
-                    username=user.username, user_alias=user_alias
+                    username=user.username,
+                    user_alias=user_alias,
+                    actor_username=user.username,  # AC12: MCP caller is actor
                 )
             except Exception as deact_err:
                 logger.debug(
@@ -1108,7 +1191,9 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
             msg = f"Composite repository '{user_alias}' update started"
         elif operation == "delete":
             job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
-                username=user.username, user_alias=user_alias
+                username=user.username,
+                user_alias=user_alias,
+                actor_username=user.username,  # AC12: MCP caller is actor
             )
             msg = f"Composite repository '{user_alias}' deletion started"
         else:
@@ -1122,35 +1207,11 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-# C12: bound the list_global_repos response. On large deployments the full list
-# was an unbounded ~533K-token payload that blows the caller's context. Page it.
-_GLOBAL_REPOS_DEFAULT_LIMIT = 50
-_GLOBAL_REPOS_MAX_LIMIT = 200
-
-
-def _clamp_global_repos_limit(raw: Any) -> int:
-    """Coerce a caller-supplied limit to [1, _GLOBAL_REPOS_MAX_LIMIT]."""
-    try:
-        limit = int(raw)
-    except (TypeError, ValueError):
-        return _GLOBAL_REPOS_DEFAULT_LIMIT
-    if limit <= 0:
-        return _GLOBAL_REPOS_DEFAULT_LIMIT
-    return min(limit, _GLOBAL_REPOS_MAX_LIMIT)
-
-
 def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for list_global_repos tool (C12: paginated + name filter)."""
+    """Handler for list_global_repos tool."""
     from code_indexer.server.auth.user_manager import UserRole
 
     try:
-        limit = _clamp_global_repos_limit(args.get("limit"))
-        try:
-            offset = max(0, int(args.get("offset", 0)))
-        except (TypeError, ValueError):
-            offset = 0
-        name_filter = str(args.get("name_filter") or "").strip().lower()
-
         repos = _list_global_repos()
 
         # Admin role bypasses group-based access filtering entirely.
@@ -1168,31 +1229,7 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 )
                 repos = [r for r in repos if r.get("repo_name", "") in accessible_names]
 
-        # Optional substring filter over the repo's identifying names, so callers
-        # can find a repo without paging the whole list.
-        if name_filter:
-
-            def _matches(r: Dict[str, Any]) -> bool:
-                for key in ("repo_name", "user_alias", "golden_repo_alias"):
-                    if name_filter in str(r.get(key) or "").lower():
-                        return True
-                return False
-
-            repos = [r for r in repos if _matches(r)]
-
-        total = len(repos)
-        page = repos[offset : offset + limit]
-        return _mcp_response(
-            {
-                "success": True,
-                "repos": page,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-                "returned": len(page),
-                "has_more": offset + len(page) < total,
-            }
-        )
+        return _mcp_response({"success": True, "repos": repos})
     except Exception as e:
         logger.warning("handle_list_global_repos failed: %s", e, exc_info=True)
         return _mcp_response({"success": False, "error": str(e), "repos": []})
@@ -1321,7 +1358,11 @@ def _resolve_golden_repo_base_clone(alias: str) -> Optional[str]:
         return None
 
     parts = Path(versioned_path).parts
-    if ".versioned" in parts:
+    # Bug #1084 B1: route the "is this a snapshot?" decision through the single
+    # canonical predicate (replaces the local-only ".versioned" in parts test).
+    # The base-clone derivation below decomposes a canonical .versioned/{ns}/v_*
+    # path, which is exactly the shape the canonical clause recognizes.
+    if is_versioned_snapshot(versioned_path):
         versioned_idx = parts.index(".versioned")
         if versioned_idx + 1 >= len(parts):
             logger.warning(
@@ -1351,7 +1392,11 @@ def _load_repo_config(repo_path: str) -> Optional[tuple]:
         return None
 
     resolved = Path(repo_path).resolve()
-    if ".versioned" in resolved.parts:
+    # Bug #1084 B1: the immutability guard now uses the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test). Canonical cow-daemon
+    # snapshot paths ({mount}/.versioned/{ns}/v_*) are correctly refused, closing
+    # the one write-path corruption vector (AC #8).
+    if is_versioned_snapshot(str(resolved)):
         logger.error(
             "_load_repo_config called with versioned snapshot path %s -- "
             "refusing (immutable). Use _resolve_golden_repo_base_clone() instead.",
@@ -1503,7 +1548,9 @@ def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
     if not repo_path or not isinstance(repo_path, str):
         return repo_path, repo_alias, False
 
-    is_versioned = ".versioned" in Path(repo_path).parts
+    # Bug #1084 B1: detect snapshots via the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test).
+    is_versioned = is_versioned_snapshot(repo_path)
     if not is_versioned:
         return repo_path, repo_alias, False
 
@@ -1541,7 +1588,19 @@ def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
     resolved_alias = repo_alias or f"{alias_name}-global"
 
     if not base_clone.exists():
-        return repo_path, resolved_alias, True
+        # Bug #1084 B1: the base clone for a cow-daemon repo lives at
+        # golden_repos_dir/{ns}, not under the mount, so this local-shaped
+        # arithmetic cannot reach it. Return the (non-existent) base_clone path
+        # rather than the snapshot path: this is NEVER a writable snapshot, and
+        # the consumer's `actual_path == repo_path and not exists()` guard would
+        # have been DEFEATED on cow-daemon (the snapshot path DOES exist).
+        logger.warning(
+            "_resolve_provider_job_repo_path: base clone %s for versioned "
+            "snapshot %s does not exist -- refusing to index the snapshot.",
+            base_clone,
+            repo_path,
+        )
+        return str(base_clone), resolved_alias, True
 
     logger.info(
         "Provider job: using base clone %s instead of versioned snapshot %s",
@@ -1651,28 +1710,55 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     global_alias = f"{repo_alias}-global"
     try:
-        from pathlib import Path as _Path
-
-        data_dir = _Path(grm.data_dir)
-        golden_repos_dir = data_dir / "golden-repos"
-        sqlite_db_path = str(data_dir / "cidx_server.db")
-        registry = GlobalRegistry(
-            str(golden_repos_dir),
-            use_sqlite=True,
-            db_path=sqlite_db_path,
+        _app_state = getattr(_utils.app_module.app, "state", None)
+        _storage_mode = (
+            getattr(_app_state, "storage_mode", None) if _app_state else None
         )
-        if (
-            registry._sqlite_backend is not None
-            and registry._sqlite_backend.update_enable_temporal(global_alias, True)
-        ):
-            logger.info("Set enable_temporal=True for %s in global_repos", global_alias)
+
+        if _storage_mode == "postgres":
+            _br = getattr(_app_state, "backend_registry", None)
+            if _br is not None:
+                if _br.global_repos.update_enable_temporal(global_alias, True):
+                    logger.info(
+                        "Set enable_temporal=True for %s in global_repos (PG)",
+                        global_alias,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to set enable_temporal=True for %s in global_repos (PG)",
+                        global_alias,
+                    )
+            else:
+                logger.error(
+                    "backend_registry unavailable for enable_temporal on %s",
+                    global_alias,
+                )
         else:
-            logger.warning(
-                "Failed to set enable_temporal=True for %s in global_repos",
-                global_alias,
+            from pathlib import Path as _Path
+
+            data_dir = _Path(grm.data_dir)
+            golden_repos_dir = data_dir / "golden-repos"
+            sqlite_db_path = str(data_dir / "cidx_server.db")
+            registry = GlobalRegistry(
+                str(golden_repos_dir),
+                use_sqlite=True,
+                db_path=sqlite_db_path,
             )
+            if (
+                registry._sqlite_backend is not None
+                and registry._sqlite_backend.update_enable_temporal(global_alias, True)
+            ):
+                logger.info(
+                    "Set enable_temporal=True for %s in global_repos", global_alias
+                )
+            else:
+                logger.warning(
+                    "Failed to set enable_temporal=True for %s in global_repos",
+                    global_alias,
+                )
     except Exception as exc:
         logger.error("Error updating global_repos table for %s: %s", global_alias, exc)
+        raise
 
 
 def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:
@@ -1690,7 +1776,9 @@ def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:
         return repo_path, repo_alias, False, f"repo_path must be absolute: {repo_path}"
 
     resolved = Path(repo_path).resolve()
-    is_versioned = ".versioned" in resolved.parts
+    # Bug #1084 B1: detect snapshots via the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test).
+    is_versioned = is_versioned_snapshot(str(resolved))
     if not is_versioned:
         return str(resolved), repo_alias, False, None
 
@@ -1772,6 +1860,17 @@ def _run_provider_subprocess(
     except Exception as _seed_exc:  # noqa: BLE001
         logger.debug("Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc)
 
+    # Bug #1325 (code-review follow-up): sanitize env here, the single shared
+    # call site for both the semantic (_provider_index_job) and temporal
+    # (_provider_temporal_index_job) provider-index jobs, so a relative
+    # PYTHONPATH inherited from the server process is absolutized before the
+    # child changes cwd to actual_path -- otherwise it re-anchors into
+    # actual_path and a src/-layout package there can shadow an installed
+    # cidx dependency. Preserves the provider API key vars and (in postgres
+    # mode) the #1313 CIDX_TEMPORAL_PG_BOOTSTRAP_DIR var already merged into
+    # env by the callers.
+    sanitized_env = build_cidx_subprocess_env(env)
+
     try:
         run_with_popen_progress(
             command=cmd,
@@ -1781,8 +1880,7 @@ def _run_provider_subprocess(
             all_stdout=all_stdout,
             all_stderr=all_stderr,
             cwd=actual_path,
-            env=env,
-            timeout=None,
+            env=sanitized_env,
             error_label=f"provider {phase_name}",
         )
         stdout_out = "".join(all_stdout)
@@ -1889,7 +1987,11 @@ def _provider_temporal_index_job(
     actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
         repo_path, repo_alias
     )
-    if is_versioned and actual_path == repo_path and not Path(actual_path).exists():
+    # Bug #1084 B1: refuse when a versioned snapshot could not be redirected to an
+    # existing base clone. The resolver now returns the (non-existent) base_clone
+    # path rather than the snapshot path, so check existence of actual_path
+    # directly -- the snapshot itself is NEVER indexed.
+    if is_versioned and not Path(actual_path).exists():
         return {
             "success": False,
             "error": f"Base clone not found for {repo_path}",
@@ -1897,6 +1999,27 @@ def _provider_temporal_index_job(
         }
 
     env = _build_provider_api_key_env(provider_name)
+
+    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
+    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
+    # subprocess installs the PostgreSQL temporal-metadata backend instead
+    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
+    # returns a NEW dict (base_env=env, so the provider API key is
+    # preserved) in postgres mode, or None in sqlite mode -- fall back to
+    # the unmodified env in that case (byte-unchanged existing behavior).
+    # get_config_service().get_config() (not ServerConfigManager().load_config())
+    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
+    # get_config_service() as the sole config-read path.
+    from code_indexer.server.storage.postgres.temporal_child_wiring import (
+        build_temporal_child_env,
+    )
+
+    _merged_env = build_temporal_child_env(
+        get_config_service().get_config(), base_env=env
+    )
+    if _merged_env is not None:
+        env = _merged_env
+
     temporal_options = kwargs.get("temporal_options", {}) or {}
     cmd = _build_temporal_index_cmd(clear, temporal_options)
 

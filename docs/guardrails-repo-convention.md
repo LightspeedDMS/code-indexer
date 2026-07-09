@@ -1,7 +1,5 @@
 # Guardrails Repository Convention
 
-Story #457: Safety guardrails for open delegation jobs.
-
 When CIDX executes an open delegation job via `execute_open_delegation`, it prepends
 a safety guardrails prompt to every user objective before sending it to Claude Server.
 This document describes how to supply a custom guardrails prompt via a dedicated
@@ -155,6 +153,7 @@ add_golden_repo alias=my-guardrails url=git@github.com:org/guardrails-repo.git
 delegation_guardrails_repo = my-guardrails
 ```
 
-The repo is registered and indexed like any other golden repo. CIDX accesses
-`guardrails/system-prompt.md` from the versioned snapshot path, not the live
-git working tree.
+The repo is registered and indexed like any other golden repo. CIDX reads
+`guardrails/system-prompt.md` via `get_actual_repo_path()`, which returns the
+live mutable base clone of the repository when it exists, falling back to the
+latest versioned snapshot only when the base clone is absent.

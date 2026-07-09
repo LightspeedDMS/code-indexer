@@ -5,6 +5,1933 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [11.30.0] - 2026-07-09
+
+### Fixed
+
+- **Dep-map verification passes are concurrency-capped again (#1323).** What looked like a flaky test was a real regression: the Bug #936 dispatcher migration routed verification through `CliDispatcher.dispatch -> ClaudeInvoker.invoke -> subprocess.run`, bypassing the `max_concurrent_claude_cli` semaphore that generation still holds — so verification ran UNCAPPED (proven: 3 concurrent at cap=2), a runaway-concurrent-Claude-process resource/cost risk. `_run_verification_attempt` now acquires the SAME process-wide verification semaphore around the dispatch (release in `finally` on all paths), so generation + verification share one cap. Scoped to verification only.
+- **Golden-repo registry-orphan guard + reconcile with mass-deletion circuit-breaker (#1317).** Registration is now all-or-nothing (activation failure rolls the row back + cleans the clone; a global repo always gets its alias pointer); removal deletes the registry row before any files. A fail-soft startup reconcile removes rows whose on-disk clone is absent — guarded by a positive health-gate and a 0.5 mass-deletion circuit-breaker (a stale/unmounted NFS can never wipe the registry) plus Pass-3 pointer-repair for the #1315 symptom, single-flighted across cluster workers.
+- **CoW versioned-snapshot publish path translation (#1320).** Part A: `CowDaemonBackend._translate_to_daemon_path` fails loud (raises) instead of silently emitting an untranslatable NFS path the daemon rejects with 400. Part B: `cow_daemon.daemon_storage_path` is populated durably in both the installer and the auto-updater (value-aware idempotent; resolved from operator param/env/co-located daemon config, never hard-coded).
+- **Golden-repo mutable fields read authoritatively on cross-node mutation (#1316).** `change_branch`/`change_branch_async`, `add_indexes` temporal_options, and the per-provider temporal rebuild route now read the decision-driving field from the shared backend (not the per-worker cache), so a cross-node branch/temporal-option change is visible without a worker restart. Reload-on-miss read cache retained.
+- **e2e Phase-6 PG-parity web-session auth (#1324).** The Phase-6 throwaway server inherited `host=0.0.0.0` (via a ConfigService gap-fill from an unrelated systemd unit), making the web-session cookie `Secure` and thus dropped over the harness's plain HTTP -> 303-to-login. Harness now pins `SYSTEMD_UNIT_DIR` so the gap-fill falls back to `host=127.0.0.1`. (Underlying product gap-fill bug filed as #1335.)
+- **De-flaked `test_sqlite_log_handler_batched_1241`** — the background writer raced the test's enqueue loop; the test now drives a single deterministic drain cycle.
+
+### Added
+
+- **Merged PR #1331 (perf): short-TTL LRU caches for `FileListingService._collect_files` and `BranchService.list_branches`** read-only hot paths, with review fixes (post-walk TTL anchoring; branch-cache invalidation on branch mutations). Cluster-safe read-only listings.
+- **Merged PR #1332 (feat): opt-in admission-control / backpressure middleware** — global per-worker in-flight cap + a genuinely cluster-shared per-consumer token-bucket rate limiter (dedicated `consumer_rate_limit_state` PG table, migration 034). Both gates off by default.
+
+### Research
+
+- **HNSW orphan-node research spike (#1330).** Findings doc (`docs/research/hnsw-temporal-orphans-1330.md`): orphans affect both temporal AND regular semantic indexes via the shared builder; two regimes (exact-tie multi-thread race vs near-tie deterministic); recommended Strategy B (post-build detect+repair). Proposed implementation story #1333 (open for review). Follow-ups: #1334 (rate-limiter atomic decrement), #1335 (ConfigService gap-fill).
+
+## [11.29.0] - 2026-07-08
+
+### Fixed
+
+- **Relative `PYTHONPATH` no longer shadows CIDX dependencies in spawned `cidx` subprocesses (#1325, #1328).** A server (or CLI) launched with a relative `PYTHONPATH` (e.g. dev `PYTHONPATH=./src`) spawned `cidx` subprocesses with `cwd=<clone>`, and the relative `./src` re-anchored into the clone — so a cloned `src`-layout repo whose package name collides with a CIDX dependency (e.g. `click`) shadowed the installed one, breaking `cidx`'s own imports (SyntaxError under Python 3.9) and hard-failing golden-repo registration/refresh/activation/provider-index. New shared helper `code_indexer/utils/subprocess_env.py::build_cidx_subprocess_env()` absolutizes relative `PYTHONPATH` entries against the current process cwd before the child changes directory (never strips; preserves absolute/empty entries; composes with the Bug #1313 temporal PG env). Applied at every server-side (#1325) and CLI/proxy (#1328) `cidx`-with-`cwd` spawn site; git spawns untouched. Live-confirmed by registering `click` under a relative `PYTHONPATH`.
+- **X-Ray tool-doc evaluator examples now compile (#1326).** The Rust `OwnedNode.text` is a method; the shipped examples used field access (`&f.text`) and failed to compile (E0615). Corrected to `f.text()` across `xray_search.md` and `xray_explore.md`.
+- **Env-wiring unit tests no longer leak `os.environ` secrets on failure (#1327).** `assert KEY (not) in <env>` made pytest repr the whole dict (values included) on failure, dumping live secrets from `os.environ`-derived subprocess envs into logs/traces. New shared `tests/utils/env_assertions.py` converts each check to a bool/scalar before the assert; guard test proves sentinel secrets never appear in failure text.
+- **14 masked git-push tests fixed and un-hidden (#1329).** `test_git_push_with_pat.py` mocked the push result with an unconfigured `MagicMock().stderr`, so `_count_pushed_commits` (Bug #569) raised `TypeError`; the 14 failures were hidden by explicit `--deselect` lines in `fast-automation.sh`. Made the mocks faithful (`.stderr` a real string; product code untouched) and removed the deselect lines so the gate covers them again.
+
+## [11.28.0] - 2026-07-07
+
+### Fixed
+
+- **Temporal query reuse-seam now resolves the real embedder model name instead of the collection name (#1321).** The Story #1293 up-front-embed reuse seam passed the temporal COLLECTION base name (e.g. `code-indexer-temporal-voyage_context_4`) to `_build_query_provider_for_embedder`, which expects a real embedder MODEL name. `create_embedder()` raised `KeyError` on the collection name and fell through to the Voyage branch, building a `VoyageAIClient(model="code-indexer-temporal-<slug>")`; the tokenizer loader then requested `voyageai/code-indexer-temporal-<slug>` from HuggingFace -> 401 on every temporal query -> WARNING + silent fallback to per-shard embedding (the Cohere path was doubly wrong, building a Voyage client for a Cohere collection). Fix routes through the existing `_create_embedding_provider_for_collection` reverse-mapping helper (the same one the per-shard path already uses) to recover the real model name for both embedders. The up-front optimization now fires instead of always erroring into the fallback; query semantics are unchanged. Surfaced by the e2e Phase-3 log-audit gate (10 non-allowlisted WARNINGs).
+- **Langfuse trace-sync lifecycle unit tests are now isolated from the network (#1322).** `TestServiceLifecycle` started a `LangfuseTraceSyncService` whose background sync thread immediately called `LangfuseApiClient.discover_project()` (a real outbound HTTP request); when the Langfuse host was down that request hung and the tests tripped the 15s pytest-timeout, producing spurious `server-fast-automation.sh` failures. A `mock_langfuse_api_client` fixture now patches `LangfuseApiClient` at its import site so the sync loop completes with zero network I/O regardless of host reachability. Test-only change; no product code touched.
+
+## [11.27.0] - 2026-07-07
+
+### Fixed
+
+- **Auto-updater now provisions the Node.js toolchain, unblocking SCIP indexing and Codex-CLI provisioning cluster-wide (#1318).** SCIP builds and the Codex-CLI install were inert on server nodes because Node.js/npm was never installed (scip-python and codex are npm packages), so v11.26.0's `ensure_scip_python()` correctly logged `npm not available on PATH` and SCIP builds failed with `[Errno 2] No such file or directory: 'scip-python'`. New idempotent `DeploymentExecutor.ensure_nodejs()` (deploy Step 6.65, before the Codex-CLI and scip-python steps) installs pinned Node.js v22.11.0 LTS from the official static tarball to `/opt/node` (mirroring the `/opt/rust` provisioning; x86_64-guarded; non-fatal WARNING `DEPLOY-GENERAL-202`, never aborts a deploy; path-traversal-guarded extraction). `/opt/node/bin` is wired onto BOTH the running auto-updater process PATH (so the same-run npm consumers, which call `shutil.which`/`npm` with no explicit env, find npm) AND the `cidx-server.service` unit PATH (so the server and its index subprocesses find scip-python at runtime), the latter mirroring `_ensure_systemd_rust_path`. Known follow-up: the reinstall/partial-extract path should also verify `bin/npm` and clear the install dir.
+- **Temporal `search_code` queries no longer hit the blanket 60s MCP handler timeout under load (#1319).** Temporal search (query embed + HNSW over many quarterly shards + hydration + reranking) legitimately takes ~13-20s and its tail intermittently exceeded the generic `HANDLER_TIMEOUT_SECONDS = 60` cap (Bug #1008) under concurrent load, aborting queries whose recall was correct. Added `search_code` to the existing per-tool `_HANDLER_TIMEOUT_OVERRIDES` with a bounded `SEARCH_HANDLER_TIMEOUT_SECONDS = 180`; the 60s default is unchanged for all other tools and `exit_write_mode` (720s) is untouched. `search_code` is the single registered query tool (temporal is a mode parameter, not a separate tool).
+
+## [11.26.0] - 2026-07-07
+
+### Fixed
+
+- **Auto-updater now provisions `scip-python`, enabling SCIP indexing cluster-wide.** SCIP index generation (`cidx scip generate` / `add_golden_repo_index index_type=scip`) failed on server nodes with `[Errno 2] No such file or directory: 'scip-python'` — the binary was never installed by the installer or the auto-updater. New idempotent `DeploymentExecutor.ensure_scip_python()` (wired non-fatally as deploy Step 7.1, right after `ensure_ripgrep()`) checks `shutil.which("scip-python")` and, if absent, runs `npm install -g @sourcegraph/scip-python` (300s timeout; nonzero/timeout/OSError logged as WARNING `DEPLOY-GENERAL-201`, never raising — a failed provisioning never aborts a deploy). Mirrors the existing ripgrep/Codex-CLI provisioning pattern. Fresh installs inherit the same coverage: `install-cidx-server.sh` (which itself provisions no toolchain deps) starts the auto-update timer, so `execute()` runs and provisions scip-python on first cycle. Follow-up: `scip-typescript` is a trivial npm mirror; go/csharp/java SCIP indexers use different install patterns.
+
+## [11.25.0] - 2026-07-07
+
+### Fixed
+
+- **Omni and global-repo search no longer fail when a repo's alias pointer file is missing (#1315).** Global-repo path resolution called `AliasManager.read_alias(alias)` and hard-failed with `"Alias for global repository '<alias>' not found"` when the alias pointer JSON was missing, ignoring the valid `index_path` already stored in the registry row. In a multi-repo cluster this made omni `*` cross-repo search silently return partial results (11 of 12 global repos erroring in `results_by_repo`) for repos registered without an alias pointer (a bulk-provisioning gap). A new shared `resolve_alias_or_index_path()` helper resolves via the alias pointer first (authoritative/current) and falls back to the registry's own `index_path` when the pointer is missing and the path exists on disk (WARNING logged, `None` -> preserved hard failure when neither resolves). The fallback is versioned-path-trap-safe: `index_path` is written only at registration and is always the mutable base clone (refresh re-indexes the base clone in place and swaps only the alias pointer, never rewriting `index_path`), so the fallback never serves a `.versioned/` immutable snapshot. Routed through the helper at all five resolution sites: `multi_search_service.py` (omni fan-out), `mcp/handlers/search.py` (direct global query), `services/search_service.py`, `multi/scip_multi_service.py`, and `services/stats_service.py`. Underlying provisioning gap (alias pointers uncreated) tracked as a follow-up.
+
+## [11.24.0] - 2026-07-07
+
+### Fixed
+
+- **Golden-repo management ops no longer use a stale per-worker in-memory dict in multi-worker clusters (#1314).** `GoldenRepoManager.golden_repos` was a per-process dict populated once at `__init__` and never reloaded, used as the sole source of truth by `add_golden_repo_index`, `refresh_golden_repo`, `get_golden_repo_indexes`, and other management ops (plus a handler-level bypass in `mcp/handlers/repos.py`). Under `uvicorn --workers N` behind HAProxy round-robin, a repo registered after workers start was visible only to the worker that served the `add_golden_repo` request, so other workers returned `Golden repository '<alias>' not found` (a Cluster-Aware-State invariant violation; observed as 28 consecutive misses on a 2-workers/node staging cluster). A new `_resolve_golden_repo(alias)` cache-aside read-through now resolves from the shared metadata backend (`GoldenRepoMetadataPostgresBackend` in cluster mode / SQLite solo) with reload-on-miss; all management call-sites route through it, and `find_by_canonical_url` iterates a fresh `list_repos()` snapshot. The query path and `manage_provider_indexes` were already DB-backed and are unchanged. A residual stale-positive on cross-node mutation (bounded, non-corrupting, self-healing on restart) is tracked separately (#1316).
+
+## [11.23.0] - 2026-07-06
+
+### Fixed
+
+- **Temporal indexing no longer bottlenecks on SQLite-WAL-over-NFS in cluster mode (#1313).** The temporal metadata store (`hash_prefix -> point_id` map, write-only at runtime) was a per-shard SQLite-WAL database living inside each quarterly shard directory -- i.e. on the shared golden-repos NFS mount in cluster (`storage_mode: postgres`) deployments -- committed and WAL-checkpointed once per commit by 8 index-worker threads. py-spy proved all 8 threads parked in `save_metadata_batch`/`checkpoint_wal`, yielding a ~25x slowdown (a ~450-commit repo took ~77 min for ~3 min of real work) and a Cluster-Aware-State invariant violation. The metadata store is now backend-pluggable behind a `TemporalMetadataBackend` protocol: `TemporalMetadataSqliteBackend` (CLI/solo, byte-for-byte unchanged) and `TemporalMetadataPostgresBackend` (cluster; new additive table `temporal_metadata` via migration 033, keyed by a `collection_key = sha256(str(collection_path))[:32]` discriminator, single-transaction batch upsert with `SET LOCAL synchronous_commit = off`). Backend selection is process-local injection: the server installs the PG factory (or a fail-loud poison factory) in postgres mode; CLI/solo installs nothing and keeps SQLite.
+- **Cluster temporal indexing subprocesses now use PostgreSQL, not per-node SQLite-on-NFS (#1313).** Cluster temporal indexing runs in child `cidx index --index-commits` subprocesses, which do not inherit the server process's in-memory backend registry. A path-only IPC contract (`CIDX_TEMPORAL_PG_BOOTSTRAP_DIR`, carrying the server dir path -- never the DSN, which the child re-reads from bootstrap `config.json`) lets each child install the PG backend before any `TemporalMetadataStore` construction, failing loud (`sys.exit(1)`) rather than silently recreating `temporal_metadata.db` on NFS. All five server-side temporal launch sites (post-clone registration, scheduled refresh, `add_golden_repo_index` temporal, provider temporal job, activated-repo temporal) pass the contract in postgres mode; a source-scan enumeration guard test fails CI if a future launch site is added without it. CLI/solo indexing is unchanged (no env -> SQLite). Existing SQLite-on-NFS temporal indexes need no forced re-index (the store is write-only at query time); PG rows populate on the next refresh.
+
+## [11.22.0] - 2026-07-06
+
+### Fixed
+
+- **Job-reconciliation no longer wall-clock-reaps legitimately-queued pending jobs (#1312).** `JobReconciliationService._reclaim_stuck_index_blocking_jobs` dropped `pending` from its status filter entirely — it now reclaims only the anomalous `status='running' AND started_at IS NULL` case. A pending job queued behind long-running index jobs for other repos (bounded worker-pool exhaustion, `max_concurrent_background_jobs`) is never failed on a wall clock, closing a milder Bug #1218 edge. Bug #1141 remains covered: genuinely-abandoned pending rows are still failed by `DistributedJobWorkerService` (Bug #582), which runs on the same leader-election gate and claims the oldest pending row unconditionally (`DistributedJobClaimer` `max_concurrent_jobs=0`), failing non-retryable ops. Bug #1310 (never reap a running job with a valid `started_at`) is intact.
+- **Realigned deployment-executor memory/swap unit-test assertions (v11.21.0 test regression).** `tests/unit/auto_update/test_deployment_executor_memory.py` asserted the pre-`_run_systemd_op_with_retry` `subprocess.run` signature (raw `timeout=30/60`); the v11.21.0 hardening routes `_ensure_memory_overcommit`/`_ensure_swap_file` through the retry helper (`input=None`, `timeout=SYSTEMD_OP_TIMEOUT_SECONDS=120`). Assertions corrected to reference the constant. Test-only; production behavior was already correct and validated live.
+
+## [11.21.0] - 2026-07-06
+
+### Fixed
+
+- **Cluster installer now provisions the auto-updater.** `scripts/install-cidx-server.sh` previously created only `cidx-server.service`, so freshly-built cluster nodes had no `cidx-auto-update.service`/`.timer` and never self-updated (the server logged `launch_restart_generation target > applied ... check cidx-auto-update service status` indefinitely). The installer now renders and enables both units from the shipped template. The `cidx-auto-update.service` template and the `cidx server install-auto-update` CLI command gained a `--branch` parameter (default `master`) threaded through `CIDX_AUTO_UPDATE_BRANCH`, so staging nodes track `staging` instead of falling back to `master`.
+- **Auto-update deploys survive transient systemd/sudo starvation.** On a fresh node the first deploy compiles hnswlib and installs the Rust toolchain, briefly starving systemd/sudo (compounded when a `hard` NFS mount points at a down node); the deploy executor's hard 30s `sudo`/`systemctl` timeouts then fired and silently skipped config steps (MALLOC_ARENA_MAX injection, sudoers self-restart rule). Renamed `SYSTEMCTL_TIMEOUT_SECONDS` (30) to `SYSTEMD_OP_TIMEOUT_SECONDS` (120) and added a bounded, `TimeoutExpired`-only retry (3 attempts, 5s backoff) around the systemd control-plane operations (daemon-reload, sudoers verify/create, unit-file writes, memory-overcommit, swap-file). Fail-soft behavior preserved; the indexing / golden-repo / SCIP path (Bug #1218) is untouched.
+
+## [11.20.0] - 2026-07-06
+
+### Fixed
+
+- **Job-reconciliation no longer wall-clock-reaps live indexing jobs (#1310).** `JobReconciliationService` deleted the blanket `max_execution_time` reclaim path that failed still-progressing long-running indexing / golden-repo-registration / SCIP / temporal jobs on a live node, restoring the Bug #1218 invariant (the indexing path carries no wall-clock timeout — a large repo legitimately takes hours). Dead-node/heartbeat reclaim (the only legitimate mechanism) is unchanged; the stuck-index-blocking reclaim now guards on `started_at IS NULL`, so it can only free genuinely never-started jobs blocking `idx_active_job_per_repo`, never a running job. Tracked follow-up: #1312 (a legitimately-queued pending job can still be reaped on queue age — pre-existing edge, out of scope here).
+- **Removed redundant "durable / windowed / cluster-aggregated" badges from the cache-metrics dashboard (#1311).** Every card on the panel is now DB-sourced from the shared store (Cache Entries = live `query_embedding_cache` COUNT; On-Mode Hit Rate = `search_event_log` request counts; all others = `WindowedCacheMetrics` over `search_embed_event`), so the per-card provenance badge introduced mid-migration by Story #1294 distinguished nothing and overflowed the card. Removed the 8 header badges, 8 footer note-prefixes, and their CSS; per-card explanatory footers and all data sources are unchanged.
+
+## [11.19.0] - 2026-07-05
+
+### Added
+
+- **Durable query-embedding decision event log `search_embed_event` (#1293, epic #1288).** One row per NEEDED embed on every live path (direct, coalesced owner/joiner sharing one `live_batch_id`, temporal), on SQLite (solo) and PostgreSQL (cluster). Replaces the restart-volatile in-memory counter that overcounted under coalescing.
+- **Windowed, cluster-aggregated cache-metrics dashboard (#1294, epic #1288).** Every cache card is re-sourced from `search_embed_event` via a fail-open `WindowedCacheMetrics` aggregation with a time-window selector, so the dashboard reconciles with the analytics export instead of a per-node counter that reset on restart.
+- **`count_transport_calls()` — real transport HTTP-call count (#1305).** Additive alongside the unchanged `provider_embed_calls` (successful NEEDED embeds); it additionally counts shadow-validation, failover-attempt, and bypass wire calls. Documented residual: an all-shadow-hit coalesced batch is not additively countable.
+
+### Changed
+
+- **Removed the `config.json` transition copies of `workers`/`log_level`/`host`/`port` (#1196, epic #1194).** These launch settings now resolve solely from shared DB / `launch.json` / `applied_launch.json`; DEPLOY preserves the live systemd ExecStart and never applies a saved-but-unconfirmed launch change.
+- **BREAKING: `cidx.cache.embedding.*` OTEL instruments re-sourced from an in-memory tracker to durable, cluster-aggregated ObservableGauge callbacks (#1295, epic #1288 final).** `cidx.cache.embedding.hits` and `.misses` were monotonic Counters (incremented once per operation, restart-volatile, per-node only); they are now windowed `ObservableGauge` instruments re-computed from the durable `search_embed_event` table (Story #1293/#1294) on every OTEL export tick. Any downstream OTEL consumer that took a `rate()`/`increase()` derivative over the old Counters must instead read the Gauge value directly. `cidx.cache.embedding.shadow_cosine` similarly moved from a push Histogram to windowed percentile/histogram Gauges (`shadow_cosine_p50`/`_p05`/`_min`/`_histogram`). `cidx.cache.embedding.total_entries` is UNCHANGED (still a cheap cache-state COUNT, not event-sourced).
+
+### Fixed
+
+- **Temporal watch mode called an undefined `TemporalIndexer.index_commits_list` (`AttributeError`) — rewired both call sites to the real per-commit `index_commits()` entry point (#1296).**
+- **Fixed pre-existing daemon/diagnostics test debt hidden from the CI gate by `@pytest.mark.slow`/marker filters, and in the process restored a production prompt-template resource (`diagnostic_troubleshooting.txt`) that an earlier "dead code removal" wrongly deleted while its live consumer remained (#1304).**
+- **id-index rebuild no longer logs benign missing-`id` WARNINGs for the temporal sidecar files (`temporal_structure.json`/`temporal_progress.json`/`temporal_meta.json`); a genuinely malformed vector file still warns (#1297).**
+
+### Removed
+
+- **The in-memory `QueryEmbeddingCacheMetrics` tracker and `CoalescerRegistry.metrics()` deleted entirely (#1295, epic #1288 final).** Both were restart-volatile, per-node-only tallies now fully superseded by the durable `WindowedCacheMetrics` aggregation. The `GET /api/admin/coalescer-metrics` REST route was removed (redundant with the windowed dashboard, which already exposes cluster-aggregated `texts_coalesced`/`batches_dispatched`/`dedup_savings`/`provider_embed_calls`). `cidx.cache.embedding.audit_top1_match` was removed (no `search_embed_event` schema column for top1-match). The deep-fidelity audit path (`embedding_cache_audit.py`) now stamps `audit_sampled`/`audit_cosine` directly onto the durable event row via the Story #1293 keyed `update_audit_by_key` UPDATE, wiring a previously-orphaned code path.
+- **Deleted the orphaned diagnostics "actionable feedback" feature (`DiagnosticsService.get_actionable_feedback()`, `_load_prompt_template()`, `_execute_claude_prompt()`, and the `server/feedback/` package) — it had zero callers and was never wired to any route/UI (#1307).**
+
+## [11.18.3] - 2026-07-04
+
+### Fixed
+
+- **Daemon-mode temporal queries were 100% broken (#1302, epic #1289).** Standalone/server temporal queries worked, but the daemon's `exposed_query_temporal` resolved the collection via the regular embedding_provider/model scheme (`resolve_temporal_collection_from_config`, yielding `code-indexer-temporal-voyage_code_3`) while per-commit temporal data lives under the active-embedder scheme (`code-indexer-temporal-voyage_context_4`), and the daemon's mmap `CacheEntry` was shard-blind (real HNSW data lives in per-quarter shard subdirectories, e.g. `...-2026Q3`). Both defects fixed by delegating `exposed_query_temporal` to `execute_temporal_query_with_fusion` -- the same shard-aware, active-embedder-named dispatch already used by the CLI, server, and multi-search paths (its docstring already claimed daemon support; the wiring had simply never been done). A `--temporal-embedder` query override is now threaded end-to-end through the daemon path. Verified with a real daemon E2E for both embedders (daemon results byte-for-byte match standalone: voyage-context-4 and Cohere embed-v4.0).
+
+### Removed
+
+- **Dead mmap temporal-cache code in the daemon (#1302).** The fusion-delegation fix left `CacheEntry.load_temporal_indexes` / `invalidate_temporal` / `is_temporal_stale_after_rebuild` (plus the `temporal_hnsw_index` / `temporal_id_mapping` / `temporal_index_version` fields and their `get_stats` keys) unreachable from any production caller. Removed (87 lines) along with the test file that only exercised them, for anti-orphan compliance. The regular non-temporal daemon cache path is unchanged.
+
+## [11.18.2] - 2026-07-03
+
+### Fixed
+
+- **Daemon-mode temporal query crashed with a 100% `AssertionError` (#1300, epic #1289).** `TemporalDaemonService.exposed_query_temporal` asserted `config_manager is not None` before the lazy-init that creates it had run, so every daemon-mode temporal query failed. The lazy-init (`ConfigManager.create_with_backtrack`) is now hoisted above the first use and the assert.
+
+- **Temporal query params `at_commit`, `show_evolution`, `evolution_limit` were silent no-ops on the per-commit temporal index (#1301, epic #1289).** `at_commit` was advertised on REST/MCP but never applied and never validated -- a bogus commit hash was silently accepted and returned the full unfiltered result set. Now implemented as point-in-time scoping: the ref/hash is resolved via git to a commit + UNIX timestamp (`resolve_commit_timestamp`), which becomes an upper bound on `commit_timestamp` -- the same mechanism `time_range`'s upper bound already uses. An unresolvable ref/hash now returns a typed HTTP 400 error instead of silently succeeding.
+
+### Removed
+
+- **`show_evolution`, `evolution_limit`, and `include_removed` retired from the REST/MCP query surface (#1301).** These parameters were advertised as working but were permanent no-ops on the per-commit temporal index (Epic #1289) -- neither filtering/augmenting results nor returning a warning/error. Per-file diff timelines belong to the existing git tools (`git_file_history`, `git_log`, `git_blame`, `git_diff`), not the semantic temporal search path. Removed end-to-end: `SemanticQueryRequest` (REST model), the MCP `search_code` tool schema/docs, the Web UI query page's "Include removed files" checkbox, and all internal plumbing (`execute_temporal_query_with_fusion`, `SemanticQueryManager` query chain). A client that still sends these fields simply has them ignored by the request parser (they no longer exist) rather than silently accepted and dropped deeper in the stack.
+
+## [11.18.1] - 2026-07-03
+
+### Fixed
+
+- **Temporal search dropped the most-relevant commits (#1299, epic #1289).** Found by a real REST/MCP front-door E2E on clean code. Two root causes: (1) `TemporalSearchService.query_temporal` sorted deduped results by commit date and then truncated to `limit`, keeping the newest matches instead of the most relevant; fixed to select the top-`limit` by relevance first, then order that subset reverse-chronologically for display. (2) Fusion across disjoint quarterly shards used reciprocal-rank fusion (RRF by within-shard rank), discarding true cosine magnitude; replaced with a score-preserving `merge_shards_by_score` for disjoint shards (RRF retained unchanged for the overlapping path). Verified via the live front door: both ground-truth commits recall at rank 0 across all tested limits for both embedders. Embedding, projection, HNSW, and the regular voyage-code-3 path were proven correct and left untouched.
+
+## [11.18.0] - 2026-07-03
+
+### Added
+
+- **Epic #1289 — Per-Commit Contextualized Temporal Indexing (Pluggable Dual Embedders).** Replaces the per-file-diff temporal layout (which exploded to millions of one-vector-per-file files) with one aggregated document per commit (commit-message head + `--- path ---`-delimited diffs), chunked and embedded into model-slug-keyed quarterly shards. Far fewer vectors: a 20-file commit produces 1 vector instead of ~21.
+  - **Story #1290** — voyage-context-4 contextualized-embeddings adapter (1024-dim, 0% overlap), per-commit aggregation, v2 `temporal_structure.json` marker, hard-cut removal of the legacy per-file-diff path and monolith->shard migration machinery, recall dedup-by-commit with commit message surfaced once.
+  - **Story #1291** — Cohere embed-v4.0 as a pluggable coexisting second embedder (1536-dim native, 15% overlap). Multiple embedders' temporal indexes live side-by-side; adding one never rebuilds another. `temporal_embedder` query override threaded through REST/MCP. Per-embedder reconcile.
+  - **Story #1292** — git-history-only file-count projection script (`scripts/analysis/temporal_vector_projection.py`), absolute recall-quality gate (`scripts/analysis/temporal_recall_gate.py`), real REST+MCP front-door dual-embedder e2e (`tests/e2e/server/test_18_temporal_dual_embedder_1292.py`), and documentation.
+
+### Fixed
+
+- **voyage-context-4 temporal search returned HTTP 400 in server/cluster mode.** `VoyageAIClient.get_embeddings_batch()` (the server coalescer's embedding entry point) bypassed the contextualized-query special case; it now routes contextualized queries correctly (non-contextual/document/CLI/voyage-code-3 paths unchanged).
+- **Contextual embedder document packing** capped each packed document at the ~108k-token request budget instead of the ~28.8k-token context window, causing HTTP 400s; now caps at the context window.
+
+## [11.17.0] - 2026-07-02
+
+### Fixed
+- **#1286 (P1): Temporal shard migration is now a guaranteed lossless verified move.** The Story #1172 monolith->quarterly-shard migration silently dropped embedded vectors, wrote a false `migration_complete.marker`, and deleted the source vector files before verification -- irreversible data loss. Migration now verifies losslessness (exact count/point-id reconciliation) BEFORE deleting the monolith, hard-aborts on ANY unplaceable vector (missing id_index / missing JSON / unresolved timestamp) before building shards (no silent skips), derives the shard quarter from the immutable payload `commit_timestamp` first (git log fallback, per-SHA-resilient so one bad SHA can't poison a batch), and recovers by re-extracting vectors from the monolith with ZERO re-embedding. Covered by a real-VoyageAI E2E suite (no mocks).
+- **#1285 (P2): Activation CoW clone timeout is config-driven with partial-clone cleanup.** Large golden-repo activations (evolution/phoenix, ~1M-file index) failed at a hardcoded 120s subprocess timeout; it now honors `cow_clone_timeout` (default raised 600->3600) across LocalCloneBackend and CowDaemonBackend, and a timed-out activation removes its partial clone before re-raising so retries are not blocked.
+- **#1283 (P2): Web UI "Create API Key" no longer returns 401.** `POST/GET/DELETE /api/keys` used Bearer-only `get_current_user`; they now use `get_current_user_hybrid`, which accepts both the `Authorization: Bearer` header and the web session cookie, matching the other Web-UI-facing REST routes.
+- **#1284 (P3): Stale-mock dimension guard test fixed and un-hidden.** `TestLayer3APIValidation` mocked 3-dim embeddings that a newer dimension guard rejected before the None-detection path was reached; mocks are now dimension-correct (1024-dim) and the test is no longer `--deselect`'d by `fast-automation.sh`.
+- **#1287 (P4): e2e log-audit gate two-queue flush race fixed.** The Phase 3 gate captured its watermark after draining only `SQLiteLogHandler`, leaving the `async_logging` queue-listener undrained; a new `flush_log_pipeline()` drains both. The benign `cidx-meta-global` "FTS index not available" condition (auto-bootstrapped internal repo) is allowlisted, scoped to that exact alias.
+
+## [11.16.0] - 2026-07-01
+
+### Fixed
+- **#1264 (P1): Temporal projection-matrix self-heal is now applied at the `upsert_points` write chokepoint, closing the gap left by #1242.** The #1242 self-heal (v11.8.0) only repaired shards enumerated by the `index_commits` prep loop, but the actual crash lives in a separate module: `FilesystemVectorStore.upsert_points()` routes each point to its per-quarter shard by commit date and calls `ProjectionMatrixManager.load_matrix()`, which raised a bare `FileNotFoundError` when a shard's `projection_matrix.npy` was missing. Any shard the prep loop did not revisit (old-history quarters, lazily-touched shards) still hard-crashed every golden-repo refresh -- observed in production for `evolution-global` (2009Q4), `genai-talk2db-global` (2025Q4), and `mobile-global` (2026Q2). The fix wraps the `load_matrix` call: on a missing matrix it reuses the existing `_ensure_shard_has_projection_matrix()` helper (copy-from-base or deterministic regenerate -- no duplicated logic), evicts the stale matrix-cache entry, and retries the load once; a genuinely nonexistent collection still raises loudly (anti-silent-failure). Validated by real-path reproduction against the exact production stack trace: crash at the pre-fix commit, clean self-heal at HEAD, index remains queryable.
+- **#1264 (hardening): The shared `_ensure_shard_has_projection_matrix()` helper now writes the projection matrix atomically (temp file in the same directory + `os.replace`) for both the copy-from-base and regenerate branches.** Because #1264 makes the helper reachable from the temporal parallel-worker write path, two workers first-writing the same missing-matrix shard concurrently could otherwise hit a torn-read window; the atomic rename closes it. Both the #1242 prep-loop path and the #1264 chokepoint path benefit from the single shared change.
+
+## [11.15.0] - 2026-07-01
+
+### Fixed
+- **#1261: Removed artificial work-budgets (search-call ceiling / agent-turn caps / output-length caps) on dep-map analysis jobs.** These caps were throttling legitimate long-running dependency-map analysis, causing large repos to hit budget limits before completing a full pass.
+- **#1259: `frontmatter_json_mismatch` anomalies now route to the free Phase 3.5 sync instead of Phase-1 Claude re-analysis.** Splits the overloaded `REPAIRABLE_ANOMALY_TYPES` set so frontmatter/JSON drift -- a deterministic sync fix -- no longer burns a Claude re-analysis pass that Phase 3.5 can resolve for free.
+- **#1260: Stopped deleting the domain `.md` before Phase-1 repair analysis, restoring the previous `previous_domain_dir` extend/improve reuse.** The prior delete-then-regenerate path discarded reusable domain context that Phase-1 repair analysis depends on to extend/improve rather than start from scratch.
+- **#1257: Dashboard On-Mode Hit Rate is now request-denominated (from `search_event_log`) instead of operation-denominated.** The previous operation-denominated calculation misrepresented actual query-embedding cache effectiveness; the metric now reflects the true per-request hit rate.
+- **#1262: `LifecycleBatchRunner.run()` now surfaces per-alias failure so a failed single-alias description refresh is marked failed and increments the circuit-breaker.** Previously a failed alias inside a batch was masked by the batch-level success reporting, silently burning Claude spend on repos that were quietly failing every cycle without ever tripping the #1096 quarantine circuit-breaker.
+- **#1258: `JobTracker.complete_job`/`fail_job` persisted-row fallback closes the double-completion "not in memory" warning flood and the pop-before-persist zombie edge.** A completion racing an in-memory pop could log a flood of "not in memory" warnings and leave a zombie job row; the fallback now reads the persisted row when the in-memory entry is already gone.
+
+### Testing
+- **test(auto-update): aligned the 5 swap-failure tests with the Bug #1254 non-fatal contract.** These tests had gone stale after #1254 changed `_ensure_swap_file` to best-effort (WARNING + return True on failure); updated assertions to match the current non-fatal behavior.
+
+## [11.14.0] - 2026-07-01
+
+### Fixed
+- **#1256 (P3): `JobTracker.update_status(running)` logged a full-traceback WARNING on a benign `idx_active_job_per_repo` UniqueViolation during multi-node cluster restart.** On a rolling restart, the `update_status('running')` UPDATE for the node-`server` singleton startup jobs (`reap_activated_repos` / `data_retention_cleanup` / `startup_reconcile`) collides on the `idx_active_job_per_repo` partial unique index with a stale-running row left by the SIGKILLed pre-restart process (before `startup_reconcile` demotes it). The raw `psycopg.errors.UniqueViolation` (PG) / `sqlite3.IntegrityError` (SQLite) bubbled to a generic `except` and logged a traceback at WARNING on every restart -- log-noise that trips the Story #1122 audit gate. The job executes correctly regardless (registration dedup already prevents genuine live duplicates); this is the UPDATE-path sibling of the INSERT-path #1252/#1235 fix. Discovered during the v11.13.0 staging post-deploy log audit. Fix (conservative, no execution-behavior change): extracted the `('IntegrityError','UniqueViolation')` class-name check already used inline by `JobTracker._atomic_insert_impl` into a shared driver-agnostic helper `is_active_job_unique_violation()` (single source of truth, Messi #4); the `update_status(running)` catch site now demotes the benign case to DEBUG (no traceback) while ALL other exceptions keep the original WARNING + traceback (Messi #13 anti-silent-failure). The dedup index, registration dedup, and `startup_reconcile` are untouched (out of scope).
+
+## [11.13.0] - 2026-06-30
+
+### Fixed
+- **#1254 + #1255 (P1): auto-updater deploy-path immutable-host hardening (swap + rust non-fatal).** After #1251, the deploy reached `pip install` then aborted on OPTIONAL infra steps that cannot succeed on a read-only immutable host. #1254: `_ensure_swap_file` is best-effort (swap is an OOM optimization) -- failures log WARNING + return True. #1255 (the confirmed final blocker): `_ensure_rust_toolchain` skips `mkdir`/`chown`/install when `/opt/rust` already holds a usable toolchain (`rustc`/`cargo --version` succeed), a `chown` failure on a read-only fs is non-fatal when the toolchain is usable (`CARGO_HOME` redirected to `~/.cargo` for the build while `RUSTUP_HOME` stays `/opt/rust`), and a missing C compiler / failed `cargo build` are non-fatal (xray native search is unavailable -- `BinaryNotFound` -- until the binary builds; logged at ERROR, NOT a silent "Python fallback", which does not exist). FATAL only for a genuinely missing/uninstallable toolchain; the CORE deploy (pip install + restart) always completes. Audit confirmed `_ensure_rust_toolchain` is the last `execute()` step. Found by deploying each version to the real PrivateTmp+py3.12+editable-home+read-only staging cluster (chain: #1182/#1243/#1245/#1251/#1254/#1255).
+- **#1249 (P2): DB-outage error storm -- background loops logged a fresh ERROR+traceback per tick during a PostgreSQL outage (~37k rows in ~5 min, re-flooding logs.db).** New shared `DbOutageThrottle` (`is_db_connectivity_error` classifier + per-loop state machine): first connectivity error of an outage logs ONE ERROR, subsequent consecutive errors log DEBUG, recovery logs once, and the loop's retry interval gets exponential-capped backoff (cap 60s). Wired into `refresh_scheduler`, `leader_election_service`, `node_metrics_writer_service`, `node_heartbeat_service`, `config_service`. Genuine bugs (ProgrammingError/IntegrityError/...) are NOT throttled. Includes an OverflowError guard (clamps the backoff exponent so an unbounded failure count can't crash the daemon thread). Trigger is infrastructure (PG host restarts); this fixes the cidx-side resilience gap.
+- **#1252 (P2): atomic job insert gave up when the conflicting row vanished (benign TOCTOU).** #1252's fatal-RuntimeError symptom was already resolved by #1235; the residual gap: when the blocking job completes between the INSERT and the blocking-row lookup, the slot is free but the code skipped the refresh as a duplicate. Fix: bounded retry (3 attempts) of the atomic insert when the unique-violation fires with no active blocking row; a real duplicate still raises immediately; exhausted retries fall back to `DuplicateJobError(sentinel)`, never a fatal RuntimeError (preserves the #1235 invariant).
+- **#1253 (P2): langfuse golden repos with a missing/invalid `.code-indexer/config.json` failed refresh every cycle (231x staging).** `register_local_repo` runs `cidx init` once and swallows a mid-init failure, leaving a `.code-indexer/` dir without a valid config; registration is idempotent so init never retries, and the Bug #268 refresh guard only checked `dir.exists()`. Fix: `RefreshScheduler` self-heals -- when `.code-indexer/` exists but `config.json` is missing/invalid, it re-runs `cidx init --no-override-file --force` (non-destructive; never deletes index data) then indexes; repair failure returns `success=False` (visible, not swallowed).
+- **#1250 (P3): `LlmLeaseLifecycleService.start()` logged the provider's EXPECTED 'no available credentials' response at ERROR on every worker startup (253x staging).** Classifies the expected case by exception TYPE (`LlmCredsProviderError`) + HTTP 404 (the provider's documented status), NOT message text (the provider's `{"error":...}` body doesn't match the parsed envelope, so message-matching would silently fail in production). Expected case -> WARNING (degraded, actionable); genuine provider/transport errors -> still ERROR. The non-blocking DEGRADED behavior is unchanged.
+
+## [11.12.0] - 2026-06-30
+
+### Fixed
+- **#1251 (P1): auto-updater dead-looped on "No usable temporary directory" -- the no-sudo pip path had no `TMPDIR`.** #1243 set the deploy `TMPDIR` ONLY on the `sudo env TMPDIR=...` prefix. v11.11.0's #1245 writability fix correctly routes editable-home installs (the staging cluster layout) through the NO-SUDO command, which carried no `TMPDIR` -- so under systemd `PrivateTmp=yes` + Python 3.12 the auto-updater's isolated `/tmp` was unusable and pip's `tempfile.gettempdir()` raised `FileNotFoundError: No usable temporary directory found in ['/tmp','/var/tmp','/usr/tmp','/']` at the pybind11/hnswlib build step, dead-looping the auto-updater (same self-perpetuating class as #1182/#1243/#1245). Fix: `os.environ["TMPDIR"] = self._deploy_tmpdir()` at the TOP of `DeploymentExecutor.execute()`, before any subprocess is spawned. This is exhaustive by construction -- every `subprocess.run()` in the module either omits `env=` (inherits `os.environ`, now carrying `TMPDIR`) or builds its env from `os.environ.copy()`/`dict(os.environ)` (git env, self-restart smoke test, pace-maker install, Rust toolchain/cargo) -- so the single early mutation reaches every no-sudo child without per-call-site changes. The SUDO path's explicit `["sudo","env",f"TMPDIR={tmpdir}",...]` prefix (#1243) is byte-identical. Found by deploying v11.11.0 to the real staging cluster.
+
+## [11.11.0] - 2026-06-30
+
+### Fixed
+- **#1245 (re-fix of v11.10.0, P1): auto-updater STILL dead-looped on editable-home installs.** v11.10.0's `_is_user_install` classified a host as user-install ONLY via the `/.local/` substring; the staging cluster runs an editable install at `/home/<user>/code-indexer/src` (no `/.local/` segment), so the probe returned False -> sudo'd pip -> root's read-only `/root/.local` + `/root/.cache/pip/wheels` -> `[DEPLOY-GENERAL-021]` -> the dead-loop persisted even after the v11.10.0 source was pulled. Fix: `_is_user_install` now ALSO returns True when `os.access(install_dir, os.W_OK)` (the running import location is writable by the auto-updater's user) -- editable-home, `~/.local`, and genuine root-owned system installs are all classified correctly (conservative False -> sudo on probe failure, DEBUG-logged). System-install command shape (sudo + `env TMPDIR=` #1243, break-system-packages probe/retry #1234) is byte-identical. Caught ONLY by deploying+testing on the real staging cluster (unit tests had asserted `/.local/` paths).
+- **#1248 (P1): reindex endpoint 500'd -- `TriggerReindexResponse(**result)` but `trigger_reindex` returns a job_id str, not a mapping.** The router built the response via `**result` while the service returns a bare job_id string (and the response model needs `success`/`job_id`/`status`/`index_types`/`started_at`), so every successful reindex submission 500'd. The failure was masked on cow-daemon by the #1246 400 and never covered by a router-level test. Fix: construct `TriggerReindexResponse` explicitly (`status=JobStatus.PENDING.value` from the BGM's source-of-truth enum, `started_at=now UTC ISO`); `trigger_reindex` keeps its `-> str` contract; the endpoint stays HTTP 202 (async job-trigger semantics). Adds the missing router-level (TestClient) coverage. Found during live staging testing immediately after #1246 unblocked the reindex path.
+
+## [11.10.0] - 2026-06-30
+
+### Fixed
+- **#1245 (P1): auto-updater dead-looped at the custom hnswlib build on user-install hosts (sudo'd pip -> read-only `/root/.local`).** Even after #1243 fixed the TMPDIR/PrivateTmp issue, `build_custom_hnswlib()` and `pip_install()` ran pip via `sudo` unconditionally; on a user-install layout (code-indexer in the service user's `~/.local`, e.g. the py3.12 immutable staging host) sudo'd pip targets root's `/root/.local` (read-only) -> `[Errno 30] Read-only file system` -> "Deployment failed at custom hnswlib build step" -> the auto-updater dead-looped (same self-perpetuating class as #1182/#1243: the broken updater cannot deploy its own fix; a one-time manual deploy is required to escape). Fix: `_is_user_install(python_path)` probes the actual `code_indexer.__file__` (True when under `/.local/`, conservative False on any failure) and gates `use_sudo = not _is_user_install(...)` at every pip site -- user-install hosts now run `python -m pip install ...` WITHOUT sudo (landing in the service user's `~/.local`, where the server imports from), while system-install hosts keep the byte-identical sudo+env+TMPDIR shape (#1243) and the `--break-system-packages` probe/retry-strip (#1234). Also: skip the rebuild when hnswlib already imports AND the `third_party/hnswlib` submodule commit is unchanged (recorded under `_cidx_data_dir`); non-fatal (WARNING + continue) when a rebuild fails but hnswlib still imports; DEBUG-log the probe exception paths for diagnosability. Verified against the real run-as-user topology (auto-update service `User={USER}`).
+- **#1246 (P1): manual reindex (REST `/api/v1/repos/{alias}/reindex` AND MCP `trigger_reindex`) 400'd "Security violation: Repository path escapes data directory" on every cow-daemon cluster -- ALL cluster reindex broken; masked #1244.** `ActivatedRepoIndexManager.trigger_reindex` did `Path(repo_path).resolve()` (which FOLLOWS the cow-daemon `activated-repos -> /mnt/cow-storage/...` symlink, Bug #1052) then `relative_to(Path(self.data_dir).resolve())` (data_dir is not itself a symlink), so the resolved repo path always escaped the data dir -> false-positive 400 for every repo. Fix: `_compute_allowed_repo_roots()` builds the set of allowed RESOLVED roots -- `data_dir` plus the resolved symlink targets of `data_dir/activated-repos` and `data_dir/golden-repos` (when present) -- and `_path_is_within_any()` accepts the repo iff its resolved path is `relative_to` ANY allowed root. Uses `relative_to` (not string-prefix), so a sibling like `activated-repos-evil` is still rejected; genuine `../`/absolute traversal still fails closed; behavior is byte-identical on local (non-symlink) backends. Security-isolated commit (Story #929). Discovered while attempting a front-door reproduction of #1244 (which this unblocks).
+
+## [11.9.0] - 2026-06-30
+
+### Fixed
+- **#1243 (P1): auto-updater dead-looped on Python 3.12 + systemd `PrivateTmp` ("No usable temporary directory") -> NO staging deploy could complete.** Under `PrivateTmp=yes`, the auto-update service has an isolated `/tmp`; the sudo'd `pip install` (pybind11 + hnswlib build, and `pip install -e .`) found no usable temp dir (private /tmp/var-tmp, CWD `/` not writable, and `sudo env_reset` strips inherited `TMPDIR`), crashing every retry. Same self-perpetuating-deadlock class as #1182 (the broken auto-updater cannot deploy the fix), and `/etc` is read-only on the hosts so a unit drop-in is impossible. Fix: `DeploymentExecutor` now passes a writable `TMPDIR` THROUGH sudo at every pip site via the POSIX `env` utility -- `["sudo","env",f"TMPDIR={tmpdir}",python,"-m","pip","install",...]` -- where `tmpdir = {CIDX_DATA_DIR}/.deploy-tmp` (created on demand, never under `/tmp`). The `--break-system-packages` handling (#1234) and retry-strip variants are preserved. Validated live (`sudo env TMPDIR=... pip install` -> rc=0).
+- **#1241 follow-up (P1, regression caught live on the staging PostgreSQL cluster): `LogsPostgresBackend.insert_log_batch` called `conn.executemany`, but psycopg3 `executemany` is a CURSOR method, not a Connection method.** Every batched log insert raised AttributeError, swallowed by the fail-open WARNING -> ALL batched operational logs silently dropped on the cluster. The #1241 server-fast tests passed because the fake backend was unfaithful (had a connection-level `executemany`). Fix: `with conn.cursor() as cur: cur.executemany(...)` (with `SET LOCAL synchronous_commit = off` on the cursor first). New `test_logs_pg_batch_cursor_1241.py` uses a faithful fake Connection with NO `executemany` attribute (mirrors psycopg3) so the regression is guarded. A cross-backend audit confirmed no sibling `conn.executemany`-on-a-psycopg3-Connection bug elsewhere.
+
+## [11.8.0] - 2026-06-29
+
+### Fixed
+- **#1242 (P1): temporal monolith->shard migration created shards WITHOUT `projection_matrix.npy`, breaking ALL incremental temporal indexing (690/693 shards).** `_build_one_shard` wrote `collection_meta.json` + `id_index.bin` + `hnsw_index.bin` but never copied the projection matrix, so `collection_exists()` returned True, the indexer skipped `create_collection()` (the only writer of the matrix), and the next `upsert_points()` crashed at `load_matrix()` with `FileNotFoundError`. Verified-correct fix (the projection matrix is write-path-only — it computes the on-disk hex bucket for the JSON payload; HNSW stores full-dim vectors and search is matrix-independent, so a regenerated matrix is safe): (1) `_build_one_shard` now COPIES the monolith's surviving `projection_matrix.npy` into each shard (regenerate fallback) and backfills `quantization_range` into the shard meta; (2) a self-heal `else` branch in `temporal_indexer.index_commits` repairs the 690 already-deployed shards on their next refresh — when a shard exists but lacks the matrix, it copies from the base collection (or regenerates) + backfills quant-range BEFORE the upsert workers run, so incremental indexing recovers without a re-index. Also corrected a stale comment that wrongly claimed deleting the matrix breaks queries, and added `base_collection_name()` to single-source the quarter-suffix strip. Proven by `TestIndexCommitsSelfHeal` driving the real `index_commits()` path on a production-shaped broken shard.
+- **#1241: server log/audit writes made fully async + batched to eliminate SQLite "database is locked" contention.** The app-boundary log queue was already async, but the logs.db writer wrote one transaction per record (a 34k-record migration burst = 34k commits -> WAL churn -> lock contention), and `AuditLogService` wrote synchronously on the request thread. Fixes: (1) `SQLiteLogHandler` writer now drains up to `MAX_DRAIN_BATCH=512` records and inserts them in ONE `executemany` transaction (`insert_log_batch` added to both SQLite and PostgreSQL `LogsBackend` backends; PG uses `SET LOCAL synchronous_commit = off`); (2) `AuditLogService` converted to a bounded-queue + daemon-writer + batched `executemany` design, with `start()`/`stop()` wired into lifespan startup/shutdown (+ regression guard) so audit writes no longer block the operation thread and drain on graceful restart; (3) audit-write failures now log a WARNING instead of being silently swallowed, with a per-row fallback so one poison row can't drop a whole batch. WAL was already enabled and `DatabaseConnectionManager` already sets `busy_timeout=30000` per connection. Follow-up: shared `AsyncBatchedDBWriter` consolidation deferred.
+
+## [11.7.0] - 2026-06-29
+
+### Fixed
+- **#1240: temporal migration flooded the SQLite logs.db (one WARNING per skipped point) -> "database is locked" storm on large corrupt indexes.** `_build_quarter_buckets` logged a WARNING for every skipped point across all three drop paths (missing_id_index, missing_json, timestamp_unresolved). On a large repo with a partially-corrupt temporal index (production `evolution`: ~1,914 orphans in one collection; ~34,000 migration log rows total) this overwhelmed the single-node SQLite log store and surfaced as Logs-DB lock-contention events on the dashboard. Fix: demote the four per-point `logger.warning` calls in `_build_quarter_buckets` to `logger.debug`; the per-collection aggregate summary WARNING (which reports the counts: structural orphans, missing_id_index, missing_json) is retained, so operators keep the actionable signal while the per-point detail moves to DEBUG. drop_counts accounting, the reason-aware guard, and all bucketing behavior are unchanged. (Root-cause logging-architecture follow-up tracked in #1241: fully-async batched log writer.)
+
+## [11.6.0] - 2026-06-28
+
+### Fixed
+- **#1238 (CRITICAL data loss): temporal monolithic→quarterly-shard migration could silently drop ALL vectors on a large repo, then delete the only copy and report success.** `_batch_get_commit_timestamps` placed EVERY indexed commit SHA on a single `git log --no-walk` argv; a repo with ~50k+ unique commits exceeds Linux `ARG_MAX` (or the 60s timeout), the helper returned an empty dict, and because production temporal payloads are empty the per-payload fallback then dropped every point. `_migrate_one_collection` counted only bucketed vectors and called `_cleanup_monolithic_collection` UNCONDITIONALLY, deleting `hnsw_index.bin`/`id_index.bin`/payloads and logging "Migration complete" — unrecoverable, and the marker blocked re-run. Fix: (1) chunk the SHA lookup into 1000-SHA batches (E2BIG impossible; 60s timeout PER chunk; a failing chunk warns and continues). (2) A reason-aware post-condition guard in `_migrate_one_collection`: `_build_quarter_buckets` now returns per-reason drop counts (`missing_id_index`, `missing_json`, `timestamp_unresolved`); when any structurally-valid point fails timestamp resolution the migration RAISES before cleanup and preserves the monolith for a clean re-run (Messi #2/#13, Bug #1218 fail-loud), while genuine structural orphans (already unqueryable) are logged as a loud WARNING and the resolvable remainder migrates. Never reports success on a partial drop. Validated by unit tests (chunking, fail-loud-no-data-loss, raise-then-clean-rerun, structural-orphan-proceeds) and a live VM data-loss reproduction + clean fixed-upgrade.
+- **#1239: first v11 deploy ran the single uvicorn worker on ~1/4 of the node's cache + provider-concurrency budget.** On the first auto-update from a pre-11 node, `applied_launch.json` does not exist, so `get_applied_worker_count()` fell back to `config.json["workers"]` (e.g. 4) while DEPLOY-mode ExecStart preservation (the correct anti-`--host`-flip behavior) left the unit with no `--workers` token → uvicorn launched 1 worker. `initialize_caches()` and the `ProviderConcurrencyGovernor` then divided the per-node budget by 4 for a single running worker — a silent 4x under-resourcing until the next Web-UI restart. Fix: `get_applied_worker_count()` now reads the LIVE systemd ExecStart `--workers` as the highest-priority source (no `--workers` token → 1, matching the running process; reuses `DeploymentExecutor._is_cidx_execstart`/`_read_flag`, no regex duplication, fail-soft), so the cache/governor divisor always matches the actually-launched worker count. DEPLOY-mode ExecStart preservation is unchanged.
+
+## [11.5.0] - 2026-06-28
+
+### Fixed
+- **Temporal monolithic→quarterly-shard migration discarded ALL git timestamps on Python 3.9 → broke migration of pre-11 indexes with empty payloads (#1237).** The v11 startup migration (#1172) derives each commit's quarter from `git log --format=%cI`, but git 2.x emits a trailing `Z` for UTC commits (e.g. `2026-03-25T05:18:38Z`), which Python 3.9's `datetime.fromisoformat()` cannot parse. The git-timestamp helper wrapped the whole batch in one try/except, so a single unparseable line returned `{}` ("timestamps unavailable") and the migration fell back to per-payload `commit_timestamp` (epoch). Production temporal payloads are empty, so the fallback skipped every vector → incomplete/empty shards → temporal index not usable after upgrade. Fix: normalize a trailing `Z` to `+00:00` before `fromisoformat` (Py3.9-compatible; offset forms unchanged), and parse each git-log line in its own try/except so one bad timestamp skips only that commit instead of aborting the whole batch. Now git timestamps are available for all UTC commits and any pre-11 monolithic temporal index migrates cleanly into the correct quarterly shards. Validated by unit tests including the empty-payload production scenario (git Z-timestamps → shards created); live upgrade re-test on a v10.141.0 monolithic index (spanning 2020–2024) performed on the test VM.
+
+## [11.4.0] - 2026-06-27
+
+### Fixed
+- **#1234 (corrected): pip-capability probe checked the wrong pip.** The v11.3.0 #1234 fix probed `python -m pip --version` WITHOUT sudo (resolving the service user's `~/.local` pip, e.g. 26.0.1) while the actual hnswlib/pybind11 install runs `sudo python -m pip install ...` (resolving root's SYSTEM pip, e.g. 21.3.1 on stock Rocky 9). The probe therefore reported "supports --break-system-packages" and the sudo install still failed with "no such option", aborting the auto-update at the hnswlib build. Caught on a live Rocky 9 VM (non-sudo pip 26.0.1 vs sudo pip 21.3.1). Fix: `_pip_supports_break_system_packages(python_path, use_sudo)` now probes with the SAME sudo context the install uses (both `build_custom_hnswlib` and `pip_install` call it with `use_sudo=True`); added a belt-and-suspenders retry-without-flag fallback when an install still returns "no such option: --break-system-packages". No behavior change when the install-context pip is >= 23.0.1.
+
+## [11.3.0] - 2026-06-27
+
+Production/staging-reported correctness fixes for single-server multi-worker deployments (auto-reported by Neo + PreProdServer), found while hardening the upgrade-test release.
+
+### Fixed
+- **A single repo's missing/corrupt local index sin-bins the embedding provider cluster-wide (#1236).** The parallel-dispatch failure handler recorded ANY provider-task exception as a provider failure (`record_call(success=False)`), including local-storage errors raised AFTER the embedding call already succeeded -- so one un-indexed (or corrupt-indexed, or missing-`collection_meta.json`) repo flipped voyage-ai/cohere to `down` and every semantic query for EVERY repo skipped that provider for the sin-bin window. Introduced `LocalIndexNotFoundError` (raised by `filesystem_vector_store` for absent HNSW, corrupt HNSW via `_is_corrupt_index_error`, and missing `collection_meta.json`); the dispatch handler now skips provider-health recording for it. Genuine provider failures (HTTP/rate-limit/timeout) still sin-bin (Bug #678 preserved). The timeout branch is unchanged (cause genuinely ambiguous at timeout; a local index error surfaces via the except branch, not timeout).
+- **PostgreSQL multi-worker data-retention duplicate-claim race surfaced as a cleanup error (#1235).** Under multiple uvicorn workers on PostgreSQL, concurrent `data_retention_cleanup` claims race on the `idx_active_job_per_repo` partial unique index. The intended `DuplicateJobError` skip was not reliable: when the blocking active row completed between the unique violation and the follow-up lookup, `_atomic_insert_or_raise` raised `RuntimeError` (escaping the scheduler as a false failure); separately, `complete_job()` could deadlock on `background_jobs`. Now the vanished-row race deterministically yields `DuplicateJobError` (sentinel `existing_job_id`), and `BackgroundJobsPostgresBackend.update_job` retries on PG deadlock/serialization (40P01/40001) with bounded backoff. SQLite single-worker path unchanged.
+
+## [11.2.0] - 2026-06-27
+
+Multi-worker hardening + deploy-robustness fixes, found by a full end-to-end upgrade test (release v10.141.0 -> staging) on a fresh Rocky 9 VM running uvicorn with 4 workers.
+
+### Fixed
+- **Concurrent FTS queries fail with Tantivy `LockBusy` under multi-worker (#1233).** Every server FTS query called `TantivyIndexManager.initialize_index(create_new=False)`, which creates a Tantivy `IndexWriter` and takes the exclusive `.tantivy-writer.lock`. Under multi-worker uvicorn (separate processes, enabled by the #1167 workers un-pin) concurrent FTS reads from different workers collided on that lock -> ~67% HTTP 500 (12 concurrent -> 8 failed; sequential clean). Added `TantivyIndexManager.open_for_search()` -- a read-only path that opens the index via `Index.open` + a reader and NEVER creates a writer/takes the writer lock -- and wired it into the three server FTS read sites (`server/query/semantic_query_manager.py`, `server/routers/inline_query.py`, `server/multi/multi_search_service.py`). The write/commit path (golden-repo CoW cleanup) still uses the writer. Search results are unchanged; the daemon FTS path was already correct (it reuses a cached searcher) and is unchanged.
+- **Auto-update hnswlib build assumes pip>=23 (`--break-system-packages`) -> deploy fails on stock Rocky 9 (#1234).** The deployer's hnswlib/pybind11 rebuild ran `pip install --break-system-packages` against the system python; on a fresh Rocky 9 box (system pip 21.3.1) that flag does not exist, so the auto-update deploy failed at the build step and never completed. Added `_pip_supports_break_system_packages()` (parses `pip --version`, true only for pip>=23.0.1, fail-safe false) and made the flag conditional at all three `pip install` sites in `deployment_executor.py`. No behavior change on pip>=23.
+
+## [11.1.0] - 2026-06-27
+
+Upgrade-safety hardening of the DB-centralized runtime-config path (the feature that moves bootstrap settings into the database), found by a focused architecture review of the automatic auto-updater upgrade path.
+
+### Fixed
+- **Non-atomic `config.json` write could corrupt the only copy of bootstrap keys (#1231).** `ServerConfigManager.save_config`/`save_config_dict` wrote `config.json` via `open(path,"w")` (truncate-then-write). After config centralization, `config.json` holds the ONLY on-disk copy of the bootstrap keys (`postgres_dsn`, `storage_mode`, `clone_backend`, `cow_daemon`), so a crash mid-write (OOM, power loss, `TimeoutStartSec` SIGKILL) left a truncated file -> next startup `load_config` raised `JSONDecodeError`/`ValueError` -> dead node with no auto-recovery. Both writers now go through an atomic helper (tempfile in the same directory + `flush` + `os.fsync` + `os.replace`, temp unlinked on failure), mirroring `materialize_launch_config`. Success-path output is byte-identical (per-function trailing-newline contract preserved), and the existing file mode is preserved across the atomic replace (`0644`->`0644`, etc.; fresh files default to `0644`, not mkstemp's `0600`) so a multi-user server/auto-updater split (Bug #879) keeps read access.
+- **Config centralization seeded launch host from the ServerConfig default (127.0.0.1) instead of the live ExecStart (#1232).** At first-boot centralization the runtime row (desired launch state) is seeded from `get_config()`; if `config.json` had no explicit `host`, the seeded value was the dataclass default `127.0.0.1` rather than the node's real bind. For a node that binds `0.0.0.0` purely via its systemd `--host` flag, this planted a latent value mismatch that would detonate on the first Web-UI launch change or admin restart (ExecStart rewritten to `--host 127.0.0.1` -> node drops off HAProxy). Fixed at the SEED layer (not at materialize, which must keep honoring desired state per Story #1198): a first-boot gap-fill backfills `host`/`port`/`workers` from the live ExecStart ONLY when absent from `config.json` (precedence: explicit config.json -> live ExecStart -> ServerConfig default + WARNING), in both the SQLite (solo) and PostgreSQL (cluster) seed paths. An explicit operator value is never overridden. `materialize_launch_config` continues to write desired state directly, so Web-UI launch changes still propagate.
+
+### Removed
+- **Retired orphaned config-migration scripts (cluster-config-migrate.sh, config_migration_helper.py, verify_config_migration.py).** Runtime config is migrated automatically at server startup (unified config model; file=bootstrap-only), so the manual one-time scripts from Story #578 are obsolete and were removed. They were orphaned (zero callers) and carried a stale BOOTSTRAP_KEYS set that had diverged from config_service.py's canonical set and could strip pre-DB bootstrap keys (clone_backend/cow_daemon) on cow-daemon clusters if run.
+
+## [11.0.0] - 2026-06-26
+
+Major release. Consolidates the reliability, cluster-resilience, and Query-Analytics work from the 10.16x-10.17x series (CI-token decrypt de-spam, corrupt index/HNSW self-heal, cluster OIDC shared state, memory-governor swap threshold, config-strip noise, dangling-symlink startup resilience, and shadow-mode cache-hit instrumentation).
+
+### Fixed
+- **Interrupted query-analytics exports stay stuck `pending` forever (#1228).** Export jobs interrupted by a worker death / restart / infra outage were never reconciled to `failed` -- the export records are not covered by the BackgroundJobManager startup orphan-reconciliation, so they showed as perpetually in-progress in the Analytics export history (e.g. the 3 exports orphaned during the node-23 NFS outage). Added `reconcile_orphaned_exports()` on both export backends (SQLite + PostgreSQL) and the service: a bulk `UPDATE status='failed' WHERE status IN ('pending','running') AND created_at < now - 300s`, wired fail-soft into startup right after the existing `fail_orphaned_jobs` block. Cluster-safe: `created_at` is stamped at work-start (queue delay never inflates age), the export workload is hard-bounded (50k-row cap, finishes well under the 300s window), and `update_export` writes status unconditionally so a false-positive self-heals (a live worker's completion overwrites `failed`->`completed`). Terminal rows untouched; idempotent; no schema change. Clears existing stuck exports on the next deploy.
+
+## [10.172.0] - 2026-06-26
+
+### Fixed
+- **Dangling CoW/NFS symlink crash-looped every worker at startup (#1229).** When a CoW/NFS storage node is down, `golden-repos`/`activated-repos` (symlinks onto `/mnt/cow-storage`) become dangling, and the manager `__init__`'s `os.makedirs(path, exist_ok=True)` raises `FileExistsError` on a dangling symlink (`exist_ok` only suppresses the error for an existing directory) — crashing every uvicorn worker in a tight loop and turning a single storage-node outage into a full app-layer outage on every node. Added `server/utils/cow_utils._safe_makedirs_cow()`: on a dangling symlink it logs one rate-limited degraded-mode WARNING and returns without touching the link (preserving Bug #1052), so the worker starts and serves non-CoW traffic; otherwise it behaves exactly like `os.makedirs(path, exist_ok=True)`. Wired into the two `__init__` crash-loop sites only; operational makedirs sites still fail loudly (anti-fallback).
+- **Shadow-mode cache HITS never recorded on Query Analytics (#1230).** Shadow-mode query-embedding cache hits were structurally always `voyage_cache_hit=False` (and `cohere_cache_hit`) in the search-event log / analytics export, making shadow's "would-serve rate" invisible. `EmbeddingCoalescer._dispatch()` set every coalesced caller's returned metadata to miss unconditionally; the hit was counted on the metrics layer but never threaded onto the metadata that becomes the search-event field. Now the per-entry metadata reflects a real shadow hit using the pre-write `_shadow_blobs` lookup — a genuinely-new shadow query can never be a false-positive hit (the lookup provably precedes all cache writes in the single-threaded dispatcher). On-mode unaffected; provider-agnostic (voyage + cohere lanes).
+
+## [10.171.0] - 2026-06-26
+
+### Changed
+- **Analytics export date filter now uses a UTC datetime picker instead of a raw epoch.** The Query Analytics Export page made the admin type a UTC epoch number into the From/To filter (`type="number"`, placeholder "e.g. 1750000000") -- non-intuitive. Both inputs are now `type="datetime-local"` pickers labeled "(UTC)" with a "Times are interpreted as UTC" note; the client converts the picked UTC datetime to epoch seconds (`Date.parse(value + 'Z') / 1000`) before submitting. The backend is unchanged -- `POST /api/admin/search-events/export` still receives `from_timestamp`/`to_timestamp` as float epoch seconds; only the UI input format and client-side conversion changed. Everything stays UTC.
+
+## [10.170.0] - 2026-06-26
+
+### Fixed
+- **Corrupt HNSW index also wedges golden-repo refresh (#1223 follow-up).** Staging validation of v10.169.0 showed the first #1223 fix was partial: it self-heals a corrupt/0-byte `collection_meta.json`, but the same crashed rebuild also leaves a corrupt/partial HNSW index `.bin` (and a stale `.tmp_hnsw_*.tmp`), so after the meta heals the refresh fails one step later with hnswlib's "Index seems to be corrupted or unsupported". Extended the self-heal to the index, same index-time-recover / query-time-raise principle: `load_for_incremental_update` now catches the corruption RuntimeError, discards the corrupt `.bin` + orphaned temp files, and returns the existing no-index sentinel so the caller does a clean full rebuild; `rebuild_from_vectors` cleans orphaned `.tmp_hnsw_*.tmp`. A tight classifier (`_is_corrupt_index_error`) prevents a healthy index from ever being discarded, and the discard is path-safe/idempotent. Query-time load sites are unchanged (a corrupt index still raises on query — no silent serving of an empty index). Composes with the meta fix so a repo with both a 0-byte meta and a corrupt `.bin` fully self-heals on its next refresh, no manual cleanup.
+- **Latency tracker logged WARNING on expected shutdown DB-close (#1227).** `DependencyLatencyTracker` logged a WARNING ("database closed -- writer thread terminating") on every server shutdown -- an expected, gracefully-handled teardown condition (the daemon writer's DB is closed during shutdown; it already sets its stop event and terminates cleanly). Changed that closed-db branch in `_flush_buffer` and `_prune_stale` from WARNING to DEBUG; control flow is unchanged and the genuine consecutive-failures ERROR path is untouched, so no real failure is hidden.
+
+## [10.169.0] - 2026-06-26
+
+### Fixed
+- **Corrupt/0-byte `collection_meta.json` permanently wedged index refresh (#1223).** A crashed/interrupted index rebuild could leave a 0-byte `collection_meta.json`, after which every subsequent index/refresh of that repo failed forever ("Collection metadata file corrupted (invalid JSON)") with no self-healing -- on staging this wedged a golden repo into 32 identical `global_repo_refresh` failures. Two defects in `FilesystemVectorStore`: `create_collection` wrote the metadata non-atomically (`open(...,"w")+json.dump` truncates to 0 bytes first, so a crash mid-write leaves a 0-byte file), and `collection_exists` returned `metadata_path.exists()` so a 0-byte file counted as a valid collection and blocked re-creation. Now all metadata writers use an atomic temp-file+fsync+`os.replace` helper (fsync only on the rare meta writes; per-vector hot path unchanged), and `collection_exists` validates the file is non-empty and parses with a `vector_size` field -- empty/corrupt meta is treated as absent so a full (re)index self-heals. The query/read path still raises on corrupt meta (a query has no data to rebuild). Deployed, this auto-unblocks the wedged repo on its next refresh.
+- **SSO/OIDC login broken in cluster: OIDC state held in per-worker RAM (#1224).** OIDC transaction state (PKCE `code_verifier`, CSRF `state`) lived in a per-process dict (`StateManager._states = {}`), so the IdP callback -- round-robined by HAProxy to a different worker/node than served `/auth/sso/login` -- could not find the state and login failed (a retry "worked" only when both landed on the same worker). State now persists in a shared store (SQLite solo / PostgreSQL cluster, `oidc_state_tokens`), with atomic single-use validation (`DELETE ... RETURNING` on PG, `BEGIN EXCLUSIVE` on SQLite) and read-time TTL; the callback now ensures the provider is initialized on a fresh worker; and the retention scheduler prunes via the wired (PG-backed) instance. PKCE/CSRF/open-redirect properties preserved; isolated security-sensitive commit per Story #929.
+- **Memory governor forced RED on any swap-in, thrashing at low memory (#1225).** The Epic #1213 governor forced RED whenever `pswpin_rate > 0`, so trivial OS page-in noise (1-3 pages/interval) forced RED at 25-35% memory (watermarks 70/85), thrashing GREEN<->RED (72+80 GOV transitions/hour on staging) and defeating the GREEN-retain optimization. Added a configurable `memory_governor_swap_pswpin_red_threshold` (default 100, hot-reloaded, Web-UI tunable): only `pswpin_rate >= threshold` forces RED, so a genuine death-spiral (pswpin >> 100) still forces RED while trivial noise no longer does. The master swap-forces-red switch and all watermark/hysteresis/dwell/fail-safe behavior are unchanged.
+- **`config.json` load logged a WARNING per restart for `launch_restart_generation` (#1226).** The runtime DB key (Story #1195/#1198), written into bootstrap `config.json` by the auto-updater, is correctly not a bootstrap `ServerConfig` field, so the loader stripped it -- but at WARNING level (~22 entries per cluster restart). Added it to `EXPECTED_ORPHAN_KEYS` so it is stripped silently (INFO); genuinely unknown keys still WARN. Logging hygiene only.
+
+## [10.168.0] - 2026-06-25
+
+### Fixed
+- **Repeating APP-GENERAL-061 "Failed to decrypt github token" warning flood (#1222).** `CITokenManager.get_token()` (SQLite/PostgreSQL branch) catches every decrypt failure, logs `APP-GENERAL-061` at WARNING, and returns `None` while preserving the undecryptable ciphertext in the DB for recovery -- correct behavior, but because `create_token_manager()` is built fresh at every call site (not a singleton), every CI/CD credential check re-read the same bad row and re-emitted an identical WARNING (85 times in one staging delta) with no self-healing short of token replacement. Added a process-local, lock-guarded log-once memo keyed by `(platform, sha256(ciphertext))`: the first distinct undecryptable ciphertext logs WARNING as before, repeats are downgraded to DEBUG (not silenced), and a successful decrypt for the platform clears the memo so a genuinely new bad ciphertext after a rotation warns once again. Raw token material is never stored or logged -- only the SHA-256 of the ciphertext. Logging hygiene only: no behavior/contract change, no DB schema/migration; the functional path (treat as unconfigured, preserve ciphertext) is unchanged. The JSON-file path (`APP-GENERAL-062`, which deletes the row and already self-heals) is untouched.
+
+## [10.167.0] - 2026-06-25
+
+### Fixed
+- **Cluster elevation: elevated TOTP session not shared across workers/nodes (#1221).** The step-up elevation state lived in per-process RAM, so an elevation obtained on one uvicorn worker (or cluster node) was invisible to every other worker/node behind HAProxy -- admin user/group mutations failed with `elevation_required` immediately after a successful elevate, depending on which worker served the retry. Elevation state now persists in a shared store (`ElevatedSessionManager` backed by PostgreSQL in cluster mode, SQLite in solo) wired at lifespan, with `prune_expired()` cleanup and a fail-closed `get_status()`. The three TOTP error codes, the 503 kill switch, the `totp_repair` recovery scope, and the replay-prevention CAS are all preserved. Isolated security-sensitive commit per the Story #929 discipline.
+- **Duplicate-job insert surfaced as scheduler RuntimeError instead of a benign skip (#1220).** The blocking-job lookup used the paginated `list_jobs` view, which could miss the conflicting active row, so a concurrent duplicate registration raised an unhandled `RuntimeError` (seen as a `DataRetentionScheduler` error) instead of the intended `DuplicateJobError` benign skip. Added a direct, non-paginated `find_active_job_by_type_and_alias(operation_type, repo_alias)` on the job-tracker (both SQLite and PostgreSQL backends) and routed `_find_blocking_active_job_id` through it, so collisions deterministically raise `DuplicateJobError` and the caller skips quietly.
+- **Daemon in-process FTS rebuild reported success when every file failed (#1218 residual).** `exposed_rebuild_fts_index` returned `status:"ok"` even when `indexed_count == 0 and failed_count > 0`, masking a total failure as success. It now returns `status:"error"` in that case so callers see the failure. Completes the #1218 timeout-removal work on the daemon path.
+
+## [10.166.0] - 2026-06-25
+
+### Added
+- **Memory-Pressure-Aware Index-Cache Governor (Epic #1213).** Temporal queries fan out over time-sharded HNSW indexes, and Bug #1171 unconditionally evicts each shard's HNSW after use to prevent a production swap death-spiral, at the cost of reloading every shard from disk/NFS on every query. A new node-aware, cgroup-aware MemoryGovernor makes that eviction conditional on a memory-pressure band: GREEN (memory comfortable) retains shards across queries for fast warm temporal queries; YELLOW proactively evicts LRU to a floor and trims; RED reverts to the exact Bug #1171 evict-after-use. Fail-safe is RED (the band starts RED and any signal error / kill-switch reverts to the proven-safe evict), so the swap-spiral guard is never weakened. CLI/solo and the RED/disabled/errored server paths are byte-identical to #1171. Eight Web-UI-tunable, hot-reloaded watermark settings (no env vars). Observability: GET /api/admin/memory-governor + an MCP twin return a per-process snapshot (band, used_pct, basis cgroup_v2/v1/host, pswpin_rate, counters, live watermarks, pid); GOV-001..005 structured records land in the server log store (front-door queryable via admin_logs_query and sqlite3). Validated solo (local) with GREEN-retain / RED-#1171 / YELLOW-degrade proven by config hot-reload and a real balloon crossing RED with swap flat.
+
+## [10.165.0] - 2026-06-25
+
+### Fixed
+- **Regression from #1202: MCP search_code crashed on single global/activated repos (#1219).** #1202 changed `_perform_search` to return a `(results, effective_strategy)` tuple and updated `query_user_repositories`, but missed the second caller `_execute_tracked_search`, so the single `-global` path iterated the tuple and raised `'list' object has no attribute 'to_dict'` on every mode. Unpacked the tuple at the missed call site and threaded the effective-mode echo through the global path. Found on the staging cluster during v10.164.0 validation.
+
+## [10.164.0] - 2026-06-25
+
+### Fixed
+- **Temporal indexing per-commit save serialization (#1206).** The per-commit save stage serialized all worker threads (per-vector SQLite commit/fsync, per-commit full-file re-sort+rewrite under an exclusive lock, a global write lock around every vector JSON write), starving the embedding pool. Batched SQLite writes (one transaction per upsert batch + WAL checkpoint), amortized O(1) progress flush (in-memory staging + flush every 10 commits + final flush, race-guarded), and removed the global write lock. Per-commit save cost is now amortized constant; crash-durability and the deterministic point_id contract preserved.
+- **Activation never ran branch-aware reindex (#1203).** Activating a golden repo on a non-default branch (and switch_branch / sync_with_golden_repository) CoW-copied the default-branch index and never reindexed, so semantic search returned default-branch embeddings for files that differ. Wired the existing branch-aware delta indexer into all three lifecycle sites (skip for default branch and *-global), and invalidate the in-memory HNSW + id_index caches (prefix eviction) after reindex so the corrected on-disk index is actually served.
+- **Temporal CLI --index-commits left a non-sharded monolith (#1207).** CLI sharding never deleted the base provider dir's monolithic index nor wrote migration_complete.marker, so every temporal query enumerated the marker-less base dir (spurious escalating HNSW-stale warnings + stale-read risk). CLI now runs the shared cleanup after a successful shard run (gated so a partial run never deletes the monolith), and get_overlapping_shards excludes a marker-less base dir with no real monolith (unified predicate).
+- **REST /api/query had no reranking (#1209).** Added rerank_query/rerank_instruction to the REST query model and wired the shared rerank funnel (after fusion, before truncation), achieving parity with MCP/CLI.
+- **Temporal rerank document omitted the commit message (#1208).** commit_diff results were reranked on diff text only. A single shared content extractor (used by MCP, REST, CLI) now includes the commit message for temporal commit_diff results.
+- **fts/hybrid silently ignored on dual-provider repos (#1202).** When both embedding providers were configured, the auto-parallel default preempted the FTS branch, so search_mode=fts/hybrid ran semantic fusion instead. Gated the auto-parallel default on search_mode==semantic; added effective_search_mode/effective_query_strategy echo and fts/hybrid overflow metadata to the response.
+- **CLI temporal query dropped --exclude-path and extra --path-filter values (#1210).** Now forwards exclude_path and all path filters to the temporal fusion call (parity with the server temporal path).
+- **Documented path glob matched only nested paths (#1211).** A leading-star-slash pattern is normalized so it matches a directory segment at any depth including root-level, fixing silent under-filtering (symmetric for include and exclude).
+- **VoyageMultimodalClient missing get_provider_name (#1212).** Multi-index queries including a multimodal collection silently dropped the multimodal contribution via a swallowed AttributeError; the method now exists.
+- **Multi-provider temporal indexing showed no progress for additional providers (#1205).** Each additional provider now renders its own live progress display (the primary pass is unchanged).
+- **repository_status omitted next_refresh and enable_scip for global repos (#1204).** Added both fields from the already-loaded record (no extra query), eliminating the need to pull the bulk list_global_repos for a single repo.
+- **Indexing/registration/SCIP path carried job/subprocess/per-file timeouts (#1218).** Removed all overarching wall-clock timeouts (job, subprocess watchdog, per-file/per-batch) and their swallow-and-skip handlers; only the per-outbound-embedding-HTTP-call timeout + retry remain. A genuine post-retry failure now fails the job loud (no silent partial index); cidx index exits non-zero on total failure so a failed registration fails and cleans up its orphan clone instead of reporting success with an empty index.
+
+## [10.163.0] - 2026-06-24
+
+### Fixed
+- **Epic #1194 production-safety: a routine deploy could rebind a cluster node to loopback and drop it off HAProxy.** The auto-updater's DEPLOY path rewrote the systemd ExecStart `--host` from `config.host`, whose `ServerConfig` default is `127.0.0.1` -- a value the installer never overwrote (it hardcodes `--host 0.0.0.0` directly into ExecStart). On any node whose `applied_launch.json` did not yet exist, a routine code deploy therefore rewrote `--host 0.0.0.0` -> `127.0.0.1`, binding loopback-only and severing HAProxy/cluster reachability. Confirmed live on the staging cluster (all 3 nodes went 503). Fix: `_ensure_launch_config` DEPLOY mode now PRESERVES the live ExecStart when `applied_launch.json` is MISSING (identical to the existing CORRUPT handling) -- a routine deploy never rewrites the live unit from a stale config; the live ExecStart is the confirmed running state (MAJOR-M1). Intentional host changes still flow through the Web UI -> diagnostics-restart (APPLY) path, which is unchanged. Additionally the installer now writes `host: 0.0.0.0` into the generated `config.json` so it matches the `--host 0.0.0.0` it already bakes into ExecStart, eliminating the stale default for fresh installs. Validated end-to-end on the live staging cluster (host=0.0.0.0 propagated cluster-wide, generation-bump restart converged all 3 nodes, HAProxy front door recovered 503 -> serving).
+
+## [10.162.0] - 2026-06-24
+
+### Added
+- **Epic #1194 -- Cluster-wide launch-affecting settings via shared state.** `host`, `port`, `workers`, and `log_level` are now runtime-configurable from the Web UI and propagate across a cluster via a shared-state, uncoordinated per-node self-restart -- no leader election, no new table, no ordered rolling restart. Completes (and supersedes) the partial v10.161.0.
+  - **#1197 -- Runtime launch keys.** Moves `host`/`port`/`workers`/`log_level` out of the `config.json` bootstrap into runtime config (kept in `config.json` for one transition release via `TRANSITION_PRESERVE_KEYS`). New `get_applied_worker_count()` resolver (`applied_launch.json` -> `config.json` -> default) feeds the provider-concurrency governor and the HNSW/FTS caches so per-node concurrency/memory budgets size against the APPLIED worker count.
+  - **#1198 -- Per-node launch.json materializer.** `ConfigService.materialize_launch_config()` writes a per-node `launch.json` (the TARGET snapshot: workers/log_level/host/port + `target_restart_generation`) atomically via tempfile + `os.replace`, wired into the runtime save path and startup, and registered on the Bug #586 reload callback.
+  - **#1199 -- Auto-updater ExecStart reconstruction.** `_ensure_launch_config(APPLY|DEPLOY)` performs a token-bounded, value-aware in-place rewrite of `--host`/`--port`/`--workers` on the live systemd ExecStart, matching BOTH the `code_indexer.server.main` and `uvicorn` unit shapes (the old `uvicorn`-only gate was a silent no-op on real installer units). APPLY sources from `launch.json` and records `applied_launch.json` (incl. `applied_restart_generation`) ONLY after a successful ensure + restart; DEPLOY sources from `applied_launch.json` -> `config.json` -> defaults and never from the TARGET (corrupt applied -> preserve the live ExecStart). `code_indexer.server.main` and the solo CLI launch path now accept/forward `--workers`. `--log-level` is deliberately NOT in ExecStart (it is applied in-process).
+  - **#1200 -- Cluster-wide restart via `launch_restart_generation`.** A raw `config_json` JSON key bumped by an atomic in-SQL `jsonb_set` increment (no `asdict()` round-trip; bumping node's `_db_config_version` left unadvanced so it self-restarts). A normal settings-save preserves the generation via a race-safe targeted single-key re-inject (no lost update, no dropped-key resurrection). An explicit per-poll `check_pending_launch_restart()` -- wired into the reload poll loop, version-diff-independent -- materializes then signals while `target > applied`, never records applied (the auto-updater owns that), and emits one rate-limited WARNING when a node is stuck.
+  - **#1195 -- Web UI launch settings + server-side host/port guardrail.** The four settings are editable via the runtime save path with restart-required badges; a SERVER-SIDE confirmation guardrail (pre-change value read before mutation; client `<dialog>` injects the confirm flag for UX) blocks accidental host/port changes that could sever HAProxy/firewall connectivity; the diagnostics restart is cluster-aware (cluster bump-only, solo single-node). The existing TOTP elevation gate on the config-save and `/restart` endpoints is verified, not duplicated.
+
+## [10.161.0] - 2026-06-24
+
+### Fixed
+- **Partial Epic #1194 (#1199) intermediate cut** -- auto-updater APPLY/DEPLOY ExecStart reconstruction defect fixes. Superseded by v10.162.0, which completes the epic; use v10.162.0.
+
+## [10.160.0] - 2026-06-23
+
+### Fixed
+- **Auto-updater admin-restart ignored the worker count:** An admin-UI-requested restart (`POST /admin/restart` -> `restart.signal` file in systemd mode) was handled by the auto-updater's poll loop with a bare `restart_server()` (`systemctl restart`) only -- it never ran `execute()`, so `_ensure_workers_config()` (the sole writer of the systemd unit's `--workers N`) was skipped. The server relaunched with the OLD worker count even though `workers` is in `RESTART_REQUIRED_FIELDS`. Proven on staging: set `config.workers=3`, requested restart, `ExecStart` stayed `--workers 1` and only 1 worker came up. Fix: the restart-signal handler in `server/auto_update/service.py` now calls `_ensure_workers_config()` (idempotent, value-aware, non-fatal) immediately before `restart_server()`, so an admin-requested restart re-applies the configured worker count. The single-writer invariant is preserved (`restart_server()` still does not modify the unit; `_ensure_workers_config` remains the only `--workers` writer, now invoked from both `execute()` and the restart-signal handler).
+
+## [10.159.0] - 2026-06-22
+
+### Fixed
+- **#1190 MCP exit_write_mode 60s guillotine:** The MCP protocol dispatch applied one global 60s cap (`HANDLER_TIMEOUT_SECONDS`) to all synchronous tool handlers, killing `exit_write_mode` 10x below its budget when the cidx-meta backup hit a rebase conflict that real Claude-CLI resolution needs minutes for. Added a per-tool timeout override (`exit_write_mode` -> 720s = 600s conflict budget + 120s buffer) threaded through `_invoke_handler` at both dispatch call sites; every other tool keeps the 60s default (Bug #1008 protection intact).
+- **#1186 cidx-meta backup rebase masking:** Backup sync treated any non-zero `git rebase` as a conflict-stop and then ran `rebase --continue` even when no rebase was in progress, masking the real failure. Now gates conflict resolution on `_rebase_in_progress()` (checks `.git/rebase-merge`/`rebase-apply`) and surfaces the original rebase stderr otherwise.
+- **#1185 regex_search dash-pattern crash:** User regex patterns starting with `-` were passed as a bare ripgrep positional arg, crashing with "unrecognized flag". Patterns are now passed via `-e <pattern>` and the search path after `--`.
+- **#1184 reaper/retention DuplicateJobError noise:** Data-retention and activated-reaper schedulers logged benign cross-worker `DuplicateJobError` collisions at ERROR; now use `register_job_if_no_conflict` and demote the dedup collision to DEBUG (matching the #1162 pattern).
+- **#1180 Search Event Log config save:** The `export_retention_days` field was posted under the wrong config category, raising a ValueError on save. Added a per-key category override so the section saves correctly.
+- **#1178 SQLite multi-worker bootstrap race:** Under `uvicorn --workers N`, concurrent workers raced in DB bootstrap (`initialize_database` / `seed_initial_admin` / golden-repo + cidx-meta seeding). Serialized the bootstrap path with a `filelock` singleton lock; backends remain fail-loud (strict INSERT) for race safety.
+- **#1188 local:// URL-normalize WARNING:** Golden/activated repo URL-match loops logged a benign WARNING for the internal `local://` scheme; the scheme is now skipped before normalization (the genuine-error WARNING remains as a safety net).
+- **#1189 / #1192 / #1187 test-and-gate hygiene:** Allowlisted a benign `auto_watch_manager` "No watch running" e2e WARNING (#1189); rewrote a stale file-content truncation test to the post-Bug-#1080 line-offset pagination contract (#1192); fixed a coalescer e2e test to the `(vector, EmbeddingCacheMetadata)` tuple contract (#1187).
+
+## [10.158.0] - 2026-06-22
+
+### Documentation
+- **Auto-Updater Invariants (#1182, #1183):** Documented the deployment-lock self-heal invariant in `CLAUDE.md` -- the lock MUST live under `CIDX_DATA_DIR` (never `/tmp`, which systemd `PrivateTmp=yes` isolates and Python 3.12 rejects with `PermissionError`), and `DeploymentLock.acquire()` must be fail-soft so a lock-create failure never freezes a deploy. Corrected the now-stale Story #1167 note: the `_ensure_workers_config` idempotency guard is value-aware, not presence-only. No code change versus 10.157.0 (this release carries documentation only and serves as the staging deploy that validates the previously-frozen Python 3.12 node self-heals without manual intervention).
+
+## [10.157.0] - 2026-06-22
+
+### Fixed
+- **Bug #1182 - Auto-Updater Self-Heal (incomplete Bug #1175 fix):** The auto-updater no longer deadlocks permanently on Python 3.12 nodes running under systemd `PrivateTmp=yes`. Two-layer fix: (1) the deployment lock is moved off `/tmp` to a `CIDX_DATA_DIR`-anchored path via a new shared `get_default_lock_path()` helper (consumed by both `run_once.py` and `service.py`), so the lock lives under the server data directory that `PrivateTmp` does not isolate; (2) `DeploymentLock.acquire()` create-path is now fail-soft (`except OSError` -> WARNING + `return True`, never re-raises), so a lock-create failure can never freeze a deploy. The prior #1175 fix only hardened the `.exists()` probe, not the `open()` write, and left the lock on `/tmp`; every 60s poll re-raised `PermissionError` and aborted before git pull / pip install / restart, a self-perpetuating deadlock. Trigger was strictly Python 3.12 (3.9 nodes unaffected). New tests exercise the real failure surface (patch `builtins.open` to raise on the lock write; assert the lock path is not under `/tmp`).
+- **Bug #1183 - Workers Config Idempotent-On-Value (Story #1167 guard gap):** `DeploymentExecutor._ensure_workers_config()` now rewrites an existing `--workers N` token to the configured `config.workers` value instead of short-circuiting on the mere presence of any `--workers` token. The prior presence-only guard (`if "--workers" in content: return True`) left the multi-worker un-pin inert on every already-deployed node (units already carried a hardcoded `--workers 1`), so `config.workers > 1` had no effect. The replacement uses a token-bounded, ExecStart-scoped regex (`(?<!\S)--workers\s+\S+`) so `--workers 1` is not confused with `--workers 10` and adjacent flags are never clobbered; three cases handled: exact-value no-op, wrong-value rewrite (tee + daemon-reload), absent append. New tests cover the 1->4 rewrite and the 4->4 true no-op. Makes Epic #1161's configurable multi-worker actually take effect on real clusters.
+
+## [10.156.0] - 2026-06-22
+
+### Added
+- **Story #1162 - Description Refresh Scheduler Cross-Worker Dedup:** The description-refresh dispatch now uses cluster-atomic `register_job_if_no_conflict` (was `register_job`) so exactly one Claude CLI invocation fires per stale repo per refresh cycle regardless of uvicorn worker count. Losing workers catch `DuplicateJobError`, log at DEBUG, and continue before any refresh thread is spawned; the generic registration-failure WARNING path is preserved. The DB partial unique index `idx_active_job_per_repo` is the sole arbiter (no in-process dedup state). Accepted limitation: per-process quarantine counters remain per-worker.
+- **Story #1163 - JWT Logout Token Revocation + Blacklist Pruning:** Both `GET /logout` (web admin) and `GET /user/logout` (user portal) now blacklist the JWT `jti` at logout via `get_token_blacklist().add(jti)`. The blacklist is DB-backed (`TokenBlacklist`, SQLite solo / PostgreSQL cluster) so revocation is cross-worker and cross-node -- every uvicorn worker and every cluster node rejects the revoked JWT on the next request. New `TokenBlacklist.prune_expired(ttl_seconds)` method deletes expired rows from both SQLite and PostgreSQL backends and evicts matching entries from the local set. `DataRetentionScheduler` now calls `prune_expired` in both cleanup paths (SQLite and PG) using `jwt_expiration_minutes * 60` as the TTL (read live from config, not hardcoded); result dict includes `token_blacklist_deleted` in `total_deleted`. Logout is non-fatal: any failure to extract/blacklist the jti logs a WARNING and never prevents the 303 redirect.
+- **Story #1164 - PG Migration Concurrent Startup Safety:** `MigrationRunner.run()` now acquires a PostgreSQL SESSION advisory lock (`pg_advisory_lock`) keyed by `_MIGRATION_ADVISORY_LOCK_KEY` (stable `int` derived from `sha256(b"cidx_migrations")[:8]` big-endian signed, value `8835134184625913288`) before any migration work. Under `uvicorn --workers N`, concurrent workers previously raced on the `schema_migrations.filename UNIQUE` constraint; the second committer's startup failed. With the SESSION-level lock, exactly one worker applies pending migrations while others block; when they acquire the lock the pending set is empty and they apply nothing. The lock is released in `finally` on all paths (success and exception) and automatically on connection close (crashed worker cannot deadlock others). The `run()` int return value and all internal migration logic are unchanged. SQLite init path (`database_manager.py`) is unaffected.
+- **Story #1165 - Per-Worker Embedding Governor Concurrency Scaling:** `query_provider_max_concurrency` is now the PER-NODE total provider-concurrency budget. `ProviderConcurrencyGovernor` divides it by `config.workers` at construction (auto-seed path only) so combined embedding pressure across all uvicorn workers on a node stays within the configured limit. Per-worker seed = `max(k_min, per_node_budget // workers)`, then clamped to `[k_min, k_max]`. Workers=1 is byte-identical to previous behavior. Workers=0 or negative falls back to 1 (no division). Explicit `max_concurrency` construction (used in tests) is never divided. Cross-node budgeting remains the operator's responsibility. New `_read_config_workers()` static helper mirrors `_read_config_concurrency` fallback discipline (returns 1 on any config error).
+- **Story #1166 - Per-Worker HNSW/FTS Cache Memory Budget:** New `initialize_caches(worker_count)` in `src/code_indexer/server/cache/__init__.py` divides the per-node HNSW and FTS index-cache cap by `config.workers` so N uvicorn workers each hold 1/N of the budget instead of N x the full `DEFAULT_MAX_CACHE_SIZE_MB = 4096` MB cap. New constant `MIN_CAP_PER_WORKER_MB = 256` (exported) floors the per-worker cap so no worker is starved. New private helpers `_load_hnsw_config()`, `_load_fts_config()`, and `_divided_cap()` eliminate the config-load duplication between the lazy getters and `initialize_caches`. Called inside `initialize_services()` (`src/code_indexer/server/startup/service_init.py`) IMMEDIATELY BEFORE the eager `get_global_cache()`/`get_global_fts_cache()` getters, so the per-worker cap is in place when the singletons are first constructed (single source of truth -- the prior lifespan placement ran after the singletons already existed at full cap, a no-op). Worker count read via `get_config_service().get_config().workers` (a bootstrap key) with try/except fallback to 1. Idempotent (skips re-construction if a singleton already exists, no second cleanup thread spawned). Lazy getters `get_global_cache()`/`get_global_fts_cache()` remain unchanged as safety nets at the full undivided cap for CLI/single-worker/tests. Workers=1 is byte-identical to previous behavior; workers=0 or negative falls back to divisor=1 (no ZeroDivisionError).
+- **Story #1167 - Auto-Updater Workers Un-Pin + Web UI Workers Setting:** `_ensure_workers_config()` in `DeploymentExecutor` now reads the configured worker count from `ServerConfigManager` (same bootstrap-config idiom as sibling `_ensure_*` methods) instead of hardcoding `--workers 1`. Uses `max(1, config.workers or 1)` to guard against misconfigured zero/negative values. Workers=1 is byte-identical to previous behavior. Single-writer invariant preserved: `restart_server()` and `HealthWatchdog._restart_server()` both invoke `systemctl restart` on the existing unit without modifying it. Web UI Server Settings screen gains a read-only "Uvicorn Workers" display row and a number input (1-64) in edit mode; `"workers"` added to `RESTART_REQUIRED_FIELDS` so the UI shows the restart-required note; validation rejects values outside 1-64. Backend already had `workers` in `BOOTSTRAP_KEYS` and `_update_server_setting` already mapped it.
+- **Story #1168 - Multi-Worker Throughput Benchmark Suite:** Standalone benchmark script `scripts/analysis/multi_worker_throughput.py` measures search throughput across 1/2/3/4 uvicorn workers under 4 scenarios (repeating/unique x cache-on/off). Emits markdown + JSON reports to `reports/perf/` (gitignored). Reads admin credentials from `E2E_ADMIN_USER`/`E2E_ADMIN_PASS` (or `E2E_ADMIN_USERNAME`/`E2E_ADMIN_PASSWORD`) environment variables or `.local-testing`. Does NOT auto-start/stop servers — operator manages server lifecycle. Metrics collected from verified REST endpoints: `POST /api/query` (with `no_embedding_cache_shortcut`), `GET /api/admin/coalescer-metrics` (provider embed calls), `GET /cache/stats` (HNSW index hit ratio). No dedicated JSON endpoint exists for query-embedding cache stats; effectiveness is approximated from provider call deltas. Includes a regression check: 2-worker repeating+cache-on throughput must be >= `--regression-multiplier` (default 1.7x) of 1-worker; script exits 1 on failure. Pytest wrapper `tests/performance/test_multi_worker_scaling.py` (marked `@pytest.mark.performance`, skipped unless `CIDX_PERF_TEST=1`) invokes the script as a subprocess. Fixture `tests/performance/fixtures/benchmark_queries.txt` provides 300 diverse code-search queries. The full 1/2/3/4-worker benchmark with 1.7x assertion is an operator-reviewed gate — CI runs only the skip-guarded pytest wrapper.
+
+### Fixed
+- **Bug #1181 - Perf Fix #1: per-query payload_cache batch commit + synchronous_commit=off:** The query hot path previously called `payload_cache.store()` once per large result inside `_apply_rest_semantic_truncation`, `_apply_rest_fts_truncation`, and the MCP equivalent `_apply_fts_payload_truncation`. At concurrency 20 this caused 6+ fsync'd PostgreSQL COMMITs per query, saturating the WAL write lock (`LWLock|WALWrite|COMMIT` pileup visible in `pg_stat_activity`). Fix has two parts: (A) new `store_batch(contents: List[str]) -> List[str]` on `PayloadCacheSqliteBackend`, `PayloadCachePostgresBackend`, and the `PayloadCache` facade collects all large snippets per query and stores them in ONE transaction/commit (`executemany` + single `conn.commit()`), returning handles in order (each immediately retrievable via `retrieve(handle)` cross-node); (B) the PG backend issues `SET LOCAL synchronous_commit = off` before the INSERT in both `store()` and `store_batch()`, eliminating WAL fsync wait for these ephemeral TTL-evicted rows -- the commit is visible immediately (no deferred/fire-and-forget), only crash-durability is relaxed, and `SET LOCAL` is per-transaction so it does NOT affect users/jobs/migrations or any other statement type. All three truncation helpers now use two-pass batching: first pass marks small results, collects large contents; second pass calls `store_batch()` once and assigns handles back. Fail-open preserved: if `store_batch` raises, all pending large results get `cache_handle=None, has_more=False` and the query response succeeds.
+- **Bug #1181 - Perf Fix #2: async/coalesced best-effort last_used touch for query-embedding cache:** The 98%-common cache-hit path previously issued a synchronous `UPDATE query_embedding_cache SET last_used=...` on every hit, contending on the WAL lock and the hot row under multi-worker deployments. Fix: `record_hit()` now does ZERO synchronous DB writes. It coalesces touches into an in-process dict keyed by `(cache_key, provider, model, dimension)` -> latest float timestamp; a background daemon thread (`qec-touch-flusher`) drains the buffer every ~5 seconds via new `touch_last_used_batch(items)` method in ONE transaction. SQLite backend uses `executemany` in a single `execute_atomic` transaction. PostgreSQL backend uses `SET LOCAL synchronous_commit = off` then `executemany` + commit -- safe because `last_used` is ephemeral LRU bookkeeping: a crash losing a buffered touch leaves the row valid, just without a freshly updated timestamp. Buffer is bounded at 2048 entries with early flush on cap hit (Messi Rule #14 compliance). `QueryEmbeddingCacheBackend` Protocol gains `touch_last_used_batch(items)` (mypy-enforced on both backends). `QueryEmbeddingCache.start()` / `stop(timeout)` lifecycle wired in `startup/lifespan.py`: `start()` after `set_query_embedding_cache()`; `stop()` before `clear_query_embedding_cache()`. This is approximate LRU -- ordering is best-effort, row correctness is never compromised. 34 new unit tests in `tests/unit/server/services/test_query_embedding_cache_async_touch_1181.py` and `tests/unit/server/services/test_query_embedding_cache_async_touch_backends_1181.py`.
+- **Bug #1181 - Perf Fix #3: skip per-query file-hash staleness re-read for immutable versioned snapshots:** `_get_chunk_content_with_staleness` in `FilesystemVectorStore` previously called `_compute_file_hash` (reads the whole file + SHA-1) for every git-repo result on every query — even when the index is served from an immutable `.versioned/{alias}/v_{ts}` snapshot whose files can never change. Fix adds a `skip_staleness_check: bool = False` constructor kwarg and attribute to `FilesystemVectorStore` (default False keeps CLI and mutable-path behavior byte-identical). When True, the Tier-1 branch (file exists) reads the file content once, then returns immediately as NOT stale without calling `_compute_file_hash`. The server layer sets the flag via `is_immutable_versioned_snapshot(str(project_root))` in `FilesystemBackend.get_vector_store_client()`, guarded inside the existing `if self.hnsw_index_cache is not None:` block so server modules are never imported on the CLI path. Mutable base-clone and activated-CoW paths keep the flag False and continue running the full staleness check. File-deleted path is unaffected (fires before the skip). 15 new tests in `tests/unit/storage/test_fsv_skip_staleness_1181.py`.
+- **Bug #1181 - psycopg3 executemany is a Cursor method, not a Connection method:** Perf Fixes #1 and #2 initially called `conn.executemany(...)`, which raises `AttributeError` on psycopg v3 (executemany lives on the cursor). Wrapped in the fail-open handler, this made both batched writes SILENT NO-OPS in PostgreSQL mode -- payload_cache rows were never persisted (`/cache/{handle}` -> 404) and `last_used` was never updated. The unit tests passed only because their `FakeConn` mocks defined `executemany` on the connection, modeling an API the real driver lacks. Caught by benchmarking against real PostgreSQL. Fix: both PG backends use `with conn.cursor() as cur: cur.executemany(...)` in the same transaction (SET LOCAL synchronous_commit=off -> executemany -> single commit); the `PayloadCacheBackend`/`QueryEmbeddingCacheBackend` test mocks were made faithful to psycopg3 (cursor-based); a real-PG regression test was added (gated on `CIDX_TEST_PG_DSN`). Audit confirmed the bug was contained to these two backends.
+- **Bug #1179 - Admin Config screen returns HTTP 500 (UndefinedError on config.search_event_log):** `_get_current_config()` in `web/routes.py` did not include a `search_event_log` key, but the Jinja template (`partials/config_section.html` lines 2440/2445/2464/2471) dereferences `config.search_event_log.search_event_log_retention_days` and `config.search_event_log.export_retention_days` inside the `<details id="section-search_event_log">` block. The `| default()` Jinja filter only guards the leaf attribute, not the missing intermediate section, so every `GET /admin/config` and every `POST /admin/config/{section}` (which re-renders the page) raised `UndefinedError` and returned HTTP 500. Root cause: Story #1159/#1160 added the template section and `get_all_settings()` support but did not update `_get_current_config()`. Fix: added `"search_event_log"` to the return dict of `_get_current_config()`, merging `search_event_log_retention_days` (from `settings["search_event_log"]`, default 90) and `export_retention_days` (from `settings["export"]`, default 30) into one dict matching the template's data contract. A new completeness-guard test asserts that every top-level section the template dereferences is present in `_get_current_config()` to prevent recurrence.
+- **Epic #1161 test/regression maintenance:** Fixed test-isolation and faithful-mock issues surfaced by the full fast/server suites: migration-runner advisory-lock tests needed a faithful mocked `_conn.cursor()`; the description-refresh integration stub needed `register_job_if_no_conflict`; the #1166 real-path tests needed `CIDX_SERVER_DATA_DIR`/config-service isolation under chunked runs; and the async-touch unit tests use `asyncio.run` to avoid event-loop contamination. Test-only; no production behavior change.
+
+## [10.155.0] - 2026-06-21
+
+### Fixed
+- **Bug #1177 - ProviderHealthMonitor emits spurious WARNING on None→path transition in CLI temporal query path:** `get_instance()` fired WARNING whenever the singleton existed with `path=None` and a subsequent call provided a real persistence path. In the CLI temporal query path, `semantic_query_manager.py` creates the singleton (path=None) before `cli.py` configures the reranker sinbin persistence path, triggering the mismatch warning on every `--time-range-all` invocation. The WARNING was designed for the dangerous case of two competing non-None paths. A None→real_path transition is benign (no sin-bin state was ever loaded or persisted). Fix: WARNING now fires only when both existing and requested paths are non-None and different; the None→real_path case is demoted to DEBUG with the ignored path for diagnostics.
+
+## [10.154.0] - 2026-06-21
+
+### Fixed
+- **Bug #1176 - spurious WARNING from migrate_legacy_temporal_collection() on every temporal query:** The function treated the `code-indexer-temporal/` metadata tracker directory (containing only `temporal_metadata.db`) as a legacy HNSW collection. The provider-detection chain exhausted and `_detect_from_config()` emitted a WARNING on every `--time-range-all` query. Added early guard after existence check: if `temporal_metadata.db` is present and none of `{hnsw_index.bin, collection_meta.json, temporal_meta.json}` exist, return `SKIPPED` immediately. The guard cannot false-positive on a genuine legacy collection because `collection_meta.json` is always written at `create_collection()` time before any vectors are added.
+
+## [10.153.0] - 2026-06-21
+
+### Fixed
+- **Epic #1169 test contamination fix (test_temporal_cache_injection_1170.py):** The module-level `_STUB_MODULES` loop unconditionally wrote `MagicMock()` into `sys.modules` for every listed module not yet imported, including `numpy` and `msgpack`. When pytest collected `test_temporal_cache_injection_1170.py` before `test_temporal_migration_1172.py`, numpy was stubbed before 1172's `import numpy as np` ran, causing `hnswlib` to receive a MagicMock numpy when it imported internally and then raise `AttributeError: __version__` (dunder attributes are not auto-created on MagicMock). All 9 tests in 1172 failed when the three Epic #1169 test files ran in fixed order. Fix: changed the stub loop to `try: __import__(_mod) / except ImportError: sys.modules[_mod] = MagicMock()` — installed packages (numpy, msgpack) now get their real implementations; uninstallable packages (google.protobuf, rich, pathspec) still get MagicMock stubs. All 76 tests in the three 1170+1171+1172 files now pass in fixed order.
+
+## [10.152.0] - 2026-06-20
+
+### Fixed
+- **Bug #1175 - deployment_lock.py PermissionError crash on Python 3.12 with PrivateTmp=yes:** `cidx-auto-update.service` crashed on every invocation when systemd `PrivateTmp=yes` made `/tmp` paths inaccessible. Python 3.12 propagates `PermissionError` from `Path.exists()` instead of returning `False`. Added `_lock_file_exists()` private helper that wraps all three `self.lock_file.exists()` call sites in `deployment_lock.py` with `try/except OSError: return False`. Staging nodes were stuck at old versions and required manual SSH deployment to recover.
+- **Test suite performance - TestExecuteWiring in test_deployment_executor_memory.py:** Four `execute()` wiring tests each took 6-28 seconds because the un-mocked `_wait_for_drain()` made real HTTP calls to localhost:8000 and `_ensure_claude_cli_updated()` blocked for 5s on `npm --version` timeout. Fixed by: (1) adding `patch.object(executor, "_wait_for_drain", return_value=True)` to each `with` block, and (2) pre-stubbing all non-essential execute() steps (6.5-15) with lambda stubs in `_make_executor_with_mocked_steps()`. Tests now complete in 0.94s for 4 tests (was 28s).
+- **test_partial_file_bug.py AttributeError:** `TrackedFilesystemClient` had no `resolve_collection_name` method; fixed in `high_throughput_processor.py` by computing the collection name inline.
+
+## [10.151.0] - 2026-06-20
+
+### Fixed
+- **Search event logging and analytics export bug fixes (Bugs #1173 and #1174):** Three bugs found during E2E testing of Stories #1159 and #1160. (1) Bug #1173: `inline_query.py` now gates `_writer.enqueue()` behind a `_search_succeeded` flag (initialized False, set True before each of the 3 success return paths: async 202, FTS/hybrid, and semantic). Events are never logged for failed searches (upstream errors, provider timeouts, invalid queries). The context `_ctx_token` reset stays unconditional in `finally:`. (2) Bug #1174a: `inline_admin_ops.py` `POST /api/admin/analytics-exports` removed the pre-generated `export_id = str(uuid.uuid4())`; the worker now reads `export_id = job_id_holder["job_id"]` after `submit_job()` returns, making the export row id identical to the BGM job id. (3) Bug #1174b: `GET /api/admin/analytics-exports` now accepts an optional `?id=<export_id>` query parameter passed through to `export_svc._backend.list_exports(export_id=id)`, enabling the download handler to retrieve a specific export row by job id.
+
+## [10.150.0] - 2026-06-20
+
+### Added
+- **Background startup migration of monolithic temporal indexes to quarterly shards (Story #1172):** When the server starts up, `submit_temporal_migration_jobs()` (wired in `lifespan.py` after BGM initialization, before `yield`) scans all activated and golden repos for unsharded temporal collections. Detection via `_needs_temporal_migration(index_path)`: a collection qualifies if it passes `is_temporal_collection()`, fails `is_sharded_temporal_collection()`, has no `migration_complete.marker`, and has a `hnsw_index.bin` file. One BGM job (`operation_type="temporal_index_migration"`) is submitted per repo; `DuplicateJobError` is caught and skipped (DEBUG log) for cluster-aware dedup via the `idx_active_job_per_repo` PG partial unique index. The migration job: (1) loads the monolithic HNSW via `hnswlib.Index`, (2) reads `label→point_id` from `collection_meta.json` `hnsw_index.id_mapping`, (3) batch-fetches commit timestamps from git via `git log --no-walk --format=%H %cI` (`%cI` = ISO 8601 strict, Python 3.9 compatible), (4) groups vectors by quarter, (5) writes each quarterly shard atomically via `{shard_name}.migrating` → `os.replace()`, (6) writes `migration_complete.marker`, (7) deletes monolithic `hnsw_index.bin`, `id_index.bin`, and JSON payload files, (8) calls `del monolithic_index; gc.collect()` in a `finally` block to free C++-managed HNSW memory. Stale `.migrating` dirs from prior crashed runs are cleaned at job start. Fully idempotent on restart. Both providers discovered (all unsharded temporal collections, no provider filter). Progress reported via `progress_callback` after each shard. Non-fatal: startup scan failures log WARNING and continue.
+
+## [10.149.0] - 2026-06-20
+
+### Added
+- **Quarterly temporal index sharding (Story #1171):** Temporal commit indexes now write into quarterly shard collections (`code-indexer-temporal-{model_slug}-{YYYY}Q{N}`) instead of a single monolithic collection. `TemporalIndexer.index_commits()` groups commits by quarter, creates each shard collection before first write, and processes shards sequentially to bound peak RAM. On the query path, `execute_temporal_query_with_fusion()` calls `get_overlapping_shards()` per configured provider to discover only the quarterly shards whose date range overlaps the query `time_range`, skipping non-overlapping shards entirely. Each shard HNSW index is evicted from the server-mode cache immediately after its query completes (`hnsw_index_cache.invalidate()` in a `finally` block), ensuring peak RAM is bounded to one shard per concurrent provider rather than accumulating all shard indexes in memory. A single `fuse_rrf_multi` pass merges results from all shards across all providers (no double-RRF). Legacy monolithic collections are included when present on disk for backward compatibility.
+
+## [10.148.0] - 2026-06-20
+
+### Fixed
+- **Temporal query path — cache injection + shared executor + subprocess timeout (Story #1170):** Three performance and reliability fixes on the temporal search path. (1) `MultiSearchService._search_temporal_sync()` now builds `FilesystemVectorStore` with `hnsw_index_cache` and `id_index_cache` (guarded on `self.hnsw_index_cache is not None`), mirroring the injection pattern already used by `FilesystemBackend.get_vector_store_client()` on the regular semantic path. (2) `MultiSearchService.__init__()` and `get_instance()` accept a new `hnsw_index_cache: Optional[Any] = None` parameter; `_search_temporal_sync()` forwards `parallel_executor=self.thread_executor` to `execute_temporal_query_with_fusion()`, which propagates it through `_query_single_provider()` and `_query_multi_provider_fusion()` into `TemporalSearchService`. `TemporalSearchService.__init__()` stores it as `self.parallel_executor` and passes it to `FilesystemVectorStore.search()` on the `FilesystemVectorStore` branch. (3) `TemporalSearchService._reconstruct_temporal_content()` now passes `timeout=30` to `subprocess.run()`; on `subprocess.TimeoutExpired` it logs a WARNING and returns `"[Content unavailable - git reconstruction timed out]"` instead of hanging. All new parameters default to `None` — no behavioral change for CLI/daemon mode.
+
+## [10.147.0] - 2026-06-20
+
+### Fixed
+- **psycopg3 TupleRow dict conversion in QueryAnalyticsExportPostgresBackend.list_exports():** `list_exports()` called `dict(row)` on psycopg3 `TupleRow` objects returned by `fetchall()`. psycopg3 does not return dict-like rows by default, so `dict(row)` raised `ValueError: dictionary update sequence element #0 has length 36; 2 is required` (UUID string has length 36), causing HTTP 500 on all cluster nodes when listing or downloading query analytics exports. Fixed by mapping columns by explicit positional index matching the `query_analytics_exports` CREATE TABLE column order.
+
+## [10.146.0] - 2026-06-20
+
+### Fixed
+- **psycopg3 TupleRow dict conversion in SearchEventLogPostgresBackend (Bug #5):** `query()` and `query_for_export()` called `dict(row)` on psycopg3 `TupleRow` objects returned by `fetchall()`. psycopg3 does not return dict-like rows by default, so `dict(row)` raised `ValueError: cannot convert dictionary update sequence element #0 to a sequence`, which the `except` clause swallowed silently — making all search event reads return `[], 0` on PostgreSQL. Both methods now map columns by explicit positional index matching the `030_search_event_log.sql` CREATE TABLE column order.
+- **Context.run() re-entrancy on parallel Voyage+Cohere execution (Bug #4):** `semantic_query_manager.py` called `contextvars.copy_context()` once before the `ThreadPoolExecutor.submit()` loop and reused the same `Context` object across both provider threads. Since a `Context` can only be entered once at a time, the second thread raised `RuntimeError: Context.run() already entered`. Fixed by moving `copy_context()` inside the provider loop so each submitted thread gets its own independent context copy.
+
+## [10.145.0] - 2026-06-20
+
+### Fixed
+- **Search event embedding metrics always NULL (Stories #1159/#1160):** Three root causes corrected: (1) `semantic_query_manager.py` now calls `contextvars.copy_context()` before the `ThreadPoolExecutor.submit()` loop so `_search_event_ctx` is visible inside worker threads (Python 3.9 does not propagate ContextVars across `submit()`); (2) `inline_query.py` now imports `get_current_correlation_id` from `telemetry.correlation_bridge` (the registered middleware) instead of `middleware.correlation` (unregistered, always returned None), fixing `correlation_id` always being NULL; (3) `GET /api/admin/search-events` and analytics export endpoints now use `get_current_admin_user_hybrid` so they are accessible from the Web UI session cookie, and test fixtures updated accordingly.
+
+## [10.144.0] - 2026-06-20
+
+### Added
+- **Query Analytics Export UI (Story #1160):** New admin page at `/admin/analytics-export` allows admins to filter search event data and export it to Excel. Filter panel supports: UTC epoch date range (`from_timestamp`/`to_timestamp`), username, repository alias, search type (semantic/fts/hybrid/temporal/regex/xray), and embedding cache hit filter (hits_only/misses_only). Export runs as a background job (`POST /api/admin/search-events/export` returns `job_id`); the page polls `GET /api/jobs/{job_id}` and updates status in real time. Export history table (`GET /api/admin/search-events/exports`) shows all exports with created time, initiator, filter summary, row count, file size, status, and a Download link for completed exports. Downloads served at `GET /api/admin/search-events/exports/{id}/download` with `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` MIME type. Excel files contain 15 canonical columns per search event. Export retention configurable via Web UI `export_retention_days` (default 30, range [1, 3650]); old files are evicted automatically. Dual-backend storage: `QueryAnalyticsExportSqliteBackend` (solo) and `QueryAnalyticsExportPostgresBackend` (cluster). SQL migration `031_query_analytics_exports.sql` is additive-only. "Analytics" nav link added between Logs and Self-Monitoring. `ExportFiltersRequest` Pydantic model enforces JSON-body binding (not query params) with correct key names aligned to the service contract.
+
+## [10.143.0] - 2026-06-20
+
+### Added
+- **Search Event Logging (Story #1159):** Every semantic/hybrid search now records operational statistics to a `search_event_log` table. Fields captured per query: `query_text`, `repository_alias`, `search_type`, `result_count`, `total_latency_ms`, `username`, `node_id`, and embedding-cache telemetry (`provider_name`, `embedding_cache_mode`, `embedding_cache_hit`, `provider_latency_ms`, `cohere_*`/`voyage_*` fields). The writer uses an async fire-and-forget queue (maxsize=5000, 5s drain, 500 events/batch) so telemetry never blocks a query. Both backends wired: `SearchEventLogSqliteBackend` (solo) and `SearchEventLogPostgresBackend` (cluster/PG). SQL migration `030_search_event_log.sql` is additive-only (`CREATE TABLE IF NOT EXISTS`). `EmbeddingCacheMetadata` dataclass propagates cache hit/miss and provider latency from `EmbeddingCoalescer.submit()` through `coalesced_query_embedding()` to the per-request `SearchEventContext` ContextVar. Admin endpoint: `GET /api/admin/search-events?limit=N` returns paginated events (max 1000). Retention configurable via Web UI `search_event_log_retention_days` (default 90, range [1, 3650]).
+
+## [10.142.0] - 2026-06-19
+
+### Added
+- **GitLab/GitHub auto-discovery background job (Story #1157):** `POST /api/discovery/{platform}/start` now runs discovery asynchronously via `BackgroundJobManager`, returning a `job_id` immediately. The client polls `GET /api/jobs/{job_id}` for live progress (0-90% during page fetching, 100% on completion). Results are stored in `PayloadCache` (cluster-safe: PostgreSQL in cluster mode, SQLite in solo) under key `discovery:{job_id}` and retrieved via `GET /api/discovery/{platform}/result/{job_id}` with automatic multi-page reassembly. Duplicate jobs (same platform, PENDING or RUNNING) return the existing `job_id` with `existing=true`.
+
+### Fixed
+- **Discovery start endpoint security:** Added `require_elevation()` dependency to `POST /api/discovery/{platform}/start` — previously missing, now enforces TOTP step-up for all admin mutation callers.
+- **Discovery result retrieval for large payloads:** `GET /api/discovery/{platform}/result/{job_id}` now accumulates all `PayloadCache` pages (each max 5000 chars) before deserializing JSON, preventing 500 errors on real-sized repository lists that span multiple pages.
+
+## [10.141.0] - 2026-06-18
+
+### Fixed
+- **Audit cache-metric cards rendered inconsistently:** "Audit Top-1 Match" showed a percentage while "Audit Avg Top-10 Overlap" showed a bare decimal (0.97), though both are [0,1] proportions. Top-10 Overlap now renders as a percentage too. Also added a zero-guard to Top-1 Match (it divided by `audit_total` with no check — a `ZeroDivisionError` when no audit samples exist, e.g. just after a node restart); it now shows `--` like the other cards, so both are consistent in format and no-data handling.
+
+## [10.140.0] - 2026-06-18
+
+### Fixed
+- **Shadow Cosine Distribution chart appeared empty even when samples existed.** Cosine-audit similarities (cached vs freshly-computed embedding of the same query) cluster at ~1.0, so all samples land in the last bucket `[0.95, 1.00)` of the 40 ascending buckets — which was scrolled off the bottom of the `max-height: 28rem` container, so the chart looked all-zero. Now renders highest-similarity buckets first (reversed) with a compact `max-height: 14rem`, so the populated buckets are visible without scrolling. Full 40-bucket distribution retained (low-cosine outliers still show on scroll).
+
+## [10.139.0] - 2026-06-18
+
+### Fixed
+- **"Recent Activity" dashboard table rendered "N/A" under the Status header with the status badge floating unlabeled to its right.** The HTMX refresh partial (`dashboard_recent_jobs.html`) renders 5 columns (Repository, Job Type, Completed, User, Status) plus a conditional Providers column, but `dashboard_stats.html`'s `<thead>` (and its inline initial body) had only 4, so after a refresh the rows misaligned under the header. Fixed the `<thead>` to match (added "User" + a conditional "Providers" header) and replaced the inline initial body with `{% include "partials/dashboard_recent_jobs.html" %}` so initial render and HTMX refresh share one row source and can't drift. Regression guard: `test_dashboard_stats_thead_alignment.py`.
+
+## [10.138.0] - 2026-06-18
+
+### Fixed
+- **Query Embedding Cache "Clear" button now sits next to the "Total Cached Entries" count** on the admin config screen (it was previously in the section footer next to "Edit", ~9 rows below the count, so it read as missing). Moved in both `config_section.html` and the `qec_display.html` HTMX swap-target partial; HTMX behavior unchanged.
+- **Shadow Cosine Distribution dashboard card rendered as an unreadable single overflowing line** instead of a chart. The ASCII bar chart relied on Jinja whitespace-control that stripped the newlines between the 40 buckets, collapsing them onto one line that overflowed the card. Replaced with a contained CSS horizontal bar chart (bar width = the existing log-scaled `bar_pct`), with `overflow-x` hidden + a capped scrollable height, plus a "No shadow cosine samples recorded yet" empty state when no samples have been recorded.
+
+## [10.137.0] - 2026-06-18
+
+### Fixed
+- **Activated-repo reindex failed "not initialized" and timed out (server in-process path).** `ActivatedRepoIndexManager` constructed with no `data_dir` hardcoded `~/.cidx-server/data`, ignoring `CIDX_SERVER_DATA_DIR`, so the reindex worker shelled `cidx index` against the wrong directory and reported "no configuration found - project needs initialization." The constructor now reads `CIDX_SERVER_DATA_DIR` (mirroring `startup/lifespan.py`); behavior is unchanged when the env var is unset.
+- **Reindex job was invisible to the job-status API.** The four reindex / index-status handlers (`mcp/handlers/admin`, `routers/indexing`) constructed `ActivatedRepoIndexManager()` without injecting the app's shared `BackgroundJobManager`, so the job ran in a throwaway manager and `GET /api/jobs/{id}` never saw it (poll timeout) — and each call leaked a worker-thread pool. The handlers now inject `app.state.background_job_manager` (and `activated_repo_manager`), failing loud if unavailable.
+- **Finished background jobs could appear stuck RUNNING forever under SQLite contention.** `_execute_job` evicted a terminal job from memory even when its terminal-status persist silently failed, leaving the polled status stale. Memory eviction is now gated on a successful persist; on failure the job is retained in memory with its terminal status (anti-silent-failure).
+
+### Tests
+- e2e Phase 3 hardening: per-request admin-token refresh in the snapshot-retention test (long-running token expiry), disabled the inline registration lifecycle Claude call (registration latency), refreshed the log-audit allowlist (dropped the stale #1154 entry, added benign operational-warning patterns), strengthened the AC2 reindex assertion to require `completed`, and widened the `fake_popen_progress` mock to accept the registration-index `timeout` kwarg.
+
+## [10.136.0] - 2026-06-17
+
+### Fixed
+- **Omni multi-repo search re-embedded the query per repo and inflated the cache hit/miss metric (#1148, completion).** Building on the single-flight fix in 10.135.0, the per-config coalescer is now the single embedding chokepoint that records hit/miss EXACTLY ONCE per `(text, provider-config)` key-resolution per user query. An omni over K same-config repos embeds the query ONCE and reuses the vector across all K (cold omni -> 1 miss + 1 provider call; warm omni -> 1 hit, not K); a single-repo query reuses its one embedding across the primary search and the memory-retrieval pass. `_compute_shared_query_vector` returns `(vector, config-digest)` and `multi_search_service` reuses the precomputed vector for a repo only when the repo's own provider-config digest matches AND neither digest is the fail-open sentinel (`is_fallback_digest` guard) — a different-config repo (e.g. Cohere embed-v4.0 1536-dim vs Voyage 1024-dim) never receives a wrong-config vector and embeds via its own provider. When a precomputed vector is present, `FilesystemVectorStore.search` uses it directly and bypasses `coalesced_query_embedding` (no re-embed, no second metric). Over-cap queries count as exactly one miss + one `long_key` per query.
+
+### Added
+- **Shadow-cosine distribution histogram on the Database Health dashboard (#1152).** The single Shadow Cosine P50 (stuck at 1.0000 in production) is replaced by a full-range distribution histogram: 40 uniform buckets spanning [-1.0, 1.0] (width 0.05, named constants), bar lengths log10-scaled so the dominant ~1.0 spike and the thin sub-1.0 collision tail are both visible, with raw-count labels and a P50 / Min / P05 summary. Computed from the existing bounded shadow-cosine ring buffer under the existing lock — observability-only, no new persistence, schema, or behavior change. Bar lengths are precomputed in Python (no Jinja `log` filter, which previously 500'd the card on any populated bucket).
+
+## [10.135.0] - 2026-06-17
+
+### Fixed
+- **EmbeddingCoalescer single-flight registry leaked memory and zeroed the hit-rate metric (#1148).** The previous implementation (rejected in code review) used thread identity to track in-flight keys and retained done futures indefinitely — causing unbounded memory growth (O(total requests) instead of O(live concurrency)), suppressing hit-rate metrics for sequential same-key warm queries on different threads (hits=0 instead of the true hit count), and leaving a latent joiner hang when the owner path had no try/finally. Reimplemented using the correct standard single-flight pattern: key registered at MISS start, removed unconditionally in try/finally on owner completion (both dispatcher and non-dispatcher paths). Concurrent same-key joiners wait on the pending Future with a bounded 60-second timeout (Messi #14); later sequential same-key callers find no registry entry, perform a real cache lookup, and each record a genuine hit metric. Cache I/O (lookup, record_hit) is restored to outside `_inflight_lock` preserving the lock-free invariant. Registry is now O(live concurrency) with zero retained entries after resolution.
+
+## [10.134.0] - 2026-06-15
+
+### Fixed
+- **Self-monitoring was non-functional in cluster mode -- scans ran (spending Claude credits) but the dashboard showed no scan history and no created issues (Bug #1140).** `LogScanner` wrote scan records, issues, and dedup fingerprints to node-local SQLite while the cluster dashboard reads through the PostgreSQL `SelfMonitoringBackend` -- a silent split-brain (scans succeeded into the wrong store). The scanner and `IssueManager` now route all persistence (scan records, issue metadata, and dedup fingerprints) through the injected backend; the manual "Scan Now" trigger now wires the registry backend (it previously built the service with none -> SQLite); and the PostgreSQL backend gained the missing `list_issues` method so the "Created Issues" panel renders on the cluster. Added a protocol-conformance test asserting both backends implement the full `SelfMonitoringBackend` protocol (the gap that hid the missing method), and the dashboard's issue read now logs its previously-silent fallback. Solo/SQLite mode is unchanged.
+- **Dependency-map domain-file warning flood + frontmatter corruption (Bug #1114).** A domain file with structurally-invalid YAML frontmatter (duplicated, un-indented `participating_repos`) made the cross-domain graph builder emit a full-traceback WARNING on every parse (observed 47x, no de-spam). The malformed-YAML branch in `parse_domain_file_for_graph` now de-spams per distinct file path (warn once, then DEBUG; the `MALFORMED_YAML` anomaly is still recorded on every call), mirroring the existing missing-file branch. Separately, the domain-file frontmatter writers (`_update_frontmatter_timestamp`, `_build_refinement_frontmatter`, and the delta/render path) now serialize via a single dict -> `yaml.safe_dump` (which de-dupes keys) instead of line-based string manipulation -- using a timestamp-preserving loader/dumper so ISO-8601 `last_analyzed`/`last_refined` values survive byte-for-byte (with the `T` separator), keeping the line-based downstream readers working.
+
+## [10.133.0] - 2026-06-15
+
+### Added
+- **Per-node cache-telemetry cards now show the serving node's id.** The three in-memory / per-node query-embedding-cache metrics (Shadow Hit Rate, On-Mode Hit Rate, Shadow Cosine P50) display the node id (`cluster.node_id` if set, else hostname) in their footer note and the "volatile" badge tooltip. In a cluster, HAProxy cookie affinity pins a browser to one node, so without the label two operators on different nodes can see different values for the same cluster and have no way to tell why; the node id disambiguates it. Cache Entries is unchanged (DB-backed, cluster-wide). The node id reuses `app.state.node_id` (wired by lifespan in cluster mode) with a `socket.gethostname()` fallback for solo.
+
+### Fixed
+- **Docs: corrected the cluster load-balancer session-affinity description.** `docs/cluster-architecture.md` previously claimed "the load balancer does not pin sessions to specific nodes," which contradicted the same doc's "session-pinned via HAProxy" note and `cluster-setup.md`. It now accurately states HAProxy uses cookie-based session affinity (`cookie SERVERID insert indirect nocache`) to pin each browser session to one node, with TTL-bounded cache staleness; the LB diagram label was updated to `roundrobin+sticky`.
+
+## [10.132.0] - 2026-06-15
+
+### Fixed
+- **Tag/commit-pinned golden repos no longer fail their refresh every cycle.** `GitPullUpdater.has_changes()` ran `git log HEAD..@{upstream}`, which raises on a detached HEAD (`@{upstream}` does not resolve), so a golden repo whose `default_branch` is a git tag or specific commit (detached HEAD) failed every scheduled refresh indefinitely (observed: `type-fest` pinned to tag `v4.8.3`, thousands of consecutive failures). Detachment is now detected via `git symbolic-ref -q HEAD` and treated as a graceful no-op (a pinned ref is immutable -- nothing to pull); the normal-branch change-detection path is byte-for-byte unchanged.
+
+### Added
+- **Query-embedding cache database is now shown on the Database Health honeycomb.** Added `query_embedding_cache.db` ("Embedding Cache") as a 9th hexagon: `_resolve_db_path` routes it to the server `data/` dir (the hexagon shows the real path + size, not "file not found"), the honeycomb `viewBox` was extended so the 3rd row renders un-clipped, and the file is registered in `POSTGRES_MIGRATED_DATABASES` (it is PostgreSQL-backed in cluster mode, so in postgres mode it is covered by the single "postgresql" check; in solo mode it renders as its own SQLite hexagon).
+- **Cache-metrics cards distinguish volatile from durable.** Shadow Hit Rate, On-Mode Hit Rate, and Shadow Cosine P50 now carry a "volatile" badge plus an "in-memory - per-node - resets on restart" footer note (these are process-local metrics that reset on restart and are not aggregated across cluster nodes); Cache Entries is marked durable (read from the cache database).
+
+### Removed
+- **Dead api_metrics read/write path.** Removed the unused `get_metrics`/`record` code path that read the empty legacy `api_metrics` table (the dashboard already reads the bucketed `api_metrics_buckets` tables). The legacy `api_metrics` table schema is deliberately KEPT (`CREATE TABLE IF NOT EXISTS`) for rolling-restart backward compatibility -- only the dead access code was removed, not the table.
+
+## [10.131.0] - 2026-06-14
+
+### Fixed
+- **Query-embedding cache: a corrupt cache row could break live queries (Codex review).** A mode=on cache HIT decoded the stored blob with no length/dimension validation and no try/except, so a corrupt or wrong-dimension row either raised `struct.error` into the query handler or returned a wrong-length vector that corrupted the downstream HNSW search. The on-hit decode now validates `len(blob) == dimension*4`; on any mismatch or decode error it logs a WARNING and treats the row as a MISS (recompute + rewrite), restoring the "all cache ops fail-open" contract.
+- **Indexing: a vanished file was counted as a failure instead of a skip (Codex review, refines #1118).** The FileChunkingManager TOCTOU path returned `success=False`, so a benign vanished file inflated the failure count. A vanished file is now an explicit SKIP (neither processed nor failed); genuine errors on existing files still count as failures. The vanished-file `FileNotFoundError` guard was also confirmed scoped to the absent source file.
+- **Query-embedding cache deep-fidelity audit overlap divisor (Codex review).** The audit's top-K overlap divides by `max(len of the two result lists)` so identical cached-vs-live vectors correctly yield 1.0 fidelity (a fixed `/AUDIT_TOP_K` divisor wrongly reported a perfect small-result match as 0.5); the stale docstring was corrected to match.
+
+### Removed
+- **Two orphan/hidden query-embedding-cache config knobs (Codex orphan review, Messi Rule #12).** Removed the global `query_embedding_cache_anchor_tokens` (consumed by cache-key normalization but never exposed on the config screen — a stale `config.json` value could silently govern cache keys for both providers) and the dead global `query_embedding_cache_audit_sample_rate` (zero consumers). The per-provider anchor-token and audit-sample-rate knobs remain fully wired and UI-exposed; the anchor-token default is now a module constant (2). Existing configs that still contain the removed keys load unchanged (the keys are ignored).
+
+## [10.130.0] - 2026-06-14
+
+### Fixed
+- **Description-refresh hard-failed on valid CI trigger events like `release` (Bug #1116).** The lifecycle parser's `ci.trigger_events` used a closed 7-value enum (`push|pull_request|merge_request|tag|schedule|workflow_dispatch|manual`); a repo whose CI accurately reported any other valid event (e.g. GitHub Actions `on: release`, observed for `fastapi`) raised `UnifiedResponseParseError` and -- all-or-nothing -- discarded the entire description+lifecycle refresh. `trigger_events` is now validated as an open list of non-empty strings (consistent with its sibling `required_checks`), and the prompt's allowed-list was relaxed to examples. Other lifecycle enums stay strict.
+- **Langfuse telemetry not installed cluster-wide (Bug #1117).** `langfuse` was not a declared dependency, so it existed only where hand-installed (one cluster node), and telemetry init failed at startup on the others ("No module named 'langfuse'"). It is now a mandatory dependency in `pyproject.toml`, so the auto-updater's `pip install -e .` installs it on every node.
+- **A vanished file aborted the entire index (Bug #1118).** During refresh+index, a file that disappeared between directory enumeration and the hash phase (`[Errno 2] No such file`, e.g. a transient `*.tmp`) raised a fatal error that discarded the whole index. Such a TOCTOU vanish is now a per-file skip with a WARNING in both `high_throughput_processor` (hash worker) and `file_chunking_manager`; real errors on existing files still abort as before.
+- **Omni `*` / wildcard search could not resolve globally-activated repos (Bug #1119).** A wildcard repository_alias string (`"*"`, `"name-?"`) was routed to the single-repo path ("Repository '*' not found"), and bare member names were looked up by their bare alias even when only the `-global` form existed. Wildcard strings are now routed to the omni/expansion path, and bare names are promoted to their `-global` form (access-filtered) during expansion. Applied to both `search_code` and `regex_search`.
+- **Dangling activated-repo registrations were un-removable and queryable (Bug #1120).** When an activated repo's on-disk directory was gone but its registry row remained, `deactivate_repository` returned a permanent 404 (it gated on `os.path.exists`), so the dangling registration could never be cleaned up and kept producing query errors. Deactivation now gates on the authoritative registry (PG row / metadata) and removes all traces even when the directory is missing. Added admin-only endpoints so operators can clean up across users: `GET /api/admin/activated-repos` (lists all activated repos with a `path_exists` flag to surface dangling ones) and `DELETE /api/admin/activated-repos/{username}/{user_alias}` (admin force-deactivate of any user's repo). Self-service deactivation is unchanged; the admin routes require admin (non-admin -> 403).
+
+## [10.129.0] - 2026-06-14
+
+### Fixed
+- **Coalescer ignored per-repo embedding endpoint/model (Bug #1112).** The Story #1079 embedding coalescer built its per-lane Voyage/Cohere providers from bare default config, so with coalescing enabled (the default) per-repo `api_endpoint`/`model` overrides were ignored on the coalesced path and every query used the default model/dimension (wrong query vector for heterogeneous-model repos; per-repo endpoint overrides silently dropped). The coalescer registry is now lazy and keyed by provider-config digest: coalescers are built on demand from the caller's per-repo provider, so per-repo endpoint and model are honored on the coalesced path. Homogeneous-default deployments are unchanged (one coalescer per lane); heterogeneous configs each get their own coalescer (preserving the one-batch-one-config seal), bounded with a direct-path fallback on overflow.
+- **Query-embedding cache config screen could not be re-saved after resetting a per-provider anchor_tokens to inherit (#1107).** The input rendered the inherited (None) value as the literal "None", so re-submitting the form sent "None" and int() rejected it. The Voyage/Cohere anchor inputs now render blank for an inherited value so the config screen round-trips.
+- **Flaky fast-automation tests under parallel load (Bug #1113).** Three timing/scheduler unit tests had real test-isolation bugs -- a class-level threading.Event.wait patch that captured other tests' waits, a leaked module-level semaphore, and an operator-precedence bug that counted every file open -- surfacing as non-deterministic flakes under concurrent load. Made deterministic (fake clock / formula assertion / per-test isolation) without weakening what they verify.
+
+## [10.128.0] - 2026-06-14
+
+### Fixed
+- **Query-embedding cache (Epic #1103) dashboard metrics now populate without telemetry.** The cache-metrics dashboard cards (hit ratio, shadow cosine, deep-fidelity audit) were blank whenever telemetry was disabled (the default config on staging/production), because the metrics object was only constructed in the telemetry-enabled startup branch and the accessor stayed None. The object is now built whenever the cache is wired (with the OTEL meter when telemetry is on, else a no-op meter), so its in-process snapshot tallies -- which the dashboard reads independently of OTEL export -- always record. Also: per-provider `query_embedding_cache_{voyage,cohere}_anchor_tokens` can now be reset to inherit-global (None) via the Web UI instead of being coerced to 0. Found via staging-cluster E2E.
+
+## [10.127.0] - 2026-06-14
+
+### Added
+- **Epic #1103 (server-side query-embedding cache).** Caches the QUERY-path embedding for both providers (VoyageAI, Cohere) so repeated or anchor-equivalent query texts skip the embedding round-trip. Synchronous DB-direct, backend-dual (SQLite solo / PostgreSQL cluster) -- no RAM layer, no TTL. Tristate per-provider mode (`off`/`shadow`/`on`, default `shadow`) plus a master kill switch (`query_embedding_cache_enabled`). Anchor-token normalization dial (per-provider `query_embedding_cache_{voyage,cohere}_anchor_tokens`, inheriting the global default of 2): keeps the first N tokens in order and sorts the remaining tail, so reordered queries share one key; the key is CASE-PRESERVED (never lowercased) and SHA-256-hashed; composite PK `(cache_key, provider, model, dimension)`. Shared count-based LRU cap (`query_embedding_cache_max_entries`, default 10000) -- one bucket across both providers, oldest evicted, enforced on every write. Per-request `no_embedding_cache_shortcut` (default false) on all REST and MCP search endpoints (skips the cache READ but still writes). Observability: hits/misses counters + total-entries gauge + per-mode hit ratio on the dashboard and via OTEL, plus shadow-mode `cos(cached, live)` fidelity. Sampled deep-fidelity audit (per-provider `query_embedding_cache_{voyage,cohere}_audit_sample_rate`, default 0.0): on a sampled fraction of cache hits, runs a second HNSW search and records top-10 overlap + top-1 match (on-mode sampled hits re-embed once on the sampled fraction only). Includes the Cohere `embedding_purpose` fix (Bug #1104): all server query-path embed calls pass `embedding_purpose="query"` so Cohere maps to `input_type="search_query"` (previously queries were mis-embedded as `search_document`). New reference docs: `docs/query-embedding-cache.md` and `docs/query-embedding-cache-empirical-study.md`.
+
+## [10.126.0] - 2026-06-12
+
+### Fixed
+- **Bug #1102 (description refresh wrote change-relative language — descriptions must be timeless snapshots for RAG).** Staging fault-injection on v10.125.0 showed a refreshed description containing "Recent code also enforces form parser field and part-size limits..." — changelog voice leaking into the RAG corpus, caused by the `git log --since` change-scoping priming the model to narrate findings as recent changes. Added refinement rule 7 "TIMELESS SNAPSHOT VOICE" to `lifecycle_refresh_addendum.md` (bans temporal/change-relative phrasing — "recent", "newly", "previously", "no longer", "was added" — and mandates plain present-tense facts), reinforced the change-scoping paragraph (the window is a verification-budget tool only and must never surface in the output voice), and added the same timeless-snapshot instruction to the create-mode description guidance in `lifecycle_unified.md`. Prompt-content guard tests in `test_lifecycle_timeless_snapshot_1102.py` (mutation-verified: they fail when the rules are removed). The pre-#1094 historical pin test (`test_create_mode_matches_pre_1094_head_content`) was re-scoped to a pure git-history comparison so intentional prompt edits remain possible; the live create-mode no-drift invariant stays guarded by `test_create_mode_prompt_is_byte_identical_to_current_file`.
+
+## [10.125.0] - 2026-06-12
+
+### Fixed
+- **Bug #1100 (description-refresh scheduler ignored the PG tracking backend in cluster mode — split-brain starved new repos).** `startup/lifespan.py` constructed `DescriptionRefreshScheduler` without a `tracking_backend` argument, so it fell back to node-local SQLite even in postgres cluster mode, while `meta_description_hook` was given the PG-backed registry backend. Repos seeded via the hook were written to PG but never seen by the scheduler (which read SQLite), so their descriptions never refreshed. Moved the registry-selected `tracking_backend` resolution ahead of the scheduler constructor and passed it in, so scheduler and hook now share one backend (PG in cluster mode, SQLite only on the genuine no-registry/solo path). The existing `_reconcile_stale_next_run_rows()` runs synchronously in `start()` before the dispatch loop, spreading overdue rows across the refresh interval so the cutover cannot trigger a mass-dispatch refresh storm. Regression guards in `test_lifespan_tracking_backend_wiring_1100.py` (source-order wiring + storm-prevention against real SQLite).
+- **Bug #1101 (description refinement degraded lifecycle frontmatter and left hallucination-negation residue).** On refresh, the lifecycle frontmatter was rebuilt from the model output, silently dropping richer existing values (`build_system: uv/hatchling` → `hatchling`), list entries (`ci.required_checks: [check, zizmor]` → `[check]`), and omitted keys (`branch_environment_map`). Added a deterministic preserve-by-default lifecycle merge in `lifecycle_batch_runner.py` (invoked from `_process_one_repo` on the refresh write-back): the model value is treated as a degradation and the existing value kept when the new value is a subset/substring of the existing one or the model omits the key; a genuinely different non-empty value still updates. Recurses into nested dicts (`ci`) and keeps superset lists; never drops a key. Added refinement rule "REMOVE FABRICATIONS SILENTLY" to `lifecycle_refresh_addendum.md` so hallucinations are removed rather than refuted in-place (negations that name a false feature pollute the RAG corpus). CREATE-mode prompt remains byte-identical (#1094 invariant preserved). Tests in `test_lifecycle_frontmatter_preserve_1101.py`.
+- **Bug #1099 (research cleanup emitted a repeating WARNING for the well-known 'default' session directory).** `ResearchCleanupService.cleanup()` logged at WARNING for every directory `_is_session_dir_name()` rejected, including the expected `DEFAULT_SESSION_DIR_NAME` dir, so every hourly sweep produced a never-self-healing WARNING that masked genuine unexpected-directory warnings. Downgraded the `default` case to DEBUG; WARNING is retained for genuinely unexpected non-session directory names. Preservation behavior is otherwise unchanged. Tests in `test_research_cleanup_service.py::TestDefaultDirLogLevel`.
+
+## [10.124.0] - 2026-06-12
+
+### Fixed
+- **Bug #1098 (activated-repo reaper disabled fleet-wide by admin/dashboard reads).** `get_repository()` unconditionally stamped `last_accessed` on every call. A single load of the admin Activated Repositories page reset the TTL for every repo in the system (all users, pre-pagination), preventing the reaper from ever evicting idle repos. Added `touch: bool = True` keyword parameter to `get_repository()`; admin/dashboard paths (`web/routes.py:repo_details`, `dashboard_service.get_temporal_index_status`) now pass `touch=False`. Added throttled `touch_last_accessed()` method (1-hour window) used by the MCP search path so search-only active users are not inadvertently reaped. Tests in `test_get_repository_last_accessed_1098.py`.
+- **Bug #1096 (description-refresh quarantine bypassed for repos with stable NULL last_known_commit).** The circuit-breaker (`PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3`) auto-cleared on the `has_changes_since_last_run()` check, which returns True when `last_known_commit` is NULL — meaning perpetually-failing repos with no successful run were never quarantined. Changed the auto-clear gate to compare the current on-disk commit fingerprint against the fingerprint recorded at failure time; clears only when the fingerprint genuinely differs (real commit transition). Regression tests in `test_description_refresh_circuit_breaker_1096.py`.
+- **Bug #1095 (search `exclude_path` silently ignored when comma-separated).** `exclude_path` accepted only a single pattern; passing `"tests/,docs/"` was treated as one literal string and matched nothing. Added `parse_exclude_patterns()` helper that splits on commas and trims whitespace; applied to the semantic leg (`search_service.py`), the FTS/regex leg (`semantic_query_manager.py`), and the temporal leg (`temporal_fusion_dispatch.py`).
+
+### Added
+- **Story #1094 (description-refresh refines existing descriptions instead of replacing).** `LifecycleClaudeCliInvoker` now passes `existing_description` + `last_analyzed` when a non-empty `cidx-meta/{alias}.md` already exists. The externalized `lifecycle_refresh_addendum.md` prompt instructs Claude to preserve accurate content, correct outdated content, and add missing context — not regenerate from scratch. The `{{REFRESH_SECTION}}` placeholder in `lifecycle_unified.md` is substituted with the addendum in refresh mode and stripped entirely in create mode (byte-identical to prior behavior). A 64 KB defensive cap truncates oversized existing descriptions with a marker and WARNING.
+
+## [10.123.0] - 2026-06-11
+
+### Fixed
+- **Bug #1089 (description backfill threads crash on duplicate job registration).** On fast server restarts both `_run_lifecycle_backfill_async` and `_run_description_backfill_async` called `register_job()` while a prior run's job row was still active in the DB. On PostgreSQL the `idx_active_job_per_repo` partial unique index raised `UniqueViolation`, which the existing `except Exception` block caught and logged as an ERROR, silently aborting the backfill sweep. Changed both calls to `register_job_if_no_conflict()` (atomic duplicate-safe path) and added a specific `except DuplicateJobError` guard that logs at INFO ("already active — skipping") and returns early; the `finally` block still clears the event flag. Regression tests added in `test_description_refresh_scheduler_bug1089.py`.
+- **Bug #1093 (permanent description quality-regression loop — four structural defects).** Four bugs in `description_refresh_scheduler.py` combined to cause every golden repo's description to be silently overwritten with degraded output on every scheduled refresh cycle after a DB reset or fresh install: (A) `has_changes_since_last_run()` returned True unconditionally when `last_known_commit` is NULL — fixed to return False when a non-empty `.md` file already exists (no-herd guarantee: 844 repos with NULL commits reschedule cheaply instead of dispatching AI jobs); (B) `on_refresh_complete()` only read `metadata.json`, missing the provider-specific `metadata-{provider}.json` files used by golden repos — fixed to mirror the existing fallback from `has_changes_since_last_run` so `last_known_commit` is written correctly; (C) `_get_refresh_prompt()` staged a temp file and built a prompt that was never used (only its None-ness was checked) — replaced with a lightweight `_has_existing_description()` check; (D) temp dirs created by `_stage_and_build_prompt()` were never cleaned up on the success path — fixed to return the tmp dir path and clean up in the caller. Regression tests added in `test_description_refresh_scheduler_bug1093.py`.
+
+### Added
+- **Story #1092 (batch-create: skip redundant pre-flight git validation).** `POST /admin/golden-repos/batch-create` blocked the HTTP response for N x 2-5s per repo on `git ls-remote` validation — redundant since repos were already confirmed reachable by the discovery API. Added `skip_pre_flight_git_validation: bool = False` to `add_golden_repo()` (single-repo path unchanged); `_batch_create_repos()` now passes `True` for the flag and hoists `list_golden_repos()` to one call before the loop. `generate_unique_alias()` gains an optional `existing_aliases` set parameter so the pre-built set is reused across the loop instead of issuing a DB query per repo. A 20-repo batch now returns in under 2 s with a job_id per repo and zero `git ls-remote` subprocesses during the HTTP request. Tests added in `test_batch_creation_1092.py`.
+
+## [10.122.0] - 2026-06-11
+
+### Fixed
+- **Bug #1091 (Config UI: description refresh help text misleading).** The Web UI config screen help text for `description_refresh_enabled` and `description_refresh_interval_hours` omitted critical behavioral details. Updated both the view and edit sections to clarify: (1) the enabled toggle gates two one-shot startup backfill sweeps (lifecycle metadata repair and terse-description regeneration) in addition to the periodic loop — disabling stops ALL automated description activity; (2) the interval governs only the periodic loop and does not delay the startup backfills, which always run immediately at scheduler start.
+- **SCIP context timeout tests broken by Bug #1088 fast-fail.** `TestSCIPQueryServiceContextTimeout` tests assumed `get_smart_context` would always be reached; our Bug #1088 pre-flight check caused early return when no SCIP files existed. Added `patch.object(service, 'find_scip_files', return_value=[...])` to both tests so the fast-fail is bypassed and they exercise what they were designed to test (timeout forwarding and propagation).
+
+## [10.121.0] - 2026-06-11
+
+### Fixed
+Five bugs diagnosed and fixed across SCIP, indexer, golden-repo cascade-delete, research-session isolation, and prompt-injection hardening. All five pass `fast-automation.sh` and `server-fast-automation.sh`; regression tests added for each.
+
+- **Bug #1088 (SCIP `get_context` missing fast-fail).** `SCIPQueryService.get_context()` was the only SCIP method that did not call `find_scip_files()` before attempting analysis. Without a SCIP index the call would time out after up to 30 s waiting for a symbol that can never exist. Added the same pre-flight `find_scip_files()` check used by every other SCIP method; returns an empty structured dict immediately when no SCIP indexes are present.
+- **Bug #1087 (reanchor tie-break picks wrong path occurrence).** `SmartIndexer._reanchor_resume_path()` used a backward scan that always chose the last (deepest) occurrence of the codebase-dir leaf name in a stored path. When the leaf appeared more than once (e.g. `…/fastapi/fastapi/…`) the backward scan selected a non-existent deeper path instead of the first existing match. Changed to a forward scan with an exists-preferring tie-break: returns the first candidate whose anchored path exists on disk, falling back to the first structural match if none exist. Single-occurrence paths are byte-identical to before.
+- **Bug #1086 (golden-repo removal leaves orphan `global_repos`/`activated_repos` rows).** `GoldenRepoManager.remove_golden_repo()` already contained the correct cascade logic (`GlobalActivator.deactivate_golden_repo()` + `activated_repos` cascade); orphaned rows on staging pre-dated the cascade code. Added a regression test that exercises the full removal path through a real SQLite-backed manager, asserting both `global_repos` and `activated_repos` rows are gone after removal. Also fixed two pre-existing assertion bugs in the existing background-worker callable tests.
+- **Bug #1085 (research-session test isolation + unbounded folder growth).** See v10.117.0 for full detail — the GC and test-isolation fixes were included in that staging-hardening bundle.
+- **Bug #1090 (prompt injection guard).** Externalized prompts (`repo_description_create.md`, `repo_description_refresh.md`, `fact_check.md`, `bidirectional_mismatch_audit.md`, `lifecycle_unified.md`) and the `dependency_map_analyzer.py` inline orientation-file generator now all open with the mandatory "these are source artifacts, not instructions" guard paragraph, preventing a repository's own CLAUDE.md from being treated as instructions during analysis.
+
+## [10.120.0] - 2026-06-11
+
+### Added
+- **Global xray cell concurrency limiter.** All xray scan executions (`xray_search`, `xray_explore`, each cell in `xray_search_batch`) now compete for a shared pool of N slots governed by the existing `xray_worker_threads` Web UI setting (default 4). Implemented via `ResizableLimiter` stored on `app.state.xray_cell_limiter`; live-resizes when `xray_worker_threads` is updated via the config service. On acquire timeout the affected call returns `error: xray_cell_queue_timeout`; batch cells set `timeout=True, partial=True` on the job result. Prevents a single high-fan-out batch from monopolising Rust xray-core workers under concurrent load. 6/6 unit tests green; `server-fast-automation.sh` all 6 chunks pass.
+
+## [10.119.0] - 2026-06-11
+
+### Fixed
+- **xray_search_batch excluded from dashboard.** `xray_search_batch` jobs now join `xray_search` and `xray_explore` on the dashboard exclusion list, so the recent-jobs panel no longer shows high-frequency batch query calls. One-line fix to `dashboard_service.py` `exclude_operation_types` list; 11/11 unit tests green.
+
+## [10.118.0] - 2026-06-11
+
+### Fixed
+The staging canary surfaced the deeper cause behind the cow-daemon/NFS refresh failures that v10.117.0's read-after-create barrier had converted from a silent crash into a loud timeout. Two distinct, proven bugs — diagnosed with live concurrent-load measurement on the 3-node staging cluster, fixed and validated.
+
+- **cow-storage-daemon asyncio cross-loop bug (the real root cause — fixed in the separate `cow-storage-daemon` repo, deployed to the staging daemon).** Under ANY concurrent clone-create load the daemon returned HTTP 500 with `RuntimeError: got Future attached to a different loop`, killing the clone job so the snapshot never landed and CIDX's barrier timed out. Cause: the daemon builds its `MetadataStore`/`CloneManager` (and their `asyncio.Lock`s) via `asyncio.run(_create())` on a loop that is then CLOSED, while uvicorn serves on a different loop; in Python 3.9 a Lock created at construction binds to the (now-dead) creation loop, so contended `acquire()` parks a Future on the wrong loop. Uncontended acquisition takes a futureless fast path — which is why single/idle refreshes worked and the failure only appeared under the auto-scheduler's concurrent refresh wave. Fix: lazy, loop-aware lock accessors that bind to `get_running_loop()` and rebind on loop change. Proven live: 8 concurrent creates went from 4x HTTP 500 to zero, and the langfuse-global (3.3 GB) refresh now completes.
+- **NFS read-after-create visibility lag under concurrent load (CIDX side).** With the daemon fixed, refreshes still intermittently hit `NFS read-after-create visibility timeout` when a large reflink ran alongside another create: a newly-created snapshot dir was instantly visible when idle but took >15s to propagate to the scheduler node under concurrent metadata churn (NFS client directory / negative-lookup caching). `wait_for_nfs_visibility` now forces a fresh `listdir(parent)` READDIR on each poll — refreshing the client's directory-entry cache far more aggressively than the prior GETATTR-only ancestor stat, so a child the create side already has resolves immediately even under load — and the timeout becomes a runtime-tunable `ServerConfig.nfs_visibility_timeout_seconds` (default raised 15s -> 60s) wired into both clone backends and the refresh-scheduler barrier. Bounded + fail-loud preserved (the readdir is best-effort; the authoritative `isdir`/deadline checks still raise on a genuine timeout). Local backend still does no wait.
+
+## [10.117.0] - 2026-06-10
+
+### Fixed
+Staging-hardening bundle — seven fixes caught by the staging canary (cluster + cow-daemon over NFS) before any reached production. All reviewed/approved; `./lint.sh`, `fast-automation`, and `server-fast-automation` green.
+
+- **Bug #1084 regression (NFS read-after-create):** the canonical `.versioned/{ns}/v_*` snapshot path nests under freshly-created parent dirs the scheduler's NFS client had never looked up (negative dcache), so `_create_snapshot`'s `subprocess.run(cwd=new_snapshot)` (`git restore`, `cidx fix-config`) hit `FileNotFoundError` ~2s after the cow-daemon reported create success. New `server/storage/shared/nfs_visibility.py::wait_for_nfs_visibility` (bounded monotonic deadline + root-first ancestor `stat` to bust the negative dcache; raises on timeout) is called at the cow-daemon/ONTAP create boundary + defense-in-depth before the subprocess steps. Local backend unchanged.
+- **cow-daemon `codebase_dir` path-domain leak (indexing):** the git-aware resume path replayed absolute file paths persisted by a prior run under the NFS-mount prefix while the current run's `codebase_dir` was the daemon-local prefix, so `file_identifier.relative_to(project_dir)` raised → "Hash calculation failed" (~101 langfuse refresh failures). `SmartIndexer._reanchor_resume_path` re-anchors stale-prefix stored paths onto the actual walk root (keyed off path shape, covers any cow-daemon repo); local/normal indexing byte-identical.
+- **Cluster git-key not synced to workers:** `SSHKeySyncService.sync()` materialized deploy-key files on every node but never wrote `~/.ssh/config`, so only the node where the key was host-assigned could select it → cidx-meta backup `Permission denied (publickey)` when a worker won leader election. `sync()` now regenerates the CIDX-managed `~/.ssh/config` Host blocks on every node (IdentityFile → this node's own synced key), idempotent and non-fatal. (Requires the deploy key registered in PG `ssh_keys` to materialize on workers.)
+- **§-preamble JSON parsing (self-monitoring + scip self-healing):** the cidx-server parsed Claude CLI stdout with a bare `json.loads`, which failed `Expecting value: line 1 column 1 (char 0)` whenever a pace-maker `§` telemetry line prefixed the output. New `self_monitoring/llm_response_parser.py::extract_json_from_llm_response` (strips `§`/Warning/code-fence/prose, finds the first balanced top-level JSON, string-literal-aware; raises on empty/garbage — never a false success); wired into `LogScanner.parse_claude_response` and reused by `scip_self_healing._parse_claude_response`.
+- **`get_file_content` bare-alias fallback:** a stale own-activation record made `get_file_content` raise an unhandled `FileNotFoundError` (server-side traceback + `[CACHE-GENERAL-011]`) instead of applying the Story #1039 global fallback like `search_code`. It now recovers via the `-global` form when globally active (activated-repo precedence preserved), returns a clean MCP error for genuine not-found (no traceback), and de-spams the expected-absent log to DEBUG. `_global_fallback` stays read-only-handlers-only.
+- **Bug #1085 (Research Assistant folders unbounded, 22,654 dirs / ~73 GB):** (a) test isolation — `ResearchAssistantService` gains a `research_base_dir` seam and an autouse fixture redirects research tests off the real `$HOME` (proven no leak); (b) server-side GC — new `ResearchCleanupService` (startup orphan reconciliation + hourly TTL sweep, `research_session_retention_days` runtime knob, mirrors SCIP `WorkspaceCleanupService`). The GC sources its live-session set from the active `backend_registry.research_sessions` (PostgreSQL in cluster, SQLite in solo), fails closed (deletes nothing) on any untrustworthy live-set, validates a UUID session-dir shape before deletion, and is symlink-safe — closing a review-caught data-loss path that would otherwise have deleted live sessions in cluster mode.
+
+## [10.116.0] - 2026-06-10
+
+### Fixed
+- Bug #1084: Versioned snapshots were never deleted on the `cow-daemon` and `ONTAP` clone backends (leaked ~1.25 GB per refresh/branch-change/add-index; 957 leaked on staging). Root cause: cleanup was gated on the local-only substring test `".versioned" in path`, which the non-local backends' path layouts never contain. (Note: GitHub issue #1084 is THIS snapshot-leak bug; the v10.115.0 entry below informally reused the "#1084" label for the reranker-pooling follow-on to #1083 — unrelated.)
+  - **One canonical convention across all backends**: versioned snapshots now live at `<root>/.versioned/{ns}/v_<ts>` on local AND cow-daemon (cow-daemon creates via the existing `create_clone_at_path`). The path convention lives in ONE place -- `is_versioned_snapshot()` in `server/storage/shared/snapshot_paths.py` -- consumed via the `VersionedSnapshotManager` facade. The brittle `".versioned" in path` substring test and `golden_repos_dir/.versioned/{repo}` reconstruction are removed from all decision/discovery paths (grep-enforced by `test_versioned_single_source_bug1084.py`). A transition clause still recognizes pre-migration legacy cow-daemon shapes for cleanup.
+  - **Backend-correct deletion behind the refcount gate**: superseded snapshots are deleted through `VersionedSnapshotManager.delete_snapshot()` (cow-daemon `DELETE` REST -> daemon registry stays consistent, no ghost rows; ONTAP frees the FlexClone volume; local rmtree) -- but ONLY via `CleanupManager`'s preserved QueryTracker refcount-zero gate, so a snapshot serving an in-flight query is never deleted.
+  - **Keep-last-N retention** after each alias swap (`snapshot_retention_keep_last` runtime config, default 3; never deletes the current `target_path` or `previous_path`; enabled on local + cow-daemon; inert on ONTAP pending alias-scoped naming).
+  - **Defect C** (`_has_local_changes`) and **Defect E** (`_restore_master_from_versioned`) now use the backend discovery API (`list_snapshots`/`latest_snapshot`) instead of the local `.versioned` glob -- no more spurious every-cycle re-index/snapshot on cow-daemon, and a lost master is restorable on cow-daemon.
+  - **Secondary consumers reconciled to the canonical predicate**: the provider-index immutability guard (`mcp/handlers/repos.py` -- closes a write-into-snapshot corruption vector on cow-daemon), SCIP repo discovery (`scip_query_service.py` -- SCIP and semantic now resolve the same version), dep-map cidx-meta read (`dependency_map_service.py`), the `query_path_cache` immutability predicate (canonical snapshots gain NO-TTL caching), and `_legacy.py`.
+  - Master base clone is never deleted (incl. first refresh). Manual E2E validated against a REAL CoW Storage Daemon (canonical creation, per-swap daemon deletion with zero ghost rows, legacy-transition cleanup, retention, Defect C/E, master-never-deleted, query continuity). ONTAP canonical-layout/alias-scoped-naming (AC11) and the one-time post-deploy staging snapshot purge (AC12) are deferred/gated per the issue.
+
+## [10.115.0] - 2026-06-10
+
+### Added
+- Story #1084 (extends #1083): Production httpx connection pooling for the RERANKER clients. `VoyageRerankerClient` and `CohereRerankerClient` now borrow the factory's pooled keep-alive client (`pooled=True`) instead of building and closing a fresh client + latency transport per rerank call -- eliminating the per-request TLS handshake/connect/DNS/SSLContext churn on the `:rerank` lanes, mirroring the #1083 embed-lane fix (latency transport baked into the pooled client once; auth already per-request so key rotation stays transparent; fault-injection path unchanged with fresh per-call fault-intercepted clients). Code review approved; build-once proven by `tests/unit/server/clients/test_reranker_pooled_httpx_1084.py`.
+
+## [10.114.0] - 2026-06-10
+
+### Added
+- Story #1083: Production httpx connection pooling + batched metrics writer (query-path perf). After #1082 removed the per-query orchestration glue, profiling v10.113.0 showed the next single-worker time sinks were (a) building and tearing down a fresh httpx client + TLS handshake on every embedding call (~37% of embed wall-time) and (b) the background metrics writer doing one `BEGIN EXCLUSIVE` SQLite transaction per query (~15% on-CPU).
+  - **Production keep-alive connection pooling**: `HttpClientFactory` now owns one long-lived, thread-safe `httpx.Client` (reused SSLContext + connection pool, sized to the governor concurrency) returned via a no-op-close "borrow" context, built once and closed at lifespan shutdown. The provider sends `Authorization` per-request so the pooled client is auth-agnostic (API-key rotation is transparent, no client rebuild). The latency-tracking transport is baked into the pooled client once (no per-query SSLContext churn). Applied to VoyageAI and Cohere. The fault-injection path is unchanged (fresh per-call fault-intercepted client) — pooling applies only when fault injection is OFF (always true in production).
+  - **Batched metrics writer**: the background `api_metrics` writer drains the queue and commits batched/coalesced transactions instead of one per event (no counts lost; drained on shutdown).
+- Measured single-worker front door, same box/repo/harness, v10.113.0 vs optimized: per-query TLS-handshake/connect/DNS frames collapsed 38-77x, per-query SSLContext construction ~1397 -> 1 sample, metrics-writer CPU ~34% lighter; **throughput +38% at the C=8 knee (22.16 -> 30.65 rps), +33-35% at C=1, ~25% lower CPU per request**, byte-identical results, zero new errors.
+
+## [10.113.0] - 2026-06-09
+
+### Added
+- Story #1082: Server query-path per-query overhead elimination with drift-safe caching. Concurrent semantic searches on a single worker were GIL-bound on redundant per-query orchestration work (re-parsing the static model-spec YAML, reloading + path-resolving repo config.json, and emitting a per-query codebase_dir-mismatch WARNING) rather than on embeddings or vector search. Eliminating that redundant work reclaims the wasted core and lifts single-worker front-door throughput.
+  - **Load-once static model-spec**: `voyage_models.yaml` / Cohere specs parsed once per process instead of on every `VoyageAIClient.__init__` (the HTTP client stays per-request for thread safety).
+  - **Drift-safe `RepoConfigCache`** (`server/services/query_path_cache.py`): a thread-safe, single-flight (refcounted key-locks + invalidate-epoch), bounded-LRU `TTLCache` with hit/miss/reload/invalidate/evict counters. NO-TTL only for paths proven immutable by `is_immutable_versioned_snapshot()` (globally-activated `.versioned/v_*` snapshots); SHORT bounded TTL (default 30s) for everything not provably immutable. Provider state keyed on a `provider_config_digest` (key fingerprint, never the raw secret) covering endpoint/timeouts/retries/model. Auth-bearing data (API keys, user rows, MCP credentials, permissions, token validation) is NEVER cached. Runtime kill switch `query_path_cache_enabled`.
+  - **`codebase_dir` mismatch de-spam**: reconciled silently per-node and logged once per config path instead of on every query, preserving the Bug #1033 NFS multi-mount override.
+- Corrected the CLAUDE.md "Golden Repo Versioned Path" invariant: `get_actual_repo_path()` returns the MUTABLE base clone first (Priority-1), not the immutable versioned snapshot — query-path config caching defaults to TTL accordingly.
+- Measured on a single worker (front door, Voyage-only, same box/repo/harness, pre-#1082 vs optimized): per-query `_load_model_specs`/`yaml.safe_load`/config-reload frames present -> absent, cache serving 128,863 hits / 1 miss / 1 reload, codebase_dir warnings 5,658 -> 1, and sustained throughput +33-34% at the saturation knee (~17 -> ~23.6 rps) with byte-identical results and zero new errors. Spec hardened through two Codex GPT-5 reviews before implementation.
+
+### Performance (also shipping in this release)
+- Async server logging: the root logger now routes through a single `QueueHandler` -> `DrainableQueueListener` so request threads only enqueue (formatting and handler I/O run on the listener thread), removing the per-request logging-lock contention found by py-spy under concurrent `/api/query` load. Per-query hot-path INFO logs on the semantic-search path were also removed.
+- Shared long-lived query executor: the embed/index-load fan-out in `FilesystemVectorStore.search()` now uses one app-lifetime `ThreadPoolExecutor` (`app.state.query_executor`) instead of constructing a fresh `ThreadPoolExecutor` per request, eliminating per-request thread create/destroy churn and the associated `_global_shutdown_lock` contention. CLI/solo path unchanged (per-call executor when no server executor is injected).
+
+## [10.112.0] - 2026-06-08
+
+### Added
+- Story #1079: Server-side embedding request coalescer with adaptive per-lane concurrency governance (refines Bug #1078). Concurrent server query-embeds now coalesce into batched provider calls, gated by a self-tuning per-lane governor, so searches succeed under burst load without provider 429 failures at near-zero added latency at low load.
+  - **4 independent governed lanes** (`voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank`) replace Bug #1078's 2 shared per-provider budgets, each with its own `ResizableLimiter` (lock+condition, runtime-resizable K, replaces `BoundedSemaphore`), `AimdController` (additive-increase/multiplicative-decrease adaptive concurrency, K_MIN=8/K_MAX=32), and sinbin health key. Lanes adapt fully independently.
+  - **`EmbeddingCoalescer`** (one per `:embed` lane) coalesces concurrent submissions into a single batched `get_embeddings_batch(retry=False)` call through the governor as the SOLE limiter (no second semaphore; backoff sleeps outside the slot). Dual-constraint sealing (provider texts cap AND `_get_model_token_limit()*margin`, using the provider's own token counter) guarantees exactly one provider HTTP call per sealed batch. Shared-fate fan-out completes every coalesced caller's future on success or any exception (no hang).
+  - **Canonical 429 normalization** (`provider_backoff.is_rate_limited`): providers re-raise 429s intact (fixes a latent Bug #1078 gap where VoyageAI masked 429s as generic `RuntimeError`, invisible to backoff retry and AIMD).
+  - **Server-gated**: a coalescer registry is built only in server lifespan; the CLI/solo path keeps the direct governed single call (no batching, no accumulation window). Runtime kill switch (`coalesce_enabled`) and hot-reloadable caps (`coalesce_max_batch_size`), plus `coalesce_k_min`/`coalesce_k_max` AIMD bounds. Per-lane observability (`current_k`, AIMD-decrease logs, coalescing-ratio counters).
+- Validated end-to-end against a live server via the REST front door: a 40-concurrent `/api/query` burst across both providers (Voyage + Cohere) completed with zero 429s and proven coalescing (40 embeds -> 17 Voyage / 27 Cohere batches).
+
+## [10.111.0] - 2026-06-08
+
+### Removed
+- Bug #1081 (cleanup, no behavior change): Deleted the orphaned `handle_git_diff` MCP handler in `git_read.py`. It was registered-then-overwritten dead code -- the live `git_diff` tool is the separate `git_diff` function (Story #686, diff-line pagination); `handle_git_diff` had zero runtime callers and was only reachable via a registry line immediately overwritten by the live variant. Removed its definition, its dead registration line, its re-exports from `handlers/__init__.py` and `_legacy.py`, and the test that drove it (`test_git_diff_truncation.py`, which exercised the byte-envelope cache_handle path retired in #1080). The dead-handler-based git_diff cases in `test_bug1080_git_coherence.py` (`_call_git_diff` / `TestGitDiffCoherence`) were also removed -- the live `git_diff` pagination coherence is covered by the #1080 manual front-door E2E. `handle_git_log` (the live omni-fan-out worker) and `handle_git_blame` are untouched.
+
+### Fixed
+- Bug #1081 (doc accuracy): `git_diff.md` outputSchema now matches the live `git_diff` handler exactly -- `success`, `diff_text`, `files_changed`, `lines_returned`, `total_lines`, `has_more`, `next_offset`, `offset`, `limit`, `error`. Removed the stale dead-handler fields it previously advertised (`from_revision`, `to_revision`, `files`, `total_insertions`, `total_deletions`, `stat_summary`) that the live tool never returns. MCP clients reading the `git_diff` output schema now see the true response shape.
+
+## [10.110.0] - 2026-06-08
+
+### Fixed
+- Bug #1080 (fix): Incoherent pagination across the MCP content tools. These tools stacked TWO pagination axes on one payload -- a domain-unit axis (file lines / commits / diff-lines) AND a byte/char "envelope" (TruncationHelper + PayloadCache) -- with no reconciliation. The body was byte-cut (`content[:max_chars]`, often mid-line) while line metadata was computed against the PRE-truncation full slice, and `has_more` was overwritten with the byte-envelope value, so a single response could report `next_offset==null` (line axis: done) yet `has_more==true`/`total_pages>1` (byte axis: more) -- clients could not paginate by the documented offsets. Fix collapses to a SINGLE domain-unit axis: a new line-aware, token-bounded `_read_chunk` in `get_file_content` selects WHOLE lines only (never `content[:max_chars]` mid-line), splitting on `\n` exactly to match the service's `\n`-based `total_lines` count (`str.splitlines()` would over-split on `\f`/`\v`/`\x85`/etc. and break the `returned_lines <= total_lines` invariant), and recomputes `returned_lines`/`next_offset`/`has_more`/`truncated` FROM the actually-returned content. A single line larger than the whole budget is emitted WHOLE (the only allowed one-response budget overrun) so pagination always terminates with a strictly-advancing `next_offset`. The byte envelope (`cache_handle`/`total_pages`) is RETIRED for `get_file_content`, `git_diff`, `git_log`, `git_blame` (now `null`/`0`). NOTE for MCP clients: paginate these four tools by the domain `offset`/`next_offset`, NOT by `cache_handle`/`total_pages` (that path is gone for these tools). The `search_code`/`scip_*`/`xray_*` per-field 2000-char preview is intentionally UNCHANGED (clean item-count axis, regression-guarded). Validated front-door (REST/MCP) E2E: byte-for-byte gap-free reconstruction (`get_file_content` 33 pages == file sha256; `git_diff` == full unpaginated diff; `git_log` all 5539 commits, no dup/drop; `git_blame` contiguous 1..N). Pre-existing dead-code / doc-mismatch (`git_diff.md` outputSchema still advertises dead-handler stat fields; orphaned `handle_git_diff`) tracked separately as #1081.
+
+## [10.109.0] - 2026-06-08
+
+### Changed
+- Bug #1078 (tuning): default `query_provider_max_concurrency` (the per-provider serving-path embedding/rerank concurrency cap K) raised from 8 to 16. A 3-runs-per-K benchmark sweep (K=8/16/32 at concurrency 8/20/50, single worker, real VoyageAI) found K=16 is the diminishing-returns knee: vs K=8 it cut conc-50 p50 latency ~20% (2221->1780ms) and raised throughput ~9% (14.3->15.6 rps), while K=32 showed no benefit and slight regression. High-concurrency throughput is ultimately capped by the provider round-trip + single-worker GIL (~13-16 rps regardless of K), so K governs how efficiently the queue drains. NOTE: K is PER PROCESS — a 3-node cluster now runs up to 3x16=48 concurrent provider calls (was 3x8=24); ensure this stays within the provider account's concurrent-request budget (still operator-tunable via the runtime config field). Real-provider regression test updated (EXPECTED_K=16, C=24) and re-confirmed: in_flight_high_water_mark==16, 0 errors, no hang.
+
+## [10.108.0] - 2026-06-08
+
+### Performance
+- Bug #1078 (perf): id_index is now cached cross-query, mirroring the HNSW index cache. Previously a fresh `FilesystemVectorStore` was created per query, so its per-instance id_index cache never persisted and `_load_id_index` re-deserialized the id_index from disk on EVERY query -- rebuilding thousands of `pathlib.Path` objects in pure Python. A GIL-only py-spy profile showed this id_index deserialization was ~33% of all GIL-holding time, serializing concurrent queries on the single worker. New `IdIndexCache` (`server/cache/id_index_cache.py`, mirrors `HNSWIndexCache`: TTL, per-key load dedup, `invalidate`/`invalidate_prefix`/`clear`) is a process-global singleton (`get_global_id_index_cache()`) wired in via `FilesystemBackend.get_vector_store_client()` in server mode (gated on the HNSW cache being present; CLI/standalone keeps the per-instance dict, unchanged). The id_index cache is invalidated wherever the HNSW cache is invalidated (index rebuild/refresh), so a refresh never serves a stale path mapping. Measured (voyage-only, single worker, real provider): concurrency-8 semantic latency dropped from ~929ms to ~426ms (-54%, 2.2x); id_index load 316ms->8ms, with a cascade (less GIL contention) cutting embed 533->288ms, HNSW-cache-hit 88->13ms, and per-query setup 143->76ms. Single-query latency also improved 359->274ms.
+
+## [10.107.0] - 2026-06-07
+
+### Fixed
+- Bug #1078 (REAL root cause): Semantic-search concurrency collapse on the server was caused by **logging-lock contention**, not provider rate-limiting. `SQLiteLogHandler.emit()` performed a synchronous SQLite write (`execute_atomic` -> `get_connection`) WHILE holding the Python logging handler lock; every per-query INFO log (amplified by the dual-provider "parallel" query strategy) serialized on that lock. Proven by py-spy thread dumps: under a 16-concurrent semantic burst, 32 request threads were parked on `logging/__init__.py:901` `Handler.acquire()` while the holder was stuck in `emit -> get_connection`; zero HTTP 429s occurred. Fix: `SQLiteLogHandler` is now non-blocking -- `emit()` extracts fields and enqueues onto a bounded in-memory queue (`maxsize=10000`), and a dedicated daemon writer thread (`sqlite-log-writer`) drains it to the DB, so the handler lock is never held during I/O (mirrors the existing `ApiMetricsService` writer pattern). On queue saturation, ERROR/CRITICAL records get a bounded blocking enqueue (never silently lost); lower-severity records drop with an observable `dropped_count` + throttled stderr warning (anti-silent-failure). Hot-path per-query INFO logs (e.g. `backend_factory.py` "Creating FilesystemBackend", `semantic_query_manager` routing/strategy logs) demoted to DEBUG. `close()` flushes the queue and joins the writer. Validation (real VoyageAI, single-worker server): 48 concurrent requests -> 48/48 HTTP 200, 0 timeouts, 0 threads on the logging lock, post-burst recovery 0.45s (baseline: 40/40 timeouts + worker hang). Why local (SQLite) collapsed but staging (PostgreSQL) did not: SQLite's single-writer + connection-manager contention wedges under concurrent log writes; PostgreSQL tolerates them. The v10.106.0 ProviderConcurrencyGovernor is retained as independent hardening but is NOT the fix for this stall.
+
+## [10.106.0] - 2026-06-07
+
+### Fixed
+- Bug #1078: Semantic-search concurrency collapse under load. The query serving path made multiple unbounded blocking calls per query to the embedding/rerank provider (VoyageAI/Cohere) -- query embedding, optional memory-retrieval embedding, and optional reranking -- all hitting the same provider account with no admission control and inconsistent 429 handling. Under concurrency this self-DoSed the provider: a single-worker server hung with 40/40 timeouts at concurrency 20 (measured, real provider). Fix (Phase 1): a process-wide `ProviderConcurrencyGovernor` (`server/services/provider_concurrency_governor.py`) with a `threading.BoundedSemaphore(K)` per provider budget (`voyage`, `cohere`) -- Voyage embedding and Voyage rerank share one `voyage` budget (shared account rate limit). All 5 serving call sites (PG + filesystem query embedding, memory-retrieval embedding, reranking, temporal embedding) acquire one slot per single HTTP attempt via the shared `governed_call.py::governed_query_embedding` helper, which wraps a new bounded `execute_with_backoff` (`services/provider_backoff.py`: max 2 retries, per-attempt cap 15s, cumulative cap <=45s, full jitter, Retry-After honored/clamped) so 429 backoff sleeps happen OUTSIDE the held slot. Query-path embedding is now single-attempt (`get_embedding -> get_embeddings_batch(retry=False)`); the indexing batch path keeps its own 429 retry/backoff and is NOT governed. A sinbin pre-check skips sinbinned providers without consuming a slot. The two fault-injection bypasses (memory + rerank client construction) now route through `_http_client_factory`. New server runtime config `query_provider_max_concurrency` (default 8). Real-provider regression test (`tests/integration/test_provider_governor_real_concurrency_1078.py`, no mocks): 20 concurrent governed embeddings -> 20 successes / 0 errors, in-flight high-water-mark held at 8, no worker hang, sentinel recovery 0.45s. Phase 2 (pooled keep-alive HTTP client) deferred. Per-process cap; in a 3-node cluster the global ceiling is 3xK by design (no distributed limiter).
+
+## [10.105.0] - 2026-06-07
+
+### Added
+- Story #1077: C and C++ language support for xray AST search, across BOTH the Python `AstSearchEngine` (Phase 1) and the Rust `xray-core`/`xray-cli` (Phase 2). Rust xray-core now supports 17 languages (was 15) via new `tree-sitter-c` (0.24.2) and `tree-sitter-cpp` (0.23.4) grammar crates; the Python engine supports 12 (was 10) using the C/C++ grammars already bundled in `tree-sitter-languages`. Extension mapping: C = `.c`, `.h`; C++ = `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx`, `.h++` (`.h` maps to C per GitHub-Linguist; a C++ header named `.h` parses under the C grammar and may yield ERROR nodes on C++-only syntax — name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++`). The auto-updater rebuilds `xray-cli` on deploy (DeploymentExecutor Step 16), so no deploy-plumbing change is needed. Verified node kinds: `translation_unit`, `function_definition`, `call_expression`, `struct_specifier` (C), `class_specifier`/`namespace_definition`/`template_declaration` (C++), `if_statement`/`for_statement`/`while_statement`, `try_statement`/`catch_clause` (C++), `string_literal`, `comment`. Adds two C/C++ playbook examples to the xray_search tool docs (both live-verified through `xray-cli`), a verified cross-language node-type table, 8 new test fixtures (c/cpp x smoke/realistic/advanced/pathological), and Rust integration tests asserting zero-ERROR parse + exact node kinds. Lazy-load invariant preserved (tree-sitter not imported at CLI startup).
+
+## [10.104.0] - 2026-06-07
+
+### Fixed
+- Bug #1072: SSH key registration was not cluster-aware. In PostgreSQL cluster mode, `SSHKeyManager` wrote keys only to the node-local SQLite store and the registering node's `~/.ssh` (storing a `private_path`, never the private key content), so the cluster sync service (`SSHKeySyncService`, which distributes private keys from shared PG to every node's `~/.ssh`) had nothing to distribute. Net effect: an SSH key registered on one node worked only there; git ops on other nodes failed with `Permission denied (publickey)` (e.g. cidx-meta backup push silently degraded to single-node). Fix: the private key content is now encrypted at rest in shared PG and distributed cluster-wide. (1) New `private_key` column on `ssh_keys` (migration `027`, PG + SQLite, nullable/backward-compatible). (2) `SSHKeyManager` is cluster-aware via `set_cluster_dependencies(pg_backend, fernet)` (injected in lifespan): on registration it reads the generated private key, encrypts it with a cluster Fernet key (new `ssh_key_encryption_key` in `cluster_secrets`, same trust model as the MFA key), and persists the ciphertext to PG. (3) `SSHKeySyncService` decrypts before writing each node's `~/.ssh/<key>` at `0600`; undecryptable keys are logged and skipped, never written corrupt. (4) `delete_key` now also removes the key from PG in cluster mode (prevents resurrection on the next sync); `create_key` is an idempotent upsert (`ON CONFLICT (name) DO UPDATE`) so re-registration populates the encrypted blob without a primary-key collision. New shared helper `cluster_key_provider.load_or_create_fernet_key`. Operational note: existing `ssh_keys` rows have `private_key = NULL` after migration; re-register affected keys to populate the encrypted content for cross-node distribution.
+
+## [10.103.0] - 2026-06-07
+
+### Fixed
+- Bug #1071: Intermittent `POST /auth/login` HTTP 500 (`KeyError: 0`) on PostgreSQL cluster nodes. Root cause: `ElevatedSessionManager._PgBackend.touch_atomic*` mutated `conn.row_factory = dict_row` directly on a SHARED pooled psycopg3 connection. psycopg_pool does not reset `row_factory` on connection return, so that dict_row factory persisted and polluted the next borrower; any code reading a row positionally (`row[0]`) on the polluted connection then crashed with `KeyError: 0`. Observed 24 times on staging over 4 days. Fix attacks the bug at its source AND defensively pins all readers: (1) `elevated_session_manager` now uses a scoped `conn.cursor(row_factory=dict_row)` that never mutates the shared connection; (2) `token_bucket._pg_consume`, `rate_limiter` (PasswordChange), `oauth_rate_limiter` (Token + Register), `concurrency_protection` (advisory lock), and `totp_service.verify_recovery_code` all now pin `conn.cursor(row_factory=tuple_row)` for positional reads. `login_rate_limiter` was already immune. New regression coverage: `test_row_factory_pollution_bug1071.py`, `test_token_bucket_pg_row_factory_bug1071.py`, `test_rate_limiter_pg_row_factory_bug1071.py`.
+
+## [10.102.0] - 2026-06-06
+
+### Fixed
+- Bug #1075: `BackgroundJobsPostgresBackend._row_to_dict()` called `json.loads()` directly on the `metadata` column (JSONB), bypassing the `_json_col()` helper already used for all other JSON columns. psycopg3 auto-deserializes JSONB to Python dicts before returning rows, so `json.loads(dict)` raised `TypeError`. This broke `get_job_details` and `cancel_job` for all xray jobs (which are only in PG, never in BJM's in-memory cache). Fix: use `_json_col()`. Also removes the `and row[19]` falsy guard — `_json_col` handles `None` correctly and the old guard would silently coerce `{}` to `None`.
+- Bug #1076: `SyncJobsPostgresBackend._row_to_dict()` had the identical defect for five JSONB columns (`phases`, `phase_weights`, `progress_history`, `recovery_checkpoint`, `analytics_data`). Added `_json_col()` helper and replaced all five `json.loads(row[N]) if row[N] else None` calls.
+
+## [10.101.0] - 2026-06-06
+
+### Changed
+- xray jobs (`xray_search`, `xray_explore`) are now excluded from the dashboard recent-jobs panel. They remain fully tracked (cancel still works) but no longer clutter the 20-slot recent-jobs list with "Unknown" repo entries. Exclusion is pushed into SQL on both SQLite and PostgreSQL backends so `LIMIT` fires after filtering — dashboard fills correctly even under heavy xray traffic. Adds `exclude_operation_types` param to `get_recent_jobs()` in `JobTracker` and `list_jobs()` in both storage backends.
+
+## [10.100.0] - 2026-06-06
+
+### Fixed
+- Bug #1074: Multi-repo `xray_search` and `xray_explore` fan-out paths still called `bjm.submit_job(repo_alias=single_alias)`, which routes through `register_job_if_no_conflict` and enforces `idx_active_job_per_repo`. Concurrent multi-repo xray calls sharing any single alias got `DuplicateJobError` → 409. Fix: both multi-repo loops now use `job_tracker.register_job(repo_alias=None, metadata={"repo_alias": alias})` + `xray_executor`, identical to the single-repo fix from Bug #1073. Also hardened `_make_xray_explore_job_fn` with `try/finally` around the engine call so `bjm.unregister_child_processes` is always invoked even on exception (pre-existing child-process leak, now consistent with the search path).
+
+## [10.99.0] - 2026-06-06
+
+### Fixed
+- Bug #1073: `xray_search` and `xray_explore` handlers called `register_job()` with `repo_alias=repo_alias_parsed` (non-NULL), which triggered the `idx_active_job_per_repo` partial unique index (`WHERE status IN ('pending','running') AND repo_alias IS NOT NULL`) at INSERT level on both SQLite and PostgreSQL. On PostgreSQL cluster (staging, NFS-backed repos) where xray ops take seconds, every concurrent call beyond the first raised `UniqueViolation` — a 100% failure rate for parallel xray stress tests on the same repo. Fix: both call sites now pass `repo_alias=None` (the designed escape hatch — NULL values are excluded by the index predicate) with `metadata={"repo_alias": repo_alias_parsed}` preserving the alias for observability. Incomplete follow-up to Bug #1070.
+
+## [10.98.0] - 2026-06-06
+
+### Fixed
+- Bug #1070: `xray_search` and `xray_explore` MCP handlers were routed through `BackgroundJobManager.submit_job()`, which serializes all per-repo jobs behind a `register_job_if_no_conflict` gate — preventing concurrent xray calls on the same repo and causing unnecessary queue contention. Fix: both handlers are now `async def` and route compute to a dedicated 20-worker `ThreadPoolExecutor` (`xray_executor`, wired in lifespan), using `job_tracker.register_job()` directly (read-only; no conflict gate needed). The async `_await_xray_future` helper replaces the old synchronous `time.sleep` polling loop — no `_mcp_executor` thread is held during the wait. `_AWAIT_SECONDS_MAX` lowered from 120.0 to 45.0 to stay comfortably under the ALB 60 s hard timeout. `cancel_job` extended to handle xray jobs (absent from `self.jobs`, reached via `_child_processes` + `JobTracker`). New test coverage: architectural fix (concurrent calls, no serialization), cancel path, await-seconds validation, params, and lifespan executor-wiring.
+
+## [10.97.0] - 2026-06-05
+
+### Fixed
+- PostgreSQL `background_jobs` metadata serialization: `BackgroundJobsPostgresBackend.update_job` json.dumps'd only `result`/`claude_actions`/`extended_error`/`language_resolution_status` — `metadata` was missing from its `_JSON_FIELDS`, even though INSERT and READ both serialize/deserialize it. So updating a job that carries a `metadata` dict raised `psycopg.ProgrammingError: cannot adapt type 'dict'`. The lifecycle/description backfill jobs register with a metadata dict (dep-map jobs don't), so every backfill job crashed instantly in cluster mode (`0 succeeded, 0 failed`) — the third bug blocking these features in production. Fix: add `metadata` to `update_job`'s `_JSON_FIELDS`, aligning PG with the already-correct SQLite backend (which includes metadata in its update json_fields). Found while validating the v10.95.0/v10.96.0 fixes on staging.
+
+## [10.96.0] - 2026-06-05
+
+### Fixed
+- Scheduler golden-backend cluster-wiring bug: `DescriptionRefreshScheduler` defaulted its golden-repo backend to local SQLite (`GoldenRepoMetadataSqliteBackend`) when no `golden_backend` was injected, and `lifespan.py` constructed it without one. In cluster/postgres mode the golden repos live in PostgreSQL (`golden_repos_metadata`, 15 repos on staging) but local SQLite had only 1 stale row, so the description backfill, lifecycle backfill, and description scheduled refresh saw 1 repo instead of all cluster repos — these features were non-functional in cluster/production (the startup sweep logged "1 aliases clean"). Fix: inject `backend_registry.golden_repo_metadata` (the storage factory already creates the correct per-mode backend — SQLite solo, Postgres cluster) into the scheduler. Solo mode is byte-for-byte identical (same SQLite backend at the same db path). Verified the PG and SQLite `GoldenRepoMetadataBackend.list_repos()`/`get_repo()` contracts match (both `List[Dict]`/`Optional[Dict]` keyed on `alias`, with `clone_path`). Found while validating the v10.95.0 config-load-ordering fix on staging.
+
+## [10.95.0] - 2026-06-05
+
+### Fixed
+- Scheduler config-load-ordering bug (cluster/postgres mode): the Description Refresh Scheduler and Dependency Map Scheduler read their enabled flags (`description_refresh_enabled` / `dependency_map_enabled`) from `config_service.get_config()` at `start()` time, but `ConfigService.set_connection_pool()` (which loads runtime config from the PG `server_config` table via `_load_runtime_from_pg`) was only called much later in `lifespan.py` (~line 2264). So at scheduler `start()` the config returned bootstrap defaults (both flags false), and the one-shot startup sweeps (`reconcile_terse_descriptions`, `reconcile_broken_lifecycle_metadata`) were permanently skipped even when the operator had enabled the feature in the Web UI — and the dep-map scheduler read disabled across restarts. Fix: set the ConfigService PG pool EARLY (before the scheduler inits) in postgres mode, so `get_config()` returns merged runtime config at `start()`. The late call is kept (belt-and-suspenders; `start_config_reload` is idempotent). Solo/SQLite mode is unaffected (postgres-gated). Regression tests assert the source-order invariant (early `set_connection_pool` precedes both scheduler constructions).
+
+## [10.94.0] - 2026-06-05
+
+### Fixed
+- Bug #1069: dep-map delta retry money-pit. `invoke_delta_merge_file` returned `None` for three distinct situations — genuine dispatch failure, mtime-unchanged (Claude ran but made no edit), and byte-identical content — and `DependencyMapService._update_domain_file` mapped every `None` to `FAILED`, retrying up to `MAX_DOMAIN_RETRIES` (3) times. Each retry is a fresh ~20-minute Opus call, so a domain that legitimately needs no change burned 3x the cost (observed live on staging: `llm-observability-trace-archives` re-explored from scratch three times, producing zero change). The two no-op cases now return `_DELTA_NOOP` (-> `NOOP` -> loop breaks, no retry); only genuine dispatch failures return `None` and retry. A regression test asserts a no-op domain dispatches the subprocess exactly once (not three times), and a genuine failure still retries `MAX_DOMAIN_RETRIES` times.
+- Bug #1069: `_dispatch_via_flow` now raises on `result.success is False` so genuine dispatch failures propagate to each caller's `except` block instead of falling through and being misclassified as a no-op. This also closes a latent silent-failure in the new-domain path, where a failed dispatch previously wrote an empty/garbage domain file and reported success.
+
+## [10.93.4] - 2026-06-05
+
+### Fixed
+- Bug #1068: `DataRetentionScheduler` cross-backend cleanup consistency. PostgreSQL `sync_jobs` retention now deletes by `completed_at` with `status IN ('completed','failed')` (previously `created_at` with `status='completed'` only), matching the SQLite path — both backends now delete identical rows for the same retention intent (a job created long ago but completed recently is correctly KEPT). All five cleanup tables (logs, audit_logs, sync_jobs, dependency_map_tracking, background_jobs) were audited for column/status parity across both backends.
+- Bug #1068: cleanup is now per-table independent — a failure in one table no longer aborts the whole cycle and silently reports success. Each table's cleanup runs in its own try/except, per-table failures are recorded in the result (`failed_tables`) and surfaced in the JobTracker outcome (not just logged), so retention errors are visible instead of lingering. Confirmed no retention path references the non-existent `last_updated` column (the staging error was a transient rolling-deploy schema skew).
+
+## [10.93.3] - 2026-06-05
+
+### Fixed
+- Bug #1062: dependency-map admin page returned HTTP 500 due to an unclosed Jinja `{% if %}` block
+  in the backfill-cards partial template. The nested conditional was redundant — the outer block
+  already gates the cards to admin users — so it was removed entirely.
+
+### Removed
+- 5 stale MCPB removal-verification tests that referenced `src/code_indexer/mcpb`, a module
+  that no longer exists. The tests were validating the absence of a module that had already been
+  fully removed in a prior release; keeping them caused spurious failures on clean checkouts.
+
+## [10.93.2] - 2026-06-05
+
+### Added
+- Story #1055: `xray_search_batch` MCP tool — cross-repo multi-expression X-Ray sweep in ONE
+  background job. Runs a repos x scans matrix: every scan bundle (`driver_regex` + optional
+  `evaluator_code` or `pattern_name`) is applied to every resolved repository. Each match is tagged
+  with `repository_alias`, `scan_index`, and `pattern_name`. Returns exactly one `job_id` (not
+  `job_ids`). Limits: 50 aliases, 50 scan bundles, timeout [10, 7200]s, await_seconds [0, 30].
+  Global-alias fallback applied per alias. Unresolvable aliases become `error_level="repo"` errors;
+  partial jobs proceed over the resolved subset. Per-cell `pattern_name` resolution uses
+  `XrayPatternService` (repo-specific scope first, then `__any__/` fallback). Cancellation checked
+  between cells. Large results spill to PayloadCache. REST shim at `POST /api/xray/search/batch`.
+  45 new unit tests in `tests/unit/server/mcp/test_xray_search_batch_handler.py`.
+
+## [10.93.1] - 2026-06-05
+
+### Added
+- Story #1067: `frontmatter_verifier` module in `global_repos/` — non-raising single-file
+  and batch verification of cidx-meta lifecycle frontmatter. Reuses `UnifiedResponseParser._validate`
+  and `_validate_optional_sections` as the single source of truth for enum tables and required-key
+  lists (zero enum duplication). No description-length floor (bug #1064 established the [500,2000]
+  floor was fictional — any non-empty string passes). Structured `VerificationResult` (passed bool +
+  violations list) and `BatchReport` (valid/invalid counts + per-file detail). Batch never aborts on
+  a bad file. 95% test coverage across 6 Gherkin scenarios plus integration no-drift tests against
+  `UnifiedResponseParser`.
+
+## [10.93.0] - 2026-06-05
+
+### Added
+- Story #1062: live lifecycle and description backfill observability cards on /admin/dependency-map.
+  BackfillJournalService writes a shared-NFS `_activity.md` journal (append-only, offset-tracked)
+  and an atomic (fsync + os.replace) `_status.json` sidecar per namespace (lifecycle / description).
+  Two new HTMX partial routes (`GET /admin/partials/lifecycle-backfill-journal` and
+  `/admin/partials/description-backfill-journal`) return the journal fragment with a pinned
+  six-header contract (`X-Backfill-Active`, `X-Backfill-Total`, `X-Backfill-Done`,
+  `X-Backfill-Failed`, `X-Backfill-Completed-At`, `X-Journal-Offset`) plus server-side 30s
+  grace after completion before switching to idle polling.
+  `_backfill_in_progress` split into `_lifecycle_backfill_running` and
+  `_description_backfill_running` flags so both backfill types can run concurrently without
+  blocking each other.
+  `LifecycleBatchRunner` gains a `journal_callback` parameter for per-alias progress reporting;
+  first-run cidx-meta directory is now created with `mkdir -p` before journal writes.
+  Two frontend cards mirror the existing depmap-activity-panel polling pattern.
+
+## [10.92.8] - 2026-06-05
+
+### Fixed
+- Config-loader hardening: `_dict_to_server_config` now filters unknown keys before
+  constructing `BackgroundJobsConfig` (matching the existing pattern for other sub-configs),
+  so config drift or version downgrade no longer crashes the description-refresh scheduler
+  loop with `unexpected keyword argument 'max_concurrent_refresh_jobs'`.
+- Jobs-dashboard tracker/BG merge: replaced the per-page dedup (which dropped tracker-only
+  dep-map jobs — Bug #736 regression — and could O(history)-fetch) with a single bounded
+  id-only query (`list_job_ids_filtered`, shared WHERE-builder, ORDER BY created_at DESC
+  LIMIT 50000); Postgres `list_jobs_filtered` gained username scoping for parity.
+- Test-suite robustness: added `actor_username` to hand-rolled `background_jobs` fixtures
+  (8 files) so Bug #1065's atomic INSERT works; deterministic in-memory backend for
+  description-scheduler first-enable tests (were breaching the 15s server-fast timeout);
+  adapted refresh_scheduler collision_log tests to the `list_due_repos` API.
+
+## [10.92.7] - 2026-06-05
+
+### Fixed
+- Bug #1063 follow-up: `_get_all_jobs` (jobs dashboard) tracker/BG merge dedup was
+  regressed — tracker-only dep-map jobs vanished (Bug #736 regression), and the first
+  fix attempt would have either re-dropped jobs or done O(history) per-page DB fetches.
+  Final fix: dedup tracker jobs against a single bounded id-only query
+  (`list_job_ids_filtered`, shared WHERE-builder with `list_jobs_filtered`,
+  `ORDER BY created_at DESC LIMIT 50000`) so tracker-only jobs appear, jobs in both
+  appear exactly once, total_count is page-consistent, and only ONE id query runs per
+  view regardless of jobs-table size. Also fixed missing `username` scoping in the
+  Postgres `list_jobs_filtered` (parity with SQLite). ORDER BY hardening added to both
+  SQLite and Postgres `list_job_ids_filtered` so the capped 50,000 ids are always the
+  newest rows, guaranteeing any tracker-visible (<=24h-recent) job is inside the id-set
+  regardless of daily volume or physical row order.
+- Bug #1065 follow-up: three test fixtures (`dep_map_tracking/conftest.py`,
+  `test_golden_repo_manager_lifecycle_hook.py`,
+  `test_add_golden_repo_unified_lifecycle.py`) hand-rolled a `background_jobs` table
+  missing the `actor_username` column that #1065's atomic INSERT writes (production has
+  it via the `_migrate_background_jobs_actor_username` migration); added the column to
+  the fixtures so they no longer fail when the INSERT runs.
+
+## [10.92.6] - 2026-06-04
+
+### Fixed
+- Bug #1060: Leaked `SQLiteLogHandler` on the root logger after lifespan shutdown caused
+  silent log drops in subsequent tests. The actual root cause was NOT the originally-
+  hypothesized "database is locked" WAL contention (busy_timeout=30000 already handles
+  that). The real cause: `SQLiteLogHandler` is installed on the root logger during
+  lifespan startup via `logging.getLogger().addHandler(sqlite_handler)` but was never
+  removed on shutdown. After the lifespan exits and pytest deletes the tmp `logs.db`
+  directory, the stale handler remains on the root logger. Subsequent `logger.warning()`
+  calls in other tests hit the deleted DB and fail with `unable to open database file`,
+  silently dropping those log records and masking real test failures.
+  Fix: lifespan shutdown now calls `logging.getLogger().removeHandler(sqlite_handler)`
+  and `sqlite_handler.close()`, symmetric with the install at startup (idempotent/safe).
+  The removal is placed as the first action immediately after `yield` (in its own
+  try/except) so it runs robustly even if a later shutdown step raises.
+
+## [10.92.5] - 2026-06-04
+
+### Fixed
+- Bug #1061: `DescriptionRefreshScheduler.calculate_next_run` now uses pure uniform-random
+  across the full `description_refresh_interval_hours` window (mean spacing ~96s at 900
+  repos/24h) instead of hash-based bucket assignment + 18-minute in-bucket jitter that
+  clustered ~37 repos/hour into spikes. Dropped the dead hashlib bucket path entirely.
+- Bug #1061: Added `_reconcile_stale_next_run_rows()` called from `start()` after
+  `reconcile_orphan_tracking()`. Re-slots all NULL or past `next_run` rows on startup so
+  first-enable and long-disabled-restart no longer fire the whole fleet at once. Also fixes
+  the latent gap where NULL `next_run` rows never matched `WHERE next_run <= ?` and thus
+  were never due for scheduling.
+- Bug #1061: `_reconcile_stale_next_run_rows` now compares `next_run` as tz-aware datetimes
+  (parsing via `datetime.fromisoformat`, treating naive timestamps as UTC) instead of raw
+  string comparison, preventing the Postgres TIMESTAMPTZ lexicographic-compare footgun in
+  cluster mode.
+
+### Changed
+- `DescriptionRefreshScheduler.start()` log line now reads
+  "uniform random across full interval" (was "hash-based bucket scheduling with jitter").
+- Module and class docstrings updated to reflect uniform-random scheduling.
+
+### Tests
+- Bug #1061: `tests/unit/server/services/test_description_refresh_scheduler_uniform_jitter_bug.py`
+  covers `calculate_next_run` uniformity (Kolmogorov-Smirnov + histogram bin cap),
+  `_reconcile_stale_next_run_rows` (NULL recompute, past recompute, future preserved,
+  mixed rows, NULL rows never due, spread across full interval), and `start()` call-order
+  (orphan reconcile before stale reconcile before daemon thread).
+
+## [10.92.4] - 2026-06-04
+
+### Fixed
+- Bug #1063 Part 1: `GlobalRepoManager.list_due_repos()` now accepts a `cap` argument and issues a `LIMIT`-bounded SQL query instead of loading all rows then slicing in Python. New `max_concurrent_refresh_jobs` field added to `BackgroundJobsConfig` (default 3). The scheduler uses `count_active_refresh_jobs()` to gate concurrent refreshes, preventing thundering-herd on large golden-repo registries.
+- Bug #1063 Part 2: `BackgroundJobManager._execute_job` now debounces `_persist_jobs` writes for intermediate progress ticks (coalescing within `PROGRESS_DEBOUNCE_INTERVAL = 0.5 s`), while still flushing immediately on terminal state (COMPLETED/FAILED/CANCELLED) and running `_check_db_cancellation` on every tick for responsive cancel latency.
+- Bug #1063 Part 3: `BackgroundJobManager` now uses a `threading.BoundedSemaphore(max_concurrent_background_jobs)` worker pool instead of spawning an unbounded thread per job. Pending jobs that arrive while the pool is full queue in `_pending_queue` and are dispatched by the releasing worker. Cancel of a pending job marks it CANCELLED before it ever starts; cancel of a running job sends SIGTERM to the child process.
+- Bug #1063 Part 4: `list_jobs()` and `get_jobs_for_display()` now hard-cap `page_size` at `MAX_PAGE_SIZE = 50` (module-level constant, importable). The DB query limit tracks the capped page_size, not the old 10000-row bulk-fetch sentinel. `_get_all_jobs()` in `routes.py` applies the same cap. Dashboard fetch is now O(page_size) instead of O(total_job_history).
+- Bug #1063 cleanup: `_MAX_DB_FETCH_FOR_PAGINATION` renamed to `_MAX_OP_TYPE_SCAN` to accurately describe its only remaining use site (`get_jobs_by_operation_and_params` full-op-type scan), since all pagination paths now use `MAX_PAGE_SIZE`.
+
+### Tests
+- Bug #1063: New test files `tests/unit/global_repos/test_bug1063_part1_capped_due_query.py`, `tests/unit/server/repositories/test_bug1063_part2_progress_debounce.py`, `tests/unit/server/repositories/test_bug1063_part3_bounded_worker_pool.py`, `tests/unit/server/repositories/test_bug1063_part4_dashboard_bounded_fetch.py` covering all four fix parts plus the Part 4G `_get_all_jobs` multi-page reachability test (Bug #736 / BLOCKING 3).
+- Bug #1065: `tests/unit/server/repositories/test_bug1063_part4_dashboard_bounded_fetch.py::TestGetAllJobsMergeReachability.test_all_jobs_reachable_exactly_once_with_partial_bg_page` long assertion strings wrapped to comply with ruff E501 line-length.
+
+## [10.92.3] - 2026-06-04
+
+### Fixed
+- Bug #1066: `RefreshScheduler._scheduler_loop` now uses a `_submit_failed` sentinel to track whether `_submit_refresh_job` raised a generic (non-`DuplicateJobError`) exception. `update_next_refresh` is only called on success or `DuplicateJobError`; on a transient failure the repo's `next_refresh` is left unchanged so the scheduler retries on the very next poll cycle instead of silently skipping a full refresh interval.
+
+## [10.92.2] - 2026-06-04
+
+### Fixed
+- Bug #1065: `BackgroundJobManager.submit_job` now routes repo-scoped operations through the cluster-atomic `JobTracker.register_job_if_no_conflict()` (honoring the `idx_active_job_per_repo` partial unique index) BEFORE spawning the worker thread. A duplicate raises `DuplicateJobError` as a hard reject instead of being swallowed. Previously the legacy TOCTOU precheck + non-atomic `register_job` + swallowed constraint violations let duplicate workers run in both solo and cluster modes.
+- Bug #1065: New `atomic_claim_insert` method added to the `BackgroundJobsBackend` Protocol and both SQLite and Postgres backend implementations. Uses a plain `INSERT` (no `OR IGNORE`, no conflict suppression of the partial unique index) so the `idx_active_job_per_repo` constraint violation actually raises and is translated to `DuplicateJobError`. The existing `save_job` `INSERT OR IGNORE` is unchanged for its other callers.
+- Bug #1065: `register_job_if_no_conflict` (and the underlying atomic insert) now persists `is_admin` and `actor_username` (Story #1032 AC12 audit trail) on the atomic claim path, fixing silent loss of those columns for repo-scoped jobs that previously went through the non-atomic code path.
+- Bug #1065: New regression tests at `tests/unit/server/repositories/test_submit_job_atomic_dedup.py` covering: atomic dedup rejects the second caller with `DuplicateJobError`, AC12 `is_admin`/`actor_username` columns are persisted via the atomic insert, and `INSERT OR IGNORE` swallow on `save_job` no longer silently hides duplicate violations. Updated tests in `test_background_job_manager_tracker.py`, `test_job_tracker_atomic_register.py`, and `test_job_tracker_bug892.py`.
+
+## [10.92.1] - 2026-06-04
+
+### Fixed
+- Bug #1064: `TERSE_DESCRIPTION_MAX_CHARS` lowered from 500 to 200 in `description_refresh_scheduler.py`. Small-repo descriptions of 201-500 chars are legitimately concise — they were being re-flagged as terse on every scheduler startup and re-queued for regeneration in an infinite loop. At the new threshold of 200 (barely a sentence), only genuine stubs or failed generations are queued.
+
+### Changed
+- Bug #1064: `src/code_indexer/server/prompts/lifecycle_unified.md` description field instruction no longer requests a fixed 500-2000 character count. Replaced with quality/coverage-oriented guidance: cover purpose, domain(s), high-level capabilities, key technologies, and integration surface at the level of detail the repository actually warrants — a few sentences for a small library, several paragraphs for a large system. No padding, no truncation of real substance.
+
+## [10.92.0] - 2026-06-04
+
+### Added
+- Bug #1056: New shared helper `src/code_indexer/server/services/jittered_dispatcher.py` with two public functions and three module-level constants. `dispatch_parallel_with_jitter(items, *, concurrency, base_jitter_seconds, worker_fn)` submits items to a `ThreadPoolExecutor` where each worker thread sleeps `random.uniform(0, base_jitter_seconds)` before invoking the worker function, smoothing the thundering-herd burst of concurrent Claude CLI calls that all sites previously submitted in lockstep. `sleep_with_jitter(base_jitter_seconds)` provides the same randomised inter-iteration sleep for sequential loops. Both functions are no-ops when `base_jitter_seconds <= 0`. Constants: `DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS = 2.0`, `DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS = 2.0`, `DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS = 2.0`. 6 unit tests at `tests/unit/server/services/test_jittered_dispatcher_bug1056.py` and 3 integration tests at `tests/unit/server/services/test_dispatcher_integration_bug1056.py` covering all public behaviours.
+
+### Fixed
+- Bug #1056: `LifecycleBatchRunner._run_sub_batch` now delegates parallel repo dispatch to `dispatch_parallel_with_jitter` instead of submitting all futures in a tight loop via `ThreadPoolExecutor`. The `ThreadPoolExecutor` block and its dict-comprehension future map have been replaced with a single `dispatch_parallel_with_jitter` call; per-repo error handling semantics are preserved exactly (per-alias `Exception` logged at ERROR level and sub-batch continues; `BaseException` re-raised immediately).
+- Bug #1056: `DependencyMapService` Pass 2 per-domain loop now calls `sleep_with_jitter(DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS)` at the top of each iteration after the first (guarded by `domain_idx > 0`, positioned after the cancellation check and before per-domain work). Prevents all Claude CLI calls for N domains firing simultaneously when Pass 2 starts on a repo with many domains.
+- Bug #1056: `DepMapRepairExecutor` broken-domain repair loop now calls `sleep_with_jitter(DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS)` at the top of each iteration after the first (guarded by `anomaly_idx > 0` via `enumerate`). Prevents all Phase 3.7 re-analysis Claude CLI calls firing in lockstep when multiple domains need repair in a single pass.
+
+## [10.91.17] - 2026-06-04
+
+### Fixed
+- Bug #1058: `UnifiedResponseParser` no longer fails with `not valid JSON: Extra data` when Claude appends trailing prose after the JSON object. New `_strip_postamble` static method walks the string from the first `{`, tracking brace depth while ignoring braces inside JSON string literals (handles `\"` escaped quotes correctly), and truncates everything after the matching closing `}`. Applied in `parse()` immediately after `_strip_preamble`, symmetrically completing the preamble/postamble defence-in-depth pipeline. Previously caused 100% lifecycle-batch failure rate (17/17 calls failing in production) and a silent retry burn loop that consumed tokens with zero forward progress. 5 new unit tests at `tests/unit/server/services/test_unified_response_parser_postamble_bug1058.py` covering: trailing prose, preamble+postamble composition, brace-inside-string-literal, escaped-quote-then-brace, and code-fenced-JSON-with-trailing-prose.
+- Bug #1059: `SharedJobSentinel.read_active()` no longer returns `None` for losers caught in the narrow race window between a winner's `os.open(O_CREAT|O_EXCL)` and the subsequent `os.write()` (Story #1035). Bounded retry: up to 3 attempts at 10ms intervals (~30ms worst-case loser-path latency, only when the race is hit; zero overhead in the common case). Preserves the Story #1035 O_CREAT|O_EXCL locking primitive — only the read path changed. Surfaced as a flaky `test_concurrent_claim_race_single_winner` under chunked-parallel `./server-fast-automation.sh` load, but also a real cluster-correctness fix: losers now reliably learn the winner's `job_id` so downstream code (dashboard sentinel display, dep-map analysis pre-flight at `web/dependency_map_routes.py::trigger_dependency_map`) can attribute the conflict correctly. 5 new unit tests at `tests/unit/server/services/test_shared_job_sentinel_read_active_retry_bug.py` covering: absent-file sanity, valid-file sanity, transient-empty-then-succeeds, persistent-corrupt-returns-None, and persistent-corrupt-warning-message.
+
+## [10.91.16] - 2026-06-03
+
+### Fixed
+- Bug #1054: Phase 3.7 dep-map graph-channel repair no longer crashes with `'AnomalyAggregate' object has no attribute 'message'` when the hygiene-parser aggregates a per-type anomaly cluster that exceeds the example threshold. Root cause: `_audit_bidirectional_mismatch`, `_repair_self_loop`, and `_repair_malformed_yaml` in `dep_map_repair_executor.py` were forwarding the iteration value straight to their per-anomaly delegates, which read `anomaly.message` / `anomaly.file`. Story #911 AC6 had retrofitted the unwrap pattern into `_repair_garbage_domain_rejected` but the other three repair sites were missed. All three now apply the same `examples = [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples` unwrap and loop per example. 3 regression-guard tests at `tests/unit/server/services/test_dep_map_repair_aggregate_unwrap_bug1054.py` (AnomalyAggregate scenarios for each of the three handler types, asserting per-example dispatch and zero AttributeError).
+
+## [10.91.15] - 2026-06-03
+
+### Added
+- Story #1053: Resumable delta dep-map analysis via per-domain YAML frontmatter journal. Each `dependency-map/<domain>.md` carries its own `last_delta_applied: <fingerprint>` marker; frontmatter and body are written together in one atomic `os.replace` (tempfile + fsync + rename in the same parent directory — no cursor-vs-file ambiguity window). On crash/restart, the resumed run computes the same delta fingerprint and skips any domain whose frontmatter shows the current delta already applied. New-repo discovery is monolithic skip-or-redo: if `_domains.json` already covers every new repo alias, the discovery Claude CLI call is skipped entirely; if the JSON is missing, malformed, or wrong-shape, the call re-runs. Cluster correctness inherits from the existing `cidx-meta` `WriteLockManager` lock (atomic `O_CREAT|O_EXCL` on NFSv4). Crash-durability scope: process crash / SIGKILL / `systemctl restart` / graceful reboot — NOT sudden power loss or NFS server crash (the in-flight domain is re-processed on resume in those cases by design). 40 unit/integration tests covering all 16 acceptance criteria. New helper scripts `tests/e2e/manual/provision_delta_fixture.sh` and `tests/e2e/manual/audit_processes.sh` for the full process-tree-kill E2E test (Scenario 16).
+
+### Docs
+- New architecture reference: `docs/depmap-resumable-delta-architecture.md` (182 lines) documenting the 5 primitives, the resume loop, the lock dependency, the honest crash-durability scope, the 7-item rejected-approaches anti-regression list (no backup-by-N, no prompt context hint, no separate cursor file, no batched discovery, no fingerprint intersection, no `run_full_analysis` hardening, no parent-dir fsync), and production observability.
+- CLAUDE.md "Critical Architecture Invariants" gains a slim 5-line "Resumable Delta Dep-Map Analysis (Story #1053)" subsection pointing to the architecture doc.
+
+### Separate isolated commit (per Story #929 Security-Sensitive Commit Discipline)
+- `125d7568` "docs: harden Push-to-master Authorization rule" — rewrites the CLAUDE.md push-to-master rule with anti-extrapolation language, mandatory two-confirmation protocol, per-push per-version authorization scope, explicit /goal exclusion, and a "Past failures" paragraph documenting the v10.91.14 unauthorized-push incident verbatim. Permission/authorization rule change; isolated from feature work.
+
+## [10.91.14] - 2026-06-03
+
+### Fixed
+- Bug #1052: Auto-updater now idempotently creates the `~/.cidx-server/data/activated-repos` symlink under CoW-managed storage on CoW-daemon cluster deployments. Story #1034 had set this up for `golden-repos` but not for `activated-repos`, so freshly-provisioned cluster nodes silently couldn't accept activations until an admin manually fixed the symlink (as documented in Bug #1044/#1046 staging validation history). New step `_ensure_activated_repos_symlink_for_cow_daemon()` runs in `DeploymentExecutor.execute()` after Step 14 (NFS research symlinks); no-op for local/ontap backends; refuses to silently move pre-existing real-directory user data — emits a structured WARNING with the manual migration command instead. 6 regression-guard tests added at `tests/unit/server/auto_update/test_activated_repos_symlink_setup_bug1052.py` (real `os.symlink()` in `tmp_path`, no mocks).
+
+### Cleanup
+- Removed 2 `@pytest.mark.xfail` tests per zero-disabled-tests policy:
+  - `test_admin_jobs_stats_endpoint.py::test_stats_endpoint_calculates_total_jobs` (auth-mocking infrastructure debt; endpoint existence already covered by `test_stats_endpoint_exists`).
+  - `test_dep_map_888_ac7_ac8_ac9.py::TestAC7DomainNotIndexedGap` (whole class — documented architectural gap "awaiting product decision"; the 4 reachable resolution states remain covered by separate classes).
+
+## [10.91.13] - 2026-06-03
+
+### Fixed
+- Bug #1049: `build_dep_map_dispatcher` did not derive `claude_soft_timeout_seconds` from `config.dependency_map_pass_timeout_seconds`, so the inner shell `timeout <N> claude ...` command was always wrapped at `_DEFAULT_SOFT_TIMEOUT_SECONDS = 1800` regardless of operator setting. Operators raising `dependency_map_pass_timeout_seconds` to 18000 were silently capped at 30 minutes per pass. Factory now derives the value from config when the caller does not pass an explicit override; explicit override still wins. 3 regression-guard tests added at `tests/unit/server/services/test_dep_map_dispatcher_factory_timeout_config_bug1049.py`.
+- Bug #1051: 15 depmap-dashboard/sentinel/state-polling unit tests failing on development across 3 root causes:
+  - **Group A (4)**: `FakeTracker` test double in `tests/unit/server/services/test_depmap_dashboard_job_runner.py` lacked `fail_job` method after v10.91.6's `update_status(..., error=...) → fail_job(...)` change. Added the method + updated 4 `TestFailurePath::*` assertions.
+  - **Group B (8 + setup-error cascade)**: `tests/unit/server/web/conftest.py`'s autouse `_bootstrap_server_database` seeded admin/admin in SQLite but did NOT assign the new `UserManager` to `dependencies.user_manager`. Combined with `_restore_dependency_globals` saving/restoring a None-initial singleton, this caused `POST /login` to return 500 `User manager not available` on every test after the first, blocking ~15 sentinel/refinement/state-polling tests at fixture setup. Extended `_bootstrap_server_database` to assign the singleton.
+  - **Group C (3)**: production-logic drift in `src/code_indexer/server/web/dependency_map_routes.py` dashboard-partial handler — missing sentinel-held / claim-race / terminal-job guards before submitting a new `dep_map_dashboard` job or rendering the in-progress partial.
+
+### Tests
+- 121 previously-affected tests now pass; 0 failures across the targeted depmap dashboard sweep. (`os.path.realpath`) at construction (`__init__` and `set_shared_repos_dir`). Discovered during Bug #1044 staging E2E validation: clusters that deploy `~/.cidx-server/data/activated-repos` as a symlink to the CoW-managed storage (e.g. `-> /mnt/cow-storage/activated-repos`) hit `_fd_anchored_phase1_rename`'s `os.open(..., O_NOFOLLOW)` check on the top-level dir, which correctly refuses to follow the symlink and raises `Errno 20 Not a directory`. Deactivation jobs reported `success: true` but left workspaces on disk with 7 cleanup warnings. The admin-controlled top-level path is safe to resolve once at init; per-user/alias subpaths under it still get O_NOFOLLOW protection.
+
+### Tests
+- New regression-guard suite `tests/unit/server/repositories/test_activated_repos_dir_symlink_resolution.py` (3 tests using real `os.symlink()` — no mocks per Anti-Mock):
+  - Symlinked data_dir resolves to target on construction.
+  - Non-symlink direct directory continues to work.
+  - `set_shared_repos_dir` resolves symlinks too.
+
+## [10.91.11] - 2026-06-03
+
+### Fixed
+- Bug #1046 (extension): v10.91.10 added symlink resolution but only accepted paths under `mount_point`. On the CoW daemon host node (cluster node 23) the `golden-repos` symlink target is under `daemon_storage_path` directly (`/home/jsbattig/cow-storage/golden-repos`) — the bind-mount alias of the same XFS filesystem reached via the symlinked source rather than the mount point. v10.91.10 still rejected these resolved paths. v10.91.11 extends `_translate_to_daemon_path` to accept paths resolving under EITHER `mount_point` (translate to daemon-local form) OR `daemon_storage_path` (already in daemon-local form, return as-is).
+
+### Tests
+- Added 2 regression-guard tests to `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py`:
+  - `test_symlink_to_daemon_storage_path_passes_through` — symlink resolving under daemon_storage_path returns the resolved path unchanged.
+  - `test_direct_daemon_storage_path_passes_through` — direct daemon_storage_path entries pass through unchanged.
+  Real `os.symlink()` only — no mocks (Anti-Mock rule).
+
+## [10.91.10] - 2026-06-03
+
+### Fixed
+- Bug #1046: `CowDaemonBackend._translate_to_daemon_path` (`clone_backend.py:315-335`) rejected the `golden_repos_dir` symlink path with `"is not under mount_point '/mnt/cow-storage' — cannot translate to daemon view"`, blocking every cluster activation after the Bug #1044 wiring fix made this code path reachable. Root cause: literal string `startswith` comparison with no symlink resolution; staging's `golden_repos_dir` is intentionally a symlink (`/home/jsbattig/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos`) to satisfy the XFS-reflink-same-filesystem constraint. Added `os.path.realpath()` resolution before the mount-point prefix check; the resolved path is now used for both the comparison and the daemon-side path computation.
+
+### Tests
+- New regression-guard suite `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py` (3 tests using real `os.symlink()` under `tmp_path` — zero mocking of the symlink layer per Anti-Mock rule). Test 1 confirmed RED before fix; all 3 pass after.
+
+## [10.91.9] - 2026-06-03
+
+### Fixed
+- Bug #1044: Activation was completely broken because Story #1034 added a hard `clone_backend is None` guard to `ActivatedRepoManager._clone_with_copy_on_write` (activated_repo_manager.py:2643) but the lifespan wiring never injected `_clone_backend` into the `ActivatedRepoManager` reachable from `golden_repo_manager.activated_repo_manager`. Every activation raised `"ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. Story #1034 Commit 4 requires clone_backend injection."`. Added `arm._clone_backend = snapshot_manager._clone_backend` to `lifespan.py` belt-and-suspenders block (lines 615-625), matching the existing Story #1034 pattern that injects `_snapshot_manager` into `GoldenRepoManager` and `RefreshScheduler`.
+
+### Tests
+- New regression-guard suite `tests/unit/server/startup/test_lifespan_clone_backend_wiring_bug1044.py` (6 tests: source-text guards, source-order guard, runtime simulation using real `ActivatedRepoManager` and real `VersionedSnapshotManager` via `build_snapshot_manager`).
+
+### Docs
+- Added "ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)" invariant to project CLAUDE.md "Critical Architecture Invariants" section.
+
+## [10.91.3] - 2026-06-02
+
+### Fixed
+- Users page CRUD: extended the PRG (Post-Redirect-Get) fix from v10.91.2 to the 4 remaining POST handlers — `create_user`, `update_user_role`, `change_user_password`, `update_user_email`. All five Users-page POST handlers now return `RedirectResponse(303, "/admin/users?...")` on every code path, so the form interceptor in `base.html` does a real `window.location.href` navigation and HTMX initializes normally. Users table re-renders correctly after every CRUD operation, not just delete.
+- Extended `_USERS_PAGE_ERROR_MESSAGES` whitelist with 6 new error codes: `passwords_mismatch`, `invalid_role`, `cannot_demote_self`, `sso_password_change_denied`, `user_not_found`, `operation_failed`. Unknown codes still silently render no banner (XSS prevention).
+
+### Audited (no fix needed)
+- Other admin CRUD pages reviewed: `golden_repos.html`, `groups.html`, `ssh_keys.html`, `repos.html`, `config.html`, `self_monitoring.html`, `dependency_map.html`. None have the `hx-trigger="load"` + intercepted POST-form combination that triggers the `document.write` HTMX re-init bug, so PRG is not required for them.
+
+## [10.91.2] - 2026-06-02
+
+### Fixed
+- Users page delete (and other admin POST handlers) now use PRG (Post-Redirect-Get): on success/failure the server returns a 303 redirect to `/admin/users?success=<code>&u=<username>` (or `?error=<code>`) instead of rendering the page inline. This avoids the `document.write()` HTMX re-init bug (v10.91.1 polling fallback was insufficient in practice). The form interceptor in `base.html` already handles `resp.redirected === true` by doing a full `window.location.href = resp.url` navigation, which triggers HTMX auto-init normally. The users table now re-renders after delete.
+- Added `_USERS_PAGE_SUCCESS_MESSAGES` and `_USERS_PAGE_ERROR_MESSAGES` whitelist dicts in `routes.py` so query-string status codes can never inject HTML into the rendered page (XSS prevention). Unknown codes silently fall through to no banner.
+
+## [10.91.1] - 2026-06-02
+
+### Fixed
+- Users page: after a successful delete (or any other `/admin/` form POST), the success banner appeared but the users table never re-rendered — stuck on "Loading users…". Root cause: the global form interceptor in `base.html` `_doSubmit()` POSTs via `fetch()` and replaces the page with `document.open()/write()/close()`. `document.write` does not reliably re-fire HTMX's `DOMContentLoaded` auto-init on the new document, so `hx-trigger="load"` elements (like `#users-list-section`) never fire their initial request. Added an explicit `htmx.process(document.body)` call after `document.close()`, with a short polling loop (capped at 40 retries × 50ms = 2s) to wait for the new document's htmx script to load.
+
+## [10.91.0] - 2026-06-02
+
+### Fixed
+- Users page delete button consistently returned "Invalid CSRF token". Root cause: the hidden `<form id="delete-form-...">` was placed directly inside `<tbody>` in `partials/users_list.html`. HTML5 in-table insertion mode inserts the form and immediately pops it off the open elements stack, orphaning the `<input type="hidden" name="csrf_token">` from the form. Native form submit therefore sent no csrf_token field. Wrapped the delete form in `<tr><td colspan="5">` to match the edit/email/password forms in the same template. Regression test added: `tests/unit/server/web/test_users_delete_form_html5_parse.py` (uses html5lib parser, which enforces HTML5 in-table rules — html.parser/lxml are lenient and do not catch this).
+
+## [10.90.0] - 2026-06-02
+
+### Added (Story #1040)
+- Dependency map analysis cancellation: admin can stop a running full or delta analysis mid-flight via `POST /admin/dependency-map/cancel`.
+- `DependencyMapService.cancel_running_analysis()` sets a `threading.Event` (`_cancel_event`) that domain loops in `run_full_analysis`, `run_delta_analysis`, and `run_refinement_cycle` check at the top of each iteration, allowing graceful stop within one domain boundary.
+- Cancel event is cleared at the start of every new analysis run so stale cancellations never affect subsequent runs.
+- When analysis is cancelled, `JobTracker.fail_job()` is called with `"Cancelled by admin"` in the finally block (previously the job was left in `running` state).
+- "Stop Analysis" button added to the dep-map admin page Actions card; visible only while a job is running; disables itself and shows "Stopping..." after click; updates status div with outcome.
+- REST endpoint only (no MCP tool): `POST /admin/dependency-map/cancel` requires admin elevation.
+
+## [10.89.0] - 2026-06-02
+
+### Added (Story #1039)
+- Per-handler bare-to-global alias fallback for 31 read-only MCP handlers. When a dep-map analysis Claude subagent passes a bare repo alias (e.g. `evolution`) instead of the `-global`-suffixed form (`evolution-global`), and the user does not have that repo in their own activated-repo list, the handler transparently promotes the alias to `evolution-global` if the golden repo is globally active. Eliminates the 445 daily "Repository not found for user admin" errors that Claude dep-map subagents were generating.
+- New `_global_fallback.py` helper module (`server/mcp/handlers/`) with `try_global_fallback(alias, golden_repo_manager) -> str | None`.
+- New `user_has_activated_repo(username, alias) -> bool` method on `ActivatedRepoManager` for pre-check membership test.
+- New `is_globally_active(alias) -> bool` method on `GoldenRepoManager` delegating to `GlobalActivator`.
+- Fallback applied to: `search_code`, `handle_regex_search`, `get_file_content`, `list_files`, `browse_directory`, `handle_directory_tree`, `handle_xray_search`, `handle_xray_explore`, `handle_xray_dump_ast`, `scip_definition`, `scip_references`, `scip_dependencies`, `scip_dependents`, `scip_impact`, `scip_callchain`, `scip_context`, `get_branches`, and 12 git-read handlers.
+- Write/mutation handlers remain strict -- no fallback applied.
+
+## [10.88.0] - 2026-06-01
+
+### Fixed (Bug #1038)
+- Bug #1038: Removed FILE_EDIT_COMPLETE sentinel from dep-map verification pipeline. Verification is now best-effort (single attempt, returns bool, never raises). Eliminates catastrophic retry cascade that burned hundreds of dollars when model output format changed.
+
+### Fixed (Bug #1037)
+- `XrayPatternService.store_pattern` / `delete_pattern` (`server/services/xray_pattern_service.py`) now serialize via the existing `_COARSE_ALIAS="cidx-meta"` write lock through a `_run_with_coarse_lock` helper modeled on `MemoryStoreService` (`server/services/memory_store_service.py:372`). When the lock is held by `refresh_scheduler` / `memory_store_service` / `dep_map_service`, the xray service writes the YAML to disk and SKIPS `_git_commit` — the lock holder's refresh will sweep the change via `git add -A`. When unlocked, xray acquires the lock and runs `_git_commit` + `CidxMetaBackupSync.sync()` inside the critical section.
+- Two MCP handler call sites in `server/mcp/handlers/xray.py` (`store_xray_pattern`, `delete_xray_pattern`) pass `cidx_meta_path` / `coarse_lock_owner` so the service can identify the lock owner.
+
+### Tests (Bug #1037)
+- 13 new unit tests in `tests/unit/server/services/test_xray_pattern_service_coarse_lock.py` covering lock acquisition (`store_pattern`/`delete_pattern`), piggyback skip when lock held, full critical-section execution when lock free, owner string emission (`xray-pattern:store:*` / `xray-pattern:delete:*`), and integration with `CidxMetaBackupSync`.
+- Handler fixture in `tests/unit/server/mcp/test_xray_pattern_handler.py` updated to accept `**kwargs` for forward compatibility.
+
+### Documentation
+- `CLAUDE.md` adds one-line note to the "cidx-meta backup contract" section pointing to the new coarse-lock invariant.
+
+## [10.87.0] - 2026-06-01
+
+### Fixed (Bug #1036)
+- `XrayPatternService._git_commit` (`server/services/xray_pattern_service.py`) now uses the canonical cidx-meta backup pattern from Story #926: `build_non_interactive_git_env()` + `cidx-meta-backup` author/committer identity, followed by `CidxMetaBackupSync.sync()` to push to the configured remote. Previously the bare `subprocess.run(["git", "commit"], ...)` produced commits authored as `code-indexer@<hostname>` that were never pushed — pattern changes only reached the remote when the next refresh cycle's sync happened to run.
+- Sync failures surface via WARNING log (deferred-failure pattern mirroring `refresh_scheduler.py`); the commit itself is not rolled back.
+- Graceful degradation when `cidx_meta_backup_config.enabled=False` — local commit still happens, sync is skipped.
+
+### Tests (Bug #1036)
+- 5 new unit tests in `tests/unit/server/services/test_xray_pattern_service_backup_sync.py` covering canonical env vars, sync invocation, sync_failure surfacing, graceful degradation when backup disabled, and `cidx_meta_path` correctly forwarded to `CidxMetaBackupSync`.
+
+## [10.86.0] - 2026-06-01
+
+### Added (Story #1035)
+- `SharedJobSentinel` (`server/services/shared_job_sentinel.py`) — cluster-wide re-entrancy primitive using atomic `O_CREAT|O_EXCL` on NFS-shared cidx-meta. Methods: `try_claim(op_type, job_id, node_id)`, `release(op_type, expected_job_id)`, `read_active(op_type)`, `is_stale(info, timeout)`. Stale recovery built into `try_claim` (atomic replace via tempfile + os.replace).
+- `FilesystemDashboardCacheBackend` (`server/storage/filesystem_backends.py`) — drop-in replacement for the per-node SQLite dashboard cache. Stores `_dashboard_cache.json` under `cidx-meta/dependency-map/`. Atomic NFSv4-safe writes via tempfile + os.replace. Interface parity with the SQLite backend: `is_fresh`, `get_cached`, `set_result`, `claim_job_slot`, `clear_job_slot_for_retry`, `get_running_job_id`.
+- `AnalysisAlreadyRunningError` — surfaced from `DependencyMapService.run_full_analysis` / `run_delta_analysis` when sentinel claim fails. Carries `active_job_id` for 409 response surfacing.
+- `CLAUDE.md` "Dep-Map Re-Entrancy Sentinels" architectural invariant subsection.
+
+### Changed (Story #1035)
+- `DependencyMapService.is_available()` now consults `SharedJobSentinel.read_active("analysis")` (cluster-visible) instead of a per-process `threading.Lock` (per-node only).
+- `DependencyMapService.run_full_analysis()` / `run_delta_analysis()` wrap analysis body in `SharedJobSentinel.try_claim`/`release` (try/finally). New `pre_claimed` parameter allows route-layer ownership (web/MCP claim sentinel synchronously before spawning the worker thread).
+- Web `POST /admin/dependency-map/trigger` (`dependency_map_routes.py`): synchronous sentinel claim before thread spawn; 409 response body now includes `job_id` of the active analysis; sentinel released on thread-spawn failure.
+- Dashboard partial STATE 3/4 (`dependency_map_routes.py`): STATE 3 reads `SharedJobSentinel.read_active("dashboard")` from shared storage; STATE 4 attempts sentinel claim before submitting the dashboard job. Losing nodes fall through to STATE 3 rendering Processing view attached to winner's job_id.
+- Dashboard background job now submitted with non-NULL `repo_alias="__depmap_dashboard__"` (defense-in-depth — engages JobTracker's `idx_active_job_per_repo` partial unique index alongside sentinel).
+- MCP `trigger_dependency_analysis` handler (`mcp/handlers/admin/__init__.py`): same architecture — synchronous sentinel claim before thread spawn; 409-equivalent error envelope `{"success": false, "error": "already in progress", "job_id": <active>}` on cross-node collision.
+- Bare `except Exception` clauses in both trigger paths narrowed to catch `(DuplicateJobError, AnalysisAlreadyRunningError)` and surface as 409 / MCP error envelope. Other exceptions propagate.
+
+### Tests (Story #1035)
+- 102 new unit tests; 100% coverage on `SharedJobSentinel` and `FilesystemDashboardCacheBackend`.
+- `tests/unit/server/services/test_shared_job_sentinel.py` — claim/release/stale/concurrent race/owner safety.
+- `tests/unit/server/storage/test_filesystem_dashboard_cache.py` — interface parity with SQLite backend.
+- `tests/unit/server/web/test_dependency_map_routes_sentinel.py` — pre-flight claim, 409 surfacing, dashboard STATE 3/4 sentinel paths.
+- `tests/unit/server/services/test_dependency_map_service_sentinel.py` — service-layer sentinel integration.
+- `tests/unit/server/mcp/test_trigger_dependency_analysis_handler_sentinel.py` — MCP handler exception narrowing.
+
+## [10.85.0] - 2026-05-31
+
+### Fixed (Story #1034)
+- CRITICAL: CoW clone operations now route through VersionedSnapshotManager / CowDaemonBackend in cluster mode, fixing 600s timeouts on the langfuse repo (1.1GB, 11.7k files) — every refresh was timing out for 20+ hours when the job landed on a non-storage node (NFS byte-copy instead of XFS reflink).
+- Pre-existing wiring bug: clone_backend_wiring.build_snapshot_manager() now passes versioned_base to VersionedSnapshotManager.
+- _fallback_copy_on_write_clone() dead code removed from activated_repo_manager.py.
+
+### Added (Story #1034)
+- CloneBackend.create_clone_at_path() method (Protocol) with LocalCloneBackend and CowDaemonBackend implementations.
+- CowDaemonBackend._sanitize_identifier() — replaces dots with underscores for daemon namespace/name.
+- Daemon version check at CIDX startup: _check_daemon_health reads daemon version field, fails loud if < 0.2.0.
+- RefreshScheduler/ActivatedRepoManager/GoldenRepoManager accept snapshot_manager / clone_backend injection.
+- scripts/check_no_direct_cp_reflink.py AC15 CI gate (wired into lint.sh).
+- LocalCloneBackend.versioned_base constructor param is now Optional (default None); callers using only create_clone_at_path() no longer need to provide a meaningless value. create_clone() raises loud RuntimeError if called when versioned_base is None.
+
+### Companion daemon
+- Daemon v0.1.0 -> 0.2.0: optional dest_path in POST /api/v1/clones, version in HealthResponse, MetadataStore dest_path column + delete fix, Path.resolve() validation.
+
+## v10.84.0 (2026-05-30) -- Opus M3 helpers extraction (Story #1032 Commit 11)
+
+### Refactor (Opus M3 — Phase 1 of 2-phase)
+- Extracted the 4 module-level deactivation helpers from `activated_repo_manager.py` into a new module `src/code_indexer/server/repositories/deactivation_helpers.py`:
+  - `_safe_purge_trash_entry(trash_root, entry_name)` — fd-anchored recursive delete
+  - `_fd_anchored_rmtree(name, parent_fd, expected_st_dev)` — recursive helper
+  - `_fd_anchored_phase1_rename(activated_repos_dir, username, user_alias)` — atomic Phase 1 rename
+  - `_predeactivation_leak_scan_enabled()` — bootstrap config flag accessor
+- Manager file: **3888 → 3580 lines** (~308 lines removed). Still violates MESSI Rule 6 (500-line cap) but the largest single contributor is gone.
+- All 4 helpers re-exported from `activated_repo_manager` namespace so tests/callers that patch via `activated_repo_manager._fd_anchored_phase1_rename` continue to work unchanged.
+- Zero behavior change — pure file-organization refactor. All 57 deactivation tests pass. server-fast-automation all 6 chunks green (13,417 tests).
+
+### Deferred (Opus M3 Phase 2)
+- The deactivation METHODS (`_do_deactivate_single`, `_do_deactivate_composite`, `_do_deactivate_repository`, `sweep_orphan_trash_dirs`, `_detect_resource_leaks`) remain on `ActivatedRepoManager` for now. A future commit can extract them into a `DeactivationService` class (composition pattern) for further file-bloat reduction.
+
+## v10.83.0 (2026-05-30) -- Opus review H1 + H2 (Story #1032 Commit 10)
+
+### Documentation (Opus H1)
+- Added justification comments to 7 remaining `shutil.rmtree(path, ignore_errors=True)` call sites in activation/clone failure-cleanup paths in `src/code_indexer/server/repositories/activated_repo_manager.py` (lines 953, 1004, 1031, 1069, 2033, 2992, 3090). Each comment documents:
+  - The path is computed from instance state + validated function args in the SAME call frame — no user input crosses the boundary.
+  - No metadata row has been written yet (cleanup happens BEFORE Step 6 metadata persistence in activation flow) — so the deactivation rename-to-trash pattern does not apply.
+  - Why path-based rmtree is the correct rollback mechanism here.
+- Inconsistent with the new fd-anchored discipline only stylistically; not exploitable from current call patterns per opus review.
+
+### Tests (Opus H2)
+- New file `tests/unit/server/repositories/test_pg_metadata_first_ordering.py` with 3 tests asserting the metadata-before-Phase-2 ordering invariant (HIGH #2 fix from Commit 6):
+  - `TestMetadataDeletedBeforePhase2Single::test_metadata_deleted_before_phase2` — single path: `_delete_metadata` called AFTER `_fd_anchored_phase1_rename` and BEFORE `_safe_purge_trash_entry`.
+  - `TestMetadataDeletedBeforePhase2Composite::test_metadata_delete_ordering_holds_for_composite` — composite path: same invariant.
+  - `TestPhase2NeverRunsBeforeMetadataDelete::test_phase2_not_invoked_until_metadata_call_returns` — belt-and-suspenders: Phase 2 must not START until metadata delete RETURNS (state-based assertion, not just call-count).
+- Invariant is backend-agnostic (file mode + PG mode) so single-mode tests cover both.
+- All 57 deactivation-related tests pass. server-fast-automation all 6 chunks green (13,417 tests).
+
+## v10.82.0 (2026-05-30) -- Codex RED ghost-window closure (Story #1032 Commit 9)
+
+### Fixed
+- **Codex GPT-5 final-final review of v10.81.0 found RED**: the Commit 8 ghost-prevention guard `if not phase1_succeeded and os.path.exists(repo_dir):` still relied on `os.path.exists()`, which returns `False` (not raises) on permission errors — leaving a narrow ghost-window where a refused Phase 1 + permission-restricted parent would route to the metadata-delete branch.
+- Replaced single-flag exists()-based guard with **two explicit boolean flags** in both `_do_deactivate_single` and `_do_deactivate_composite`:
+  - `rename_was_attempted` — set True when we enter the rename branch (initial existence check passed at entry).
+  - `phase1_succeeded` — set True ONLY after `_fd_anchored_phase1_rename` returns.
+  - Outer guard now reads purely from these flags: `if rename_was_attempted and not phase1_succeeded:` → preserve metadata + log GHOST REPO PREVENTION. No filesystem probes in the discriminator → immune to exists() lying.
+
+### Tests
+- New regression test `TestPermissionErrorFalseNegativeBlocked::test_ghost_blocked_even_when_exists_returns_false_negative` in `tests/unit/server/repositories/test_ghost_repo_prevention.py`. Mocks `os.path.exists` to lie with False after the entry check, asserting the explicit flag still preserves metadata. Locks in the Commit 9 fix.
+- 27/27 deactivation-related tests pass. server-fast-automation all 6 chunks green (13,414 tests).
+
+## v10.81.0 (2026-05-30) -- Ghost-repo prevention (Story #1032 Commit 8, codex re-re-review NEW HIGH)
+
+### Fixed
+- **NEW HIGH from Codex GPT-5 final review of v10.80.0**: when `_fd_anchored_phase1_rename` raised (e.g. `.trash` symlink swap → ValueError, OSError, IOError), the outer `_delete_metadata` call still ran unconditionally in both `_do_deactivate_single` AND `_do_deactivate_composite`. Result: live repo dir remained on disk in `{username}/{user_alias}` while metadata was deleted → UI showed "deactivated" while bytes were ghost-alive.
+- Both deactivation methods now guard the outer `_delete_metadata` with `if not <repo_dir>.exists()` — metadata is only removed when the dir is actually gone (Phase 1 success OR orphan-already-gone state). On Phase 1 failure, metadata is preserved AND a `GHOST REPO PREVENTION` error is logged with `requires_admin_cleanup: True`.
+- Stale comment in `config_manager.py` for `orphan_trash_sweep_per_startup_cap` corrected: was "synchronously at server startup ... blocks startup", now accurately says "dispatched asynchronously via asyncio.create_task ... NEVER blocks FastAPI startup". (HIGH #5 leftover from previous review.)
+
+### Tests
+- New file `tests/unit/server/repositories/test_ghost_repo_prevention.py` with 3 regression tests:
+  - Single-path metadata preserved when Phase 1 fails + ghost warning surfaced.
+  - Composite-path metadata preserved when Phase 1 fails + ghost warning surfaced.
+  - Normal success path still deletes metadata correctly (no regression).
+- All 13,413 server tests pass via `server-fast-automation.sh`. Lint exit 0.
+
+### Status
+This is the final cleanup commit of Story #1032 deactivation work. Three Codex re-reviews now performed; the BLOCKER + HIGH list from each review is fully closed. The orphan-sweep cap operational weakness (10K orphans needing multiple restarts to drain) is documented but not a blocker — admins can set `orphan_trash_sweep_per_startup_cap: 0` for unlimited background-task sweep when needed.
+
+## v10.80.0 (2026-05-30) -- Xray pattern library doc improvements (Story #1032 Commit 7)
+
+### Documentation
+User reported building six xray evaluators in one session before discovering `store_xray_pattern` existed. Tool docs were mechanically accurate but the motivation/trigger framing was buried. Five enhancements:
+
+- **`store_xray_pattern.md` slim_description** rewritten to lead with the iteration trigger: "Persist a hard-won xray evaluator... Use this whenever an evaluator took more than one iteration to get right." (was: "Store a named, reusable Rust xray evaluator pattern..."  — no trigger.)
+- **"When to store a pattern" trigger block** added near the top of `store_xray_pattern.md`, before the YAML schema. Lists 5 trigger heuristics + the cost-of-not-storing line: "If you close the session without storing, that work is gone."
+- **"Post-session checklist"** subsection added: "Before ending a session where you developed a new evaluator: if the evaluator took iteration, call `store_xray_pattern`..."
+- **`xray_search.md` + `xray_explore.md` `pattern_name` description** rewritten from passive ("Mutually exclusive with evaluator_code") to active: "Before writing evaluator_code inline, check the pattern library — a pattern for your use case may already exist. Use `browse_directory('cidx-meta-global', path='xray-patterns')` to list available patterns." Plus post-session reminder.
+- **"Best Practices" cost quantified**: replaced vague "complex, tuned through iteration, or laborious to produce should be stored" with concrete: "A non-trivial evaluator typically costs 3-6 tool round-trips to develop... Storing the result means that cost is paid once across all users and all future sessions. An evaluator that is not stored is effectively thrown away when the session ends."
+
+### Verification
+- `python3 tools/verify_tool_docs.py` CI gate: PASS (all 149 tools documented, frontmatter valid).
+- Schema, YAML examples, parametrization, error codes unchanged. Mechanics intact; only framing improved.
+
+## v10.79.0 (2026-05-30) -- Codex HIGH items + test bug (Story #1032 Commit 6)
+
+### Performance / Visibility
+- **HIGH #2 fixed**: metadata-first ordering. `_do_deactivate_single` and `_do_deactivate_composite` now delete metadata IMMEDIATELY after Phase 1 rename, before Phase 2 purge starts. In PG/cluster mode, the UI sees the repo gone instantly via `_list_user_repos_pg`. Phase 2 still runs to free disk; if Phase 2 fails, metadata is already deleted and orphan sweeper handles the leftover dir.
+- **HIGH #3 fixed**: startup orphan sweep no longer blocks lifespan. Bounded via new bootstrap config flag `orphan_trash_sweep_per_startup_cap` (default 100) — after the cap, the remaining orphans are picked up on next restart. Documented in the sweeper docstring.
+- **HIGH #4 fixed**: `_fd_anchored_rmtree` no longer materializes the whole directory via `list(scandir)`. Iterates the scandir streaming, deleting per iteration. Eliminates OOM/DoS vector on malicious huge subtrees (e.g. crafted `.git/objects/`).
+
+### Documentation
+- **HIGH #5 fixed**: three lying docstrings/comments corrected:
+  - Phase 1 "fall through to direct rmtree as before" comment removed (the except block doesn't actually call rmtree).
+  - Lifespan AC8 comment "never blocks startup" replaced with accurate "bounded by `orphan_trash_sweep_per_startup_cap`".
+  - `_safe_purge_trash_entry` docstring softened: "Refuses to cross filesystem boundaries (different `st_dev`). NOTE: same-superblock bind mounts share `st_dev` and are NOT detected by this check."
+
+### Tests
+- Test bug fixed: `tests/unit/server/repositories/test_deactivate_walk_removal.py` fixture helper now writes `{alias}_metadata.json` (matching production code), not `{alias}.json`. Tests had been silently passing on an unverified path.
+- 5 new tests covering metadata-first ordering + bounded sweep + streaming scandir. All 50 deactivation-related tests pass. server-fast-automation all 6 chunks green.
+
+## v10.78.0 (2026-05-30) -- Phase 1 fd-anchored rename + composite safe purge (Story #1032 Commit 5) + Bug #1033
+
+### Security (Story #1032 Commit 5 — closes 3 Codex GPT-5 BLOCKERS)
+- **BLOCKER #1 + #2 fixed**: Phase 1 of `_do_deactivate_single` no longer uses path-based `os.makedirs` + `os.rename`. New helper `_fd_anchored_phase1_rename(activated_repos_dir, username, user_alias)` opens parent fds with `O_DIRECTORY|O_NOFOLLOW` (refuses if any ancestor is a symlink), pins inodes via `st_dev` check, and uses fd-anchored `os.rename(src, dst, src_dir_fd=user_fd, dst_dir_fd=trash_fd)`. Codex GPT-5 reproduced two TOCTOU exploits locally against v10.77.0 (ancestor `.trash` swap and `{username}` swap); both are now structurally impossible because the kernel uses the pinned fd identity, not pathname resolution.
+- **BLOCKER #3 fixed**: `_do_deactivate_composite` no longer calls `shutil.rmtree(subrepo_path)` per component + `shutil.rmtree(repo_path)` on the composite root. Both replaced by a single `_fd_anchored_phase1_rename` + `_safe_purge_trash_entry` sequence — components move atomically with the composite dir into `.trash/`, then are purged via the fd-anchored recursive deleter. Composite path is now TOCTOU-immune symmetrically with single path.
+- **HIGH #1 (carryover) fixed**: `_do_deactivate_repository` metadata-missing orphan branch (Bug #1030 cleanup) no longer uses path-based `shutil.rmtree(repo_dir)`. Routes through `_fd_anchored_phase1_rename` + `_safe_purge_trash_entry`.
+
+### Tests
+- 14 new tests in `tests/unit/server/repositories/test_phase1_fd_anchored.py` covering: rename success path, `.trash` symlink swap resistance, `{username}` ancestor symlink swap resistance, symlinked activated_repos_dir refusal, O_NOFOLLOW flag verification, dual `dir_fd` rename verification, nonexistent-repo handling.
+- Composite leak-on-failure test updated to patch `_fd_anchored_phase1_rename` (new failure mode under fd-anchored composite flow).
+- All 45 deactivation-related tests pass. fast-automation + server-fast-automation (13,405 server tests) all green.
+
+### Fixed (Bug #1033 — concurrent agent work)
+- `ConfigManager.load()` now reconciles a stored absolute `codebase_dir` against the actual config file location. On NFS clusters where nodes mount the same share at different paths (e.g. node-A: `/mnt/nfs/project`, node-B: `/data/project`), a config saved on node-A would point at node-A's path; the new behavior auto-corrects to the current node's path and logs a warning. Test: `tests/unit/config/test_config_manager_codebase_dir_reconcile.py`.
+
+## v10.77.0 (2026-05-29) -- Rename-then-delete + orphan trash sweeper (Story #1032 Commit 4)
+
+### Changed
+- `_do_deactivate_single` now uses rename-then-delete: Phase 1 atomically renames `repo_dir` to `{activated_repos_dir}/.trash/{ts}-{uuid8}-{username}-{user_alias}/` (visible to user as instant), Phase 2 performs the slow recursive purge against the trash entry. Rename is atomic on XFS (production) and NFSv4 (CoW Daemon staging) within the same export — the trash root is a single top-level directory under `activated_repos_dir` so source and destination always share a mount.
+
+### Added
+- New `_safe_purge_trash_entry(trash_root, entry_name)` module-level helper that recursively deletes a trash entry using fd-anchored Python ops only (no subprocess). Replaces the original `_safe_rm_rf_trash` subprocess wrapper after Codex GPT-5 code review found a TOCTOU vulnerability in path-based check-then-delete: an ancestor symlink swap between `os.path.exists()` and `subprocess.run(["rm","-rf",...])` could redirect deletion outside the trash root. The new design eliminates the entire attack surface:
+  - Opens trash_root with `O_DIRECTORY | O_NOFOLLOW` (pins inode; refuses symlinked root).
+  - Accepts only a basename `entry_name` (no path traversal possible by design).
+  - Validates `entry_name` has no `/`, `\\`, `..`, `.`, dot-dot-prefix, or null bytes.
+  - All recursive ops via `os.unlink(name, dir_fd=...)` and `os.rmdir(name, dir_fd=...)` — no path strings cross to the kernel after the initial fd.
+  - `st_dev` mount-boundary guard at every descent — refuses to cross filesystem boundaries (NFS bind, etc.).
+  - Symlinks never followed (O_NOFOLLOW + `is_symlink` check) — unlinked as the link, never recursed into the target.
+  - Raises ValueError on any safety violation; raises OSError on kernel-level failures (no silent CompletedProcess returns).
+- New `ActivatedRepoManager.sweep_orphan_trash_dirs()` method scans `{activated_repos_dir}/.trash/` and purges every leftover entry via the fd-anchored helper. Idempotent (missing/empty trash → 0). Returns count purged.
+- App lifespan startup invokes `sweep_orphan_trash_dirs()` once per server start (best-effort; logged at WARNING on failure, never blocks startup) to recover from crashes mid-Phase-2.
+
+### Performance
+- Deactivation now feels instant from the user's perspective: source dir disappears within milliseconds of clicking Deactivate (Phase 1 rename). Slow recursive purge runs synchronously in the same background-job worker thread but is no longer in the UI-visible critical path.
+
+### Security (Codex GPT-5 code review findings — addressed)
+- BLOCKING: TOCTOU via ancestor symlink swap — fixed by replacing path-based subprocess with fd-anchored Python deletion.
+- HIGH #1: Broken `..` invariant in path normalisation — eliminated by requiring basename-only entry_name (no path components to traverse).
+- HIGH #2: Mount-boundary crossing — fixed via `st_dev` check at every directory descent.
+- HIGH #3: Silent nonzero handling — fixed by raising on any failure (no silent CompletedProcess).
+- HIGH #4: Caller-supplied root misuse-prone — mitigated by ActivatedRepoManager always passing its own `self.activated_repos_dir`.
+
+### Tests
+- 16 new tests in `tests/unit/server/repositories/test_safe_rm_rf_trash.py` covering all safety invariants (8 entry-name validations, 3 trash-root validations, symlink defense, cross-FS refusal, real deletion).
+- 6 new tests in `tests/unit/server/repositories/test_orphan_trash_sweep.py` covering idempotency, single/multi orphan purge, sweep resilience past individual failure.
+
+### Deferred (composite path)
+- `_do_deactivate_composite` not yet refactored to rename-then-delete — composite repos are rarely used and the existing Commit-3 leak-on-failure diagnostic already applies. Will be addressed in a follow-up if usage patterns warrant.
+
+## v10.76.0 (2026-05-29) -- Drop redundant pre-deletion walks in deactivation (Story #1032 Commit 3)
+
+### Performance
+- `_do_deactivate_single` and `_do_deactivate_composite` no longer perform the pre-flight `os.walk + os.path.getsize` traversal that existed purely to populate `repo_size_mb`/`file_count` fields in one log line. For a 100k-file activated repo (typical Java/Node golden-repo CoW clone), this saves ~100k+ `stat()` syscalls per deactivation — the dominant cost on cold cache.
+- `_detect_resource_leaks` moved from a mandatory pre-flight scan to a post-failure-only diagnostic — runs only when `shutil.rmtree` raises, surfacing whatever blocked deletion (`.git` >100MB, large temp files, etc.) in the resulting cleanup warnings.
+
+### Added
+- New bootstrap-only config flag `enable_predeactivation_leak_scan` (default `false`). Set to `true` in `config.json` to restore the pre-flight leak scan when investigating an incident. Bootstrap-only (read once at startup) per the existing flag pattern used by `enable_malloc_trim`.
+
+### Removed
+- `repo_size_mb` and `file_count` fields no longer appear in the "Repository deactivation initiated" log line. They were the sole consumer of Walk #1 telemetry.
+
+## v10.75.0 (2026-05-29) -- Fix actor_username persistence in PostgreSQL backend (Story #1032 Commit 2 follow-up)
+
+### Fixed
+- PostgreSQL `BackgroundJobsBackend.save_job` now accepts and persists the new `actor_username` column. v10.74.0 added the column and the SQLite/in-memory paths but missed the PG backend, so cluster-mode (storage_mode=postgres) deployments silently wrote `actor_username=NULL` for every job. Discovered during live staging verification immediately after v10.74.0 deployment.
+- `_SELECT_COLS` constant and `_row_to_dict` helper updated in lockstep so PG SELECTs surface `actor_username` to callers.
+
+## v10.74.0 (2026-05-29) -- Deactivation actor_username tracking (Story #1032 Commit 2)
+
+### Added
+- `background_jobs.actor_username TEXT NULL` column (PG migration `026_actor_username_background_jobs.sql` + SQLite migration in `database_manager.py`). Tracks WHO triggered the action when the actor differs from the resource owner.
+- `BackgroundJobManager.submit_job(actor_username=None)` parameter. When None, defaults to `submitter_username` for backward compatibility (preserves prior audit semantics).
+- `ActivatedRepoManager.deactivate_repository(..., actor_username=None)` parameter — propagates the actor through to submit_job.
+- Entry points wired to derive actor_username from authenticated session:
+  - `web/routes.py` admin deactivate route passes `actor_username=session.username`
+  - `routers/inline_repos.py` REST DELETE /api/repos/{user_alias} passes `actor_username=current_user.username`
+  - `mcp/handlers/repos.py` MCP `deactivate_repository` passes `actor_username=user.username` (credential owner)
+  - `services/activated_reaper_service.py` TTL reaper passes `actor_username="system"` (explicit)
+- Dashboard "Recent Jobs" partial: when `actor_username` is set AND differs from `username`, renders "actor → owner" instead of just "owner", surfacing admin actions on other users' repos.
+
+### Changed
+- `_get_all_jobs(...)` default flipped to `is_admin=False` (default-deny); both existing callers (`_create_jobs_page_response`, `jobs_list_partial`) now pass `is_admin=True` explicitly.
+- `BackgroundJobManager.get_jobs_for_display(...)` SQLite branch now plumbs the username scope into `list_jobs_filtered`, closing a cross-user data leakage gap for completed DB-stored jobs when non-admin users query.
+- `_build_deactivating_map` exception path: logs at `ERROR` with `exc_info=True` instead of swallowing silently (anti-silent-failure per Messi rule 13).
+
+### Security
+- Server-side actor derivation only — no API surface accepts `actor_username` from request body/query/header, preventing audit-evidence forging.
+
+### Migrations
+- Backward-compatible: column is NULL-able with no DEFAULT. Old rolling-restart nodes continue to INSERT without the column; rows are queryable by both old and new code. Idempotent on re-run.
+
+## v10.73.0 (2026-05-29) -- Repository Deactivation Visibility + Admin Bypass (Story #1032 Commit 1)
+
+### Added
+- Dashboard: new "Active deactivations" stat tile showing count of in-flight `deactivate_repository` jobs across the whole cluster (queries both in-memory and PG/SQLite backend, de-duped by job_id).
+- Repos page: per-row "Deactivating..." badge that links to the running job for any pending/running deactivation, visible to admin for any user's repo.
+- REST `GET /api/repos` and MCP `list_repositories`: new `deactivation_job` field per repo (`{"job_id": "...", "status": "running"} | null`) so CLI/MCP clients see in-flight deactivations.
+- Web UI admin deactivate success flash now contains a clickable Job ID linking to `/admin/jobs?search_text=<id>` for one-click navigation to the job detail.
+
+### Changed
+- `BackgroundJobManager.list_jobs`, `get_job_status`, `get_jobs_for_display` gain an `is_admin: bool = False` parameter; when True, the username scope is bypassed so admin can see all users' jobs.
+- REST endpoints `GET /api/jobs`, `GET /api/jobs/{job_id}`, `DELETE /api/jobs/{job_id}` now pass `is_admin=(current_user.role == 'admin')`. Non-admin users continue to see only their own jobs (privilege-escalation regression test added).
+
+### Removed
+- Repos page: dead "File Count" column (always rendered `N/A` because the backend never populated the field). Pure UI noise removed.
+
+### Security
+- Stored-XSS hardening: `user_alias` is now HTML-escaped in the admin deactivation success flash before being rendered through Jinja's `|safe` filter, preventing script injection via maliciously-named activated repos.
+
+### Fixed
+- Test debt from Story #1031: `EXPECTED_REGISTRY_KEYS` in the MCP handler registry structure test now includes `store_xray_pattern` (was failing on master/development since the tool was registered).
+
+## v10.72.0 (2026-05-29) -- directory_tree Absolute Path Disclosure Fix
+
+### Fixed
+- Security: `directory_tree` MCP tool no longer discloses the absolute server filesystem path in its `root_path` response field. It now returns the relative requested path (empty string for repo root), consistent with `tree_string` and `root.path`. Discovered during v10.71.0 staging E2E testing when verifying pattern-library discoverability via `directory_tree` on cidx-meta.
+
+## v10.71.0 (2026-05-29) -- Xray Pattern Library: Path Security + Doc Improvements
+
+### Fixed
+- Security: `store_xray_pattern` response now returns relative path (e.g. `xray-patterns/__any__/name.yaml`) instead of absolute server filesystem path, preventing internal path disclosure.
+- MCP docs: `xray_search` and `xray_explore` output schema corrected from "absolute path" to "relative path from repository root" (matches actual code behavior since v10.70.0).
+- MCP docs: Error examples in `xray_search` and `xray_explore` updated to use relative paths instead of absolute paths.
+- Pre-existing mypy type-ignore code mismatch in `xray_pattern_service.py` (`return-value` corrected to `no-any-return`).
+- Pre-existing Rust compilation failures in `test_real_evaluator_patterns.py`: evaluator code used `node.text` (field access) instead of `node.text()` (method call) per OwnedNode API.
+
+### Added
+- Pattern Library Best Practices section in `store_xray_pattern` MCP docs advising clients to save laborious evaluators for reuse.
+- Pattern Library section in `xray_search` and `xray_explore` MCP docs with discoverability guidance (`browse_directory`/`directory_tree` on cidx-meta).
+- Test `test_store_pattern_returns_relative_path` verifying no absolute path disclosure.
+
+## v10.70.0 (2026-05-29) -- Persistent Xray Evaluator Pattern Library
+
+### Added
+- Story #1031: Persistent xray evaluator pattern library with parametrization. Store reusable Rust evaluator patterns in cidx-meta (`xray-patterns/` folder), resolve by name in `xray_search` and `xray_explore` via `pattern_name` parameter, override pattern defaults via `pattern_params`.
+- `store_xray_pattern` MCP tool for storing/updating patterns with overwrite protection.
+- Const injection engine: pattern parameters become typed `const` lines (usize, i64, f64, bool, str) prepended to evaluator code before Rust compilation.
+- Seed patterns: `catch-rethrow` and `deep-nesting` auto-created in `__any__/` scope on first use.
+- Path traversal protection on scope and pattern name parameters.
+- Pattern resolution: repo-specific scope first, then `__any__/` cross-repo fallback.
+- `pattern_name` and `pattern_params` parameters added to `xray_search` and `xray_explore` tool schemas and documentation.
+
+## v10.69.0 (2026-05-29) -- Bug Fixes: search_code Crash + Reaper Deactivation Loop
+
+### Fixed
+- Bug #1029: `search_code()` KeyError crash when `query_text` parameter missing (130 crashes/24h in production). Early validation in `search_code()` returns clean error response for missing, empty, whitespace-only, or non-string `query_text`. Defense-in-depth: hard dict access `params["query_text"]` changed to `params.get("query_text", "")` in response metadata builder.
+- Bug #1030: Activated reaper deactivation infinite loop for phantom repositories (69 failed jobs/24h). Two-layer fix: (1) idempotent deactivation in `_do_deactivate_repository()` — when metadata is None, clean up orphan artifacts (rm repo dir + delete metadata) and return success instead of raising `ActivatedRepoError`; (2) reaper skip guard in `run_reap_cycle()` skips repos with empty username or user_alias.
+
+### Added
+- Rust xray-core: HCL/Terraform, YAML, XML, Groovy, and SQL language support (tree-sitter grammars).
+- Xray tool doc updates referencing new supported languages.
+
+## v10.68.0 (2026-05-28) -- Xray Tool Doc Improvements + Runtime Truncation Tests
+
+### Added
+- Quick Start sections in both `xray_search` and `xray_explore` MCP tool docs with complete working examples so first-time users see a runnable pattern before the reference material.
+- `debug_log()` and `truncate_snippet()` now listed in the "Allowed constructs" security whitelist in both xray tool docs (were missing despite being preamble-provided functions).
+- REST/MCP field name mismatch note in `xray_search` docs: REST API uses `driver_regex`/`max_files` while MCP uses `pattern`/`max_results`.
+- Self-contained Quick Start in `xray_explore` with two examples (AST exploration without evaluator, evaluator with debug_log tracing).
+- Rust runtime integration test `test_debug_log_truncation_limits_runtime`: compiles evaluator calling debug_log 150 times, loads .so, asserts exactly 100 messages returned in-order.
+- Rust runtime integration test `test_debug_log_byte_limit_runtime`: compiles evaluator sending 60x200B messages, asserts exactly 51 retained (10KB cap enforced).
+
+## v10.67.0 (2026-05-28) -- Xray Evaluator debug_log() Function
+
+### Added
+- Story #1028: `debug_log(msg: &str)` function available inside xray evaluator code for runtime debugging. Messages are collected in a per-thread buffer (max 100 messages, 10KB total) and returned in the JSON output as `debug_messages[]`. Python-side `XRaySearchEngine` surfaces them as `debug_output[]` in job results for both `xray_search` and `xray_explore`. Security: in-memory only, no sandbox bypass.
+- `xray_drain_debug_log()` exported symbol in compiled evaluator dynlibs for draining debug messages after evaluation.
+- `drain_debug_log()` method on `Evaluator` trait with default empty implementation; `DynlibEvaluator` overrides via trait dispatch to call the dynlib export.
+- `debug_messages` field in `ScanResult` and xray-cli JSON output.
+- `debug_output` field documented in `xray_search` and `xray_explore` MCP tool docs with usage examples, limits, and security notes.
+
+## v10.66.0 (2026-05-28) -- Activation Metadata + Cache Page Index Fixes
+
+### Fixed
+- Bug #1026: Single-repo activation metadata now includes `username` field. The `_do_activate_repository()` metadata dict was missing the username key, causing reaper CRITICAL errors when accessing `metadata["username"]`. Also backfills the field for pre-existing metadata files via `setdefault()` in `_list_user_repos_fs()`.
+- Bug #1027: `cidx_fetch_cached_payload` MCP handler now uses 1-indexed pages at the API boundary (was 0-indexed). Callers sending `page=1` for the first page no longer get "Page 1 out of range" errors on single-page results. Internal `PayloadCache.retrieve()` remains 0-indexed; translation happens at the handler boundary.
+
+## v10.65.0 (2026-05-28) -- Non-root Auto-Updater Rust Toolchain Fix
+
+### Fixed
+- Auto-updater `_ensure_rust_toolchain()` now uses `sudo mkdir -p` and `sudo chown -R` to create `/opt/rust` instead of direct `Path.mkdir()`. The auto-updater runs as a non-root user on staging (e.g. `jsbattig`), so creating `/opt/rust` without sudo fails with `PermissionError: [Errno 13]`, crashing the entire deployment.
+
+## v10.64.0 (2026-05-28) -- RUSTUP_HOME Systemd Service Fix
+
+### Fixed
+- Auto-updater now adds `RUSTUP_HOME=/opt/rust` and `CARGO_HOME=/opt/rust` to the cidx-server systemd service file. The rustup proxy at `/opt/rust/bin/rustc` needs `RUSTUP_HOME` to find the installed toolchain; without it, rustup defaults to `$HOME/.rustup` which has no default toolchain configured, causing "no default toolchain" errors at runtime.
+
+### Added
+- New `_ensure_systemd_env_var()` static method for idempotent `Environment="KEY=VALUE"` management in systemd unit files.
+- `_line_parts()` helper to DRY indent/ending extraction from service file lines.
+
+## v10.63.0 (2026-05-28) -- Rust Toolchain Install Location Fix
+
+### Fixed
+- Auto-updater now installs Rust toolchain to `/opt/rust` (system-wide) instead of `/root/.cargo`. The auto-updater runs as root so `Path.home()` resolved to `/root/`, but `cidx-server` runs as the `code-indexer` OS user which cannot access `/root/` (0550 permissions). This made `rustc` unreachable, breaking xray evaluator compilation.
+- Stale `/root/.cargo/bin` entries in systemd service PATH are automatically cleaned up during deployment via new `_remove_path_segment()` method.
+- `RUSTUP_HOME` and `CARGO_HOME` env vars explicitly set to `/opt/rust` and propagated to both `curl` and `sh` subprocess calls in `_install_rust_toolchain()`.
+
+### Changed
+- `_ensure_systemd_cargo_path` renamed to `_ensure_systemd_rust_path` to reflect the new system-wide install location.
+- MCP tool doc `xray_explore.md` fully rewritten from Python-era documentation to Rust native evaluator documentation (OwnedNode API, EvalFinding struct, Rust examples).
+
+## v10.62.0 (2026-05-28) -- Xray Memory Waste Fix + Test Fixture Cleanup (Epic #1019)
+
+### Fixed
+- Xray search engine no longer pre-loads ALL candidate file source code into memory (~170MB for 17K-file repos). The Rust subprocess reads files itself; Python-side `line_content` enrichment now reads on-demand per file with findings.
+- `_DEFAULT_EVALUATOR_CODE` in MCP handlers changed from Python to Rust. The old Python code was silently rejected by `validate_rust_evaluator()` when evaluator_code was omitted.
+- Atomic `.so` cache writes in `_try_pre_fill()`: writes to `{hash}.so.tmp.{pid}` then renames, preventing corruption from concurrent workers.
+- `ast_debug` enrichment reads file bytes from disk instead of deleted `spec["source"]` key.
+- 75 pre-existing test failures from Rust migration (commit 839e935): updated evaluator fixtures from Python `"return True"` to valid Rust `fn evaluate_node` across 4 test files.
+
+### Changed
+- `_build_matches()` now accepts `abs_path` parameter for on-demand file reading instead of relying on pre-loaded source.
+- MCP tool doc `xray_explore.md` updated to reflect Rust evaluator validation (forbidden constructs section).
+
+## v10.61.0 (2026-05-28) -- Xray Error Handling Hardening (Epic #1019)
+
+### Fixed
+- Pre-flight validator now catches `static` declarations (not just `static mut`). Previously slipped through to Rust compiler producing N duplicate errors per file.
+- Compiler/invocation errors deduplicated: single error entry returned instead of one per file spec. Compile failures are per-evaluator, not per-file.
+- Silent timeout on infinite-loop evaluators now produces synthetic `EvaluatorTimeout` error with diagnostic guidance instead of empty results.
+- Server filesystem paths fully sanitized from all error messages returned to API callers. Six error return paths in `rust_backend.py` now apply `_sanitize_error_message()`: BinaryNotFound, JSON parse error, CLI JSON error field, subprocess timeout, non-zero exit stderr, FileNotFoundError. Server logs retain raw paths for debugging.
+- Stale test (`test_json_error_field_returns_error_tuples_for_all_files`) fixed: was mocking `subprocess.run` but code uses `subprocess.Popen`, and was expecting per-file errors instead of deduplicated single entry.
+
+### Added
+- `_sanitize_error_message()` in `rust_backend.py`: two-rule regex sanitizer strips xray-cache paths (to `evaluator.rs`) and general server paths (to `<server-path>`).
+- New unit tests: Rust pre-flight `static` validation (57 lines), backend sanitization and deduplication (145 lines), search engine timeout detection (56 lines), CLI error path sanitization (Test 20).
+
+## v10.60.0 (2026-05-28) -- REST Xray Validator Fix (Epic #1019)
+
+### Fixed
+- REST `POST /api/xray/search` pre-flight validation was still calling the Python AST validator (`sandbox.validate()`) instead of `validate_rust_evaluator()`. Rust evaluator code submitted via REST API was rejected with `syntax_error: invalid syntax`. MCP handler was already correct; REST route was missed during the Rust-only migration.
+
+### Changed
+- `xray_routes.py` no longer instantiates `XRaySearchEngine` for pre-flight validation -- uses the lightweight `validate_rust_evaluator()` function directly (same as MCP handler).
+
+## v10.59.0 (2026-05-28) -- Cluster-Aware Evaluator Cache + TTL (Epic #1019)
+
+### Added
+- Cluster-aware evaluator compilation cache: compiled .so blobs shared across cluster nodes via PostgreSQL (`xray_evaluator_cache` table). Solo mode uses local filesystem cache as before.
+- 5-minute TTL for cached evaluator .so files: Rust-side `is_fresh()` rejects stale local cache entries, PostgreSQL-side `fetch()` filters by `compiled_at` timestamp. Lazy cleanup on `store()`.
+- `XrayCacheBackend` Protocol in `rust_backend.py` for structural typing of cache backends.
+- Module-level singleton for cluster cache backend in `search_engine.py` -- shared across all per-request `XRaySearchEngine` instances.
+- `CIDX_DATA_DIR` support in Rust `get_cache_dir()` -- parity with Python for deployments using custom data directories (Bug #879).
+- 3 new forbidden macros in Rust validator: `panic!`, `todo!`, `unimplemented!` (defense-in-depth, both Python and Rust layers).
+- 5 new forbidden macros in Python pre-flight validator: `include_str!`, `include_bytes!`, `option_env!`, `print!`, `eprint!`.
+- `_ensure_systemd_cargo_path()` in DeploymentExecutor: ensures `~/.cargo/bin` in systemd PATH for Rust toolchain (mirrors `_ensure_systemd_claude_path()`).
+
+### Changed
+- Evaluator cache check now requires TTL freshness in addition to hash and rustc version match.
+- `RustNativeBackend.__init__()` accepts optional `xray_cache_backend` parameter for cluster cache injection.
+- `install-cidx-server.sh`: Cargo bin directory added to systemd PATH line.
+
+### Fixed
+- 6 corrections in xray_search MCP documentation: `static mut` -> `static` in forbidden list, expanded allowed macros/constructs, fixed variable name in cookbook pattern 5, corrected language count, fixed error code name.
+- Removed redundant `rustup default stable` subprocess call from `_install_rust_toolchain()` (already baked into RUSTUP_SH_ARGS).
+- Fixed bytes/str stderr handling in curl and sh error paths in deployment executor.
+
+## v10.58.0 (2026-05-27) -- Pure Rust Evaluators, Transpiler Removed (Epic #1019)
+
+### Removed
+- Deleted Python-to-Rust transpiler (`transpiler.py`, 1036 lines). Users write Rust evaluator code directly.
+- Deleted transpiler test suite (`test_transpiler.py`, 61 tests) and construct parity gate (`test_construct_parity.py`).
+- Removed 2 dead `XRaySearchEngine()` instantiations from MCP handlers after validation refactor.
+
+### Changed
+- RustNativeBackend now validates and passes Rust evaluator code directly to xray-cli (no transpilation step).
+- MCP xray handlers use `validate_rust_evaluator()` from sandbox.py instead of `engine.sandbox.validate()`.
+- All MCP xray_search documentation rewritten for Rust OwnedNode API: 15 cookbook patterns, evaluator reference, security whitelist, error codes.
+- Real evaluator pattern tests converted from Python to Rust (`test_real_evaluator_patterns.py`).
+- Rust backend tests updated for direct Rust evaluator code (`test_rust_backend.py`).
+
+### Added
+- Python-side Rust validator (`validate_rust_evaluator()` in sandbox.py): regex-based pre-flight security checks for 18 forbidden constructs (unsafe, std::fs/net/process/env/io, raw pointers, extern, mod, static mut, dangerous macros).
+- 25 new Rust validator tests (`test_rust_validator.py`): covers all forbidden constructs, valid code acceptance, ValidationResult structure.
+
+## v10.57.0 (2026-05-27) -- Rust Native Xray Engine (Epic #1019)
+
+### Added
+- Rust xray-core crate: tree-sitter parsing, rayon parallel scanning, OwnedNode heap-allocated AST, file collection across 10 languages (Java, Kotlin, Python, TypeScript, JavaScript, Go, C#, Bash, HTML, CSS).
+- Rust xray-cli binary: `--dynlib`, `--json`, `--files` flags for pipeline integration. Scans 19K+ files in under 4 seconds.
+- Dynamic evaluator compilation and caching: `rustc --crate-type cdylib` (~210ms compile), SHA-256 cache at `~/.cidx-server/xray-cache/`, libloading for native-speed execution, LRU eviction at 100 entries.
+- Rust AST validator: whitelist enforcement (no unsafe, no std::fs/net/process, no raw pointers) before compilation.
+- RustNativeBackend (`src/code_indexer/xray/rust_backend.py`): drop-in replacement for PythonEvaluatorSandbox.run_batch(). Validates, compiles, invokes xray-cli, parses JSON output.
+- DeploymentExecutor Step 16: `_ensure_rust_toolchain()` installs rustup + stable toolchain idempotently, verifies C compiler, builds xray-cli. FATAL on failure.
+- 81 new tests: 10 rust_backend, 19 toolchain provisioning, 11 Rust unit tests, 41 spike pattern validation.
+
+## v10.56.0 (2026-05-23) -- Auto-Updater E2E Verification
+
+### Changed
+- Version bump to verify auto-updater end-to-end deployment across staging cluster (3 nodes).
+
+## v10.55.0 (2026-05-23) -- Skipped Test Cleanup
+
+### Removed
+- Deleted 12 dead test files containing only permanently-skipped or mock-heavy placeholder tests: `test_clean_file_chunking_manager`, `test_vector_calculation_manager`, `test_parallel_processing_replacement`, `test_voyage_threadpool_elimination`, `test_advanced_query_filtering`, `test_semantic_query_manager_warning_log_conditions`, `test_server_startup_crash_fix`, `test_fixed_size_chunking_documentation`, `test_temporal_indexer_project_id`, `test_resume_and_incremental_bugs`, `test_teach_ai_templates`, `test_cancellation_handling`.
+- Deleted ~32 permanently-skipped methods from 11 test files (RED-phase TDD stubs that were never un-skipped after implementation, unreachable-in-local-mode tests, placeholder classes).
+- Removed 15 obsolete ruff/mypy exclusion entries from `pyproject.toml` pointing to deleted test files.
+
+### Fixed
+- Un-skipped ~62 tests across 8 files that were guarded by `try/except ImportError` or `if X is None: pytest.skip()` patterns left over from TDD red phase. All are now active and passing.
+- Fixed indentation errors in `test_workspace_cleanup_service.py` and `test_file_crud_service.py` introduced during un-skip operations.
+- Fixed cascading import error in `test_cancellation_handling.py` (imported from deleted `test_vector_calculation_manager`).
+
+### Changed
+- Zero `@pytest.mark.skip` decorators remain in the test suite. Only legitimate runtime `pytest.skip()` calls (environment/fixture checks) remain.
+
+## v10.54.0 (2026-05-23) -- hnswlib Pre-flight Check + FTS Bootstrap Fix
+
+### Fixed
+- **hnswlib pre-flight guard**: `smart_index()` now raises `RuntimeError` immediately — before acquiring the lock or generating any vectors — when the custom hnswlib fork is not installed. Previously the error surfaced only after all vector files had been written, requiring a full re-index.
+- **FTS bootstrap for new index**: `cidx index --fts` now correctly populates a brand-new Tantivy index from all codebase files when the semantic index is already up-to-date and there is nothing to embed. Previously the FTS index was left empty in this scenario.
+
+### Changed
+- **pyproject.toml**: Added hnswlib VCS dependency (`git+https://github.com/LightspeedDMS/hnswlib.git@89720633`) so `pip install` / `pipx install` builds the custom fork automatically. Also added `numpy>=1.24.0` as an explicit dependency.
+- **install-cidx-server.sh**: Added `g++` / `gcc-c++` to system package list for C++ compilation of hnswlib; added `--recurse-submodules` to fresh clone; added `git submodule update --init third_party/hnswlib` after `git pull`.
+- **docs/installation.md**: Documented C++ compiler prerequisite (gcc/g++/clang) required at install time.
+
+### Added
+- Unit tests for hnswlib pre-flight check and FTS bootstrap path (`tests/unit/services/test_smart_indexer.py`).
+
+## v10.53.0 (2026-05-23) -- Python Version Constraint
+
+### Changed
+- Tightened `requires-python` from `>=3.9` to `>=3.9,<3.13` in `pyproject.toml`. `tree-sitter-languages==1.10.2` and `tantivy==0.25.0` ship no pre-built wheels for Python 3.13+; without this bound, installation on Python 3.13/3.14 silently falls back to source builds requiring Rust/Cargo. Affects all platforms (macOS, Linux, Windows).
+
+## v10.52.0 (2026-05-22) -- MCP Response Key Collision Fix + TOTP Redirect Fix
+
+### Fixed
+- **Bug #1016**: Renamed inner `content` key to `file_content` in `get_file_content` MCP tool response to eliminate naming collision with MCP protocol's `CallToolResult.content` wrapper. Clients no longer navigate two identically-shaped `content` arrays. Updated tool doc schema accordingly.
+- **Bug #1017**: Fixed race condition in `base.html` form interceptor where `document.write()` cancelled a pending `window.location.replace()` navigation on `totp_setup_required` 403 responses. Admin forms (role change, email, password, delete) now correctly redirect to `/admin/mfa/setup` when TOTP is not configured.
+
+## v10.51.0 (2026-05-22) -- Auto-Updater E2E Verification
+
+### Fixed
+- Upgraded root pip on cluster node .22 from 21.3.1 to 26.0.1 to fix `--break-system-packages` flag not recognized during auto-updater deployment step. All 3 cluster nodes now auto-update end-to-end.
+
+## v10.50.0 (2026-05-22) -- Auto-Updater Deployed to All Cluster Nodes
+
+### Fixed
+- Deployed auto-updater systemd service and timer to cluster nodes .22 and .23, which were missing the `cidx-auto-update.service` and `cidx-auto-update.timer` units. All 3 cluster nodes now auto-update from the staging branch every 60 seconds.
+
+## v10.49.0 (2026-05-22) -- MCP Protocol Version Negotiation (Codex Compatibility)
+
+### Fixed
+- MCP initialize handler now negotiates protocol version by echoing back the client's requested version when supported (2024-11-05, 2025-03-26, 2025-06-18), falling back to latest (2025-06-18) for unknown versions. Previously hardcoded 2025-06-18, causing Codex's `rmcp` client to reject the handshake when it only supports 2025-03-26.
+
+## v10.48.0 (2026-05-22) -- MCP Streamable HTTP Transport Fix (Codex Compatibility)
+
+### Fixed
+- MCP POST endpoints (`/mcp`, `/mcp-public`) now return HTTP 202 with empty body for JSON-RPC notifications (no `id` field), per MCP Streamable HTTP transport spec. Previously returned 200 with a JSON-RPC body, causing Codex's `rmcp` Rust client to close the transport during handshake on `notifications/initialized`.
+
+## v10.47.0 (2026-05-20) -- Atomic Writes for Delta Dependency Map
+
+### Fixed
+- Delta dependency map writes now use temp-file + atomic rename pattern (`Path.replace()`) instead of direct `write_text()`, preventing partial/corrupt files on crash (Bug #1015). Three write sites fixed: `_update_domain_file` (domain .md), `_apply_domain_assignments` (_domains.json), `_remove_stale_repos_from_domains_json` (_domains.json).
+
+## v10.46.0 (2026-05-20) -- Golden Repo Refresh Fixes, HCL Detection, REST Regex Search
+
+### Fixed
+- Golden repo refresh failures caused by `cidx init` creating `.code-indexer-override.yaml` in repo root, blocking subsequent `git pull` with "untracked working tree files would be overwritten" error (Bug #1013). Three-layer fix: `--no-override-file` CLI flag on all server subprocess calls, pre-pull cleanup of CIDX artifacts, and error recovery with retry and path traversal validation.
+- X-Ray `_hcl_available()` probed nonexistent `tree_sitter_hcl` package instead of `tree_sitter_languages.get_language("hcl")`, causing Terraform/HCL support to be silently disabled (Bug #1014)
+
+### Added
+- REST endpoint `POST /api/regex/search` for server-side regex search with single-repo and omni fan-out support, 50-repo cap, auth/permission checks, structured error codes, and per-repo metrics (Story #1011)
+
+## v10.45.0 (2026-05-19) — Fix Extension Cascade Race Condition (Bug #1012)
+
+### Fixed
+- Removed `cascade_indexable_extensions_to_repos()` call from Web UI config save handler -- cascade was pre-empting drift detection by writing new extensions to repo configs immediately, causing `sync_repo_extensions_if_drifted()` to find no drift and never trigger `--reconcile`
+- Golden repos now pick up new indexable extensions via drift detection on next refresh cycle, which correctly detects the change and triggers a full reconcile index run
+
+### Changed
+- Web UI "Save & Cascade" button renamed to "Save" for indexing settings section
+- Help text updated: "Changes apply to golden repos on next refresh cycle"
+
+## v10.44.0 (2026-05-18) — Documentation and E2E Testing Standards
+
+### Added
+- Server E2E front-door testing mandate in CLAUDE.md -- all server E2E tests must use REST API/MCP endpoints, CLI/SSH only for troubleshooting
+- Langfuse trace sync documentation (`docs/langfuse-trace-sync.md`)
+
+### Changed
+- README.md streamlined -- removed redundant "What's New in v10.0" section, consolidated navigation, reduced by ~400 lines
+
+## v10.43.0 (2026-05-18) — NFS Lock File Writable Mode
+
+### Fixed
+- All 7 lock file opens changed from read-only `"r"` to read-write `"r+"` mode, fixing EBADF when POSIX `lockf()` attempts exclusive locks on NFS — `lockf(LOCK_EX)` requires a writable file descriptor
+- Golden repo HNSW index builds, branch isolation, and metadata updates no longer fail on NFS-mounted storage
+
+## v10.42.0 (2026-05-18) — NFS-Safe fsync
+
+### Fixed
+- All 12 `os.fsync()` call sites across 8 files now use NFS-safe wrapper that suppresses EBADF on directory file descriptors, fixing golden repo HNSW index finalization failure on NFS mounts
+- Golden repo indexing no longer fails with `[Errno 9] Bad file descriptor` during ID index save and directory fsync operations on NFS-backed storage
+
+### Added
+- `nfs_safe_fsync()` utility in `file_locking.py` — wraps `os.fsync()` with EBADF tolerance for NFS close-to-open consistency semantics
+
+## v10.41.0 (2026-05-18) — NFS-Safe File Locking
+
+### Fixed
+- All 33 `fcntl.flock()` call sites across 12 files now use NFS-safe locking via centralized `nfs_safe_flock`/`nfs_safe_funlock` utility, fixing EBADF failures on NFS mounts with `local_lock=none`
+- Golden repo indexing on cluster nodes no longer fails during HNSW index builds, vector store writes, or background rebuilds due to BSD flock incompatibility with NFS
+
+### Added
+- `src/code_indexer/utils/file_locking.py` — centralized NFS-safe file locking utility that tries `flock()` first, falls back to `lockf()` (POSIX record locks via NLM) on EBADF
+- Git hook template in `git_hook_manager.py` uses inline flock-to-lockf fallback (standalone script, cannot import utility)
+
+## v10.40.0 (2026-05-18) — NFS Cluster Stability Fixes
+
+### Fixed
+- Background index rebuilder flock-first/lockf-fallback for NFS mounts where local_lock=none causes EBADF on flock(); lockf uses POSIX record locks via NLM protocol
+- Dependency map services handle commit_hashes as dict (PostgreSQL JSONB via psycopg3) or str (SQLite), fixing TypeError crash and silent empty-dict return
+- migrate_to_postgres tool handles JSONB dict type for commit_hashes column during SQLite-to-PostgreSQL migration
+
+### Added
+- cluster-migrate.sh --is-storage-node flag so the NFS export server uses local path validation instead of NFS self-mount
+
+## v10.39.0 (2026-05-17) — NFS Golden Repo Compatibility
+
+### Fixed
+- Git clone/fetch/pull operations on NFS-backed golden-repos storage now pass `-c core.fsync=none` to avoid fatal fsync I/O errors on NFS v4 mounts with Git 2.47+ (Bug #1010)
+
+## v10.38.0 (2026-05-17) — Database and Config Stability Fixes
+
+### Fixed
+- Validation error responses now properly serialize bytes values in rejected_value field, preventing JSON serialization crashes on malformed request bodies (Bug #1003)
+- MCP credential verification no longer fails authentication when last_used_at timestamp update encounters database lock contention (Bug #1004)
+- Background job submission no longer emits spurious "Duplicate active job rejected" warnings in PostgreSQL mode when JobTracker registers an already-persisted job (Bug #1005)
+- Legacy config key enforce_pace_maker_pacing_only now properly migrates to pace_maker_mode before unknown-key stripping, eliminating repeated warning floods on server restart (Bug #1006)
+
+## v10.37.0 (2026-05-17) — Health Watchdog, Blame Hardening, and Thread Pool Optimization
+
+### Added
+- Health watchdog for cidx-server auto-restart via systemd timer with consecutive failure tracking and cooldown enforcement (Story #1007)
+- Git blame subprocess timeout (30s) with BlameErrorResult dataclass for graceful timeout handling (Bug #1008)
+- PayloadCache + TruncationHelper for blame response payload size management (Bug #1008)
+- MCP protocol handler timeout (60s) via asyncio.wait_for on run_in_executor calls (Bug #1008)
+- Configurable MCP dispatch thread pool (mcp_dispatch_pool_size, default 128) as asyncio default executor (Story #1009)
+- MultiSearchService singleton pattern to prevent redundant thread pool creation (Story #1009)
+
+### Fixed
+- Langfuse auto_span_logger _summarize_output now handles "lines" key from blame responses (Bug #1008)
+
+### Changed
+- Multi-search subsidiary pool defaults increased: multi_search_max_workers 2->8, scip_multi_max_workers 2->8, subprocess_max_workers 2->8 (Story #1009)
+- X-Ray worker threads default increased from 2 to 4 (Story #1009)
+
+### Removed
+- OmniSearchService dead code (213 lines) — functionality fully replaced by omni fan-out in search handlers (Story #1009)
+
+## v10.36.0 (2026-05-16) — NFS Symlink Sharing for Claude CLI Sessions
+
+### Added
+- Auto-updater Step 13: Claude CLI install verification with npm-based installation fallback
+- Auto-updater Step 14: NFS symlink creation for entire ~/.claude/ directory, enabling shared Claude CLI sessions across all cluster nodes via single NFS mount
+- Auto-updater Step 15: systemd PATH configuration ensuring Claude CLI binary is accessible to cidx-server service
+- Migration tool --nfs-mount parameter: converts local Claude state directories to shared NFS storage with consolidation of old per-project claude directories
+- LLM lease lifecycle late-init in lifespan: secondary cluster nodes that boot before scheduler assigns subscriptions now properly initialize LLM services on first config sync
+
+### Changed
+- Removed old Step 15 credential-sync methods (superseded by full ~/.claude/ symlink approach)
+- DeploymentExecutor step count increased from 12 to 15
+
+## v10.35.0 (2026-05-15) — NFS Golden Repo Volume Monitoring
+
+### Added
+- NFS golden repo volume appears on dashboard alongside local disk volumes in cluster mode (Story #1002)
+- Device label "Golden Repos (NFS)" with accurate metrics from psutil.disk_usage() and correct fstype (nfs/nfs4)
+- NFS volume correctly absent in standalone mode or when mount is down
+- Graceful OSError handling when NFS mount becomes stale or inaccessible
+- Both dashboard paths covered: standalone health endpoint (_get_mounted_volumes) and cluster node_metrics carousel (_collect_volume_info)
+- NfsMountValidator.get_mount_path() method for external consumers
+- NFS mount auto-detection in lifespan via psutil.disk_partitions(all=True) with longest-match selection
+
+## v10.34.0 (2026-05-15) — Comprehensive Documentation Overhaul
+
+### Fixed
+- 75+ verified factual corrections across 30 documentation files
+- README.md: install tags updated to current version, Cohere dimensions 2048->1536, VoyageAI model names corrected to canonical (voyage-code-3, voyage-large-2), server start command fixed, dep_map timeout default 600->1800
+- CLAUDE.md: DUNDER_ATTR_BLOCKLIST count 24->39, TOTP field name corrected, lint.sh description fixed, Cohere provider acknowledged
+- xray-sandbox.md: Story #993 changes reflected (SAFE_BUILTINS 27->34, Groups F+G added, banned list corrected, test count 112->303)
+- server-deployment.md: flat-key config warning added, TTL key name corrected, stale versions updated
+- query-guide.md: parameter count corrected to 28, min_score default fixed to None
+- memory-retrieval-operator-guide.md: wrong defaults fixed (voyage 0.75->0.5, cohere 0.5->0.4)
+- migration-to-v10.md: memory_retrieval_enabled default corrected to false
+- Stale migration counts (3->25), phantom module/test paths, dead links, and stale fact-check headers cleaned across 20+ files
+- docs/CHANGELOG.md replaced with redirect to root CHANGELOG (was 180+ versions behind)
+
+### Changed
+- Memory index reorganized by category (Safety, Quality, Workflow, Architecture, References)
+- Removed 2 transient project memories (completed bug package, time-bound staging mission)
+- Added 5 previously unindexed timeless memory files to MEMORY.md
+
+## v10.33.0 (2026-05-15) — Auto-Reconcile on Extension Drift
+
+### Added
+- Extension drift detection in refresh scheduler: when server-side file extension config changes (additions or removals), the next refresh automatically triggers `--reconcile` to re-scan the full repository, even if there are no git or local file changes.
+- `ExtensionDrift` dataclass in ConfigService captures added/removed extensions from `sync_repo_extensions_if_drifted()`.
+- `has_files_with_extensions()` short-circuit file scanner with directory pruning for efficient drift-triggered file existence checks.
+- `_check_extension_drift()` helper in RefreshScheduler, called before both git and local repo early-return paths to ensure drift is never skipped.
+- Crash recovery (interrupted metadata) OR-logic with drift detection: either condition alone triggers `--reconcile`.
+
+### Fixed
+- Extension drift check was unreachable during normal scheduled refreshes when no git/local changes were detected (early return bypassed the drift block). Drift detection now runs before both early-return exits.
+
+## v10.32.0 (2026-05-14) — Fix GlobalRepoOperations startup warning in cluster mode
+
+### Fixed
+- GlobalRepoOperations no longer eagerly resolves backend_registry at construction time during server startup. Registry resolution is deferred to a lazy property accessed at request time, eliminating the spurious "storage_mode=postgres but backend_registry not set; falling back to SQLite" WARNING that fired on every cluster node restart.
+- Added thread-safe double-checked locking on the registry property to prevent duplicate registry construction under concurrent first-access requests.
+
+## v10.31.0 (2026-05-14) — Fix PG token bucket LEAST() scalar function
+
+### Fixed
+- TokenBucketManager._pg_refund() used SQL MIN() as scalar function which only works in SQLite; PostgreSQL requires LEAST() for two-argument scalar minimum. This crashed every login attempt on the staging cluster with `psycopg.errors.UndefinedFunction`.
+
+## v10.30.0 (2026-05-14) — Cluster-mode bypass fixes and PG state sharing
+
+### Fixed
+- GlobalRepoOperations (shared_operations.py) now detects postgres mode and delegates to BackendRegistry.global_repos instead of always creating a SQLite-backed GlobalRegistry.
+- registry_factory.py returns PostgresGlobalRegistryAdapter wrapping the shared PG backend in cluster mode, ensuring all nodes read/write to the same global repos store.
+- repos.py _set_enable_temporal_flag now checks storage_mode and updates enable_temporal via BackendRegistry.global_repos in postgres mode instead of creating a throwaway SQLite GlobalRegistry.
+- golden_repo_manager.py enable_temporal updates route through BackendRegistry in postgres mode.
+- alias_manager.py write-mode markers now use PG table instead of filesystem in cluster mode.
+- Langfuse trace sync fromisoformat compatibility fix for Python 3.9.
+
+### Added
+- TokenBucketManager PG cluster support: cross-node rate limiting via token_bucket_state table with atomic consume/refund operations.
+- LlmLeaseStateManager PG cluster support: encrypted lease state stored in cluster_secrets table, encryption key derived from shared JWT secret via PBKDF2.
+- PostgreSQL migration 024_token_bucket_state.sql for cluster rate limiting.
+- LLM Creds Client: NestJS response envelope unwrapping (metadata/payload format).
+- lifespan wiring for rate_limiter.set_connection_pool() and LlmLeaseStateManager.set_connection_pool() in cluster mode.
+
+## v10.29.0 (2026-05-13) — PG datetime serialization across all backends
+
+### Fixed
+- All PostgreSQL backend methods now wrap returned dicts with `sanitize_row()` to convert TIMESTAMPTZ datetime objects to ISO strings, preventing `TypeError: Object of type datetime is not JSON serializable` in cluster mode.
+- Affected backends: users, git_credentials, ssh_keys, research_sessions, sync_jobs, oauth, description_refresh_tracking (7 files, ~50 datetime fields).
+
+## v10.28.0 (2026-05-13) — Elevation dialog race condition fix
+
+### Fixed
+- Elevation dialog race condition in `ConfigService.load_config()` (Bug #998): when config hot-reload toggled `elevation_enforcement_enabled` between the `require_elevation` check and the `elevate-ajax` endpoint call, users got trapped in the modal with "Step-up elevation is currently disabled" error.
+- MCP consolidated dispatcher session key markers.
+
+## v10.27.0 (2026-05-13) — Three-way pace-maker toggle
+
+### Added
+- Three-way pace-maker mode toggle (disabled/on/off) with Web UI config screen support.
+- Config screen crash fix for pace-maker settings.
+
+## v10.26.0 (2026-05-13) — Langfuse sync cluster-aware leader election
+
+### Fixed
+- Langfuse trace sync now gated behind leader election in cluster mode (postgres). Only the leader node runs sync, preventing duplicate work and NFS write conflicts. Solo mode (sqlite) unchanged.
+
+## v10.25.0 (2026-05-13) — Comprehensive template PG datetime slicing fixes
+
+### Fixed
+- Git Credentials page 500 in cluster mode: `created_at[:10]` slicing on PG datetime object (added `|string` filter).
+- API Keys page: `created_at[:10]` datetime slicing (added `|string` filter).
+- Repos list page: `activated_at[:10]` datetime slicing (added `|string` filter).
+- Jobs list page: `started_at[:19]` and `created_at[:19]` datetime slicing (added `|string` filter).
+- Dashboard recent jobs: `completion_time[:19]` datetime slicing (added `|string` filter).
+- Dashboard stats: `completion_time[:19]` datetime slicing (added `|string` filter).
+- Audit logs list: `timestamp[:19]` datetime slicing (added `|string` filter).
+- Dependency map job status: `last_run[:16]`, `next_run[:16]`, and `run.timestamp[:16]` datetime slicing (added `|string` filter).
+- Dashboard Langfuse: `last_sync_time[:19]` datetime slicing (added `|string` filter).
+
+## v10.24.0 (2026-05-13) — PG type compatibility fixes for cluster web UI
+
+### Fixed
+- MFA cross-user setup flow: guard returns HTML errors instead of JSON for web UI pages, skips confirm_overwrite for show mode (read-only QR display), totp_code input has required attribute.
+- Research Assistant 500 in cluster mode: `relative_time()` Jinja filter handles PG native datetime objects (was calling `.endswith("Z")` on datetime).
+- MCP Credentials page 500 in cluster mode: template slicing on PG datetime objects (added `|string` filter).
+- Timestamp slicing in golden repo and repo list pages: added `_safe_ts_slice()` helper that handles both str and datetime.
+- Self-monitoring PG backend: added missing `list_scans()` and `get_running_scan_count()` methods required by protocol.
+- `_format_datetime_display()` now accepts both str and datetime objects from PG.
+
+## v10.23.0 (2026-05-12) — Cluster OIDC late-init and activated repos PG dict_row fix
+
+### Fixed
+- OIDC/SSO not initialized on cluster secondary nodes: ConfigService gets PG pool after OIDC startup, so secondary nodes without OIDC in bootstrap config.json skipped initialization. Added late-initialization block after ConfigService gets PG pool that retries OIDC setup from PG config.
+- P0 query regression in cluster mode ("tuple indices must be integers or slices, not str"): `activated_repo_manager.py` PG SELECT queries used `conn.execute()` without `row_factory=dict_row`, returning tuples instead of dicts. All search, repo listing, and cascade deletion operations failed. Added `_dict_row_factory()` helper and `conn.cursor(row_factory=...)` to all three PG SELECT methods, following the pattern from `groups_backend.py` and `audit_log_backend.py`.
+
+## v10.22.0 (2026-05-12) — Unified token encryption key with salt file and shared crypto module (Story #999)
+
+### Added
+- `token_encryption.py`: shared AES-256-CBC encryption module eliminating duplication between CITokenManager and GitCredentialManager. Three-priority key derivation chain: salt file > cluster_secret > hostname.
+- `encryption_key_salt.py`: auto-seeds `.encryption_key_salt` from `.jwt_secret` (postgres mode) or hostname (sqlite mode) with 0600 permissions.
+- Try-decrypt fallback: canonical key first, hostname-derived key on PKCS7 failure (exactly 2 attempts). Lazy re-encryption when fallback succeeds.
+- `update_encrypted_token` added to `CITokensBackend` protocol, SQLite backend, and PG backend for lazy re-encryption persistence.
+- `GitCredentialsPostgresBackend` gains `update_encrypted_token` for cluster-mode lazy re-encryption.
+- PG backend wiring for CI tokens in web routes (`_get_token_manager()` detects storage_mode).
+- `cluster-migrate.sh` seeds `.encryption_key_salt` from `.jwt_secret` with trailing newline stripped.
+- Lifespan calls `ensure_encryption_key_salt()` on startup for consistent key derivation.
+- 67 new/updated unit tests covering encryption primitives, salt management, factory integration, and lazy re-encryption.
+
+### Changed
+- CITokenManager and GitCredentialManager delegate all crypto operations to `token_encryption` module via relative imports (fixes mypy resolution with `--explicit-package-bases`).
+- `create_token_manager()` and `create_git_credential_manager()` factories call `ensure_encryption_key_salt()` before construction.
+
+## v10.21.0 (2026-05-12) — Cluster-aware token re-encryption and GitCredentialManager cluster support
+
+### Added
+- `GitCredentialManager` now accepts `cluster_secret` parameter for key derivation in cluster mode (same pattern as `CITokenManager`).
+- `create_git_credential_manager()` factory function reads `.jwt_secret` in postgres mode for consistent encryption keys.
+- `migrate_to_postgres.py` gains `--server-dir` flag for automatic token re-encryption during migration: re-encrypts both `ci_tokens` and `user_git_credentials` tables from hostname-derived key to `.jwt_secret`-derived key.
+- `cluster-migrate.sh` passes `--server-dir` to migration tool automatically.
+
+### Fixed
+- Git credential operations now work in cluster mode (previously always used hostname-based key derivation, causing decryption failures after migration).
+- BackgroundJob PG backend schema mismatch: added `current_phase`/`phase_detail` to `save_job()` and filtered unknown keys before `BackgroundJob` construction.
+
+## v10.20.0 (2026-05-12) — Complete SQLite-to-PostgreSQL migration tool and cluster-migrate.sh fixes
+
+### Fixed
+- Migration tool now handles 6 additional tables with real data: user_mfa, user_recovery_codes, activated_repos, server_config, dependency_map_run_history, wiki_article_views. Previously, TOTP secrets and recovery codes would be lost during solo-to-cluster conversion.
+- cluster-migrate.sh now sets cluster.node_id in config (required for leader election).
+- cluster-migrate.sh data migration step now passes optional database paths (oauth.db, scip_audit.db, refresh_tokens.db) when those files exist.
+- cluster-migrate.sh local clone backend no longer runs NFS copy steps with an empty mount path.
+
+### Added
+- `--node-id` CLI argument for cluster-migrate.sh (auto-generated from hostname if omitted).
+- PostgreSQL migration 024: wiki_article_views table (was inline-only in PG backend, missing before data migration runs).
+- BOOLEAN_COLUMNS entries for user_mfa.mfa_enabled and activated_repos.is_composite/wiki_enabled.
+- JSON_COLUMNS entries for server_config.config_json, activated_repos.metadata_json, dependency_map_run_history.phase_timings_json.
+
 ## v10.19.0 (2026-05-12) — MCP cancel_job with XRay process termination (Story #996)
 
 ### Added

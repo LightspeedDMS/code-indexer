@@ -11,14 +11,18 @@ Mocking strategy (matches test_xray_search_handler.py pattern):
 - _resolve_repo_path: mocked to return a fake path (should not be reached
   for invalid-regex cases)
 - _get_background_job_manager: mocked to capture submit_job calls
+- _get_job_tracker, _get_xray_executor, asyncio.get_running_loop: mocked
+  for tests that reach the job submission path (pcre2=True tests)
 - User: real User object (admin role) with query_repos permission
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, cast
+from typing import Any, Dict, Generator, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -66,6 +70,58 @@ def _base_explore_params(**overrides: Any) -> Dict[str, Any]:
     return params
 
 
+@contextmanager
+def _xray_single_repo_env(
+    resolved_future: "Optional[asyncio.Future]" = None,
+) -> Generator:
+    """Patch infra boundaries for the single-repo Bug #1070 path.
+
+    Yields (mock_bjm, mock_job_tracker, mock_xray_executor, mock_loop) where
+    mock_loop.run_in_executor is the call-recording mock returning the future.
+    If resolved_future is None, a PENDING future is used (job_fn capture pattern).
+    """
+    mock_bjm = MagicMock()
+    mock_jt = MagicMock()
+    mock_jt.register_job.return_value = MagicMock()
+    mock_exec = MagicMock()
+    mock_app = MagicMock()
+    mock_app.background_job_manager = mock_bjm
+    mock_app.activated_repo_manager = None
+    mock_app.golden_repo_manager = None
+
+    if resolved_future is None:
+        resolved_future = asyncio.Future()  # pending; capture-only tests use call_args
+
+    loop_instance = MagicMock()
+    loop_instance.run_in_executor.return_value = resolved_future
+
+    with (
+        patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/fake/repo/path",
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            return_value=mock_jt,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+        ) as mock_validate,
+        patch("asyncio.get_running_loop", return_value=loop_instance),
+    ):
+        mock_validate.return_value = MagicMock(ok=True)
+        yield mock_bjm, mock_jt, mock_exec, loop_instance
+
+
 # ---------------------------------------------------------------------------
 # Tests: handle_xray_search
 # ---------------------------------------------------------------------------
@@ -74,7 +130,7 @@ def _base_explore_params(**overrides: Any) -> Dict[str, Any]:
 class TestXraySearchInvalidRegex:
     """handle_xray_search rejects bad non-PCRE2 patterns before job submission."""
 
-    def test_search_invalid_regex_returns_invalid_regex_error(self):
+    async def test_search_invalid_regex_returns_invalid_regex_error(self):
         """Invalid non-PCRE2 pattern returns error='invalid_regex'."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
@@ -92,7 +148,7 @@ class TestXraySearchInvalidRegex:
                 return_value=mock_bjm,
             ),
         ):
-            result = handle_xray_search(
+            result = await handle_xray_search(
                 _base_search_params(pattern="[unclosed", pcre2=False), user
             )
 
@@ -102,7 +158,7 @@ class TestXraySearchInvalidRegex:
         )
         assert "message" in data, "Response must include a message field"
 
-    def test_search_invalid_regex_does_not_submit_job(self):
+    async def test_search_invalid_regex_does_not_submit_job(self):
         """submit_job must NOT be called when the pattern is invalid (non-PCRE2)."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
@@ -120,35 +176,20 @@ class TestXraySearchInvalidRegex:
                 return_value=mock_bjm,
             ),
         ):
-            handle_xray_search(
+            await handle_xray_search(
                 _base_search_params(pattern="[unclosed", pcre2=False), user
             )
 
         mock_bjm.submit_job.assert_not_called()
 
-    def test_search_pcre2_invalid_regex_skips_pre_validation(self):
+    async def test_search_pcre2_invalid_regex_skips_pre_validation(self):
         """pcre2=True bypasses Python pre-validation; handler returns job_id."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
         user = _make_admin_user()
-        mock_bjm = MagicMock()
-        mock_bjm.submit_job.return_value = "pcre2-job-id"
 
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
-
-        with (
-            patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/repo/path",
-            ),
-            patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
-            patch(
-                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
-                return_value=mock_bjm,
-            ),
-        ):
-            result = handle_xray_search(
+        with _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop):
+            result = await handle_xray_search(
                 _base_search_params(pattern="[unclosed", pcre2=True), user
             )
 
@@ -169,7 +210,7 @@ class TestXraySearchInvalidRegex:
 class TestXrayExploreInvalidRegex:
     """handle_xray_explore rejects bad non-PCRE2 patterns before job submission."""
 
-    def test_explore_invalid_regex_returns_invalid_regex_error(self):
+    async def test_explore_invalid_regex_returns_invalid_regex_error(self):
         """Invalid non-PCRE2 pattern returns error='invalid_regex'."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_explore
 
@@ -187,7 +228,7 @@ class TestXrayExploreInvalidRegex:
                 return_value=mock_bjm,
             ),
         ):
-            result = handle_xray_explore(
+            result = await handle_xray_explore(
                 _base_explore_params(pattern="[unclosed", pcre2=False), user
             )
 
@@ -197,7 +238,7 @@ class TestXrayExploreInvalidRegex:
         )
         assert "message" in data, "Response must include a message field"
 
-    def test_explore_invalid_regex_does_not_submit_job(self):
+    async def test_explore_invalid_regex_does_not_submit_job(self):
         """submit_job must NOT be called when the pattern is invalid (non-PCRE2)."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_explore
 
@@ -215,35 +256,20 @@ class TestXrayExploreInvalidRegex:
                 return_value=mock_bjm,
             ),
         ):
-            handle_xray_explore(
+            await handle_xray_explore(
                 _base_explore_params(pattern="[unclosed", pcre2=False), user
             )
 
         mock_bjm.submit_job.assert_not_called()
 
-    def test_explore_pcre2_invalid_regex_skips_pre_validation(self):
+    async def test_explore_pcre2_invalid_regex_skips_pre_validation(self):
         """pcre2=True bypasses Python pre-validation; handler returns job_id."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_explore
 
         user = _make_admin_user()
-        mock_bjm = MagicMock()
-        mock_bjm.submit_job.return_value = "pcre2-explore-job-id"
 
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
-
-        with (
-            patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/repo/path",
-            ),
-            patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
-            patch(
-                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
-                return_value=mock_bjm,
-            ),
-        ):
-            result = handle_xray_explore(
+        with _xray_single_repo_env() as (mock_bjm, mock_jt, mock_exec, mock_loop):
+            result = await handle_xray_explore(
                 _base_explore_params(pattern="[unclosed", pcre2=True), user
             )
 

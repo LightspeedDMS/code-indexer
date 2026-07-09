@@ -74,6 +74,7 @@ if [ "$3" = "1" ]; then
     python3 -c "
 import sys
 import json
+import errno
 import fcntl
 from pathlib import Path
 
@@ -81,7 +82,13 @@ metadata_file = Path('{self.metadata_file}')
 if metadata_file.exists():
     try:
         with open(metadata_file, 'r+') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            except OSError as e:
+                if e.errno == errno.EBADF:
+                    fcntl.lockf(f.fileno(), fcntl.LOCK_EX)
+                else:
+                    raise
             f.seek(0)
             try:
                 data = json.load(f)

@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
 import numpy as np
 
 if TYPE_CHECKING:
@@ -130,11 +132,11 @@ class ProviderHealthMonitor:
             return
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                fcntl.flock(fh, fcntl.LOCK_SH)
+                _used_lockf = nfs_safe_flock(fh.fileno(), fcntl.LOCK_SH)
                 try:
                     raw = fh.read()
                 finally:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
+                    nfs_safe_funlock(fh.fileno(), _used_lockf)
             state: object = json.loads(raw)
             if not isinstance(state, dict):
                 logger.warning(
@@ -226,7 +228,7 @@ class ProviderHealthMonitor:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(lock_path, "a", encoding="utf-8") as lock_fh:
-                fcntl.flock(lock_fh, fcntl.LOCK_EX)
+                _used_lockf = nfs_safe_flock(lock_fh.fileno(), fcntl.LOCK_EX)
                 try:
                     existing = self._read_persisted_state(path)
                     merged = self._build_merged_state(existing)
@@ -241,7 +243,7 @@ class ProviderHealthMonitor:
                     os.replace(tmp_name, str(path))
                     tmp_name = None
                 finally:
-                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                    nfs_safe_funlock(lock_fh.fileno(), _used_lockf)
         except OSError as exc:
             logger.warning("Persistence file %s: write error — %s", path, exc)
         finally:
@@ -275,6 +277,7 @@ class ProviderHealthMonitor:
         signature here. The constructor itself validates all keys at runtime.
         """
         mismatch_warning: Optional[str] = None
+        mismatch_debug: Optional[str] = None
         with cls._lock:
             if cls._instance is None:
                 # **kwargs typed as `object` cannot match __init__'s typed params statically;
@@ -284,7 +287,8 @@ class ProviderHealthMonitor:
             # Singleton already exists — check for persistence_path mismatch.
             if persistence_path is not None:
                 existing_path = cls._instance._persistence_path
-                if existing_path != persistence_path:
+                if existing_path is not None and existing_path != persistence_path:
+                    # Two different non-None paths competing: genuinely dangerous.
                     # Collect message inside lock; emit outside so logging I/O
                     # does not extend lock hold time and pytest caplog captures it.
                     mismatch_warning = (
@@ -292,9 +296,20 @@ class ProviderHealthMonitor:
                         f"singleton already exists with path={existing_path}, "
                         f"ignoring requested path={persistence_path}"
                     )
+                elif existing_path is None:
+                    # Benign ordering: singleton created before CLI persistence was
+                    # configured (e.g. semantic_query_manager before cli.py).
+                    # No data is lost — a path=None singleton never loaded sin-bin state.
+                    mismatch_debug = (
+                        "ProviderHealthMonitor.get_instance(): singleton has no "
+                        f"persistence path; ignoring requested path={persistence_path} "
+                        "(singleton was created before CLI persistence was configured)"
+                    )
             instance = cls._instance
         if mismatch_warning is not None:
             logger.warning(mismatch_warning)
+        if mismatch_debug is not None:
+            logger.debug(mismatch_debug)
         return instance
 
     @classmethod

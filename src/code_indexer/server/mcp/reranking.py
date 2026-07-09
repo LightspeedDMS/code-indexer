@@ -24,7 +24,7 @@ Bug #679 Part 2 (AC4): rerank_metadata also contains 'reranker_status' nested di
 
 import logging
 import time
-from typing import Any, Callable, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 from code_indexer.server.clients.reranker_clients import (
     CohereRerankerClient,
@@ -37,6 +37,17 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 logger = logging.getLogger(__name__)
 
 MAX_CANDIDATE_LIMIT = 200  # Hard cap on candidates fetched for reranking
+
+# Bug #1078 Phase 1: seconds to wait for a governor slot before raising GovernorBusyError.
+_GOVERNOR_ACQUIRE_TIMEOUT_SECS: float = 30.0
+
+# Map reranker client class -> governor RERANK-lane key.
+# Story #1079 Phase B+C: the governor is now 4-lane. Rerank calls route to the
+# provider's ":rerank" lane (embedding calls use ":embed" — see governed_call.py).
+_RERANKER_BUDGET: Dict[Type, str] = {
+    VoyageRerankerClient: "voyage:rerank",
+    CohereRerankerClient: "cohere:rerank",
+}
 
 _DISABLED_HINT = (
     "Reranking requested but no reranker providers are configured. "
@@ -116,9 +127,41 @@ def _attempt_provider_rerank(
     if monitor.is_sinbinned(health_key):
         return None, "skipped"
     try:
-        client = client_cls()
-        rerank_results = client.rerank(
-            query=query, documents=documents, instruction=instruction, top_k=top_k
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.provider_concurrency_governor import (
+            ProviderConcurrencyGovernor,
+        )
+
+        # Bug #899 fix: pass factory so fault injection intercepts this client.
+        # AttributeError guard: app.state not set in unit-test environments without
+        # full lifespan; None is equivalent to the pre-#899 default (no fault injection).
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "reranker client using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+        from code_indexer.services.provider_backoff import execute_with_backoff
+
+        client = client_cls(http_client_factory=_factory)
+        # Bug #1078: gate the HTTP call through the concurrency governor AND wrap
+        # with execute_with_backoff so 429 sleeps happen OUTSIDE the held slot.
+        _budget = _RERANKER_BUDGET.get(client_cls, "voyage:rerank")
+        _governor = ProviderConcurrencyGovernor.get_instance()
+        rerank_results = execute_with_backoff(
+            lambda: _governor.execute(
+                _budget,
+                lambda: client.rerank(
+                    query=query,
+                    documents=documents,
+                    instruction=instruction,
+                    top_k=top_k,
+                ),
+                acquire_timeout=_GOVERNOR_ACQUIRE_TIMEOUT_SECS,
+            )
         )
         return [(r.index, r.relevance_score) for r in rerank_results], None
     except RerankerSinbinnedException:
@@ -329,6 +372,65 @@ def _tag_and_pool(code_results: list, memory_candidates: list) -> list:
             }
         )
     return pool
+
+
+def extract_rerank_document(result: dict) -> str:
+    """Return the rerank document for a search result — temporal-aware.
+
+    For temporal commit_diff results the document includes BOTH the diff text
+    and the commit message (Bug #1208).  The commit message is appended after
+    the diff body using a clear delimiter so the cross-encoder sees full commit
+    context when scoring diff relevance.
+
+    Concat format (when commit_message present):
+        "{diff_text}\\n\\nCommit: {commit_message}"
+
+    Works with all three result shapes:
+      MCP/REST dict  — {"code_snippet": str, "temporal_context": {"commit_message": str}}
+      CLI funnel dict — {"snippet": str, "_temporal_obj": TemporalSearchResult}
+      Non-temporal   — {"content": str} or {"code_snippet": str}
+
+    Graceful fallback: if commit_message is absent or falsy, returns base text only
+    (no crash).  Non-temporal results are returned unchanged.
+
+    Args:
+        result: A search result dict from any surface (MCP, REST, or CLI).
+
+    Returns:
+        String used as the document text passed to the cross-encoder reranker.
+    """
+    # Extract base text — check top-level keys first, then CLI semantic 'payload' sub-dict.
+    # match_text fallback mirrors old _fts_content_extractor precedence (snippet THEN
+    # match_text): FTS grep-mode (--snippet-lines 0) sets snippet="" with matched text
+    # in match_text (tantivy_index_manager.py:786,1130; also on exception at :982).
+    base: str = (
+        result.get("content")
+        or result.get("code_snippet")
+        or result.get("snippet")
+        or result.get("match_text")
+        or (result.get("payload") or {}).get("content")
+        or ""
+    )
+
+    # --- Attempt to find commit_message from either shape ---
+
+    # MCP/REST shape: temporal_context is a top-level dict key
+    commit_message: str = ""
+    temporal_ctx = result.get("temporal_context")
+    if isinstance(temporal_ctx, dict):
+        commit_message = temporal_ctx.get("commit_message") or ""
+
+    # CLI shape: _temporal_obj is a TemporalSearchResult dataclass
+    if not commit_message:
+        temporal_obj = result.get("_temporal_obj")
+        if temporal_obj is not None:
+            tc = getattr(temporal_obj, "temporal_context", None)
+            if isinstance(tc, dict):
+                commit_message = tc.get("commit_message") or ""
+
+    if commit_message:
+        return f"{base}\n\nCommit: {commit_message}"
+    return base
 
 
 def _tagged_content_extractor(item: dict) -> str:

@@ -369,6 +369,10 @@ class TestJobStatusPartialAnomalyDetails:
 
         make_healthy_output_dir(tmp_path)
 
+        mock_cache = MagicMock()
+        mock_cache.is_fresh.return_value = True
+        mock_cache.get_cached.return_value = {"result_json": '{"status": "completed"}'}
+
         with (
             patch(
                 "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
@@ -378,6 +382,10 @@ class TestJobStatusPartialAnomalyDetails:
                 # Inject a known repo that is not covered by any domain
                 "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
                 return_value={"repo-alpha", "repo-beta", "uncovered-service"},
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dashboard_cache_backend",
+                return_value=mock_cache,
             ),
         ):
             response = client.get(

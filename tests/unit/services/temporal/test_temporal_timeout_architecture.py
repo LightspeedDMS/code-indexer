@@ -173,8 +173,8 @@ class TestWorkerCancellationHandling:
 
                 # This should exit gracefully without processing
                 completed_count, total_files_processed, total_vectors = (
-                    indexer._process_commits_parallel(
-                        commits, mock_provider, vector_manager, progress_callback=None
+                    indexer._index_shard_commits(
+                        commits, vector_manager, progress_callback=None
                     )
                 )
 
@@ -369,11 +369,26 @@ class TestProgressiveMetadataErrorHandling:
             all_branches=False, max_commits=None, since_date=None
         )
 
-        # Create SUCCESSFUL mock provider
+        # Create SUCCESSFUL mock provider (kept only for VectorCalculationManager's
+        # constructor signature -- the contextual embedder below does its own
+        # HTTP calls, not through submit_batch_task).
         mock_provider = Mock()
         mock_provider.get_embeddings_batch.return_value = [[0.1] * 1024]
         mock_provider._count_tokens_accurately.return_value = 100
         mock_provider._get_model_token_limit.return_value = 120000
+
+        # Story #1290: _index_shard_commits() is normally called from
+        # index_commits(), which constructs self._active_embedder. Calling it
+        # directly (bypassing index_commits()) requires setting it up here.
+        class _FakeEmbedder:
+            dimensions = 1024
+            overlap_percentage = 0.0
+
+            def embed_commit_chunks(self, chunks):
+                return [[0.1] * 1024 for _ in chunks]
+
+        indexer._active_embedder = _FakeEmbedder()
+        indexer._active_embedder_name = "fake-embedder"
 
         # Create vector manager
         vector_manager = VectorCalculationManager(
@@ -383,20 +398,21 @@ class TestProgressiveMetadataErrorHandling:
 
         try:
             # Process commits - should succeed
-            with patch.object(
-                indexer, "progressive_metadata"
-            ) as mock_progressive_metadata:
-                mock_progressive_metadata.load_completed.return_value = set()
-
-                completed_count, total_files_processed, total_vectors = (
-                    indexer._process_commits_parallel(
-                        commits, mock_provider, vector_manager, progress_callback=None
-                    )
+            completed_count, total_files_processed, total_vectors = (
+                indexer._index_shard_commits(
+                    commits, vector_manager, progress_callback=None
                 )
+            )
 
-                # VERIFY: Successful commits WERE saved
-                assert mock_progressive_metadata.save_completed.call_count > 0, (
-                    "Successful commits should be saved to metadata"
+            # VERIFY: the successful commit's durable per-commit completion
+            # marker (AC16) is present in this shard's progressive metadata
+            # AFTER the flush.
+            shard_progress = indexer._get_progress(indexer.collection_name)
+            completed = shard_progress.load_completed()
+            assert completed, "Successful commits must be marked complete"
+            for commit in commits:
+                assert commit.hash in completed, (
+                    f"commit {commit.hash} must be in the durable completion marker"
                 )
 
         finally:

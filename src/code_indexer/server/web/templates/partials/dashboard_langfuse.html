@@ -96,7 +96,7 @@
             </td>
             <td>
                 {% if metrics.last_sync_time %}
-                    {{ metrics.last_sync_time[:19] }}
+                    {{ (metrics.last_sync_time|string)[:19] }}
                 {% else %}
                     Never
                 {% endif %}

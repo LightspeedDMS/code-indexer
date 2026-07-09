@@ -16,6 +16,7 @@ Uses:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -526,3 +527,125 @@ class TestCredentialTypeResetOnFailedStart:
         assert svc.get_status().status == LeaseLifecycleStatus.DEGRADED
         # H2 fix: _credential_type must be None after failed start
         assert svc._credential_type is None
+
+
+# ---------------------------------------------------------------------------
+# TestStartCheckoutNoCredentialsAvailable (Bug #1250)
+# ---------------------------------------------------------------------------
+
+_LIFECYCLE_LOGGER_NAME = "code_indexer.server.services.llm_lease_lifecycle"
+
+
+class TestStartCheckoutNoCredentialsAvailable:
+    """start() when the provider explicitly reports no available credential.
+
+    This is an EXPECTED, handled, non-fatal startup condition (the provider's
+    documented contract returns HTTP 404 from /checkout exclusively for this
+    case). It must log at WARNING — not ERROR — and must still enter the
+    existing non-blocking DEGRADED state unchanged.
+    """
+
+    def _make_no_credentials_service(self, tmp_path: Path) -> LlmLeaseLifecycleService:
+        def checkout_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"error": "No available credentials for vendor: anthropic"},
+            )
+
+        return _make_service(tmp_path, checkout_handler=checkout_handler)
+
+    def test_status_is_degraded_when_no_credentials_available(self, tmp_path):
+        svc = self._make_no_credentials_service(tmp_path)
+        svc.start()  # Must NOT raise
+        assert svc.get_status().status == LeaseLifecycleStatus.DEGRADED
+
+    def test_warning_logged_not_error_when_no_credentials_available(
+        self, tmp_path, caplog
+    ):
+        svc = self._make_no_credentials_service(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=_LIFECYCLE_LOGGER_NAME):
+            svc.start()
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        assert error_records == []
+        assert len(warning_records) == 1
+        assert "anthropic" in warning_records[0].message
+        assert "DEGRADED" in warning_records[0].message
+
+    def test_error_message_captured_when_no_credentials_available(self, tmp_path):
+        svc = self._make_no_credentials_service(tmp_path)
+        svc.start()
+        status = svc.get_status()
+        assert status.error is not None
+        assert len(status.error) > 0
+
+    def test_credentials_file_not_created_when_no_credentials_available(self, tmp_path):
+        creds_path = tmp_path / "creds" / ".credentials.json"
+        svc = self._make_no_credentials_service(tmp_path)
+        svc.start()
+        assert not creds_path.exists()
+
+    def test_state_file_not_written_when_no_credentials_available(self, tmp_path):
+        svc = self._make_no_credentials_service(tmp_path)
+        svc.start()
+        state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
+        assert state_mgr.load_state() is None
+
+
+# ---------------------------------------------------------------------------
+# TestStartCheckoutUnexpectedErrorStillLogsError (Bug #1250 contrast)
+# ---------------------------------------------------------------------------
+
+
+class TestStartCheckoutUnexpectedErrorStillLogsError:
+    """A genuinely unexpected provider/transport error must still log ERROR.
+
+    Only the documented 'no available credentials' 404 case is demoted to
+    WARNING — everything else (other HTTP status codes, transport failures,
+    auth errors) must remain at ERROR exactly as before.
+    """
+
+    def test_error_logged_for_unexpected_provider_http_status(self, tmp_path, caplog):
+        def checkout_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"error": "Internal server error"})
+
+        svc = _make_service(tmp_path, checkout_handler=checkout_handler)
+
+        with caplog.at_level(logging.WARNING, logger=_LIFECYCLE_LOGGER_NAME):
+            svc.start()  # Must NOT raise
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        assert len(error_records) == 1
+        assert warning_records == []
+        assert svc.get_status().status == LeaseLifecycleStatus.DEGRADED
+
+    def test_error_logged_when_provider_unreachable(self, tmp_path, caplog):
+        transport = httpx.MockTransport(_failing_handler)
+        client = LlmCredsClient(
+            provider_url="http://unreachable",
+            api_key="key",
+            transport=transport,
+        )
+        state_manager = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
+        creds_manager = ClaudeCredentialsFileManager(
+            credentials_path=tmp_path / "creds" / ".credentials.json"
+        )
+        svc = LlmLeaseLifecycleService(
+            client=client,
+            state_manager=state_manager,
+            credentials_manager=creds_manager,
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LIFECYCLE_LOGGER_NAME):
+            svc.start()  # Must NOT raise
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+
+        assert len(error_records) == 1
+        assert warning_records == []
+        assert svc.get_status().status == LeaseLifecycleStatus.DEGRADED

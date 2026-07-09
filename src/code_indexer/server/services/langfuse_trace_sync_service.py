@@ -167,7 +167,12 @@ class LangfuseTraceSyncService:
 
         # Read from state files (visible across cluster nodes)
         try:
-            state_pattern = str(Path(self._data_dir) / "langfuse_sync_state_*.json")
+            state_pattern = str(
+                Path(self._data_dir)
+                / "golden-repos"
+                / ".langfuse_state"
+                / "langfuse_sync_state_*.json"
+            )
             for state_file in glob.glob(state_pattern):
                 try:
                     state = json.loads(Path(state_file).read_text(encoding="utf-8"))
@@ -522,11 +527,12 @@ class LangfuseTraceSyncService:
             elif isinstance(h, dict) and h.get("updated_at"):
                 # Not seen, but check if still within age window
                 try:
-                    trace_time = datetime.fromisoformat(h["updated_at"])
+                    ts = h["updated_at"].replace("Z", "+00:00")
+                    trace_time = datetime.fromisoformat(ts)
                     if trace_time >= max_age:
                         # Still within age window - keep
                         pruned_hashes[tid] = h
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     # Malformed timestamp - discard
                     pass
 
@@ -887,6 +893,24 @@ class LangfuseTraceSyncService:
     def _load_sync_state(self, project_name: str) -> Dict[str, Any]:
         """Load sync state from file."""
         state_file = self._get_state_file_path(project_name)
+        if not state_file.exists():
+            safe_name = self._sanitize_folder_name(project_name)
+            legacy_path = Path(self._data_dir) / f"langfuse_sync_state_{safe_name}.json"
+            if legacy_path.exists():
+                try:
+                    state_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(legacy_path), str(state_file))
+                    logger.info(
+                        "Migrated Langfuse sync state to shared path: %s",
+                        state_file.name,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to migrate legacy state %s -> %s: %s",
+                        legacy_path,
+                        state_file,
+                        exc,
+                    )
         if state_file.exists():
             try:
                 result: Dict[str, Any] = json.loads(
@@ -907,9 +931,18 @@ class LangfuseTraceSyncService:
         tmp_path.rename(state_file)
 
     def _get_state_file_path(self, project_name: str) -> Path:
-        """Get state file path for a project."""
+        """Get state file path for a project.
+
+        State files live under golden-repos/.langfuse_state/ so they are
+        visible to all cluster nodes via NFS.
+        """
         safe_name = self._sanitize_folder_name(project_name)
-        return Path(self._data_dir) / f"langfuse_sync_state_{safe_name}.json"
+        return (
+            Path(self._data_dir)
+            / "golden-repos"
+            / ".langfuse_state"
+            / f"langfuse_sync_state_{safe_name}.json"
+        )
 
     def _sync_loop(self) -> None:
         """

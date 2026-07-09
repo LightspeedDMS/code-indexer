@@ -74,12 +74,12 @@ class DependencyMapDashboardJobRunner:
                 )
 
             result = self._dashboard.get_job_status(progress_callback=callback)
-            self._cache.set_cached(json.dumps(result))
+            self._cache.set_cached(json.dumps(result, default=str))
             self._tracker.update_status(
                 job_id, status="completed", progress=_PCT_COMPLETE
             )
         except Exception as e:
             logger.error("Dashboard job %s failed: %s", job_id, e)
             self._cache.mark_job_failed(str(e))
-            self._tracker.update_status(job_id, status="failed", error=str(e))
+            self._tracker.fail_job(job_id, error=str(e))
             raise

@@ -68,8 +68,6 @@ def test_all_server_config_fields_are_classified() -> None:
             "voyage_ai_sinbin",
             "cohere_sinbin",
             "query_orchestration",
-            "clone_backend",
-            "cow_daemon",
             "memory_retrieval_config",
             "lifecycle_analysis_config",
             "codex_integration_config",  # Story #844 — runtime, not bootstrap
@@ -80,6 +78,23 @@ def test_all_server_config_fields_are_classified() -> None:
             "activated_reaper_config",  # Story #967 — runtime, not bootstrap
             "xray_config",  # Story #977 — runtime, not bootstrap
             "pace_maker_mode",  # Story #997 — runtime Web UI setting (three-way: disabled/on/off)
+            "query_provider_max_concurrency",  # Bug #1078 Phase 1 — runtime, Web UI configurable
+            "coalesce_enabled",  # Story #1079 Phase E — runtime kill switch
+            "coalesce_max_batch_size",  # Story #1079 Phase E — runtime cap
+            "coalesce_k_min",  # Story #1079 Phase E — runtime AIMD floor seed
+            "coalesce_k_max",  # Story #1079 Phase E — runtime AIMD ceiling seed
+            "snapshot_retention_keep_last",  # Bug #1084 Phase A6 — runtime keep-last-N knob
+            "nfs_visibility_timeout_seconds",  # Bug #1084 staging follow-up — runtime NFS visibility deadline
+            "research_session_retention_days",  # Bug #1085 — runtime research GC retention
+            "query_embedding_cache_config",  # Story #1105 — runtime Web UI cache config
+            "admission_control_config",  # runtime; read from merged config at app wiring
+            "search_event_log_retention_days",  # Issue #1159 — runtime Web UI setting
+            "export_retention_days",  # Story #1160 — runtime Web UI export retention
+            # Story #1197: four launch keys moved from BOOTSTRAP_KEYS to runtime
+            "workers",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "log_level",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "host",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "port",  # Story #1197 — runtime (cluster-propagated via shared DB row)
         }
     )
 
@@ -114,3 +129,14 @@ def test_all_server_config_fields_are_classified() -> None:
         f"Fields appear in both BOOTSTRAP_KEYS and _KNOWN_RUNTIME_KEYS: {overlap}. "
         "Each field must belong to exactly one set."
     )
+
+
+def test_snapshot_retention_keep_last_default_is_three() -> None:
+    """Bug #1084 Phase A6: keep-last-N retention knob defaults to 3 and is runtime
+    (Web UI configurable), NOT bootstrap."""
+    from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+    from code_indexer.server.utils.config_manager import ServerConfig
+
+    assert ServerConfig(server_dir="/tmp/test").snapshot_retention_keep_last == 3
+    # Runtime field — must NOT be a bootstrap key.
+    assert "snapshot_retention_keep_last" not in BOOTSTRAP_KEYS

@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from typing import Generator
 
 import psycopg  # noqa: F401  (imported for type annotations in callers)
-from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool as _PsycopgPool
 
 logger = logging.getLogger(__name__)
@@ -93,20 +92,7 @@ class ConnectionPool:
                     elapsed,
                     _SLOW_ACQUISITION_THRESHOLD,
                 )
-            try:
-                yield conn
-            finally:
-                # Convention: the pool default row_factory is tuple_row (psycopg's
-                # default, which the majority of backends rely on via positional
-                # row[N] access). Backends that read rows by name MUST opt in with
-                # an explicit `conn.cursor(row_factory=dict_row)` -- they must not
-                # rely on a dict_row left behind by a previous borrower. Reset here
-                # so a per-use override never leaks to the next borrower (the
-                # NodeHeartbeatService.get_active_nodes KeyError: 0 class of bug).
-                try:
-                    conn.row_factory = tuple_row
-                except Exception:
-                    pass
+            yield conn
 
     def close(self) -> None:
         """Close the pool and all underlying connections."""

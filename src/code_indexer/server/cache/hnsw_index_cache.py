@@ -708,6 +708,41 @@ class HNSWIndexCache:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+    def evict_lru_entries(self, n: int) -> int:
+        """Evict the n least-recently-used cache entries (YELLOW proactive action).
+
+        Evicts at most min(n, current_size) entries in LRU order (oldest
+        `last_accessed` first).  Thread-safe — acquires `_cache_lock`.
+        Returns the count actually evicted (may be < n if cache has fewer entries).
+        Never raises.
+
+        Args:
+            n: Number of LRU entries to evict.  Values <= 0 are treated as 0.
+
+        Returns:
+            Count of entries actually evicted.
+        """
+        if n <= 0:
+            return 0
+        evicted_count = 0
+        with self._cache_lock:
+            for _ in range(n):
+                if not self._cache:
+                    break
+                lru_path = min(
+                    self._cache.keys(),
+                    key=lambda path: self._cache[path].last_accessed,
+                )
+                del self._cache[lru_path]
+                self._eviction_count += 1
+                evicted_count += 1
+                logger.debug(
+                    "GOV evict_lru_entries: evicted LRU entry %s",
+                    lru_path,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        return evicted_count
+
     def get_stats(self) -> HNSWIndexCacheStats:
         """
         Get cache statistics (AC7: Monitoring).

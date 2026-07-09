@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     repo_alias TEXT,
     resolution_attempts INTEGER NOT NULL DEFAULT 0,
     progress_info TEXT,
-    metadata TEXT
+    metadata TEXT,
+    actor_username TEXT
 )
 """
 

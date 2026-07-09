@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 _SQL_DIR = Path(__file__).parent / "sql"
 
+# Advisory lock key for pg_advisory_lock / pg_advisory_unlock.
+# Derived from sha256(b"cidx_migrations")[:8] interpreted as a big-endian signed
+# 64-bit integer so the value is stable and identical on every cluster node.
+# All workers contend on this single SESSION-level lock, which serialises the
+# migration-apply critical section without being released by COMMIT/ROLLBACK
+# (unlike pg_advisory_xact_lock).  The lock is released explicitly in the
+# finally block of run(), or automatically when the connection closes — so a
+# crashed worker cannot permanently block the others.
+_MIGRATION_ADVISORY_LOCK_KEY: int = int.from_bytes(
+    hashlib.sha256(b"cidx_migrations").digest()[:8], "big", signed=True
+)
+
 _CREATE_SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id SERIAL PRIMARY KEY,
@@ -177,35 +189,27 @@ class MigrationRunner:
             logger.error("Failed to apply migration: %s", filename)
             raise
 
-    # Constant session-level advisory-lock key that serializes migration runs
-    # across concurrent processes -- multiple uvicorn workers in one pod AND
-    # multiple pods cold-starting at once. Any int is fine as long as it is
-    # unique to this purpose; 0x63696478 = ASCII "cidx".
-    _MIGRATION_ADVISORY_KEY = 0x63696478
-
     def run(self) -> int:
         """
         Execute all pending migrations in numeric order.
 
-        Calls ensure_migrations_table(), discovers all SQL files, compares
-        against already-applied migrations, and applies each pending one.
+        Acquires a PostgreSQL SESSION advisory lock before any work so that
+        concurrent worker processes (e.g. uvicorn --workers N) serialise here.
+        While one worker applies pending migrations and records them in
+        schema_migrations, all others block on the lock; when they acquire it
+        the pending set is already empty and they apply nothing — eliminating
+        the schema_migrations UNIQUE-constraint race.
 
-        Concurrency: the whole check-then-apply is serialized under a PostgreSQL
-        session-level advisory lock, so with multiple uvicorn workers (or
-        multiple pods starting together) only one process runs migrations at a
-        time; the others block here, then find everything already applied and
-        apply 0. Without this, concurrent starters race on
-        ``CREATE TABLE IF NOT EXISTS schema_migrations`` (a known Postgres
-        catalog race) and on the ``INSERT`` into ``schema_migrations``.
+        The lock is SESSION-level (pg_advisory_lock, not pg_advisory_xact_lock)
+        so it survives the per-migration COMMIT/ROLLBACK inside apply_migration.
+        It is released explicitly in the finally block, or automatically when
+        the connection closes (so a crashed worker cannot block others forever).
 
         Returns:
             Count of migrations applied in this run.
         """
-        with self._conn.cursor() as _lock_cur:
-            _lock_cur.execute(
-                "SELECT pg_advisory_lock(%s)", (self._MIGRATION_ADVISORY_KEY,)
-            )
-            self._conn.commit()
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,))
         try:
             self.ensure_migrations_table()
             applied = set(self.get_applied_migrations())
@@ -224,17 +228,10 @@ class MigrationRunner:
             )
             return count
         finally:
-            # Session-level lock: released explicitly here, or automatically if
-            # the process dies (session ends), so a crash can never wedge it.
-            try:
-                with self._conn.cursor() as _unlock_cur:
-                    _unlock_cur.execute(
-                        "SELECT pg_advisory_unlock(%s)",
-                        (self._MIGRATION_ADVISORY_KEY,),
-                    )
-                    self._conn.commit()
-            except Exception:  # pragma: no cover - best-effort unlock
-                logger.warning("Failed to release migration advisory lock")
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_unlock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,)
+                )
 
     def get_status(self) -> Dict[str, object]:
         """

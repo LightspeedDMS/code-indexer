@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 # Constants
-VECTOR_PROCESSING_TIMEOUT = 300.0  # 5 minutes timeout for vector processing
+# Note (Bug #1218): VECTOR_PROCESSING_TIMEOUT removed — no per-batch wall-clock
+# bound on the indexing path; the only legitimate timeout is the per-request
+# outbound embedding-provider HTTP call inside the provider itself.
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
 
 
@@ -48,6 +50,7 @@ class FileProcessingResult:
     chunks_processed: int
     processing_time: float
     error: Optional[str] = None
+    vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
 
 
 class FileChunkingManager:
@@ -407,7 +410,22 @@ class FileChunkingManager:
         6. Call progress_callback to trigger display updates
         """
         start_time = time.time()
-        file_size = file_path.stat().st_size
+        try:
+            file_size = file_path.stat().st_size
+        except FileNotFoundError as e:
+            # Bug #1118 — TOCTOU: file vanished between enumeration and chunking.
+            # Return a vanished result (not raise) so the collector skips it gracefully.
+            # vanished=True signals that this is NOT a hard failure — it must not
+            # increment failed_files in the collector.
+            logger.warning(f"Skipping file that vanished during chunking: {file_path}")
+            return FileProcessingResult(
+                success=False,
+                vanished=True,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=time.time() - start_time,
+                error=f"File vanished before processing: {e}",
+            )
         filename = file_path.name
 
         # Single acquire at start - create clean FileData
@@ -783,9 +801,7 @@ class FileChunkingManager:
             try:
                 # Collect embeddings from all batches in order
                 for batch_future in batch_futures:
-                    batch_result = batch_future.result(
-                        timeout=VECTOR_PROCESSING_TIMEOUT
-                    )
+                    batch_result = batch_future.result()
 
                     # CRITICAL: Validate each batch result
                     if (

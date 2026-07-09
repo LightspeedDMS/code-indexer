@@ -126,10 +126,13 @@ class TestTriggerReindex:
         )
 
         assert isinstance(job_id, str)
-        # Verify clear flag is passed to job function
+        # Verify clear flag is passed to job function.
+        # Bug #1154 fix: worker params are forwarded as positional *args.
+        # Positional layout: (operation_type, func, repo_alias, repo_path, index_types, clear)
+        # so clear=True lands at index 5. Also accept the legacy kwargs form.
         call_args = index_manager.background_job_manager.submit_job.call_args
-        assert "clear" in call_args[1] or any(
-            "clear" in str(arg) for arg in call_args[0]
+        assert call_args[1].get("clear") is True or (
+            len(call_args[0]) > 5 and call_args[0][5] is True
         )
 
     def test_trigger_reindex_invalid_type(self, index_manager):
@@ -461,3 +464,258 @@ class TestIntegration:
         """Test complete workflow: trigger -> poll -> verify completion."""
         # This will be expanded once implementation is complete
         pass
+
+
+class TestRepoAliasForwardingBug1154:
+    """Regression tests for Bug #1154: repo_alias not forwarded to worker.
+
+    BackgroundJobManager.submit_job declares repo_alias as its own keyword-only
+    parameter for job tracking.  Before the fix, trigger_reindex passed
+    repo_alias=repo_alias as a keyword argument, which was consumed by
+    submit_job and never forwarded into *args/**kwargs that reach the worker
+    function _execute_indexing_job.  The result: every reindex job failed with
+    ``TypeError: _execute_indexing_job() missing 1 required positional
+    argument: 'repo_alias'``.
+    """
+
+    def test_repo_alias_forwarded_to_worker(self, temp_data_dir):
+        """repo_alias must reach _execute_indexing_job when job executes.
+
+        Uses the real BackgroundJobManager so the actual *args/**kwargs
+        forwarding path is exercised — no mocking of the feature under test.
+        _execute_indexing_job is replaced with a spy that records its arguments
+        and returns success immediately (avoids needing real index tooling).
+        """
+        import threading
+        from unittest.mock import patch
+
+        real_bjm = BackgroundJobManager()
+
+        mock_arm = Mock()
+        repo_path = str(Path(temp_data_dir) / "activated-repos" / "testuser" / "myrepo")
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+        mock_arm.get_activated_repo_path = Mock(return_value=repo_path)
+
+        manager = ActivatedRepoIndexManager(
+            data_dir=temp_data_dir,
+            background_job_manager=real_bjm,
+            activated_repo_manager=mock_arm,
+        )
+
+        received_kwargs: dict = {}
+        worker_called = threading.Event()
+
+        def spy_execute(
+            repo_alias: str,
+            repo_path: str,
+            index_types,
+            clear: bool,
+            progress_callback=None,
+        ):
+            received_kwargs["repo_alias"] = repo_alias
+            received_kwargs["repo_path"] = repo_path
+            received_kwargs["index_types"] = index_types
+            received_kwargs["clear"] = clear
+            worker_called.set()
+            return {"success": True, "details": {}}
+
+        with patch.object(manager, "_execute_indexing_job", side_effect=spy_execute):
+            # Mock path exists check
+            with patch("os.path.exists", return_value=True):
+                manager.trigger_reindex(
+                    repo_alias="myrepo",
+                    index_types=["semantic"],
+                    clear=False,
+                    username="testuser",
+                )
+
+        # Wait for the background worker to run (real thread pool)
+        assert worker_called.wait(timeout=10), (
+            "Worker _execute_indexing_job was never called within 10 seconds"
+        )
+
+        # The critical assertion: repo_alias must have been forwarded
+        assert received_kwargs.get("repo_alias") == "myrepo", (
+            f"Bug #1154: repo_alias was NOT forwarded to _execute_indexing_job. "
+            f"Worker received kwargs: {received_kwargs}"
+        )
+        assert received_kwargs.get("repo_path") == repo_path
+        assert received_kwargs.get("index_types") == ["semantic"]
+        assert received_kwargs.get("clear") is False
+
+        real_bjm.shutdown()
+
+
+class TestSvcMigrate003Regression:
+    """Regression tests for SVC-MIGRATE-003 log interpolation bug.
+
+    Before the fix, the logger.error call in _execute_all_index_types used
+    a plain string with {index_type}/{error_msg} placeholders instead of an
+    f-string, so the actual values were never substituted.  These tests verify
+    that after the fix the real values appear in the logged message.
+    """
+
+    def test_svc_migrate_003_log_contains_real_index_type_and_error(
+        self, index_manager, temp_data_dir
+    ):
+        """SVC-MIGRATE-003: logged message must contain actual index_type and error string.
+
+        Drives _execute_all_index_types directly by patching
+        _execute_single_index_type to return a failure dict, then captures the
+        logger.error call and asserts the message contains the real values.
+        """
+        from unittest.mock import patch
+
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        expected_error = "Voyage AI timed out after 30s"
+        expected_type = "semantic"
+
+        def _fake_single(rp, index_type, clear):
+            return {"success": False, "error": expected_error}
+
+        captured_calls = []
+
+        def _fake_logger_error(msg, *args, **kwargs):
+            captured_calls.append(msg)
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            with patch.object(
+                index_manager.logger, "error", side_effect=_fake_logger_error
+            ):
+                index_manager._execute_all_index_types(
+                    repo_path=repo_path,
+                    index_types=[expected_type],
+                    clear=False,
+                    update_progress=lambda pct, message="": None,
+                    allocator=None,
+                )
+
+        assert len(captured_calls) >= 1, (
+            "SVC-MIGRATE-003: expected logger.error to be called at least once"
+        )
+        logged_msg = captured_calls[0]
+        assert expected_type in logged_msg, (
+            f"SVC-MIGRATE-003: log message must contain the real index_type '{expected_type}', "
+            f"got: {logged_msg!r}"
+        )
+        assert expected_error in logged_msg, (
+            f"SVC-MIGRATE-003: log message must contain the real error '{expected_error}', "
+            f"got: {logged_msg!r}"
+        )
+        assert "{index_type}" not in logged_msg, (
+            f"SVC-MIGRATE-003: log message must not contain literal '{{index_type}}', "
+            f"got: {logged_msg!r}"
+        )
+        assert "{error_msg}" not in logged_msg, (
+            f"SVC-MIGRATE-003: log message must not contain literal '{{error_msg}}', "
+            f"got: {logged_msg!r}"
+        )
+
+    def test_execute_all_index_types_returns_success_false_on_index_failure(
+        self, index_manager, temp_data_dir
+    ):
+        """_execute_all_index_types must return success=False when any index_type fails.
+
+        This ensures the job-completion logic in BackgroundJobManager correctly
+        marks the job as FAILED (not COMPLETED) when indexing partially or
+        fully fails, preventing a 300s e2e poll timeout.
+        """
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        def _fake_single(rp, index_type, clear):
+            if index_type == "semantic":
+                return {"success": False, "error": "VoyageAI connection refused"}
+            return {"success": True, "message": "ok"}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            results = index_manager._execute_all_index_types(
+                repo_path=repo_path,
+                index_types=["semantic", "fts"],
+                clear=False,
+                update_progress=lambda pct, message="": None,
+                allocator=None,
+            )
+
+        assert "semantic" in results
+        assert results["semantic"]["success"] is False, (
+            "_execute_all_index_types must preserve the failure result dict from "
+            "_execute_single_index_type so the caller can compute all_success=False"
+        )
+        assert "fts" in results
+        assert results["fts"]["success"] is True
+
+
+class TestDataDirEnvVar:
+    """Regression tests for CIDX_SERVER_DATA_DIR bootstrap env var in constructor.
+
+    Before the fix, ActivatedRepoIndexManager.__init__ always defaulted to
+    ~/.cidx-server/data when no data_dir arg was supplied, ignoring
+    CIDX_SERVER_DATA_DIR.  In every deployment that sets this env var
+    (including all in-process e2e Phase-3 tests via conftest.py), the reindex
+    worker resolved repo paths against the WRONG directory, causing
+    SVC-MIGRATE-003 "no configuration found" failures.
+
+    The fix mirrors the pattern in lifespan.py:
+        env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        if env_server_dir:
+            self.data_dir = str(Path(env_server_dir) / "data")
+        else:
+            self.data_dir = str(Path.home() / ".cidx-server" / "data")
+    """
+
+    def test_env_var_sets_data_dir(self, monkeypatch, mock_background_job_manager):
+        """When CIDX_SERVER_DATA_DIR=/some/tmp is set and no data_dir arg is given,
+        manager.data_dir must equal /some/tmp/data."""
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", "/some/tmp")
+        mock_arm = Mock()
+        manager = ActivatedRepoIndexManager(
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
+        )
+        assert manager.data_dir == "/some/tmp/data", (
+            f"Expected /some/tmp/data but got {manager.data_dir!r}. "
+            "ActivatedRepoIndexManager must honor CIDX_SERVER_DATA_DIR."
+        )
+
+    def test_default_when_env_var_unset(self, monkeypatch, mock_background_job_manager):
+        """When CIDX_SERVER_DATA_DIR is unset and no data_dir arg is given,
+        manager.data_dir must equal ~/.cidx-server/data (original default preserved)."""
+        monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
+        mock_arm = Mock()
+        manager = ActivatedRepoIndexManager(
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
+        )
+        expected = str(Path.home() / ".cidx-server" / "data")
+        assert manager.data_dir == expected, (
+            f"Expected {expected!r} but got {manager.data_dir!r}. "
+            "Default data_dir must be ~/.cidx-server/data when env var is unset."
+        )
+
+    def test_explicit_data_dir_wins_over_env_var(
+        self, monkeypatch, mock_background_job_manager
+    ):
+        """When an explicit data_dir arg is passed, it wins over CIDX_SERVER_DATA_DIR."""
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", "/should/be/ignored")
+        mock_arm = Mock()
+        explicit_dir = "/explicit/override"
+        manager = ActivatedRepoIndexManager(
+            data_dir=explicit_dir,
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
+        )
+        assert manager.data_dir == explicit_dir, (
+            f"Expected {explicit_dir!r} but got {manager.data_dir!r}. "
+            "Explicit data_dir arg must always win over CIDX_SERVER_DATA_DIR."
+        )

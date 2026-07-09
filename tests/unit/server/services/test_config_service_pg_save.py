@@ -49,6 +49,10 @@ class TestSeedRuntimeToPgRowFactory:
         mock_conn.execute.return_value = mock_execute_result
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
+        # cursor(row_factory=...) context manager must return mock_conn so that
+        # cur.execute() routes through mock_conn.execute() with dict row result.
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
         mock_pool = MagicMock()
         mock_pool.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)

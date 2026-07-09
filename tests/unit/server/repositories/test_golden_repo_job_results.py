@@ -37,6 +37,13 @@ def managers(temp_dirs):
     job_manager = BackgroundJobManager(storage_path=temp_dirs["job_storage"])
     golden_manager = GoldenRepoManager(data_dir=temp_dirs["golden_repos_dir"])
 
+    # Bug #1317: global activation is now mandatory for add_golden_repo() to
+    # succeed. Initialize the full DB schema (incl. global_repos table) so
+    # activation succeeds instead of failing on a missing table.
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+
+    DatabaseSchema(golden_manager.db_path).initialize_database()
+
     # Inject background job manager (pattern from test_golden_repo_manager.py)
     golden_manager.background_job_manager = job_manager
 

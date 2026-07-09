@@ -188,10 +188,18 @@ class MCPCredentialManager:
         if not self.password_manager.verify_password(client_secret, stored_hash):
             return None
 
-        # Valid credential - update last_used_at
+        # Valid credential - update last_used_at (best-effort, never fail auth)
         credential_id = credential.get("credential_id")
         if credential_id:
-            self.user_manager.update_mcp_credential_last_used(user_id, credential_id)
+            try:
+                self.user_manager.update_mcp_credential_last_used(
+                    user_id, credential_id
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to update last_used_at for credential %s (non-fatal)",
+                    credential_id,
+                )
 
         return user_id
 

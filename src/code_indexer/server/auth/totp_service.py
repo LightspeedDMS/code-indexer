@@ -23,9 +23,10 @@ import qrcode
 from cryptography.fernet import Fernet, InvalidToken
 
 try:
-    from psycopg.rows import dict_row
+    from psycopg.rows import dict_row, tuple_row
 except ImportError:  # psycopg3 not installed (standalone mode)
     dict_row = None  # type: ignore[assignment,misc]
+    tuple_row = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +106,14 @@ class TOTPService:
         """
         assert self._pool is not None
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
             # Try to read existing key
-            row = conn.execute(
-                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
-                ("mfa_encryption_key",),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                    ("mfa_encryption_key",),
+                ).fetchone()
             if row:
-                key = row["key_value"] if isinstance(row, dict) else row[0]
+                key = row["key_value"]
                 self._fernet = Fernet(key.encode())
                 self._key_id = 1
                 logger.info(
@@ -133,11 +134,12 @@ class TOTPService:
             conn.commit()
 
             # Re-read the winner
-            row = conn.execute(
-                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
-                ("mfa_encryption_key",),
-            ).fetchone()
-            key = row["key_value"] if isinstance(row, dict) else row[0]
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                    ("mfa_encryption_key",),
+                ).fetchone()
+            key = row["key_value"]
             self._fernet = Fernet(key.encode())
             self._key_id = 1
             logger.info(
@@ -257,11 +259,11 @@ class TOTPService:
         """Retrieve and decrypt the TOTP secret for a user."""
         if self._pool is not None:
             with self._pool.connection() as conn:
-                conn.row_factory = dict_row
-                row = conn.execute(
-                    "SELECT encrypted_secret FROM user_mfa WHERE user_id = %s",
-                    (username,),
-                ).fetchone()
+                with conn.cursor(row_factory=dict_row) as cur:
+                    row = cur.execute(
+                        "SELECT encrypted_secret FROM user_mfa WHERE user_id = %s",
+                        (username,),
+                    ).fetchone()
                 if row is None:
                     return None
                 try:
@@ -342,11 +344,11 @@ class TOTPService:
         """Verify TOTP code using PostgreSQL connection."""
         assert self._pool is not None
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT last_used_counter FROM user_mfa WHERE user_id = %s",
-                (username,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT last_used_counter FROM user_mfa WHERE user_id = %s",
+                    (username,),
+                ).fetchone()
             last_counter = (
                 row["last_used_counter"] if row and row["last_used_counter"] else 0
             )
@@ -475,10 +477,13 @@ class TOTPService:
                 conn.commit()
                 if cursor.rowcount == 0:
                     return False
-                remaining = conn.execute(
-                    "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = %s AND used_at IS NULL",
-                    (username,),
-                ).fetchone()[0]
+                with conn.cursor(row_factory=tuple_row) as cnt_cur:
+                    cnt_cur.execute(
+                        "SELECT COUNT(*) FROM user_recovery_codes"
+                        " WHERE user_id = %s AND used_at IS NULL",
+                        (username,),
+                    )
+                    remaining = cnt_cur.fetchone()[0]
                 logger.info(
                     "Recovery code used for %s. %d codes remaining.",
                     username,
@@ -692,11 +697,11 @@ class TOTPService:
         """Check if MFA is enabled for a user."""
         if self._pool is not None:
             with self._pool.connection() as conn:
-                conn.row_factory = dict_row
-                row = conn.execute(
-                    "SELECT mfa_enabled FROM user_mfa WHERE user_id = %s",
-                    (username,),
-                ).fetchone()
+                with conn.cursor(row_factory=dict_row) as cur:
+                    row = cur.execute(
+                        "SELECT mfa_enabled FROM user_mfa WHERE user_id = %s",
+                        (username,),
+                    ).fetchone()
                 return bool(row and row["mfa_enabled"])
         else:
             conn = self._get_conn()

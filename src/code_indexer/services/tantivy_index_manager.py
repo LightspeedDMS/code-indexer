@@ -10,7 +10,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 if TYPE_CHECKING:
     from tantivy import Index, Schema  # type: ignore[import-untyped]
@@ -301,52 +301,45 @@ class TantivyIndexManager:
             logger.error(f"Failed to initialize Tantivy index: {e}")
             raise
 
-    def open_for_search(self) -> Tuple[Any, Any]:
-        """Open an existing index for SEARCH ONLY -- no writer, no writes.
+    def open_for_search(self) -> None:
+        """Open the Tantivy index for read-only search WITHOUT creating an IndexWriter.
 
-        Unlike ``initialize_index(create_new=False)``, this never creates a
-        writer (so concurrent queries do not contend on the single Tantivy
-        writer lock) and never writes to the index directory -- no
-        ``.permission_test`` probe, no ``metadata.json`` write. That makes it
-        safe against immutable / NFS-backed snapshots served to queries (the
-        ``.versioned/`` golden-repo path), which is where the per-query writer
-        was causing writer-lock contention and ``[Errno 9] Bad file
-        descriptor`` on the read path.
+        This is the correct entry point for the server FTS query path.  The server
+        creates one TantivyIndexManager per query across potentially many concurrent
+        uvicorn workers (separate OS processes).  Using initialize_index() on that
+        path is wrong because it always calls self._index.writer(...) which takes the
+        exclusive .tantivy-writer.lock — causing LockBusy failures when multiple
+        workers attempt concurrent FTS reads (Bug #1233).
 
-        The returned ``(index, schema)`` pair can be cached and reused across
-        queries; attach a cached pair to a fresh manager with
-        :meth:`attach_cached_index` to serve :meth:`search` without any I/O.
-
-        Returns:
-            Tuple of ``(tantivy_index, schema)``.
+        Invariants:
+          - self._index is set so search() works normally.
+          - self._schema is set so _build_search_query() works normally.
+          - self._writer remains None — the writer lockfile is NEVER acquired.
 
         Raises:
-            FileNotFoundError: If no built index exists at ``index_dir``.
+            FileNotFoundError: If the index directory does not exist.
+            RuntimeError: If the Tantivy index cannot be opened (e.g. corrupted).
         """
-        if not (self.index_dir / "meta.json").exists():
+        if not self.index_dir.exists():
             raise FileNotFoundError(
-                f"No FTS index found at {self.index_dir} (index not built)"
+                f"FTS index directory does not exist: {self.index_dir}"
             )
 
-        # Schema is rebuilt from the canonical definition (same object the write
-        # path uses when opening), needed by search() for regex_query building.
-        if self._schema is None:
+        try:
+            # Open existing index without creating/recreating the schema or writer.
+            self._index = self._tantivy.Index.open(str(self.index_dir))
+            # Rebuild the schema from scratch so _build_search_query() has a valid
+            # schema object — tantivy-py's Index.open() does not expose the schema
+            # directly in a way compatible with our query-building helpers.
             self._create_schema()
+        except Exception as e:
+            logger.error(f"Failed to open Tantivy index for search: {e}")
+            raise RuntimeError(f"Cannot open FTS index at {self.index_dir}: {e}") from e
 
-        self._index = self._tantivy.Index.open(str(self.index_dir))
-        logger.debug(f"Opened Tantivy index for search (read-only) at {self.index_dir}")
-        return self._index, self._schema
-
-    def attach_cached_index(self, index: Any, schema: Any) -> None:
-        """Attach an already-open ``(index, schema)`` for search reuse.
-
-        No I/O and no writer -- used on a cache hit so a fresh, lightweight
-        manager can serve :meth:`search` against the shared cached index. Only
-        the read path (``search``/``get_document_count``/``get_all_indexed_paths``)
-        is valid after this; write operations require ``initialize_index``.
-        """
-        self._index = index
-        self._schema = schema
+        # Explicitly ensure writer is not set (defensive — _create_schema never
+        # touches _writer, but make the invariant visible).
+        assert self._writer is None, "open_for_search() must never create a writer"
+        logger.debug(f"Opened Tantivy index for read-only search at {self.index_dir}")
 
     def get_writer_heap_size(self) -> int:
         """
@@ -677,7 +670,6 @@ class TantivyIndexManager:
         path_filter: Optional[str] = None,  # Deprecated: use path_filters
         query: Optional[str] = None,  # Backwards compatibility
         use_regex: bool = False,  # NEW: Enable regex pattern matching
-        skip_reload: bool = False,  # Skip per-query index.reload() (see below)
     ) -> List[Dict[str, Any]]:
         """
         Search the FTS index with configurable options.
@@ -748,16 +740,8 @@ class TantivyIndexManager:
             import tantivy
             from tantivy import Query as TantivyQuery
 
-            # Reload index to pick up newly-committed segments. Skipped on the
-            # cached server serving path (skip_reload=True): reload() re-reads
-            # segment metadata from disk on EVERY query, which over NFS causes a
-            # p99 latency tail. There it is redundant -- the FTSIndexCache owns
-            # freshness (its loader opens fresh and reload_on_access refreshes on
-            # hit), and golden/activated snapshots are immutable between refreshes
-            # (a refresh produces a new index dir = new cache key). The CLI/daemon
-            # (live-updating index) keeps the default reload.
-            if not skip_reload:
-                self._index.reload()
+            # Reload index to get latest documents
+            self._index.reload()
             searcher = self._index.searcher()
 
             # Select field based on case sensitivity
@@ -1270,9 +1254,9 @@ class TantivyIndexManager:
 
             with self._lock:
                 # Delete old version if it exists using query-based deletion (idempotent)
-                assert (
-                    self._index is not None
-                ), "Index must be initialized when writer is initialized"
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
                 delete_query = self._index.parse_query(file_path, ["path"])
                 self._writer.delete_documents_by_query(delete_query)
 
@@ -1311,9 +1295,9 @@ class TantivyIndexManager:
         try:
             with self._lock:
                 # Delete document using query-based deletion (idempotent)
-                assert (
-                    self._index is not None
-                ), "Index must be initialized when writer is initialized"
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
                 delete_query = self._index.parse_query(file_path, ["path"])
                 self._writer.delete_documents_by_query(delete_query)
 

@@ -132,4 +132,4 @@ class TestBackgroundJobsConfigCleanupFieldRemoved:
         assert hasattr(config, "max_concurrent_background_jobs")
         assert hasattr(config, "subprocess_max_workers")
         assert config.max_concurrent_background_jobs == 5
-        assert config.subprocess_max_workers == 2
+        assert config.subprocess_max_workers == 8

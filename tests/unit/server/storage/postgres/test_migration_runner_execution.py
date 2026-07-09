@@ -149,6 +149,16 @@ class TestRunMethod:
         runner = MigrationRunner.__new__(MigrationRunner)
         runner._sql_dir = sql_dir
 
+        # Story #1164: run() acquires a SESSION advisory lock via
+        # `with self._conn.cursor() as cur: cur.execute("SELECT pg_advisory_lock(...)")`
+        # and releases it in a finally block.  Provide a faithful mock _conn so
+        # the cursor context-manager protocol is satisfied without a real PG connection.
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        runner._conn = mock_conn
+
         applied_migrations = []
 
         runner.ensure_migrations_table = lambda: None
@@ -176,6 +186,13 @@ class TestRunMethod:
 
         runner = MigrationRunner.__new__(MigrationRunner)
         runner._sql_dir = sql_dir
+
+        # Story #1164: faithful mock _conn for advisory lock cursor context manager.
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        runner._conn = mock_conn
 
         applied = []
 
@@ -205,6 +222,13 @@ class TestRunMethod:
 
         runner = MigrationRunner.__new__(MigrationRunner)
         runner._sql_dir = sql_dir
+
+        # Story #1164: faithful mock _conn for advisory lock cursor context manager.
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        runner._conn = mock_conn
 
         applied = []
 

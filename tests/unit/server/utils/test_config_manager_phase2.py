@@ -76,20 +76,14 @@ class TestScipConfig:
         """Test ScipConfig has correct default values."""
         config = ScipConfig()
 
-        assert config.indexing_timeout_seconds == 3600  # 1 hour
-        assert config.scip_generation_timeout_seconds == 600  # 10 minutes
         assert config.temporal_stale_threshold_days == 7
 
     def test_custom_values(self):
         """Test ScipConfig accepts custom values."""
         config = ScipConfig(
-            indexing_timeout_seconds=7200,
-            scip_generation_timeout_seconds=1200,
             temporal_stale_threshold_days=14,
         )
 
-        assert config.indexing_timeout_seconds == 7200
-        assert config.scip_generation_timeout_seconds == 1200
         assert config.temporal_stale_threshold_days == 14
 
 
@@ -139,8 +133,6 @@ class TestServerConfigPhase2Integration:
                     cpu_sustained_threshold_percent=92.0,
                 ),
                 scip_config=ScipConfig(
-                    indexing_timeout_seconds=7200,
-                    scip_generation_timeout_seconds=1200,
                     temporal_stale_threshold_days=14,
                 ),
             )
@@ -167,8 +159,6 @@ class TestServerConfigPhase2Integration:
 
             # Verify scip_config
             assert isinstance(loaded_config.scip_config, ScipConfig)
-            assert loaded_config.scip_config.indexing_timeout_seconds == 7200
-            assert loaded_config.scip_config.scip_generation_timeout_seconds == 1200
             assert loaded_config.scip_config.temporal_stale_threshold_days == 14
 
 
@@ -205,8 +195,6 @@ class TestConfigServicePhase2Integration:
             settings = service.get_all_settings()
 
             assert "scip" in settings
-            assert settings["scip"]["indexing_timeout_seconds"] == 3600
-            assert settings["scip"]["scip_generation_timeout_seconds"] == 600
             assert settings["scip"]["temporal_stale_threshold_days"] == 7
 
     def test_update_mcp_session_setting(self):
@@ -243,11 +231,6 @@ class TestConfigServicePhase2Integration:
         """Test updating SCIP settings via ConfigService."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = ConfigService(tmpdir)
-
-            # Update indexing_timeout_seconds
-            service.update_setting("scip", "indexing_timeout_seconds", 7200)
-            settings = service.get_all_settings()
-            assert settings["scip"]["indexing_timeout_seconds"] == 7200
 
             # Update temporal_stale_threshold_days
             service.update_setting("scip", "temporal_stale_threshold_days", 14)
@@ -331,8 +314,6 @@ class TestActivatedRepoIndexManagerConfigIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Set up ConfigService with custom SCIP values
             service = ConfigService(tmpdir)
-            service.update_setting("scip", "indexing_timeout_seconds", 7200)
-            service.update_setting("scip", "scip_generation_timeout_seconds", 1200)
             service.update_setting("scip", "temporal_stale_threshold_days", 14)
 
             # Mock get_config_service to return our service
@@ -348,7 +329,6 @@ class TestActivatedRepoIndexManagerConfigIntegration:
 
                 manager = ActivatedRepoIndexManager(data_dir=tmpdir)
 
-                # Verify config values were used
-                assert manager.INDEXING_TIMEOUT_SECONDS == 7200
-                assert manager.SCIP_TIMEOUT_SECONDS == 1200
+                # Verify config values were used (Bug #1218: INDEXING_TIMEOUT_SECONDS
+                # and SCIP_TIMEOUT_SECONDS removed; only STALE_THRESHOLD_DAYS remains)
                 assert manager.STALE_THRESHOLD_DAYS == 14

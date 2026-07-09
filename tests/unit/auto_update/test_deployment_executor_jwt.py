@@ -24,6 +24,7 @@ def executor(tmp_path):
         branch="master",
         service_name="cidx-server",
         server_url="http://localhost:8000",
+        drain_poll_interval=0,
     )
 
 

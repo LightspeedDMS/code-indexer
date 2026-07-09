@@ -9,7 +9,10 @@ from pathlib import Path
 
 from code_indexer.server.auto_update.service import AutoUpdateService
 from code_indexer.server.auto_update.change_detector import ChangeDetector
-from code_indexer.server.auto_update.deployment_lock import DeploymentLock
+from code_indexer.server.auto_update.deployment_lock import (
+    DeploymentLock,
+    get_default_lock_path,
+)
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 from code_indexer.server.utils.config_manager import ServerConfigManager
 
@@ -69,7 +72,7 @@ def main():
             os.environ.get("CIDX_SERVER_REPO_PATH", "/opt/code-indexer-repo")
         )
         branch = os.environ.get("CIDX_AUTO_UPDATE_BRANCH") or "master"
-        lock_file = Path("/tmp/cidx-auto-update.lock")
+        lock_file = get_default_lock_path()
         check_interval = 60  # seconds (not used in oneshot mode)
 
         # Initialize components — construct executor first (Bug #884: must happen

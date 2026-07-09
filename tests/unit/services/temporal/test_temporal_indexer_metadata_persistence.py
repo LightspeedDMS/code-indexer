@@ -224,7 +224,7 @@ class TestIndexCommitsWiringMaxCommitsSinceDate:
             patch.object(indexer, "_get_current_branch", return_value="main"),
             patch.object(
                 indexer,
-                "_process_commits_parallel",
+                "_index_shard_commits",
                 return_value=(1, 3, 9),
             ),
             patch(

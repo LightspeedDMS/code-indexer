@@ -251,11 +251,11 @@ class TestDunderSandboxEscapes:
     # -----------------------------------------------------------------------
 
     def test_type_builtin_in_safe_builtins(self):
-        """Verify 'type' IS in safe builtins — type(x) succeeds in the evaluator.
+        """Verify 'type' is NOT in safe builtins — type(x) fails in the evaluator.
 
-        Story #993 added 'type' to SAFE_BUILTIN_NAMES. type(node) uses only
-        Call+Name — both whitelisted at AST validation (Layer 1), and now
-        'type' is present in the exec env (Layer 2), so the evaluator succeeds.
+        type() was removed from SAFE_BUILTIN_NAMES during Phase 1 (trimmed
+        from 34 to 8 builtins for Rust-only forward). The evaluator now
+        raises NameError when type() is called.
         """
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
@@ -269,11 +269,7 @@ class TestDunderSandboxEscapes:
             lang="python",
             file_path="/src/main.py",
         )
-        # type() is now in safe builtins — evaluator succeeds
-        assert result.failure is None, (
-            f"type() must succeed after Story #993, got failure={result.failure!r}, "
-            f"detail={result.detail!r}"
-        )
-        assert result.value is True, (
-            f"type(node) is not None must return True, got {result.value!r}"
+        # type() removed from safe builtins (Rust-only forward, no Python sandbox builtins needed)
+        assert result.failure is not None, (
+            "type() should fail — removed from SAFE_BUILTIN_NAMES"
         )

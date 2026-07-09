@@ -1,13 +1,18 @@
 """
-Unit tests for Bug #849 fix: FILE_UNCHANGED sentinel prevents false retries.
+Unit tests for Bug #849 fix + Bug #1038 fix: FILE_UNCHANGED sentinel and sentinel removal.
 
-When Claude correctly determines no changes are needed in a delta dep-map update,
-it should print FILE_UNCHANGED instead of FILE_EDIT_COMPLETE. The analyzer must
-detect this and return _DELTA_NOOP so the retry loop knows not to retry.
+Bug #849: When Claude correctly determines no changes are needed in a delta dep-map
+update, it should print FILE_UNCHANGED. The analyzer must detect this and return
+_DELTA_NOOP so the retry loop knows not to retry.
+
+Bug #1038: FILE_EDIT_COMPLETE sentinel removed from instructions. Claude no longer
+needs to print a completion sentinel — the file content on disk is the work product.
+FILE_UNCHANGED is KEPT as the intentional no-op signal.
 
 Tests:
-1. _build_file_based_instructions includes FILE_UNCHANGED as a valid completion signal
-2. invoke_delta_merge_file returns _DELTA_NOOP when FILE_UNCHANGED appears in stdout
+1. _build_file_based_instructions includes FILE_UNCHANGED (kept)
+2. _build_file_based_instructions does NOT include FILE_EDIT_COMPLETE (removed, Bug #1038)
+3. invoke_delta_merge_file returns _DELTA_NOOP when FILE_UNCHANGED appears in stdout
 """
 
 from unittest.mock import patch
@@ -41,8 +46,8 @@ def analyzer(tmp_path):
 
 class TestBuildFileBasedInstructionsFileUnchangedSentinel:
     """
-    Bug #849: _build_file_based_instructions must include FILE_UNCHANGED
-    as a valid completion signal for the case where no edits are needed.
+    Bug #849 + Bug #1038: _build_file_based_instructions must include FILE_UNCHANGED
+    (intentional no-op signal) but must NOT include FILE_EDIT_COMPLETE (removed in #1038).
     """
 
     def test_build_file_based_instructions_includes_file_unchanged_sentinel(
@@ -61,38 +66,34 @@ class TestBuildFileBasedInstructionsFileUnchangedSentinel:
             "an intentional no-op and the retry loop treats it as a failure."
         )
 
-    def test_build_file_based_instructions_still_includes_file_edit_complete(
+    def test_build_file_based_instructions_does_NOT_include_file_edit_complete(
         self, analyzer, tmp_path
     ):
-        """_build_file_based_instructions must still include FILE_EDIT_COMPLETE
-        for the normal 'made edits' path."""
+        """Bug #1038: FILE_EDIT_COMPLETE sentinel removed from instructions.
+        Claude no longer needs to print a completion marker — file content is the
+        work product."""
         temp_file = tmp_path / "test_domain.md"
         temp_file.write_text("# Test domain content")
 
         instructions = analyzer._build_file_based_instructions(temp_file)
 
-        assert "FILE_EDIT_COMPLETE" in instructions, (
-            "Instructions must still include FILE_EDIT_COMPLETE for the normal "
-            "edits-made path."
+        assert "FILE_EDIT_COMPLETE" not in instructions, (
+            "FILE_EDIT_COMPLETE must NOT be in instructions (Bug #1038: sentinel removed)."
         )
 
-    def test_build_file_based_instructions_distinguishes_two_completion_paths(
+    def test_build_file_based_instructions_only_has_file_unchanged_as_signal(
         self, analyzer, tmp_path
     ):
-        """Instructions must present both FILE_EDIT_COMPLETE and FILE_UNCHANGED
-        as distinct options, so Claude can choose the appropriate one."""
+        """After Bug #1038: only FILE_UNCHANGED remains as a completion signal.
+        FILE_EDIT_COMPLETE is gone."""
         temp_file = tmp_path / "test_domain.md"
         temp_file.write_text("# Test domain content")
 
         instructions = analyzer._build_file_based_instructions(temp_file)
 
-        assert "FILE_EDIT_COMPLETE" in instructions
         assert "FILE_UNCHANGED" in instructions
-        edit_pos = instructions.index("FILE_EDIT_COMPLETE")
-        noop_pos = instructions.index("FILE_UNCHANGED")
-        assert edit_pos != noop_pos, (
-            "FILE_EDIT_COMPLETE and FILE_UNCHANGED must appear at different positions — "
-            "they are distinct completion options, not duplicates."
+        assert "FILE_EDIT_COMPLETE" not in instructions, (
+            "FILE_EDIT_COMPLETE must be absent — only FILE_UNCHANGED remains as a signal."
         )
 
 

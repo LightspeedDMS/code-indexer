@@ -154,3 +154,105 @@ def test_sync_result_skipped_false_when_local_committed(tmp_path):
     result = CidxMetaBackupSync(str(repo), "master", _resolver()).sync()
 
     assert result.skipped is False
+
+
+# ---------------------------------------------------------------------------
+# Bug #1186: rebase failed-to-start vs genuine conflict disambiguation
+# ---------------------------------------------------------------------------
+
+
+def _make_rebase_abort_hook(repo: Path) -> None:
+    """Install a pre-rebase hook that exits 1 WITHOUT creating rebase-state dirs.
+
+    git invokes this hook before creating .git/rebase-merge/, so the working
+    tree is completely clean after the hook fires — exactly the failed-to-start
+    scenario described in Bug #1186.
+    """
+    hooks_dir = repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    hook = hooks_dir / "pre-rebase"
+    hook.write_text(
+        "#!/bin/sh\necho 'pre-rebase: simulated startup failure' >&2\nexit 1\n"
+    )
+    hook.chmod(0o755)
+
+
+def test_rebase_failed_to_start_raises_original_error(tmp_path):
+    """Bug #1186: rebase exits non-zero WITHOUT leaving rebase state on disk.
+
+    The RuntimeError must contain the original hook stderr
+    ("pre-rebase: simulated startup failure"), NOT a secondary "no rebase in
+    progress" error that the buggy code produces by calling --continue when
+    there is nothing to continue.
+    """
+    import pytest
+    from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
+
+    repo, remote = _bootstrap_repo(tmp_path)
+
+    # Create remote drift so sync reaches the rebase path.
+    divergent = tmp_path / "divergent"
+    _clone_repo(remote, divergent)
+    _commit_file(divergent, "remote.txt", "remote\n", "remote drift")
+    _git(["push", "origin", "master"], divergent)
+
+    # Commit a local change so sync doesn't short-circuit at the remote-changed check.
+    _commit_file(repo, "local.txt", "local\n", "local change")
+
+    # Install hook that aborts the rebase BEFORE any rebase state is created.
+    _make_rebase_abort_hook(repo)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        CidxMetaBackupSync(str(repo), "master", _resolver()).sync()
+
+    error_msg = str(exc_info.value)
+
+    # The hook-specific stderr must be surfaced, not a masked "no rebase in progress".
+    assert "pre-rebase: simulated startup failure" in error_msg, (
+        f"Expected original hook stderr in error, got: {error_msg!r}"
+    )
+
+    # No rebase state directories should exist after the call.
+    assert not (repo / ".git" / "rebase-merge").exists()
+    assert not (repo / ".git" / "rebase-apply").exists()
+
+
+def test_genuine_conflict_still_resolves_via_continue(tmp_path):
+    """Bug #1186: genuine mid-rebase conflict (rebase-merge dir IS created) still uses --continue.
+
+    When a real merge conflict stops the rebase, .git/rebase-merge/ exists on disk.
+    The fix must NOT suppress the resolver + --continue path for this case.
+    Verified end-to-end: the resolved content reaches the remote.
+    """
+    from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
+
+    repo, remote = _bootstrap_repo(tmp_path)
+
+    # Both sides modify the same line in the same file to force a merge conflict.
+    divergent = tmp_path / "divergent"
+    _clone_repo(remote, divergent)
+    _commit_file(divergent, "shared.txt", "remote version\n", "remote: shared")
+    _git(["push", "origin", "master"], divergent)
+
+    _commit_file(repo, "shared.txt", "local version\n", "local: shared")
+
+    # Resolver that resolves the conflict by staging the file with the final content.
+    def _resolving_resolver(cidx_meta_path, conflict_files, branch):
+        shared = Path(cidx_meta_path) / "shared.txt"
+        shared.write_text("resolved\n")
+        _git(["add", "shared.txt"], Path(cidx_meta_path))
+        return SimpleNamespace(success=True, error=None)
+
+    resolver = SimpleNamespace(resolve=_resolving_resolver)
+
+    result = CidxMetaBackupSync(str(repo), "master", resolver).sync()
+
+    # Sync must complete without failure — this confirms --continue was called
+    # and succeeded (otherwise sync would raise, not return).
+    assert result.skipped is False
+    assert result.sync_failure is None
+
+    # Verify the resolved content was pushed to the remote.
+    verify = tmp_path / "verify"
+    _clone_repo(remote, verify)
+    assert (verify / "shared.txt").read_text() == "resolved\n"

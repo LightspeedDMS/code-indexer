@@ -197,10 +197,14 @@ def test_xray_explore_md_evaluator_api_lists_exposed_names(
 
 
 def test_xray_md_evaluator_api_lists_whitelisted_nodes(xray_frontmatter_and_body):
+    # xray_search.md has been migrated to Rust (Epic #1019). Python AST node
+    # whitelists no longer apply. Verify instead that Rust security whitelist terms
+    # are documented (these are present in the "Rust security whitelist" section).
     _, body = xray_frontmatter_and_body
-    missing = [n for n in _WHITELISTED_AST_NODES if n not in body]
+    rust_security_terms = ["unsafe", "std::fs", "forbidden"]
+    missing = [t for t in rust_security_terms if t not in body]
     assert not missing, (
-        f"xray_search.md Evaluator API missing whitelisted AST nodes: {missing}"
+        f"xray_search.md Rust security whitelist missing terms: {missing}"
     )
 
 
@@ -215,10 +219,13 @@ def test_xray_explore_md_evaluator_api_lists_whitelisted_nodes(
 
 
 def test_xray_md_evaluator_api_lists_stripped_builtins(xray_frontmatter_and_body):
+    # xray_search.md has been migrated to Rust (Epic #1019). Python stripped
+    # builtins no longer apply. Verify Rust forbidden constructs are documented.
     _, body = xray_frontmatter_and_body
-    missing = [b for b in _STRIPPED_BUILTINS if b not in body]
+    rust_forbidden_terms = ["unsafe", "std::fs", "std::net"]
+    missing = [t for t in rust_forbidden_terms if t not in body]
     assert not missing, (
-        f"xray_search.md Evaluator API missing stripped builtins: {missing}"
+        f"xray_search.md Rust security whitelist missing forbidden terms: {missing}"
     )
 
 
@@ -249,10 +256,14 @@ def test_xray_explore_md_evaluator_api_names_5s_timeout(
 
 
 def test_xray_md_documents_dunder_attr_blocklist(xray_frontmatter_and_body):
+    # xray_search.md has been migrated to Rust (Epic #1019). Python dunder attribute
+    # blocklist no longer applies. Verify Rust forbidden constructs are documented
+    # in the "Forbidden constructs" section instead.
     _, body = xray_frontmatter_and_body
-    missing = [attr for attr in _DUNDER_BLOCKLIST_SAMPLE if attr not in body]
+    rust_forbidden_constructs = ["unsafe", "extern"]
+    missing = [c for c in rust_forbidden_constructs if c not in body]
     assert not missing, (
-        f"xray_search.md must document the dunder attribute blocklist; missing: {missing}"
+        f"xray_search.md must document Rust forbidden constructs; missing: {missing}"
     )
 
 
@@ -366,10 +377,14 @@ def test_xray_md_documents_evaluation_errors_field(xray_frontmatter_and_body):
 
 
 def test_xray_md_evaluation_errors_lists_error_types(xray_frontmatter_and_body):
+    # xray_search.md has been migrated to Rust (Epic #1019). AttributeError is a
+    # Python-specific exception type that no longer applies. Check Rust-applicable
+    # error types that are documented in xray_search.md instead.
     _, body = xray_frontmatter_and_body
-    missing = [t for t in _EVALUATION_ERROR_TYPES if t not in body]
+    rust_error_types = ["EvaluatorTimeout", "EvaluatorCrash"]
+    missing = [t for t in rust_error_types if t not in body]
     assert not missing, (
-        f"xray_search.md must document error_type values including: {missing}"
+        f"xray_search.md must document Rust error_type values including: {missing}"
     )
 
 

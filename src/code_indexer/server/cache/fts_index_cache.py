@@ -45,14 +45,7 @@ class FTSIndexCacheConfig:
     ttl_minutes: float = 10.0
     cleanup_interval_seconds: int = 60
     max_cache_size_mb: Optional[int] = None  # No limit by default
-    # Call reload() on cache hit to pick up in-place index changes. Default
-    # False: cidx serves IMMUTABLE versioned snapshots (see CLAUDE.md "Golden
-    # Repo Versioned Path") -- the FTS index at a given cache-key path never
-    # changes (a refresh produces a new path = new key), so reloading on every
-    # hit is pure overhead and, over NFS, a per-query metadata re-read that
-    # causes a large p99 latency tail. Set True only if serving a live-updating
-    # index in place.
-    reload_on_access: bool = False
+    reload_on_access: bool = True  # Call reload() on cache hit for fresh data
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -73,7 +66,7 @@ class FTSIndexCacheConfig:
         - CIDX_FTS_CACHE_TTL_MINUTES: TTL in minutes (default: 10)
         - CIDX_FTS_CACHE_CLEANUP_INTERVAL: Cleanup interval in seconds (default: 60)
         - CIDX_FTS_CACHE_MAX_SIZE_MB: Maximum cache size in MB (default: None)
-        - CIDX_FTS_CACHE_RELOAD_ON_ACCESS: Whether to reload on cache hit (default: false)
+        - CIDX_FTS_CACHE_RELOAD_ON_ACCESS: Whether to reload on cache hit (default: true)
 
         Returns:
             FTSIndexCacheConfig instance
@@ -83,7 +76,7 @@ class FTSIndexCacheConfig:
         max_size_mb_str = os.environ.get("CIDX_FTS_CACHE_MAX_SIZE_MB")
         max_size_mb = int(max_size_mb_str) if max_size_mb_str else None
         reload_on_access = (
-            os.environ.get("CIDX_FTS_CACHE_RELOAD_ON_ACCESS", "false").lower() == "true"
+            os.environ.get("CIDX_FTS_CACHE_RELOAD_ON_ACCESS", "true").lower() == "true"
         )
 
         return cls(
@@ -130,7 +123,7 @@ class FTSIndexCacheConfig:
                 "fts_cache_cleanup_interval_seconds", 60
             ),
             max_cache_size_mb=config_data.get("fts_cache_max_size_mb"),
-            reload_on_access=config_data.get("fts_cache_reload_on_access", False),
+            reload_on_access=config_data.get("fts_cache_reload_on_access", True),
         )
 
 
@@ -316,12 +309,6 @@ class FTSIndexCache:
         #
         # Failure safety: the finally block always removes the sentinel and signals
         # the Event, ensuring waiters are never permanently blocked even on errors.
-        #
-        # On a cache HIT the optional reload() is performed AFTER releasing the
-        # lock (see below): reload() does disk/NFS I/O, and holding the global
-        # _cache_lock across it serialized every concurrent cache hit, collapsing
-        # FTS query throughput on NFS-backed indexes to ~1 rps at C=16.
-        cache_hit: Optional[Tuple[Any, Any]] = None
         while True:
             with self._cache_lock:
                 # Check if cached (fast path: entry exists and not expired)
@@ -338,19 +325,30 @@ class FTSIndexCache:
                         self._eviction_count += 1
                         # Fall through (no return here)
                     else:
-                        # Cache hit - refresh TTL (AC3). Capture refs now and do
-                        # the optional reload() (AC8) OUTSIDE the lock: the index
-                        # object is already referenced, so reloading it lock-free
-                        # is safe and avoids serializing concurrent hits on the
-                        # global lock during NFS I/O.
+                        # Cache hit - refresh TTL (AC3)
                         entry.record_access()
                         self._hit_count += 1
-                        cache_hit = (entry.tantivy_index, entry.schema)
+
+                        # Optionally reload to pick up index changes (AC8).
+                        # This is on the cache-HIT path: unaffected by sentinel pattern.
+                        if self.config.reload_on_access:
+                            try:
+                                entry.tantivy_index.reload()
+                                self._reload_count += 1
+                            except Exception as e:
+                                logger.warning(
+                                    format_error_log(
+                                        "GIT-GENERAL-009",
+                                        f"FTS index reload failed: {e}",
+                                        extra={"correlation_id": get_correlation_id()},
+                                    )
+                                )
+
                         logger.debug(
                             f"FTS Cache HIT for {index_dir} (access_count={entry.access_count})",
                             extra={"correlation_id": get_correlation_id()},
                         )
-                        break
+                        return entry.tantivy_index, entry.schema
 
                 # No ready entry. Check if another thread is already loading this key.
                 if index_dir in self._loading:
@@ -373,23 +371,6 @@ class FTSIndexCache:
             event.wait()  # Wakes when the loader thread signals (success or failure)
             # Loop back: re-check cache (may find cached entry or become new loader)
             continue
-
-        # Cache HIT path: reload() here, with NO lock held, so concurrent hits do
-        # not serialize on the global lock during (possibly slow, NFS-backed) I/O.
-        if cache_hit is not None:
-            if self.config.reload_on_access:
-                try:
-                    cache_hit[0].reload()
-                    self._reload_count += 1
-                except Exception as e:
-                    logger.warning(
-                        format_error_log(
-                            "GIT-GENERAL-009",
-                            f"FTS index reload failed: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    )
-            return cache_hit
 
         # --- NO LOCK HELD during disk I/O ---
         # We are the loader thread (sentinel planted in _loading[index_dir]).

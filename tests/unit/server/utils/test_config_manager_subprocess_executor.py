@@ -27,7 +27,7 @@ class TestBackgroundJobsConfigSubprocessExecutorField:
     def test_default_subprocess_max_workers(self):
         """AC1: Default subprocess_max_workers should be 2 per resource audit."""
         config = BackgroundJobsConfig()
-        assert config.subprocess_max_workers == 2
+        assert config.subprocess_max_workers == 8
 
     # ==========================================================================
     # Dataclass field tests
@@ -70,7 +70,7 @@ class TestServerConfigSubprocessExecutorIntegration:
     def test_server_config_subprocess_max_workers_default(self):
         """ServerConfig should have default subprocess_max_workers of 2."""
         config = ServerConfig(server_dir="/tmp/test")
-        assert config.background_jobs_config.subprocess_max_workers == 2
+        assert config.background_jobs_config.subprocess_max_workers == 8
 
 
 class TestServerConfigManagerSubprocessExecutorPersistence:
@@ -86,7 +86,7 @@ class TestServerConfigManagerSubprocessExecutorPersistence:
         config = config_manager.create_default_config()
 
         assert config.background_jobs_config is not None
-        assert config.background_jobs_config.subprocess_max_workers == 2
+        assert config.background_jobs_config.subprocess_max_workers == 8
 
     def test_custom_subprocess_max_workers_saves_to_file(self, tmp_path):
         """Custom subprocess_max_workers should persist when saved to config file."""
@@ -149,7 +149,7 @@ class TestServerConfigManagerSubprocessExecutorPersistence:
         config = config_manager.load_config()
 
         # Should have default value
-        assert config.background_jobs_config.subprocess_max_workers == 2
+        assert config.background_jobs_config.subprocess_max_workers == 8
 
     def test_config_roundtrip_preserves_subprocess_max_workers(self, tmp_path):
         """subprocess_max_workers should survive save/load roundtrip."""

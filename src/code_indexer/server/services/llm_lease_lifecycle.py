@@ -25,9 +25,46 @@ from code_indexer.server.config.llm_lease_state import (
 from code_indexer.server.services.claude_credentials_file_manager import (
     ClaudeCredentialsFileManager,
 )
-from code_indexer.server.services.llm_creds_client import LlmCredsClient
+from code_indexer.server.services.llm_creds_client import (
+    LlmCredsAuthError,
+    LlmCredsClient,
+    LlmCredsConnectionError,
+    LlmCredsProviderError,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Checkout failure classification (Bug #1250)
+# ---------------------------------------------------------------------------
+
+
+def _is_no_credentials_available_error(exc: Exception) -> bool:
+    """
+    True when the LLM-creds provider explicitly reported it has no
+    credential available to lease for the requested vendor.
+
+    This is an EXPECTED, handled, non-fatal startup condition (the server
+    enters the existing non-blocking DEGRADED state either way) -- distinct
+    from a genuine provider/transport error such as a connection failure,
+    an auth rejection, or a malformed response, which must still be logged
+    loudly.
+
+    Classification is by structured ``status_code`` rather than by message
+    text: the provider's documented contract returns HTTP 404 from
+    ``/checkout`` exclusively for "no available credentials", and that
+    status code survives regardless of how the provider's error body is
+    shaped (the free-text message is not guaranteed to be relayed verbatim
+    by ``LlmCredsClient`` -- e.g. it falls back to a generic
+    "Provider returned HTTP <code>" message when the response body does not
+    match the parsed envelope format).
+    """
+    if not isinstance(exc, LlmCredsProviderError):
+        return False
+    if isinstance(exc, (LlmCredsConnectionError, LlmCredsAuthError)):
+        return False
+    return bool(exc.status_code == 404)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +193,17 @@ class LlmLeaseLifecycleService:
 
             except Exception as exc:
                 # Non-blocking: server continues in degraded state
-                logger.error("Failed to checkout credential from LLM provider: %s", exc)
+                if _is_no_credentials_available_error(exc):
+                    logger.warning(
+                        "LLM lease DEGRADED: no anthropic credential available "
+                        "to lease; Claude-backed features unavailable until "
+                        "one is provisioned (%s)",
+                        exc,
+                    )
+                else:
+                    logger.error(
+                        "Failed to checkout credential from LLM provider: %s", exc
+                    )
                 self._credential_type = None
                 self._status = LeaseStatusInfo(
                     status=LeaseLifecycleStatus.DEGRADED,

@@ -106,6 +106,9 @@ class HealthCheckService:
         self,
         storage_mode: str = "sqlite",
         postgres_dsn: Optional[str] = None,
+        # Any is intentional: no NFS validator protocol exists; duck-typed
+        # contract requires only is_mounted() -> bool and get_mount_path() -> str.
+        nfs_validator: Optional[Any] = None,
     ):
         """Initialize the health check service with real dependencies.
 
@@ -114,6 +117,10 @@ class HealthCheckService:
                          backend is used for the database connectivity check.
             postgres_dsn: PostgreSQL DSN for connectivity check when
                          storage_mode == "postgres".
+            nfs_validator: Optional NFS validator object (cluster mode only).
+                          Must implement is_mounted() -> bool and
+                          get_mount_path() -> str. When provided, the NFS
+                          golden repo volume is included in dashboard metrics.
         """
         # CLAUDE.md Foundation #1: Direct instantiation of real services only
         try:
@@ -130,6 +137,9 @@ class HealthCheckService:
             # Storage-mode awareness
             self.storage_mode = storage_mode
             self.postgres_dsn = postgres_dsn
+
+            # NFS golden repo volume validator (cluster mode only; None = standalone)
+            self._nfs_validator = nfs_validator
 
             # State tracking for interval-averaged I/O metrics
             # These store the previous readings to calculate rates
@@ -818,6 +828,50 @@ class HealthCheckService:
                 )
             )
 
+        # Include NFS golden repo volume when in cluster mode with mounted NFS
+        _nfs_val = getattr(self, "_nfs_validator", None)
+        if _nfs_val is not None:
+            try:
+                if _nfs_val.is_mounted():
+                    nfs_mount_path = _nfs_val.get_mount_path()
+                    usage = psutil.disk_usage(nfs_mount_path)
+                    total_gb = usage.total / (1024**3)
+                    used_gb = usage.used / (1024**3)
+                    free_gb = usage.free / (1024**3)
+                    used_percent = usage.percent
+                    free_percent = 100.0 - used_percent
+
+                    # Determine actual fstype from partition info; fall back to "nfs"
+                    nfs_fstype = "nfs"
+                    try:
+                        for partition in psutil.disk_partitions(all=True):
+                            if partition.mountpoint == nfs_mount_path:
+                                nfs_fstype = partition.fstype
+                                break
+                    except Exception as fstype_err:
+                        logger.debug(
+                            f"Cannot determine NFS fstype, defaulting to 'nfs': {fstype_err}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+
+                    volumes.append(
+                        VolumeInfo(
+                            mount_point=nfs_mount_path,
+                            device="Golden Repos (NFS)",
+                            fstype=nfs_fstype,
+                            total_gb=total_gb,
+                            used_gb=used_gb,
+                            free_gb=free_gb,
+                            used_percent=used_percent,
+                            free_percent=free_percent,
+                        )
+                    )
+            except (PermissionError, OSError) as e:
+                logger.debug(
+                    f"Cannot access NFS golden repo volume: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
         return volumes
 
     def _get_active_jobs_count(self) -> int:
@@ -856,6 +910,9 @@ _health_service_instance: Optional[HealthCheckService] = None
 def get_health_service(
     storage_mode: str = "sqlite",
     postgres_dsn: Optional[str] = None,
+    # Any is intentional: no NFS validator protocol exists; duck-typed
+    # contract requires only is_mounted() -> bool and get_mount_path() -> str.
+    nfs_validator: Optional[Any] = None,
 ) -> HealthCheckService:
     """
     Get or create the singleton HealthCheckService instance.
@@ -867,6 +924,9 @@ def get_health_service(
     Args:
         storage_mode: "sqlite" (default) or "postgres".
         postgres_dsn: PostgreSQL DSN required when storage_mode == "postgres".
+        nfs_validator: Optional NFS validator for golden repo volume monitoring.
+                      Duck-typed: must implement is_mounted() -> bool and
+                      get_mount_path() -> str.
 
     Returns:
         The singleton HealthCheckService instance.
@@ -876,6 +936,7 @@ def get_health_service(
         _health_service_instance = HealthCheckService(
             storage_mode=storage_mode,
             postgres_dsn=postgres_dsn,
+            nfs_validator=nfs_validator,
         )
     return _health_service_instance
 

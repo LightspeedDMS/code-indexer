@@ -23,8 +23,17 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
         "login_security_config",  # Story #557 - removed in cleanup Story #682
         "mfa_config",  # Story #558 - removed in cleanup Story #682
         "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
+        "launch_restart_generation",  # Story #1195/#1198 - runtime DB key written into config.json by auto-updater; not a bootstrap ServerConfig field
     }
 )
+
+# Story #1009 - bounds for mcp_dispatch_pool_size bootstrap config key (range 1-1024)
+_MCP_DISPATCH_POOL_MIN: int = 1
+_MCP_DISPATCH_POOL_MAX: int = 1024
+
+# perf - bounds for query_executor_pool_size bootstrap config key (range 1-2048)
+_QUERY_EXECUTOR_POOL_MIN: int = 1
+_QUERY_EXECUTOR_POOL_MAX: int = 2048
 
 
 @dataclass
@@ -66,17 +75,65 @@ class CacheConfig:
     fts_cache_ttl_minutes: float = 10.0
     fts_cache_cleanup_interval: int = 60
     fts_cache_max_size_mb: Optional[int] = None
-    # Default False: cidx serves immutable versioned FTS snapshots, so
-    # reloading a cached index on every hit is redundant and, over NFS, a
-    # per-query metadata re-read that drives a large p99 tail. See
-    # FTSIndexCacheConfig.reload_on_access.
-    fts_cache_reload_on_access: bool = False
+    fts_cache_reload_on_access: bool = True
 
     # Payload cache settings (Story #679)
     payload_preview_size_chars: int = 2000
     payload_max_fetch_size_chars: int = 5000
     payload_cache_ttl_seconds: int = 900
     payload_cleanup_interval_seconds: int = 60
+
+    # Query-path repo-config cache settings (Story #1082).
+    # query_path_cache_enabled: optional kill-switch; when False the per-query
+    #   repo-config cache is bypassed and config loads directly (baseline).
+    # repo_config_cache_ttl_seconds: SHORT, conservative TTL for mutable /
+    #   not-provably-immutable repo paths (proven-immutable .versioned/ snapshot
+    #   paths are cached with NO TTL but still bounded). Self-healing safety net.
+    # repo_config_cache_max_entries: hard LRU bound on EACH sub-cache (immutable
+    #   + mutable) to keep cardinality bounded across refresh cycles (Bug #897).
+    query_path_cache_enabled: bool = True
+    repo_config_cache_ttl_seconds: int = 30
+    repo_config_cache_max_entries: int = 2048
+
+    # Memory-Pressure-Aware Index-Cache Governor settings (Story #1213 Story 2).
+    # All 8 fields are runtime CacheConfig knobs — hot-reloaded via the Web UI
+    # Config screen without a server restart.  The governor reads them LIVE on
+    # each band decision (mirrors coalesce_enabled / memory_retrieval_enabled).
+    #
+    # memory_governor_enabled:
+    #   False => kill-switch: should_evict_after_shard() always returns True
+    #   (reverts to Bug #1171 evict-after-use — safe, never retain).
+    # memory_governor_yellow_pct / red_pct:
+    #   Entry thresholds for YELLOW / RED bands.
+    #   Invariant: 0 < yellow < red <= 100.
+    # memory_governor_hysteresis_pct:
+    #   Gap subtracted from entry thresholds for band exit.
+    #   Invariant: hysteresis < min(yellow, 100 - red).
+    # memory_governor_red_min_dwell_seconds:
+    #   Minimum seconds in RED before transition to YELLOW is allowed.
+    # memory_governor_sample_interval_seconds:
+    #   Sampler thread sleep between psutil/cgroup reads.
+    # memory_governor_swap_forces_red:
+    #   True => positive pswpin delta forces RED regardless of used_pct.
+    # memory_governor_rss_inflation_factor:
+    #   Multiplier applied to on-disk shard sizes when computing LRU-cap
+    #   eviction budgets (corrects file-size undercount vs. real RSS).
+    memory_governor_enabled: bool = True
+    memory_governor_yellow_pct: float = 70.0
+    memory_governor_red_pct: float = 85.0
+    memory_governor_hysteresis_pct: float = 10.0
+    memory_governor_red_min_dwell_seconds: int = 30
+    memory_governor_sample_interval_seconds: float = 2.0
+    memory_governor_swap_forces_red: bool = True
+    # memory_governor_swap_pswpin_red_threshold:
+    #   Minimum swap-in rate (pages/interval) required to force RED via the
+    #   swap_forces_red path.  Staging observed idle OS noise of 1-3 pages/interval
+    #   vs. a genuine death-spiral at 3630 pages/interval (Bug #1171).  Default of
+    #   100 is well above idle noise and far below any observed spiral, so trivial
+    #   page-in activity no longer thrashes GREEN<->RED while real memory pressure
+    #   still triggers the guard immediately.
+    memory_governor_swap_pswpin_red_threshold: int = 100
+    memory_governor_rss_inflation_factor: float = 2.0
 
 
 @dataclass
@@ -102,7 +159,7 @@ class ServerResourceConfig:
     git_untracked_file_timeout: int = 60  # 1 minute for untracked file check
 
     # Refresh scheduler timeouts (in seconds)
-    cow_clone_timeout: int = 600  # 10 minutes for CoW clone of large repos (11GB)
+    cow_clone_timeout: int = 3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
@@ -261,14 +318,14 @@ class ScipConfig:
     """
     SCIP indexing configuration (Story #3 - Phase 2, AC9-AC11, AC31-AC34).
 
-    Controls SCIP indexing timeouts, temporal staleness thresholds, and query limits.
+    Controls SCIP indexing staleness thresholds and query limits.
     Migrated from hardcoded constants in activated_repo_index_manager.py and scip_query_engine.py.
+
+    Note (Bug #1218): whole-job and per-subprocess indexing timeouts have been removed.
+    The only legitimate timeout on the indexing path is the per-request outbound
+    embedding-provider HTTP call, which is handled inside the embedding providers.
     """
 
-    # AC9: Indexing timeout in seconds (default 3600s/1 hour, minimum 300s/5 min)
-    indexing_timeout_seconds: int = 3600
-    # AC10: SCIP generation timeout in seconds (default 600s/10 min, minimum 60s/1 min)
-    scip_generation_timeout_seconds: int = 600
     # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)
     temporal_stale_threshold_days: int = 7
     # AC31: SCIP reference limit (default 100, range 10-10000)
@@ -399,6 +456,20 @@ class IndexingConfig:
     old config files at load time.
     """
 
+    # Story #1158 - AC1: Configurable embedding API parallelism via Web UI.
+    voyage_ai_parallel_requests: int = 8
+    cohere_parallel_requests: int = 8
+    # Story #1158 - AC2: Configurable temporal git-diff parallelism (None = inherit from provider).
+    temporal_parallel_requests: Optional[int] = None
+
+    # Story #1290: Web UI exposure of per-commit temporal indexing config.
+    # These mirror TemporalConfig (src/code_indexer/config.py) and are seeded
+    # into each repo's .code-indexer/config.json "temporal" section by
+    # config_seeding.py (server values always win -- Bug #678 pattern).
+    temporal_embedders: List[str] = field(default_factory=lambda: ["voyage-context-4"])
+    temporal_active_embedder: str = "voyage-context-4"
+    temporal_aggregation_chunk_chars: int = 4096
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
@@ -511,10 +582,12 @@ class ClaudeIntegrationConfig:
     fact_check_timeout_seconds: int = 600
     # Pass 1 (synthesis) max turns (default: 0 = single-shot mode, no tool use)
     dependency_map_pass1_max_turns: int = 0
-    # Pass 2 (per-domain) max turns (default: 50 = agentic mode with search_code tool)
-    dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
-    # Delta analysis max turns (default: 30, for future incremental updates)
-    dependency_map_delta_max_turns: int = 30
+    # Pass 2 (per-domain) max turns (default: 0 = unlimited agentic mode; Bug #1261:
+    # a hard turn cap can truncate a legitimately long per-domain analysis mid-flight,
+    # the same anti-pattern removed from the indexing path in Bug #1218)
+    dependency_map_pass2_max_turns: int = 0
+    # Delta analysis max turns (default: 0 = unlimited, matching pass1/pass2; Bug #1261)
+    dependency_map_delta_max_turns: int = 0
     # Story #359: Refinement job configuration
     # Enable/disable continuous dependency document refinement
     refinement_enabled: bool = False
@@ -625,14 +698,14 @@ class MultiSearchLimitsConfig:
     """
 
     # MultiSearchService settings
-    # Default 2 workers per resource audit (was 10)
-    multi_search_max_workers: int = 2
+    # Default 8 workers (Story #1009: enlarged from 2 for burst concurrency)
+    multi_search_max_workers: int = 8
     # Default 30 seconds timeout
     multi_search_timeout_seconds: int = 30
 
     # SCIPMultiService settings
-    # Default 2 workers per resource audit (was 10)
-    scip_multi_max_workers: int = 2
+    # Default 8 workers (Story #1009: enlarged from 2 for burst concurrency)
+    scip_multi_max_workers: int = 8
     # Default 30 seconds timeout
     scip_multi_timeout_seconds: int = 30
 
@@ -676,10 +749,27 @@ class BackgroundJobsConfig:
     # Jobs exceeding this limit stay in PENDING until a slot is available
     max_concurrent_background_jobs: int = 5
 
-    # Story #27: Maximum concurrent workers for SubprocessExecutor (default: 2)
+    # Story #27: Maximum concurrent workers for SubprocessExecutor
     # Controls parallelism of subprocess-based operations like regex search
-    # Default 2 per resource audit recommendation (was hardcoded to 1)
-    subprocess_max_workers: int = 2
+    # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
+    subprocess_max_workers: int = 8
+
+    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Default -1 means "derive from max_concurrent_background_jobs // 2" in
+    # __post_init__. Set explicitly to override the derived default.
+    max_concurrent_refresh_jobs: int = -1
+
+    # Bug #1070: dedicated xray executor pool size.
+    # xray_search and xray_explore are read-only and must NOT share the 5-worker
+    # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
+    # compute and allows up to 20 concurrent xray jobs without starvation.
+    xray_max_concurrent_jobs: int = 20
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_refresh_jobs < 0:
+            self.max_concurrent_refresh_jobs = max(
+                1, self.max_concurrent_background_jobs // 2
+            )
 
 
 @dataclass
@@ -744,7 +834,8 @@ class XRayConfig:
     xray_timeout_seconds: int = 120
 
     # ThreadPoolExecutor worker count for Phase 2 AST evaluation (range 1..8)
-    xray_worker_threads: int = 2
+    # Default 4 (Story #1009: enlarged from 2 for burst concurrency)
+    xray_worker_threads: int = 4
 
 
 @dataclass
@@ -935,6 +1026,9 @@ class CowDaemonConfig:
     mount_point: str = ""
     poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
     timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
+    daemon_storage_path: Optional[str] = (
+        None  # Story #1034: daemon-side absolute path (where daemon's local XFS lives); used by CowDaemonBackend to translate CIDX paths (mount_point view) to daemon paths (storage_path view) so reflink works on the daemon's local filesystem. Defaults to None for backward compat (no translation when None).
+    )
 
 
 @dataclass
@@ -942,15 +1036,6 @@ class ClusterConfig:
     """Cluster node configuration (Epic #408)."""
 
     node_id: str = ""
-    # C6 repo sharding (opt-in). When False (default) the cluster runs in
-    # REPLICATION mode: every pod caches and serves every repo locally, so N
-    # replicas scale read concurrency ~linearly. When True, repos are sharded
-    # by rendezvous-hash ownership and single-repo queries are forwarded to an
-    # owner pod -- this trades concurrency for the ability to serve a working
-    # set larger than one pod's cache (many/large repos). Only enable sharding
-    # when the working set exceeds per-pod cache; for sets that fit, forwarding
-    # concentrates each repo on one owner + adds a hop and is net-negative.
-    sharding_enabled: bool = False
 
 
 @dataclass
@@ -1029,33 +1114,80 @@ class MemoryRetrievalConfig:
 
 
 @dataclass
+class QueryEmbeddingCacheConfig:
+    """Query embedding cache configuration (Story #1105).
+
+    All fields are RUNTIME (DB-backed, Web-UI tunable) — NOT in BOOTSTRAP_KEYS
+    and NOT read from config.json.  A server restart is NOT required when these
+    change; ``enabled_for()`` / ``mode_for()`` read them LIVE on every call via
+    ``get_config_service().get_config().query_embedding_cache_config``.
+
+    The 8 Web-UI-exposed settings (Story #1107 S3):
+        query_embedding_cache_enabled: Master kill switch.  False = cache inert.
+        query_embedding_cache_max_entries: Soft DB row cap (pruned on upsert).
+            Minimum accepted value at the config-validation layer: 100.
+        query_embedding_cache_voyage_mode: Per-provider mode for voyage-ai.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_voyage_anchor_tokens: Anchor-token depth for voyage.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_voyage_audit_sample_rate: Fraction of shadow hits to
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
+        query_embedding_cache_cohere_mode: Per-provider mode for cohere.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_cohere_anchor_tokens: Anchor-token depth for cohere.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_cohere_audit_sample_rate: Fraction of shadow hits to
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
+    """
+
+    query_embedding_cache_enabled: bool = True
+    query_embedding_cache_max_entries: int = 10000
+    # Per-provider mode (off / shadow / on)
+    query_embedding_cache_voyage_mode: str = "shadow"
+    query_embedding_cache_cohere_mode: str = "shadow"
+    # Per-provider anchor_tokens: None = fall back to DEFAULT_ANCHOR_TOKENS constant
+    query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
+    query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
+    # Per-provider audit sample rates (S6 deep-fidelity audit; 0.0 = audit off)
+    query_embedding_cache_voyage_audit_sample_rate: float = 0.0
+    query_embedding_cache_cohere_audit_sample_rate: float = 0.0
+
+
+@dataclass
 class AdmissionControlConfig:
-    """Request admission control / backpressure (C7).
+    """Request admission control / backpressure.
 
     Under overload the server otherwise queues every request in the anyio
     threadpool until it times out to a 504. When enabled, a middleware caps the
-    number of in-flight (non-exempt) requests PER WORKER PROCESS and sheds
-    excess with an immediate ``429 Too Many Requests`` + ``Retry-After`` so
-    clients back off and retry instead of piling up toward the queue-collapse
-    point (Q*). Health/docs endpoints are always exempt so readiness probes and
-    schema fetches are never rejected.
+    number of in-flight (non-exempt) requests PER WORKER PROCESS and/or
+    rate-limits each caller individually, shedding excess with an immediate
+    ``429 Too Many Requests`` + ``Retry-After`` so clients back off and retry
+    instead of piling up toward queue collapse. Health/docs endpoints are always
+    exempt so readiness probes and schema fetches are never rejected.
 
-    Opt-in (``enabled=False``) because the right ``max_inflight_requests`` is
-    deployment-specific (roughly timeout x per-worker service rate); operators
-    enable it and tune the cap for their load.
+    Opt-in (both switches default False) because the right cap is
+    deployment-specific (roughly timeout x per-worker service rate). The two
+    gates are independent — enable either or both. Read at app-wiring time from
+    the merged server config (not a BOOTSTRAP key); a restart applies changes.
     """
 
+    # Global per-worker in-flight cap.
     enabled: bool = False
-    # Max concurrent non-exempt requests per worker process before shedding.
-    # 0 means "no cap" (effectively disabled even if enabled=True).
+    # Max concurrent non-exempt requests per worker before shedding. 0 = no cap.
     max_inflight_requests: int = 100
     # Retry-After header value (seconds) sent on a shed request.
     retry_after_seconds: int = 1
 
     # Per-consumer (per-API-key/session) token-bucket rate limiting. INDEPENDENT
-    # of the global in-flight cap above -- enable either or both. Keyed by a hash
-    # of the caller's credential so one client (e.g. a single dealer) cannot
-    # starve the fleet. Opt-in; tune to expected per-client request patterns.
+    # of the global cap; keyed by a hash of the caller's credential. Enforcement
+    # is cluster-shared (fleet-wide, via a dedicated PG table) ONLY when a PG
+    # connection pool is attached at app-wiring time (cluster/postgres mode);
+    # in solo/SQLite mode each worker process enforces the rate independently
+    # (per-process buckets).
     per_consumer_enabled: bool = False
     # Burst: tokens a single consumer may spend back-to-back.
     per_consumer_burst: int = 30
@@ -1063,27 +1195,6 @@ class AdmissionControlConfig:
     per_consumer_refill_per_second: float = 10.0
     # Idle seconds before an unused consumer bucket is reclaimed (memory bound).
     per_consumer_cleanup_seconds: int = 3600
-
-
-@dataclass
-class QueryVectorCacheConfig:
-    """In-process query-embedding (vector) cache (fork interim).
-
-    Caches query-text -> embedding vector so repeated queries skip the VoyageAI
-    embedding call -- the dominant per-query cost and the shared external
-    bottleneck horizontal pod scaling can't relieve. Opt-in (default OFF): it
-    trades a small miss-path serialization (embed-then-search instead of
-    embed-in-parallel) for a large hit-path saving, which only pays off on
-    repetitive workloads (e.g. a support knowledge-base agent).
-    """
-
-    enabled: bool = False
-    # Max distinct (provider, model, query) entries kept before LRU eviction.
-    max_entries: int = 10000
-    # Seconds an entry lives. Embeddings are deterministic for a fixed
-    # (provider, model, text), so this is a memory/staleness bound (e.g. after a
-    # model swap), not a correctness requirement. Default 24h.
-    ttl_seconds: float = 86400.0
 
 
 @dataclass
@@ -1123,10 +1234,6 @@ class ServerConfig:
     error_handling_config: Optional[ErrorHandlingConfig] = None
     api_limits_config: Optional[ApiLimitsConfig] = None
     web_security_config: Optional[WebSecurityConfig] = None
-    # C7 request admission control / backpressure
-    admission_control_config: Optional[AdmissionControlConfig] = None
-    # In-process query-embedding (vector) cache (fork interim)
-    query_vector_cache_config: Optional[QueryVectorCacheConfig] = None
 
     # Story #15 - Configuration Refactoring: Indexing settings
     indexing_config: Optional[IndexingConfig] = None
@@ -1175,6 +1282,10 @@ class ServerConfig:
     # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
     memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
 
+    # Story #1105 - Query embedding cache configuration (runtime only, not bootstrap)
+    query_embedding_cache_config: Optional[QueryEmbeddingCacheConfig] = None
+    admission_control_config: Optional[AdmissionControlConfig] = None
+
     # Story #885 - Lifecycle analysis subprocess timeout configuration
     lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
 
@@ -1213,17 +1324,52 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = (
-        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    )
-    enable_malloc_arena_max: bool = (
-        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
-    )
+    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+
+    # Story #1032 AC6 - Pre-deactivation leak scan (bootstrap-only, never DB).
+    # Default False: _detect_resource_leaks is post-failure-only diagnostic.
+    # Set enable_predeactivation_leak_scan=true in config.json to restore pre-flight
+    # scanning before rmtree (useful for incident investigation on large repos).
+    enable_predeactivation_leak_scan: bool = False
+
+    # Story #1032 HIGH #3 - Startup orphan trash sweep cap (bootstrap-only, never DB).
+    # Maximum number of orphan trash entries purged per startup. The sweep is
+    # dispatched asynchronously via asyncio.create_task in lifespan, so it
+    # NEVER blocks FastAPI startup regardless of cap. Default 100 keeps the
+    # background workload bounded; remaining orphans are deferred to next
+    # restart. Set to 0 for unlimited (sweep runs to completion in background,
+    # may take minutes for 10K+ orphans).
+    orphan_trash_sweep_per_startup_cap: int = 100
 
     # Bootstrap-only: anyio threadpool size for sync FastAPI handlers.
     # Default 256 (anyio default is 40). Bumped to absorb concurrent long-polls
     # without starving other endpoints. Set to 0 or negative to leave at anyio default.
     server_threadpool_size: int = 256
+
+    # Story #1009 - MCP thread pool optimization for burst concurrency (bootstrap-only).
+    # Sets the asyncio loop default ThreadPoolExecutor size so all sync MCP handlers
+    # dispatched via loop.run_in_executor(None, ...) share a pool large enough to
+    # absorb ~50 concurrent Claude MCP tool calls without saturating the executor.
+    # Range: 1-1024. Default 128.
+    mcp_dispatch_pool_size: int = 128
+
+    # perf - Shared, long-lived query executor pool (bootstrap-only).
+    # FilesystemVectorStore.search() runs the index-load task in parallel with the
+    # embedding task (2 sub-tasks per query). Previously each request created its
+    # own ThreadPoolExecutor, so the create/destroy churn serialized concurrent
+    # queries on CPython's process-wide _global_shutdown_lock (71% of worker-thread
+    # py-spy samples in `submit`). This pool is created ONCE at startup and reused.
+    #
+    # Sizing rationale: it must hold ~2 threads per concurrently-served query so
+    # requests' sub-tasks don't starve each other (a tiny shared pool would be
+    # WORSE — it would serialize all requests). Default 256 mirrors
+    # server_threadpool_size (the anyio/Starlette sync-handler capacity): with up
+    # to ~256 concurrent sync query handlers, 256 query-executor workers cover the
+    # worst case without queueing. The fan-out is non-nested (load_index /
+    # generate_embedding never submit back to this pool), so no deadlock risk.
+    # Range: 1-2048.
+    query_executor_pool_size: int = 256
 
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
@@ -1244,6 +1390,75 @@ class ServerConfig:
     # Runtime (Web UI): pace-maker mode before Claude CLI invocations.
     # Values: "disabled" (no-op), "on" (enforce pacing-only), "off" (actively disable)
     pace_maker_mode: str = "disabled"
+
+    # Bug #1078 Phase 1 - Per-budget concurrency cap for serving-path embedding/rerank calls.
+    # Controls the BoundedSemaphore K in ProviderConcurrencyGovernor. Default 16 — diminishing-
+    # returns knee from the Bug #1078 3-run K-sweep (K=16 best conc-50 latency/throughput;
+    # K=32 regresses). K is PER PROCESS, so a 3-node cluster runs up to 3x this many concurrent
+    # provider calls — keep within the provider's concurrent-request budget.
+    # Excess callers queue up to acquire_timeout seconds then receive GovernorBusyError.
+    # Runtime (DB-backed), not bootstrap.
+    query_provider_max_concurrency: int = 16
+
+    # Story #1079 Phase E - Server-side embedding request coalescer.
+    # All four are RUNTIME (DB-backed, Web-UI tunable), NOT bootstrap config.json.
+    # coalesce_enabled / coalesce_max_batch_size are read live via getattr in
+    # coalesced_query_embedding / the coalescer registry, so changes take effect
+    # WITHOUT a restart (true hot-reload). coalesce_k_min / coalesce_k_max are
+    # DIFFERENT: they are CONSTRUCTION-SCOPED governor seeds (read once at
+    # ProviderConcurrencyGovernor construction via _read_config_k_bounds and baked
+    # into each lane's limiter clamp + AIMD floor/ceiling) — a change takes effect
+    # on the next governor construction / server restart, exactly like
+    # query_provider_max_concurrency seeds the initial K. They do NOT live-reload.
+    #
+    # coalesce_enabled: kill switch. When False, coalesced_query_embedding
+    #   delegates to governed_query_embedding (governor + AIMD still apply, no
+    #   batch accumulation). Read live each call (hot-reload).
+    coalesce_enabled: bool = True
+    # coalesce_max_batch_size: hard texts-per-batch ceiling. 96 == Cohere's
+    #   _get_texts_per_request() (the smallest provider texts cap), so a sealed
+    #   batch never sub-splits in the provider. Read live at registry build / seal.
+    coalesce_max_batch_size: int = 96
+    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds AND the
+    #   per-lane ResizableLimiter clamp bounds, matching the locked design
+    #   (K_MIN=8, K_MAX=32). Valid range 8 <= k_min <= k_max <= 256; present-but-
+    #   invalid config falls back to the 8/32 defaults with a logged WARNING.
+    #   Construction-scoped seed (see preamble) — NOT live hot-reload.
+    coalesce_k_min: int = 8
+    coalesce_k_max: int = 32
+
+    # Bug #1084 Phase A6 — keep-last-N versioned-snapshot retention. After each
+    # successful alias swap, all but the N newest snapshots are scheduled for
+    # deletion through the refcount-gated CleanupManager (never the current
+    # target or previous_path). Runtime / Web UI configurable. Enabled on local
+    # + cow-daemon; ONTAP discovery returns [] so retention is naturally inert
+    # there until alias-scoped naming lands.
+    snapshot_retention_keep_last: int = 3
+
+    # Bug #1084 (staging follow-up) — NFS read-after-create visibility deadline
+    # (seconds) for the versioned-snapshot barrier. Staging PROVED that under
+    # concurrent reflink load a freshly-created versioned dir can take >15s to
+    # propagate to the scheduler node over NFS; the barrier now also READDIRs the
+    # parent to bust the dir-entry cache, and this generous 60s ceiling is the
+    # safety net before failing loud. Runtime / Web UI tunable; non-positive
+    # values fall back to the module default. NOT bootstrap.
+    nfs_visibility_timeout_seconds: float = 60.0
+
+    # Bug #1085 — Research Assistant session-workspace GC retention (days). The
+    # ResearchCleanupService deletes orphaned ~/.cidx-server/research/<uuid>
+    # dirs (no live research_sessions row) older than this many days. Runtime /
+    # Web-UI tunable. 0 (or negative) disables the sweep entirely.
+    research_session_retention_days: int = 7
+
+    # Issue #1159 — Search event log retention (days). SearchEventLogWriter
+    # prunes rows older than this many days once per day. Runtime / Web-UI
+    # tunable. Must be >= 1; values < 1 are treated as the default (90).
+    search_event_log_retention_days: int = 90
+
+    # Issue #1160 — Export file retention (days). QueryAnalyticsExportService
+    # removes export files older than this many days. Runtime / Web-UI tunable.
+    # Must be in [1, 3650]; defaults to 30 days.
+    export_retention_days: int = 30
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1278,10 +1493,6 @@ class ServerConfig:
             self.error_handling_config = ErrorHandlingConfig()
         if self.api_limits_config is None:
             self.api_limits_config = ApiLimitsConfig()
-        if self.admission_control_config is None:
-            self.admission_control_config = AdmissionControlConfig()
-        if self.query_vector_cache_config is None:
-            self.query_vector_cache_config = QueryVectorCacheConfig()
         if self.web_security_config is None:
             self.web_security_config = WebSecurityConfig()
         # Story #15 - Configuration Refactoring: Initialize indexing config
@@ -1336,6 +1547,11 @@ class ServerConfig:
         # Story #883 - Initialize memory retrieval config
         if self.memory_retrieval_config is None:
             self.memory_retrieval_config = MemoryRetrievalConfig()
+        # Story #1105 - Initialize query embedding cache config
+        if self.query_embedding_cache_config is None:
+            self.query_embedding_cache_config = QueryEmbeddingCacheConfig()
+        if self.admission_control_config is None:
+            self.admission_control_config = AdmissionControlConfig()
         # Story #885 - Initialize lifecycle analysis config
         if self.lifecycle_analysis_config is None:
             self.lifecycle_analysis_config = LifecycleAnalysisConfig()
@@ -1386,31 +1602,72 @@ class ServerConfigManager:
         """
         return ServerConfig(server_dir=str(self.server_dir))
 
+    def _atomic_write_json(
+        self, config_dict: dict, trailing_newline: bool = False
+    ) -> None:
+        """Write config_dict as JSON to config.json atomically.
+
+        Bug #1231: write to a temp file in the SAME directory as config.json,
+        flush+fsync for durability, then os.replace() for an atomic rename.
+        On any exception (including a failed os.replace) the temp file is
+        unlinked before re-raising so no corrupt partial file is ever left behind.
+
+        Args:
+            config_dict: dict to serialise as JSON with indent=2.
+            trailing_newline: if True append a bare '\\n' after the JSON
+                (save_config_dict byte-identical contract).
+        """
+        import tempfile
+
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.config_file_path.parent, prefix=".cfg_tmp_"
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(config_dict, fh, indent=2)
+                if trailing_newline:
+                    fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            # Preserve existing file mode so the auto-updater (which may run as
+            # a different OS user — see Bug #879) can still read config.json.
+            # mkstemp always creates files at 0600; we must correct that before
+            # the atomic rename.
+            if self.config_file_path.exists():
+                target_mode = os.stat(self.config_file_path).st_mode & 0o777
+            else:
+                target_mode = 0o644  # faithful to the prior umask-default behaviour
+            os.chmod(tmp_path, target_mode)
+            os.replace(tmp_path, self.config_file_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def save_config(self, config: ServerConfig) -> None:
         """
         Save configuration to file.
 
+        Atomic write via _atomic_write_json (Bug #1231): original config.json
+        is never truncated before the new content is durable.
+
         Args:
             config: ServerConfig object to save
         """
-        # Ensure server directory exists
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-
-        # Convert config to dictionary and save as JSON
-        config_dict = asdict(config)
-
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
+        self._atomic_write_json(asdict(config), trailing_newline=False)
 
     def save_config_dict(self, config_dict: dict) -> None:
         """Save a dict (not full ServerConfig) to config.json.
 
+        Atomic write via _atomic_write_json (Bug #1231).  Appends a trailing
+        '\\n' to preserve byte-identical output with the pre-fix implementation.
+
         Used by Story #578 to write bootstrap-only keys in cluster mode.
         """
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
-            f.write("\n")
+        self._atomic_write_json(config_dict, trailing_newline=True)
 
     def load_config(self) -> Optional[ServerConfig]:
         """
@@ -1605,7 +1862,16 @@ class ServerConfigManager:
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip overarching job-timeout fields removed from ScipConfig
+            # so existing config.json / DB rows load cleanly without TypeError.
+            scip_dict = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict)
 
         # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
         # Convert nested git_timeouts_config dict to GitTimeoutsConfig
@@ -1631,22 +1897,6 @@ class ServerConfigManager:
         ):
             config_dict["error_handling_config"] = ErrorHandlingConfig(
                 **config_dict["error_handling_config"]
-            )
-
-        # Convert nested admission_control_config dict to AdmissionControlConfig (C7)
-        if "admission_control_config" in config_dict and isinstance(
-            config_dict["admission_control_config"], dict
-        ):
-            config_dict["admission_control_config"] = AdmissionControlConfig(
-                **config_dict["admission_control_config"]
-            )
-
-        # Convert nested query_vector_cache_config dict to QueryVectorCacheConfig
-        if "query_vector_cache_config" in config_dict and isinstance(
-            config_dict["query_vector_cache_config"], dict
-        ):
-            config_dict["query_vector_cache_config"] = QueryVectorCacheConfig(
-                **config_dict["query_vector_cache_config"]
             )
 
         # Convert nested api_limits_config dict to ApiLimitsConfig
@@ -1676,6 +1926,17 @@ class ServerConfigManager:
             idx_dict = config_dict["indexing_config"]
             idx_dict.pop("indexing_timeout_seconds", None)
             idx_dict.pop("temporal_stale_threshold_days", None)
+            # Rolling-upgrade safety: strip unknown keys so an old node loading a
+            # new blob (with Story #1158 fields) doesn't crash with TypeError.
+            from dataclasses import fields as dc_fields
+
+            known_idx_fields = {f.name for f in dc_fields(IndexingConfig)}
+            for unknown_key in [k for k in list(idx_dict) if k not in known_idx_fields]:
+                idx_dict.pop(unknown_key)
+                logger.warning(
+                    "Stripped unknown indexing_config key '%s' (not in IndexingConfig)",
+                    unknown_key,
+                )
             config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
         # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
@@ -1684,20 +1945,28 @@ class ServerConfigManager:
             if "scip_config" not in config_dict:
                 config_dict["scip_config"] = {}
             if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"][
-                    "scip_workspace_retention_days"
-                ] = retention_days
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict["scip_config"].scip_workspace_retention_days = (
+                config_dict["scip_config"]["scip_workspace_retention_days"] = (
                     retention_days
                 )
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict[
+                    "scip_config"
+                ].scip_workspace_retention_days = retention_days
 
         # Story #15 AC2: Final conversion of scip_config after migration
         # This handles the case where scip_config was created by migration above
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip removed overarching timeout fields here too
+            scip_dict_ac2 = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict_ac2.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict_ac2)
 
         # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
         claude_settings_keys = [
@@ -1799,11 +2068,15 @@ class ServerConfigManager:
             config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
 
         # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # used for ClaudeIntegrationConfig, MemoryRetrievalConfig, CodexIntegrationConfig.
         if "background_jobs_config" in config_dict and isinstance(
             config_dict["background_jobs_config"], dict
         ):
+            _bg = config_dict["background_jobs_config"]
+            _bg_allowed = {f.name for f in fields(BackgroundJobsConfig)}
             config_dict["background_jobs_config"] = BackgroundJobsConfig(
-                **config_dict["background_jobs_config"]
+                **{k: v for k, v in _bg.items() if k in _bg_allowed}
             )
 
         # Story #32: Convert content_limits_config dict to ContentLimitsConfig
@@ -1870,6 +2143,29 @@ class ServerConfigManager:
             _mem_allowed = {f.name for f in fields(MemoryRetrievalConfig)}
             config_dict["memory_retrieval_config"] = MemoryRetrievalConfig(
                 **{k: v for k, v in _mem_dict.items() if k in _mem_allowed}
+            )
+
+        # Story #1105: Convert query_embedding_cache_config dict to
+        # QueryEmbeddingCacheConfig.  Unknown keys are filtered for rolling-upgrade
+        # safety — same fields() pattern as memory_retrieval_config conversion.
+        if "query_embedding_cache_config" in config_dict and isinstance(
+            config_dict["query_embedding_cache_config"], dict
+        ):
+            _qec_dict = config_dict["query_embedding_cache_config"]
+            _qec_allowed = {f.name for f in fields(QueryEmbeddingCacheConfig)}
+            config_dict["query_embedding_cache_config"] = QueryEmbeddingCacheConfig(
+                **{k: v for k, v in _qec_dict.items() if k in _qec_allowed}
+            )
+
+        # Convert admission_control_config dict to AdmissionControlConfig. Unknown
+        # keys are filtered for rolling-upgrade safety (same fields() pattern).
+        if "admission_control_config" in config_dict and isinstance(
+            config_dict["admission_control_config"], dict
+        ):
+            _adm_dict = config_dict["admission_control_config"]
+            _adm_allowed = {f.name for f in fields(AdmissionControlConfig)}
+            config_dict["admission_control_config"] = AdmissionControlConfig(
+                **{k: v for k, v in _adm_dict.items() if k in _adm_allowed}
             )
 
         # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
@@ -1961,6 +2257,12 @@ class ServerConfigManager:
             config_dict["password_expiry_config"] = PasswordExpiryConfig(
                 **config_dict["password_expiry_config"]
             )
+
+        # Bug #1006: Migrate legacy enforce_pace_maker_pacing_only -> pace_maker_mode
+        if "enforce_pace_maker_pacing_only" in config_dict:
+            old_enforce = config_dict.pop("enforce_pace_maker_pacing_only")
+            if "pace_maker_mode" not in config_dict:
+                config_dict["pace_maker_mode"] = "on" if old_enforce else "disabled"
 
         # Remove obsolete reindexing_config field (deleted in previous commit)
         config_dict.pop("reindexing_config", None)
@@ -2078,6 +2380,28 @@ class ServerConfigManager:
         Raises:
             ValueError: If any configuration value is invalid
         """
+        # Validate mcp_dispatch_pool_size (Story #1009)
+        if not (
+            _MCP_DISPATCH_POOL_MIN
+            <= config.mcp_dispatch_pool_size
+            <= _MCP_DISPATCH_POOL_MAX
+        ):
+            raise ValueError(
+                f"mcp_dispatch_pool_size must be between {_MCP_DISPATCH_POOL_MIN} "
+                f"and {_MCP_DISPATCH_POOL_MAX}, got {config.mcp_dispatch_pool_size}"
+            )
+
+        # Validate query_executor_pool_size (perf - shared query executor)
+        if not (
+            _QUERY_EXECUTOR_POOL_MIN
+            <= config.query_executor_pool_size
+            <= _QUERY_EXECUTOR_POOL_MAX
+        ):
+            raise ValueError(
+                f"query_executor_pool_size must be between {_QUERY_EXECUTOR_POOL_MIN} "
+                f"and {_QUERY_EXECUTOR_POOL_MAX}, got {config.query_executor_pool_size}"
+            )
+
         # Validate port range
         if not (1 <= config.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {config.port}")

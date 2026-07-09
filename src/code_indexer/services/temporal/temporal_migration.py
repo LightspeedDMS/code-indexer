@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
 logger = logging.getLogger(__name__)
 
 # Named constants for vector dimensions to avoid magic numbers.
@@ -62,6 +64,20 @@ def migrate_legacy_temporal_collection(
     if not legacy_dir.exists() or not legacy_dir.is_dir():
         return _check_stale_sentinel(index_path, config)
 
+    # Guard: skip the metadata-tracker layout (Bug #1176).
+    # code-indexer-temporal/ is also used as a metadata tracker that contains
+    # only temporal_metadata.db.  When the provider detection chain runs on
+    # this directory it exhausts all strategies and _detect_from_config()
+    # emits a spurious WARNING on every temporal query.
+    # Discriminator: the directory has temporal_metadata.db but none of the
+    # known HNSW collection files (hnsw_index.bin, collection_meta.json,
+    # temporal_meta.json).
+    _hnsw_markers = ("hnsw_index.bin", "collection_meta.json", "temporal_meta.json")
+    if (legacy_dir / "temporal_metadata.db").exists() and not any(
+        (legacy_dir / m).exists() for m in _hnsw_markers
+    ):
+        return MigrationResult.SKIPPED
+
     model_name = _detect_provider_from_disk(legacy_dir, config)
     target_name = resolve_temporal_collection_name(model_name)
     target_dir = index_path / target_name
@@ -98,8 +114,11 @@ def _run_locked_migration(
 
     index_path.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")
+    _used_lockf = False
+    _lock_acquired = False
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
+        _lock_acquired = True
 
         post_lock = _handle_post_lock_recheck(
             legacy_dir, target_dir, target_name, sentinel_migrating, sentinel_migrated
@@ -140,7 +159,8 @@ def _run_locked_migration(
         logger.error("Temporal migration failed: %s. Original data preserved.", e)
         return MigrationResult.ERROR
     finally:
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        if _lock_acquired:
+            nfs_safe_funlock(lock_file.fileno(), _used_lockf)
         lock_file.close()
 
 

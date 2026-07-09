@@ -20,12 +20,24 @@ Also exports:
 
 import json
 import logging
+import queue
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+# Issue #1241 P1.3: async-batched audit writer constants.
+# Audit durability matters: generous queue cap so saturation is rare.
+_AUDIT_QUEUE_MAXSIZE = 50_000
+# Max records to coalesce per drain cycle.
+_AUDIT_MAX_DRAIN_BATCH = 512
+# Poll timeout for the writer loop (seconds).
+_AUDIT_POLL_TIMEOUT_S = 0.5
+# How long stop() waits for the writer to drain (seconds).
+_AUDIT_STOP_TIMEOUT_S = 10.0
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +63,177 @@ class AuditLogService:
 
     def __init__(self, db_path: Path, storage_backend: Any = None) -> None:
         self._backend = storage_backend
+
+        # Issue #1241 P1.3: async writer state (shared across both modes).
+        # _writer_thread is None until start() is called; log() is synchronous
+        # when the thread is not running (preserves backward-compat for tests
+        # and callers that don't call start()).
+        self._queue: queue.Queue = queue.Queue(maxsize=_AUDIT_QUEUE_MAXSIZE)
+        self._stop_event: threading.Event = threading.Event()
+        self._writer_thread: Optional[threading.Thread] = None
+
         if self._backend is not None:
             # PG mode: backend owns its own schema; skip SQLite init
             return
         self._db_path = db_path
         self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         self._ensure_schema()
+
+    # ------------------------------------------------------------------
+    # Lifecycle: start / flush / stop  (Issue #1241 P1.3)
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the background writer thread (async mode).
+
+        After start() is called, log() and log_raw() enqueue items rather
+        than writing synchronously.  Call stop() at shutdown to drain.
+        """
+        if self._writer_thread is not None and self._writer_thread.is_alive():
+            return  # idempotent
+        self._stop_event.clear()
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="audit-log-writer",
+        )
+        self._writer_thread.start()
+
+    def flush(self) -> None:
+        """Synchronously drain the writer queue without stopping.
+
+        Blocks until every record enqueued before this call has been
+        committed by the writer thread.  No-op when the writer is not
+        running (synchronous mode).
+        """
+        thread = self._writer_thread
+        if thread is None or not thread.is_alive():
+            return
+        self._queue.join()
+
+    def stop(self, timeout: float = _AUDIT_STOP_TIMEOUT_S) -> None:
+        """Signal the writer to stop and wait for it to drain.
+
+        Guarantees no audit rows are lost on graceful shutdown: the writer
+        drains its queue before the thread exits.
+        """
+        self._stop_event.set()
+        thread = self._writer_thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        self._writer_thread = None
+
+    # ------------------------------------------------------------------
+    # Internal: writer loop and batch write
+    # ------------------------------------------------------------------
+
+    def _write_batch(self, batch: List[Tuple]) -> None:
+        """Write a batch of audit items in ONE transaction (executemany).
+
+        Each item is a 6-tuple: (timestamp, admin_id, action_type,
+        target_type, target_id, details).
+
+        M3: all failures are logged at WARNING — never swallowed silently.
+        M4: on executemany failure the SQLite path retries row-by-row so one
+            poison row cannot drop up to 511 valid audit records.
+        """
+        if not batch:
+            return
+        if self._backend is not None:
+            # PG/delegated path: call log_raw per item (backend handles
+            # its own connection pooling and commit semantics).
+            for ts, aid, at, tt, tid, det in batch:
+                try:
+                    self._backend.log_raw(
+                        timestamp=ts,
+                        admin_id=aid,
+                        action_type=at,
+                        target_type=tt,
+                        target_id=tid,
+                        details=det,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "AuditLogService: PG log_raw failed (1 audit record dropped): %s",
+                        exc,
+                    )
+            return
+        # Direct-SQLite path: executemany in ONE transaction.
+        rows = list(batch)
+
+        def _do_batch(conn: sqlite3.Connection) -> None:
+            conn.executemany(
+                """
+                INSERT INTO audit_logs
+                    (timestamp, admin_id, action_type, target_type, target_id, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        try:
+            self._conn_manager.execute_atomic(_do_batch)
+        except Exception as exc:
+            # M3: log so the failure is observable (audit subsystem must never
+            #     swallow its own write errors silently).
+            # M4: fall back to per-row inserts so one bad row cannot silently
+            #     drop an entire batch of up to 512 valid audit records.
+            logger.warning(
+                "AuditLogService: batch insert failed (%d rows); "
+                "retrying row-by-row: %s",
+                len(rows),
+                exc,
+            )
+            for row in rows:
+                _row = row  # capture for closure
+
+                def _do_single(conn: sqlite3.Connection, r: Tuple = _row) -> None:
+                    conn.execute(
+                        """
+                        INSERT INTO audit_logs
+                            (timestamp, admin_id, action_type, target_type,
+                             target_id, details)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        r,
+                    )
+
+                try:
+                    self._conn_manager.execute_atomic(_do_single)
+                except Exception as row_exc:
+                    logger.warning(
+                        "AuditLogService: single-row fallback failed "
+                        "(1 audit record dropped): %s | ts=%s action=%s",
+                        row_exc,
+                        row[0] if row else "?",
+                        row[2] if len(row) > 2 else "?",
+                    )
+
+    def _writer_loop(self) -> None:
+        """Background daemon: drain queue in batches and commit to DB.
+
+        Runs until stop_event is set AND the queue is empty.
+        """
+        while True:
+            try:
+                first_item = self._queue.get(timeout=_AUDIT_POLL_TIMEOUT_S)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    break
+                continue
+
+            batch = [first_item]
+            additional = min(self._queue.qsize(), _AUDIT_MAX_DRAIN_BATCH - 1)
+            for _ in range(additional):
+                try:
+                    batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            self._write_batch(batch)
+
+            for _ in batch:
+                self._queue.task_done()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -67,6 +244,19 @@ class AuditLogService:
 
     def _ensure_schema(self) -> None:
         """Create audit_logs table and indexes if they don't exist."""
+        # Issue #1241 P1.2: WAL must be set OUTSIDE any transaction.
+        # SQLite silently ignores PRAGMA journal_mode = WAL if issued inside
+        # BEGIN ... COMMIT (execute_atomic does BEGIN EXCLUSIVE).
+        # Use a short-lived raw connection for this once-per-file pragma.
+        # Note: busy_timeout is PER-CONNECTION and is set to 30000 ms by
+        # DatabaseConnectionManager.get_connection() on every connection it
+        # opens, so we do NOT set it here on this throwaway bootstrap connection.
+        _bootstrap_conn = sqlite3.connect(str(self._db_path))
+        try:
+            _bootstrap_conn.execute("PRAGMA journal_mode = WAL")
+            _bootstrap_conn.commit()
+        finally:
+            _bootstrap_conn.close()
 
         def _do_schema(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
@@ -102,6 +292,26 @@ class AuditLogService:
     # Write
     # ------------------------------------------------------------------
 
+    def _enqueue_or_write_sync(self, item: Tuple) -> None:
+        """Enqueue if the writer thread is running, else write synchronously.
+
+        This ensures backward compatibility: callers that never call start()
+        get the original synchronous write behavior (existing tests pass
+        unchanged).  Callers that call start() get non-blocking async writes.
+        """
+        thread = self._writer_thread
+        if thread is not None and thread.is_alive():
+            # Async mode: enqueue for background drain.
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                # Queue saturated (50k deep): write synchronously to preserve
+                # audit durability — this record is too important to discard.
+                self._write_batch([item])
+        else:
+            # Synchronous mode (not started): direct write — old behavior.
+            self._write_batch([item])
+
     def log(
         self,
         admin_id: str,
@@ -113,6 +323,10 @@ class AuditLogService:
         """
         Insert one audit log entry.
 
+        Issue #1241 P1.3: when start() has been called, this enqueues the
+        record for async batched write (non-blocking).  Without start(), it
+        writes synchronously (backward-compatible for tests and simple callers).
+
         Args:
             admin_id:    Actor performing the action (username or 'system').
             action_type: Verb describing what happened.
@@ -120,28 +334,10 @@ class AuditLogService:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        if self._backend is not None:
-            self._backend.log(
-                admin_id=admin_id,
-                action_type=action_type,
-                target_type=target_type,
-                target_id=target_id,
-                details=details,
-            )
-            return
         now = datetime.now(timezone.utc).isoformat()
-
-        def _do_log(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                """
-                INSERT INTO audit_logs
-                    (timestamp, admin_id, action_type, target_type, target_id, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (now, admin_id, action_type, target_type, target_id, details),
-            )
-
-        self._conn_manager.execute_atomic(_do_log)
+        self._enqueue_or_write_sync(
+            (now, admin_id, action_type, target_type, target_id, details)
+        )
 
     def log_raw(
         self,
@@ -152,25 +348,13 @@ class AuditLogService:
         target_id: str,
         details: Optional[str] = None,
     ) -> None:
-        """Insert an audit entry with an explicit timestamp (for migration use)."""
-        if self._backend is not None:
-            self._backend.log_raw(
-                timestamp=timestamp,
-                admin_id=admin_id,
-                action_type=action_type,
-                target_type=target_type,
-                target_id=target_id,
-                details=details,
-            )
-            return
+        """Insert an audit entry with an explicit timestamp (for migration use).
 
-        def _do_log_raw(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
-                (timestamp, admin_id, action_type, target_type, target_id, details),
-            )
-
-        self._conn_manager.execute_atomic(_do_log_raw)
+        Issue #1241 P1.3: async when writer thread is running, synchronous otherwise.
+        """
+        self._enqueue_or_write_sync(
+            (timestamp, admin_id, action_type, target_type, target_id, details)
+        )
 
     # ------------------------------------------------------------------
     # Read

@@ -29,7 +29,7 @@ All modes use the same **container-free filesystem storage** - no Docker, no com
 | Feature | CLI Mode | Daemon Mode | Server Mode (Deployment) |
 |---------|----------|-------------|--------------------------|
 | **Setup Complexity** | Instant | Simple | Moderate |
-| **Query Speed** | ~1s (disk I/O) | ~5ms (cached) | <1ms (cached) |
+| **HNSW lookup (warm)** [^lat] | ~1s (cold-load) | ~5ms (cached) | <1ms (cached) |
 | **Watch Mode** | No | Yes | N/A |
 | **Multi-User** | No | No | Yes |
 | **Caching** | None | In-memory HNSW/FTS | Advanced HNSW caching |
@@ -37,6 +37,8 @@ All modes use the same **container-free filesystem storage** - no Docker, no com
 | **Best For** | Quick searches | Active development | Team collaboration |
 | **Resource Usage** | Minimal | Low | Moderate |
 | **Network** | None | Unix socket | HTTP/HTTPS |
+
+[^lat]: These figures are the **in-process HNSW index lookup time only**, not end-to-end query latency. Every real query (CLI, daemon, or server) also pays the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) plus, for server / cluster, HTTP and auth overhead. The "<1ms" figure traces to Story #526's HNSW cache micro-benchmark (`~277ms → <1ms` for repeated HNSW lookups on the same index, single-threaded, post-load). Treat these numbers as **cache-effectiveness signal**, not user-observed query speed.
 
 **Note**: CLI and Daemon are operational modes. Server Mode is a separate deployment for multi-user access.
 
@@ -242,16 +244,16 @@ cidx watch-stop
 
 | Operation | Time | Improvement vs CLI |
 |-----------|------|--------------------|
-| **First query** | ~1s | Same (cold cache) |
-| **Cached queries** | ~5ms | 200x faster |
+| **First HNSW lookup** | ~1s | Same (cold cache) |
+| **Cached HNSW lookup** | ~5ms | 200x faster |
 | **Watch indexing** | <20ms per file* | Real-time updates |
 
-*Typical performance - actual times vary by file size and system load
+*Typical performance - actual times vary by file size and system load. **HNSW lookup numbers cover the in-process index search component only**; the embedding-provider round trip (50–300ms typical) still applies on every query.
 
 **Why Faster?**:
-- HNSW/FTS indexes cached in RAM
-- No disk I/O for queries
-- Unix socket communication (fast IPC)
+- HNSW/FTS indexes cached in RAM (eliminates cold-load disk I/O)
+- Unix socket communication (eliminates subprocess startup)
+- Embedding-provider round trip still applies on every query — it sets the end-to-end floor
 
 ### Use Cases
 
@@ -324,17 +326,17 @@ See [Server Deployment Guide](server-deployment.md) for complete instructions.
 **Quick Overview**:
 ```bash
 # 1. Install on server
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # 2. Configure environment
 export VOYAGE_API_KEY="your-key"
-export CIDX_SERVER_PORT=8000
+export CIDX_SERVER_PORT=8090
 
 # 3. Add golden repositories
 # (done via admin API after server starts)
 
-# 4. Start server
-cidx-server start
+# 4. Start server (via systemd or directly)
+python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8090
 ```
 
 ### Golden Repositories
@@ -384,7 +386,7 @@ export CIDX_INDEX_CACHE_TTL_MINUTES=5  # 5 minutes
 **Monitor Cache Performance**:
 ```bash
 # Query cache statistics
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # Response
 {
@@ -415,7 +417,7 @@ Server mode uses **OAuth 2.0** for secure access:
 **REST API**:
 ```bash
 # Query via REST API
-curl -X POST http://localhost:8000/api/v1/query \
+curl -X POST http://localhost:8090/api/query \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query_text": "authentication", "limit": 10}'
@@ -701,13 +703,15 @@ cidx status
 
 ## Performance Characteristics
 
-### Query Speed Comparison
+### HNSW Lookup Comparison
 
-| Mode | Cold Query | Warm Query | Notes |
-|------|------------|------------|-------|
+| Mode | Cold HNSW lookup | Warm HNSW lookup | Notes |
+|------|------------------|------------------|-------|
 | **CLI** | ~1s | ~1s | No caching |
 | **Daemon** | ~1s | ~5ms | In-memory cache |
 | **Server** | ~277ms | <1ms | Advanced HNSW cache |
+
+These numbers reflect the **in-process HNSW index lookup component only** — they do **not** include the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) that every real query also pays, nor HTTP / auth overhead on the server. See the footnote on the [Mode Comparison table](#mode-comparison) above for methodology.
 
 ### Resource Usage
 
@@ -770,7 +774,7 @@ cidx query "test" --limit 10  # Should be ~5ms
 **Check**:
 ```bash
 # Query cache stats
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # Check TTL configuration
 echo $CIDX_INDEX_CACHE_TTL_MINUTES

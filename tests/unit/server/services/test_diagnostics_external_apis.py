@@ -150,10 +150,19 @@ async def test_check_github_api_error_http_error(
 async def test_check_github_api_not_configured(
     diagnostics_service, mock_config_manager
 ):
-    """Test GitHub API diagnostic returns NOT_CONFIGURED when no token configured."""
-    with patch(
-        "code_indexer.server.services.diagnostics_service.CITokenManager"
-    ) as mock:
+    """Test GitHub API diagnostic returns NOT_CONFIGURED when no token configured.
+
+    Bug #1304: the patch target must be
+    code_indexer.server.services.ci_token_manager.CITokenManager (where
+    create_token_manager() -- called by DiagnosticsService._get_token_manager()
+    -- actually resolves the CITokenManager symbol), NOT
+    diagnostics_service.CITokenManager. The latter is a no-op patch since
+    _get_token_manager() never references that name, so without this fix the
+    test silently exercises the REAL CITokenManager against this host's real
+    ~/.cidx-server database, which returns WORKING when real GitHub/GitLab
+    tokens are configured (e.g. via .local-testing) instead of NOT_CONFIGURED.
+    """
+    with patch("code_indexer.server.services.ci_token_manager.CITokenManager") as mock:
         mock.return_value.get_token.return_value = None
 
         result = await diagnostics_service.check_github_api()
@@ -214,10 +223,12 @@ async def test_check_gitlab_api_working(
 async def test_check_gitlab_api_not_configured(
     diagnostics_service, mock_config_manager
 ):
-    """Test GitLab API diagnostic returns NOT_CONFIGURED when no token configured."""
-    with patch(
-        "code_indexer.server.services.diagnostics_service.CITokenManager"
-    ) as mock:
+    """Test GitLab API diagnostic returns NOT_CONFIGURED when no token configured.
+
+    Bug #1304: correct patch target fix, same rationale as
+    test_check_github_api_not_configured above.
+    """
+    with patch("code_indexer.server.services.ci_token_manager.CITokenManager") as mock:
         mock.return_value.get_token.return_value = None
 
         result = await diagnostics_service.check_gitlab_api()
@@ -612,10 +623,16 @@ async def test_external_api_diagnostics_cached_for_5_minutes(
 async def test_all_apis_return_not_configured_when_not_configured(
     diagnostics_service, mock_config_manager
 ):
-    """Test that all API diagnostics return NOT_CONFIGURED when endpoints/tokens not configured."""
-    # Mock all configuration sources to return None/disabled
+    """Test that all API diagnostics return NOT_CONFIGURED when endpoints/tokens not configured.
+
+    Bug #1304: correct patch target fix (see test_check_github_api_not_configured
+    above) -- code_indexer.server.services.ci_token_manager.CITokenManager,
+    not diagnostics_service.CITokenManager (the latter is never referenced by
+    _get_token_manager(), so patching it was a silent no-op that let this
+    host's real GitHub/GitLab tokens leak into the assertions).
+    """
     with patch(
-        "code_indexer.server.services.diagnostics_service.CITokenManager"
+        "code_indexer.server.services.ci_token_manager.CITokenManager"
     ) as mock_token:
         mock_token.return_value.get_token.return_value = None
 

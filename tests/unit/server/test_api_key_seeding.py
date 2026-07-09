@@ -27,11 +27,13 @@ from code_indexer.server.startup.api_key_seeding import seed_api_keys_on_startup
 def _make_config_service(
     anthropic_api_key: str = "",
     voyageai_api_key: str = "",
+    cohere_api_key: str = "",
 ) -> MagicMock:
     """Build a minimal mock config_service for testing."""
     claude_cfg = MagicMock()
     claude_cfg.anthropic_api_key = anthropic_api_key
     claude_cfg.voyageai_api_key = voyageai_api_key
+    claude_cfg.cohere_api_key = cohere_api_key
 
     config = MagicMock()
     config.claude_integration_config = claude_cfg
@@ -327,3 +329,71 @@ class TestEnvKeyPreservedWhenConfigBlank:
             )
             # Config key must override the shell-set key
             assert os.environ.get("VOYAGE_API_KEY") == config_key
+
+
+# ---------------------------------------------------------------------------
+# TestSeederContractGuard1309 (Bug #1309)
+# ---------------------------------------------------------------------------
+
+
+class TestSeederContractGuard1309:
+    """Guards the seeder contract that Bug #1309's lifespan.py relocation fix
+    depends on: given a config_service whose get_config() returns a config WITH
+    VoyageAI/Cohere keys (as ConfigService does once it holds the PG connection
+    pool in cluster mode), seed_api_keys_on_startup() must actually set the
+    corresponding env vars. The lifespan.py fix is purely an ordering change —
+    this test proves the seeder itself does the right thing once it is given
+    the populated (PG-backed) config, so the ordering fix is sufficient.
+    """
+
+    def test_voyageai_config_key_synced_to_env_from_pg_backed_config(self, tmp_path):
+        """Config (simulating PG-backed cluster config) has VoyageAI key →
+        os.environ[VOYAGE_API_KEY] is set."""
+        voyage_key = "pa-voyage-from-pg-config"
+        config_service = _make_config_service(voyageai_api_key=voyage_key)
+        mock_sync_svc = _make_sync_service()
+
+        env_before = os.environ.pop("VOYAGE_API_KEY", None)
+        try:
+            with patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ):
+                result = seed_api_keys_on_startup(
+                    config_service=config_service,
+                    claude_config_path=str(tmp_path / "claude.json"),
+                )
+
+            assert os.environ.get("VOYAGE_API_KEY") == voyage_key
+            assert result["voyageai_seeded"] is True
+        finally:
+            if env_before is not None:
+                os.environ["VOYAGE_API_KEY"] = env_before
+            elif "VOYAGE_API_KEY" in os.environ:
+                del os.environ["VOYAGE_API_KEY"]
+
+    def test_cohere_config_key_synced_to_env_from_pg_backed_config(self, tmp_path):
+        """Config (simulating PG-backed cluster config) has Cohere key →
+        os.environ[CO_API_KEY] is set."""
+        cohere_key = "co-from-pg-config"
+        config_service = _make_config_service(cohere_api_key=cohere_key)
+        mock_sync_svc = _make_sync_service()
+
+        env_before = os.environ.pop("CO_API_KEY", None)
+        try:
+            with patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ):
+                result = seed_api_keys_on_startup(
+                    config_service=config_service,
+                    claude_config_path=str(tmp_path / "claude.json"),
+                )
+
+            assert os.environ.get("CO_API_KEY") == cohere_key
+            assert result["cohere_seeded"] is True
+        finally:
+            if env_before is not None:
+                os.environ["CO_API_KEY"] = env_before
+            elif "CO_API_KEY" in os.environ:
+                del os.environ["CO_API_KEY"]

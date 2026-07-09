@@ -51,9 +51,20 @@ class NullFaultFactory(HttpClientFactory):
         self,
         *,
         transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
         **kwargs: Any,
-    ) -> httpx.Client:
-        """Return a plain httpx.Client, honouring any caller-supplied transport."""
+    ) -> Any:
+        """Return a plain httpx.Client, honouring any caller-supplied transport.
+
+        Story #1083: when ``pooled=True`` delegate to the parent HttpClientFactory,
+        which owns the ONE long-lived keep-alive client and the borrow context
+        whose ``__exit__`` is a no-op.  Non-pooled callers keep the per-call client
+        (unchanged CLI behaviour).
+        """
+        if pooled:
+            return super().create_sync_client(
+                transport=transport, pooled=True, **kwargs
+            )
         if transport is not None:
             return httpx.Client(transport=transport, **kwargs)
         return httpx.Client(**kwargs)

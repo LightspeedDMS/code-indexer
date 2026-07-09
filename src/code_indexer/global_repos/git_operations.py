@@ -10,12 +10,15 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, cast
+from typing import List, Optional, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
 
 
 logger = logging.getLogger(__name__)
+
+# Timeout for git blame on repos with deep history (Bug #1008)
+BLAME_TIMEOUT_SECONDS = 30
 
 
 @dataclass
@@ -131,6 +134,14 @@ class BlameResult:
     revision: str
     lines: List[BlameLine]
     unique_commits: int
+
+
+@dataclass
+class BlameErrorResult:
+    """Error result returned when a git blame operation fails (e.g. timeout)."""
+
+    success: bool
+    error: str
 
 
 @dataclass
@@ -924,21 +935,40 @@ class GitOperationsService:
         revision: Optional[str] = None,
         start_line: Optional[int] = None,
         end_line: Optional[int] = None,
-    ) -> BlameResult:
+    ) -> Union[BlameResult, BlameErrorResult]:
         """Get line-by-line blame annotations for a file.
 
         Args:
             path: Path to file (relative to repo root)
             revision: Revision to blame (None for HEAD)
-            start_line: First line to include (1-indexed)
-            end_line: Last line to include (1-indexed)
+            start_line: First line to include (1-indexed integer, must be >= 1)
+            end_line: Last line to include (1-indexed integer, must be >= start_line)
 
         Returns:
-            BlameResult with blame annotations
+            BlameResult with blame annotations, or BlameErrorResult on timeout
 
         Raises:
-            ValueError: If file not found
+            ValueError: If file not found, or if start_line/end_line are invalid
         """
+        if start_line is not None:
+            if not isinstance(start_line, int):
+                raise ValueError(
+                    f"start_line must be an integer, got {type(start_line).__name__}"
+                )
+            if start_line < 1:
+                raise ValueError(f"start_line must be >= 1, got {start_line}")
+        if end_line is not None:
+            if not isinstance(end_line, int):
+                raise ValueError(
+                    f"end_line must be an integer, got {type(end_line).__name__}"
+                )
+            if end_line < 1:
+                raise ValueError(f"end_line must be >= 1, got {end_line}")
+        if start_line is not None and end_line is not None and end_line < start_line:
+            raise ValueError(
+                f"end_line ({end_line}) must be >= start_line ({start_line})"
+            )
+
         # Build git blame command with porcelain format
         cmd = ["git", "blame", "--porcelain"]
 
@@ -953,7 +983,18 @@ class GitOperationsService:
         cmd.extend(["--", path])
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
+            result = run_git_command(
+                cmd, cwd=self.repo_path, check=True, timeout=BLAME_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            error_msg = f"Git blame timed out after {BLAME_TIMEOUT_SECONDS} seconds"
+            logger.warning(
+                "git blame timed out: repo=%s path=%s revision=%s",
+                self.repo_path,
+                path,
+                revision,
+            )
+            return BlameErrorResult(success=False, error=error_msg)
         except subprocess.CalledProcessError:
             raise ValueError(f"File not found: {path}")
 

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -193,12 +194,14 @@ class OAuthPostgresBackend:
 
         if row is None:
             return None
-        return {
-            "client_id": row[0],
-            "client_name": row[1],
-            "redirect_uris": json.loads(row[2]),
-            "created_at": row[3],
-        }
+        return sanitize_row(
+            {
+                "client_id": row[0],
+                "client_name": row[1],
+                "redirect_uris": json.loads(row[2]),
+                "created_at": row[3],
+            }
+        )
 
     def generate_authorization_code(
         self,
@@ -348,13 +351,15 @@ class OAuthPostgresBackend:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) > expires_at:
             return None
-        return {
-            "token_id": row[0],
-            "client_id": row[1],
-            "user_id": row[2],
-            "expires_at": row[3],
-            "created_at": row[4],
-        }
+        return sanitize_row(
+            {
+                "token_id": row[0],
+                "client_id": row[1],
+                "user_id": row[2],
+                "expires_at": row[3],
+                "created_at": row[4],
+            }
+        )
 
     def extend_token_on_activity(self, access_token: str) -> bool:
         """Extend an access token's expiry if it is within the extension threshold."""

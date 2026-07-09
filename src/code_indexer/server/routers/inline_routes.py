@@ -71,9 +71,9 @@ from ..routers.groups import (
 from ..routers.repo_categories import router as repo_categories_router
 from ..routes.multi_query_routes import router as multi_query_router
 from ..routes.scip_multi_routes import router as scip_multi_router
-from ..routes.shard_routes import router as shard_status_router
 from ..routes.reaper_routes import router as reaper_router  # Story #967
 from ..routes.xray_routes import router as xray_router  # Story #974
+from ..routes.regex_routes import router as regex_router  # Story #1011
 from ..web import (
     web_router,
     user_router,
@@ -255,7 +255,6 @@ def register_inline_routes(
     app.include_router(cache_router)
     app.include_router(multi_query_router)
     app.include_router(scip_multi_router)
-    app.include_router(shard_status_router)
     # TEMP: Commented for testing bug #751
     # app.include_router(cicd_router)
     app.include_router(groups_router)
@@ -278,6 +277,7 @@ def register_inline_routes(
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
     app.include_router(xray_router)  # Story #974
+    app.include_router(regex_router)  # Story #1011
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles

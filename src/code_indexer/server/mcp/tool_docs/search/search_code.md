@@ -94,19 +94,9 @@ inputSchema:
       description: Search all git history. Requires temporal index.
     at_commit:
       type: string
-      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Requires temporal index.'
-    include_removed:
-      type: boolean
-      default: false
-      description: Include removed files in results. Only for temporal queries.
-    show_evolution:
-      type: boolean
-      default: false
-      description: Include code change timeline with commit history. Requires temporal index.
-    evolution_limit:
-      type: integer
-      minimum: 1
-      description: Max evolution entries per result. Only with show_evolution=true.
+      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Point-in-time scoping: results
+        are restricted to commits at or before the resolved commit. Requires temporal index. An unresolvable ref/hash
+        returns an error.'
     case_sensitive:
       type: boolean
       default: false
@@ -143,6 +133,11 @@ inputSchema:
       - commit_message
       - commit_diff
       description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
+    temporal_embedder:
+      type: string
+      description: 'Explicit temporal embedder override (e.g. ''embed-v4.0''). Omit to use temporal.active_embedder. An override
+        naming an embedder with no indexed collections returns an empty/typed result -- it never silently falls back to
+        active_embedder. Requires a temporal query (time_range, time_range_all, or at_commit).'
     query_strategy:
       type: string
       enum:
@@ -187,6 +182,10 @@ inputSchema:
     rerank_instruction:
       type: string
       description: 'Optional instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query. Steers ranking only; does not widen recall.'
+    no_embedding_cache_shortcut:
+      type: boolean
+      default: false
+      description: 'When true, skip the query-embedding cache read for this request (the write still occurs so future requests benefit). Use for freshness-critical searches where a cached embedding might not reflect the current query intent.'
   required:
   - query_text
 outputSchema:
@@ -281,16 +280,6 @@ outputSchema:
                     description: List of commits affecting this code
                     items:
                       type: object
-                  is_removed:
-                    type: boolean
-                    description: Whether file was removed from current HEAD (only when include_removed=true)
-                  evolution:
-                    type:
-                    - array
-                    - 'null'
-                    description: Code evolution timeline (only when show_evolution=true)
-                    items:
-                      type: object
         total_results:
           type: integer
           description: Total number of results returned
@@ -321,6 +310,18 @@ outputSchema:
             rerank_time_ms:
               type: integer
               description: Time spent in the reranking stage in milliseconds
+            effective_search_mode:
+              type: string
+              description: "AC7 (Bug #1202): The search mode that actually ran for this request (e.g. 'fts', 'semantic', 'hybrid'). Echoes the requested search_mode. Present on all non-omni single-repo requests."
+            effective_query_strategy:
+              type: string
+              description: "AC7 (Bug #1202): The query strategy that actually ran (e.g. 'primary_only', 'parallel', 'failover'). On dual-provider repos with search_mode='fts' or 'hybrid', this will be 'primary_only' (the auto-parallel default does NOT fire for non-semantic modes). Present on all non-omni single-repo requests."
+            preview_size_chars:
+              type: integer
+              description: "AC4 (Bug #1202): The payload preview threshold in characters applied to fts/hybrid results. Code snippets and match_text fields larger than this value are stored in the payload cache and replaced with snippet_preview + snippet_cache_handle. Use snippet_lines=0 for list-first mode to avoid large snippet payloads. Only present for fts/hybrid search modes when payload cache is active."
+            rows_capped:
+              type: integer
+              description: "AC4 (Bug #1202): Number of result rows where at least one field (code_snippet or match_text) exceeded preview_size_chars and was truncated. 0 means all fields fit within the threshold. Only present for fts/hybrid search modes when payload cache is active."
     error:
       type: string
       description: Error message (present when success=False)

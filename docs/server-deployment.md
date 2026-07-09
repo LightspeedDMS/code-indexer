@@ -23,17 +23,16 @@ CIDX server provides:
 - Linux/macOS/Windows (Linux recommended for production)
 
 ### Network Requirements
-- Port 8000 for HTTP API (configurable)
-- Port 8383 for MCP protocol (configurable)
-- Outbound HTTPS for VoyageAI API (embedding generation)
+- Port 8090 for HTTP API and MCP protocol (configurable; MCP is served on the same port as the HTTP API)
+- Outbound HTTPS for VoyageAI API or Cohere API (embedding generation)
 
 ## Installation
 
 ### Option 1: pipx (Recommended)
 
 ```bash
-# Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
 
 # Verify installation
 cidx --version
@@ -46,8 +45,8 @@ cidx --version
 python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
-# Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
 
 # Verify installation
 cidx --version
@@ -66,42 +65,44 @@ VOYAGE_API_KEY=your-voyage-api-key-here
 # Server Data Directory
 CIDX_SERVER_DATA_DIR=/var/lib/cidx-server  # Default: ~/.cidx-server
 
-# Server Ports
-CIDX_SERVER_PORT=8000     # HTTP API port
-CIDX_MCP_PORT=8383        # MCP protocol port
+# Server Port (HTTP API and MCP protocol share the same port)
+CIDX_SERVER_PORT=8090     # Default: 8090
 
-# Logging
+# Logging level
 CIDX_LOG_LEVEL=INFO       # DEBUG, INFO, WARNING, ERROR
-CIDX_LOG_FILE=/var/log/cidx-server/server.log
+# Note: server application logs are stored in ~/.cidx-server/logs.db (SQLite), not a log file.
 ```
 
 ### Configuration File
 
-Alternative to environment variables, create `~/.cidx-server/config.json`:
+Alternative to environment variables, create `~/.cidx-server/config.json`.
+
+`config.json` is for bootstrap-only settings that must be available before the database is
+accessible. All runtime settings (cache TTL, embedding config, etc.) belong in the database
+and are managed via the Web UI Config Screen.
+
+Bootstrap keys supported in `config.json`:
 
 ```json
 {
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8000,
-    "data_dir": "/var/lib/cidx-server",
-    "log_level": "INFO"
-  },
-  "cache": {
-    "hnsw_index_ttl_seconds": 600,
-    "enable_auto_cleanup": true,
-    "cleanup_interval_seconds": 60
-  },
-  "embedding": {
-    "provider": "voyageai",
-    "model": "voyage-3",
-    "api_key_env": "VOYAGE_API_KEY"
-  },
-  "auth": {
-    "enabled": true,
-    "jwt_secret_key": "generate-with-openssl-rand-hex-32",
-    "token_expiry_minutes": 10
-  }
+  "host": "0.0.0.0",
+  "port": 8090,
+  "server_dir": "/var/lib/cidx-server",
+  "log_level": "INFO",
+  "storage_mode": "sqlite"
+}
+```
+
+For PostgreSQL cluster mode, add:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8090,
+  "server_dir": "/var/lib/cidx-server",
+  "log_level": "INFO",
+  "storage_mode": "postgres",
+  "postgres_dsn": "postgresql://user:pass@db-host:5432/cidx"
 }
 ```
 
@@ -113,15 +114,17 @@ The server includes automatic HNSW index caching for massive query performance i
 
 **Without Cache (CLI Mode)**:
 - Each query loads HNSW index from disk
-- Typical query time: 200-400ms (with OS page cache)
+- Typical HNSW lookup time: 200-400ms (with OS page cache)
 - Suitable for individual developers, single-user workflows
 
 **With Cache (Server Mode)**:
 - HNSW indexes cached in memory after first query
-- Cold query (cache miss): ~277ms
-- Warm query (cache hit): <1ms
-- Speedup: 100-1800x for repeated queries
+- Cold HNSW lookup (cache miss): ~277ms
+- Warm HNSW lookup (cache hit): <1ms
+- HNSW lookup speedup: 100-1800x for repeated queries
 - Suitable for multi-user teams, high-query workloads
+
+> **Note**: the numbers above measure the **in-process HNSW index lookup component only** (Story #526 cache benchmark). End-to-end query latency also includes the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) on every query, plus HTTP and auth overhead in server / cluster modes. Treat these figures as cache-effectiveness signal, not user-observed query time.
 
 ### Cache Configuration Options
 
@@ -132,7 +135,7 @@ Configure how long HNSW indexes remain in cache via the Web UI Configuration Scr
 ```json
 {
   "cache": {
-    "hnsw_index_ttl_seconds": 600
+    "ttl_minutes": 10.0
   }
 }
 ```
@@ -181,26 +184,24 @@ Automatic background thread removes expired cache entries:
 Query real-time cache statistics:
 
 ```bash
-curl http://localhost:8000/cache/stats
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
 ```
 
 Response:
 ```json
 {
-  "total_hits": 1234,
-  "total_misses": 56,
+  "hit_count": 1234,
+  "miss_count": 56,
   "hit_ratio": 0.957,
-  "active_entries": 12,
-  "per_repository": {
+  "cached_repositories": 12,
+  "total_memory_mb": 480.5,
+  "eviction_count": 3,
+  "per_repository_stats": {
     "/path/to/repo1": {
-      "hits": 500,
-      "misses": 10,
-      "last_access": "2025-11-30T12:34:56Z"
-    },
-    "/path/to/repo2": {
-      "hits": 734,
-      "misses": 46,
-      "last_access": "2025-11-30T12:35:12Z"
+      "access_count": 510,
+      "last_accessed": "2025-11-30T12:34:56Z",
+      "created_at": "2025-11-30T10:00:00Z",
+      "ttl_remaining_seconds": 423
     }
   }
 }
@@ -209,18 +210,20 @@ Response:
 #### Key Metrics
 
 - **hit_ratio**: Percentage of queries served from cache (target: >80%)
-- **total_hits**: Number of cache hits (warm queries)
-- **total_misses**: Number of cache misses (cold queries)
-- **active_entries**: Number of repositories currently cached
+- **hit_count**: Number of cache hits (warm queries)
+- **miss_count**: Number of cache misses (cold queries)
+- **cached_repositories**: Number of repositories currently cached
 
 #### Performance Expectations
 
-| Scenario | Response Time | Cache Status | Notes |
-|----------|---------------|--------------|-------|
+| Scenario | HNSW lookup | Cache Status | Notes |
+|----------|-------------|--------------|-------|
 | First query to repository | 200-400ms | Miss | Loads from disk, benefits from OS cache |
 | Subsequent queries (within TTL) | <1ms | Hit | Served from memory cache |
 | Query after TTL expiration | 200-400ms | Miss | Cache rebuild required |
 | Concurrent queries to same repo | <1ms | Hit | Shared cache across users |
+
+HNSW lookup is the in-process index-search component of a query. End-to-end query response time is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the table above isolates the cache effect, not user-observed query speed.
 
 ### Troubleshooting Cache Issues
 
@@ -236,8 +239,8 @@ Response:
 PID=$(pgrep -f "code_indexer.server.app")
 
 # 3. Check cache stats endpoint
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/cache/stats
-# If "cached_repositories" is always 0, cache not working
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
+# If "cached_repositories" is always 0, cache is not working
 ```
 
 **Solution**:
@@ -264,7 +267,7 @@ sudo systemctl restart cidx-server
 **Diagnosis**:
 ```bash
 # Check number of active cache entries
-curl http://localhost:8000/cache/stats | jq '.active_entries'
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.cached_repositories'
 
 # Monitor memory usage
 ps aux | grep cidx-server
@@ -286,7 +289,7 @@ ps aux | grep cidx-server
 
 **Diagnosis**:
 ```bash
-curl http://localhost:8000/cache/stats | jq '.hit_ratio'
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.hit_ratio'
 ```
 
 **Possible Causes**:
@@ -405,7 +408,7 @@ Recommended production setup:
 ```bash
 # Run server behind reverse proxy (nginx/haproxy)
 # Terminate SSL at proxy level
-# Forward to CIDX server on localhost:8000
+# Forward to CIDX server on localhost:8090
 
 # Example nginx config
 server {
@@ -416,9 +419,11 @@ server {
     ssl_certificate_key /etc/ssl/private/cidx.key;
 
     location / {
-        proxy_pass http://localhost:8000;
+        proxy_pass http://localhost:8090;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -473,42 +478,50 @@ For large deployments:
 ### Health Check Endpoint
 
 ```bash
-# Check server health
-curl http://localhost:8000/health
+# Check server health (authentication required)
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/health
+```
 
-# Expected response
+Example response:
+```json
 {
   "status": "healthy",
-  "version": "8.13.0",
-  "cache": {
-    "enabled": true,
-    "active_entries": 12
-  }
+  "message": "Server is running normally",
+  "uptime": 3600.5,
+  "active_jobs": 2,
+  "job_queue": {
+    "active_jobs": 2,
+    "pending_jobs": 0,
+    "failed_jobs": 0
+  },
+  "started_at": "2025-11-30T10:00:00Z",
+  "maintenance_mode": false,
+  "version": "10.141.0"
 }
 ```
 
 ### Log Analysis
 
-Monitor server logs for issues:
+Server application logs are stored in `~/.cidx-server/logs.db` (SQLite). Monitor logs with:
 
 ```bash
-# View recent logs
-sudo tail -f /var/log/cidx-server/server.log
+# View recent error logs
+sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, level, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"
 
 # Search for cache-related logs
-sudo grep -i "cache" /var/log/cidx-server/server.log
+sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, message FROM logs WHERE message LIKE '%cache%' ORDER BY id DESC LIMIT 50"
 
-# Monitor error rate
-sudo grep -i "error" /var/log/cidx-server/error.log | wc -l
+# Count recent errors
+sqlite3 ~/.cidx-server/logs.db "SELECT COUNT(*) FROM logs WHERE level='ERROR'"
 ```
 
 ### Backup and Recovery
 
 Critical data to backup:
 
-1. **Repository indexes**: `/var/lib/cidx-server/repositories/`
-2. **Configuration**: `/etc/cidx-server/config.env`, `~/.cidx-server/config.json`
-3. **User data**: `/var/lib/cidx-server/users/`
+1. **Repository indexes**: `~/.cidx-server/golden-repos/`
+2. **Configuration**: `~/.cidx-server/config.json`
+3. **Database**: `~/.cidx-server/cidx_server.db` (users, settings, job history)
 
 Cache data (HNSW indexes) can be rebuilt, no backup needed.
 
@@ -532,7 +545,7 @@ sudo journalctl -u cidx-server -n 50
 
 ```bash
 # Check if cache is working
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # If hit_ratio is low:
 # 1. Increase TTL
@@ -552,7 +565,7 @@ ps aux | grep cidx-server
 # 3. Restart server to clear cache
 ```
 
-## Post-Generation Verification Pass (Story #724)
+## Post-Generation Verification Pass
 
 The cidx-server supports an optional post-generation verification pass that
 re-reads generated dependency-map artifacts and repo descriptions against
@@ -594,7 +607,7 @@ both with and without verification to confirm the corrections justify the cost.
   deployed code; the feature only corrects the generated markdown artifacts.
   Code-level bugs are filed as GitHub issues per the existing bug-report flow.
 
-## cidx-meta backup to remote git (Story #926)
+## cidx-meta backup to remote git
 
 The cidx-meta directory holds description files and metadata for every registered
 golden repository.  You can configure the server to keep a continuous git backup

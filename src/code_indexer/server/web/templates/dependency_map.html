@@ -294,6 +294,182 @@
     }
 })();
 </script>
+<!-- Story #1062: Lifecycle Backfill Journal Panel -->
+<!-- Starts display:none; JS shows it when X-Backfill-Active=1; hides after server-side grace -->
+<!-- Already inside the outer is_admin block (admin-gated); no nested conditional needed -->
+<article id="lifecycle-backfill-panel" style="display: none; margin-top: 1rem;">
+    <header>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h3 style="margin: 0;">Lifecycle Backfill</h3>
+            <span id="lifecycle-backfill-status"
+                  style="font-size: 0.85rem; color: var(--pico-muted-color);">
+            </span>
+        </div>
+    </header>
+    <div id="lifecycle-backfill-scroll"
+         style="max-height: 300px; overflow-y: auto; padding: 0.5rem;
+                font-family: monospace; font-size: 0.8rem; line-height: 1.5;
+                background: var(--pico-card-background-color); border-radius: 4px;">
+        <div id="lifecycle-backfill-entries"
+             hx-get="/admin/partials/lifecycle-backfill-journal?offset=0"
+             hx-trigger="load, every 3s"
+             hx-swap="beforeend">
+        </div>
+    </div>
+</article>
+
+<!-- Story #1062: Description Backfill Journal Panel -->
+<article id="description-backfill-panel" style="display: none; margin-top: 1rem;">
+    <header>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h3 style="margin: 0;">Description Backfill</h3>
+            <span id="description-backfill-status"
+                  style="font-size: 0.85rem; color: var(--pico-muted-color);">
+            </span>
+        </div>
+    </header>
+    <div id="description-backfill-scroll"
+         style="max-height: 300px; overflow-y: auto; padding: 0.5rem;
+                font-family: monospace; font-size: 0.8rem; line-height: 1.5;
+                background: var(--pico-card-background-color); border-radius: 4px;">
+        <div id="description-backfill-entries"
+             hx-get="/admin/partials/description-backfill-journal?offset=0"
+             hx-trigger="load, every 3s"
+             hx-swap="beforeend">
+        </div>
+    </div>
+</article>
+
+<script>
+(function() {
+    // Guard: only register once
+    if (window._backfillJournalListenerRegistered) return;
+    window._backfillJournalListenerRegistered = true;
+
+    var SCROLL_THRESHOLD = 50;
+
+    // Per-panel state: tracks scroll position before HTMX swap
+    var wasNearBottom = { lifecycle: true, description: true };
+
+    function getScrollContainer(prefix) {
+        return document.getElementById(prefix + '-backfill-scroll');
+    }
+
+    function isNearBottom(prefix) {
+        var sc = getScrollContainer(prefix);
+        if (!sc) return true;
+        return sc.scrollHeight - sc.scrollTop - sc.clientHeight < SCROLL_THRESHOLD;
+    }
+
+    function showPanel(prefix) {
+        var panel = document.getElementById(prefix + '-backfill-panel');
+        if (panel) panel.style.display = '';
+    }
+
+    function hidePanel(prefix) {
+        var panel = document.getElementById(prefix + '-backfill-panel');
+        if (panel) panel.style.display = 'none';
+    }
+
+    function updateStatusText(prefix, total, done, failed) {
+        var el = document.getElementById(prefix + '-backfill-status');
+        if (!el) return;
+        if (parseInt(total, 10) > 0) {
+            el.textContent = done + '/' + total + ' done' + (parseInt(failed, 10) > 0 ? ', ' + failed + ' failed' : '');
+        } else {
+            el.textContent = '';
+        }
+    }
+
+    function stopPolling(entriesId) {
+        var el = document.getElementById(entriesId);
+        if (el && el.hasAttribute('hx-trigger')) {
+            el.removeAttribute('hx-trigger');
+            htmx.process(el);
+        }
+    }
+
+    // Capture scroll position BEFORE HTMX swap to avoid race condition
+    document.body.addEventListener('htmx:beforeSwap', function(evt) {
+        var id = evt.detail.target && evt.detail.target.id;
+        if (id === 'lifecycle-backfill-entries') {
+            wasNearBottom.lifecycle = isNearBottom('lifecycle');
+        } else if (id === 'description-backfill-entries') {
+            wasNearBottom.description = isNearBottom('description');
+        }
+    });
+
+    // Auto-scroll when new entries arrive
+    function observeEntries(prefix) {
+        var container = document.getElementById(prefix + '-backfill-entries');
+        if (!container) return;
+        var observer = new MutationObserver(function() {
+            if (wasNearBottom[prefix]) {
+                var sc = getScrollContainer(prefix);
+                if (sc) sc.scrollTop = sc.scrollHeight;
+            }
+        });
+        observer.observe(container, { childList: true, subtree: true });
+    }
+    observeEntries('lifecycle');
+    observeEntries('description');
+
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        var path = evt.detail.pathInfo && evt.detail.pathInfo.requestPath;
+        if (!path) return;
+
+        var prefix = null;
+        if (path.indexOf('lifecycle-backfill-journal') !== -1) {
+            prefix = 'lifecycle';
+        } else if (path.indexOf('description-backfill-journal') !== -1) {
+            prefix = 'description';
+        }
+        if (!prefix) return;
+
+        var xhr = evt.detail.xhr;
+        var newOffset = xhr.getResponseHeader('X-Journal-Offset');
+        var isActive = xhr.getResponseHeader('X-Backfill-Active');
+        var total = xhr.getResponseHeader('X-Backfill-Total') || '0';
+        var done = xhr.getResponseHeader('X-Backfill-Done') || '0';
+        var failed = xhr.getResponseHeader('X-Backfill-Failed') || '0';
+
+        // Update offset for next poll
+        if (newOffset !== null) {
+            var entriesEl = document.getElementById(prefix + '-backfill-entries');
+            if (entriesEl) {
+                entriesEl.setAttribute('hx-get',
+                    '/admin/partials/' + prefix + '-backfill-journal?offset=' + newOffset);
+                htmx.process(entriesEl);
+            }
+        }
+
+        // Update status text
+        updateStatusText(prefix, total, done, failed);
+
+        var entriesContainer = document.getElementById(prefix + '-backfill-entries');
+        var hasEntries = entriesContainer && entriesContainer.children.length > 0;
+
+        // X-Backfill-Active drives visibility — server-side 30s grace means
+        // we NEVER use client setTimeout for hide; we just trust the server header.
+        if (isActive === '1') {
+            // Backfill active (running or within grace window) — show if has content
+            if (hasEntries) {
+                showPanel(prefix);
+            }
+        } else {
+            // Server reports inactive (past grace, or never started)
+            if (hasEntries) {
+                // Final render: show briefly, then stop polling and hide
+                showPanel(prefix);
+                stopPolling(prefix + '-backfill-entries');
+            } else {
+                hidePanel(prefix);
+                stopPolling(prefix + '-backfill-entries');
+            }
+        }
+    });
+})();
+</script>
 {% endif %}
 
 <!-- AC1: Repository Coverage section - HTMX lazy loads partial for all authenticated users -->

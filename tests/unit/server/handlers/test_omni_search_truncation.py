@@ -101,7 +101,9 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
+                handlers,
+                "_expand_wildcard_patterns",
+                side_effect=lambda x, u, **kwargs: x,
             ),
         ):
             mock_service = Mock()
@@ -113,7 +115,7 @@ class TestOmniSearchAppliesTruncation:
                 errors=None,
             )
             mock_service.search = Mock(return_value=mock_response)
-            mock_service_class.return_value = mock_service
+            mock_service_class.get_instance.return_value = mock_service
 
             params = {
                 "repository_alias": ["repo-alpha-global", "repo-beta-global"],
@@ -159,7 +161,9 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_fts_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
+                handlers,
+                "_expand_wildcard_patterns",
+                side_effect=lambda x, u, **kwargs: x,
             ),
         ):
             mock_service = Mock()
@@ -171,7 +175,7 @@ class TestOmniSearchAppliesTruncation:
                 errors=None,
             )
             mock_service.search = Mock(return_value=mock_response)
-            mock_service_class.return_value = mock_service
+            mock_service_class.get_instance.return_value = mock_service
 
             params = {
                 "repository_alias": ["repo-alpha-global"],

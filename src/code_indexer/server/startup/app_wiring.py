@@ -54,6 +54,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     secret_key = services["secret_key"]
     # SCIPAuditRepository with backend support (may be None on legacy startup)
     scip_audit_repository = services.get("scip_audit_repository")
+    # BackendRegistry (may be None in solo/SQLite mode). Its .connection_pool
+    # is the shared PG pool -- already created by initialize_services() (PG
+    # migrations + StorageFactory.create_backends() both run there, well
+    # ahead of this function), so it is available here at app-wiring time.
+    backend_registry = services.get("backend_registry")
 
     # Create FastAPI app with metadata and lifespan
     app = FastAPI(
@@ -98,10 +103,10 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
 
     app.add_middleware(CorrelationBridgeMiddleware)
 
-    # C7 request admission control / backpressure. Added last so it is the
-    # OUTERMOST middleware -- it sheds excess load with 429 + Retry-After before
-    # any downstream processing. Opt-in; only wired when enabled so there is
-    # zero overhead by default.
+    # Request admission control / backpressure. Added last so it is the OUTERMOST
+    # middleware -- it sheds excess load with 429 + Retry-After before any
+    # downstream processing. Opt-in; only wired when enabled so there is zero
+    # overhead by default.
     _admission_cfg = server_config.admission_control_config
     if _admission_cfg is not None and (
         _admission_cfg.enabled or _admission_cfg.per_consumer_enabled
@@ -129,43 +134,31 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
             if _admission_cfg.per_consumer_enabled
             else None
         )
+        # Cluster-shared enforcement: attach the PG pool (when present) so
+        # ALL workers/nodes consume from the SAME row in
+        # consumer_rate_limit_state instead of independent per-process
+        # buckets. Solo/SQLite mode has no pool -- per-process is correct
+        # there (there is only one process).
+        if (
+            _rate_limiter is not None
+            and backend_registry is not None
+            and backend_registry.connection_pool is not None
+        ):
+            _rate_limiter.set_connection_pool(backend_registry.connection_pool)
         app.add_middleware(
             AdmissionControlMiddleware,
             controller=_controller,
             rate_limiter=_rate_limiter,
         )
         logging.getLogger(__name__).info(
-            "C7 admission control ENABLED: global_cap=%s (max_inflight=%d/worker, "
-            "retry_after=%ds), per_consumer=%s (burst=%d, %.1f req/s)",
+            "Admission control ENABLED: global_cap=%s (max_inflight=%d/worker), "
+            "per_consumer=%s (burst=%d, %.1f req/s)",
             _admission_cfg.enabled,
             _admission_cfg.max_inflight_requests,
-            _admission_cfg.retry_after_seconds,
             _admission_cfg.per_consumer_enabled,
             _admission_cfg.per_consumer_burst,
             _admission_cfg.per_consumer_refill_per_second,
         )
-
-    # In-process query-embedding (vector) cache (fork interim). Configured once
-    # at startup; a no-op singleton when disabled (the default). On repetitive
-    # workloads (e.g. a support KB agent) a cache hit skips the VoyageAI call --
-    # the shared external bottleneck horizontal pod scaling cannot relieve.
-    _qvc_cfg = server_config.query_vector_cache_config
-    if _qvc_cfg is not None:
-        from code_indexer.server.cache.query_vector_cache import (
-            configure_query_vector_cache,
-        )
-
-        configure_query_vector_cache(
-            enabled=_qvc_cfg.enabled,
-            max_entries=_qvc_cfg.max_entries,
-            ttl_seconds=_qvc_cfg.ttl_seconds,
-        )
-        if _qvc_cfg.enabled:
-            logging.getLogger(__name__).info(
-                "Query-vector cache ENABLED: max_entries=%d, ttl=%.0fs",
-                _qvc_cfg.max_entries,
-                _qvc_cfg.ttl_seconds,
-            )
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)
@@ -196,9 +189,10 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     dependencies.user_manager = user_manager
     dependencies.oauth_manager = oauth_manager
     dependencies.mcp_credential_manager = mcp_credential_manager
+    # Bug #1144: Wire API key bearer authentication
+    from code_indexer.server.auth.api_key_manager import ApiKeyManager as _ApiKeyManager
 
-    # Seed initial admin user
-    user_manager.seed_initial_admin()
+    dependencies.api_key_manager = _ApiKeyManager(user_manager=user_manager)
 
     # AC2/AC4: Store ALL closure-captured variables on app.state so extracted
     # router modules can access them via request.app.state.XXX without closures.

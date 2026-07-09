@@ -38,6 +38,7 @@ def _key_data(
     name: str,
     private_key: str = "PRIVATE_KEY_CONTENT",
     public_key: str = "ssh-ed25519 AAAA comment",
+    hosts: list | None = None,
 ) -> dict:
     return {
         "name": name,
@@ -45,7 +46,7 @@ def _key_data(
         "public_key": public_key,
         "fingerprint": f"SHA256:fake_{name}",
         "key_type": "ed25519",
-        "hosts": [],
+        "hosts": list(hosts) if hosts else [],
     }
 
 
@@ -231,6 +232,138 @@ class TestManifestTracking:
 
         assert result["errors"] == []
         assert "new_key" in result["written"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: ~/.ssh/config Host-mapping materialization (cluster auth fix)
+#
+# Root cause (staging): sync() materialized key FILES on every node but never
+# wrote the ~/.ssh/config Host->IdentityFile mapping, so worker-leader nodes
+# could not select cidx_github_key for `ssh git@github.com` -> the cidx-meta
+# backup push/fetch failed with Permission denied (publickey).
+# ---------------------------------------------------------------------------
+
+
+class TestSyncWritesSshConfig:
+    @staticmethod
+    def _config_path(ssh_dir: Path) -> Path:
+        return ssh_dir / "config"
+
+    def test_host_block_written_for_assigned_host(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+
+        result = svc.sync()
+
+        config = self._config_path(tmp_path).read_text()
+        assert "Host github.com" in config
+        assert "HostName github.com" in config
+        assert f"IdentityFile {tmp_path / 'cidx_github_key'}" in config
+        assert "IdentitiesOnly yes" in config
+        assert result["errors"] == []
+
+    def test_identityfile_points_at_locally_synced_key(self, tmp_path: Path) -> None:
+        # IdentityFile MUST reference the path THIS node wrote the key to,
+        # never the originating node's private_path (which differs per node).
+        key = _key_data("cidx_github_key", hosts=["github.com"])
+        key["private_path"] = "/some/other/node/home/.ssh/cidx_github_key"
+        backend = _make_backend([key])
+        svc = _make_service(backend, tmp_path)
+
+        svc.sync()
+
+        config = self._config_path(tmp_path).read_text()
+        assert f"IdentityFile {tmp_path / 'cidx_github_key'}" in config
+        assert "/some/other/node/home/.ssh/cidx_github_key" not in config
+
+    def test_multiple_hosts_each_get_block(self, tmp_path: Path) -> None:
+        backend = _make_backend(
+            [_key_data("multi", hosts=["github.com", "gitlab.com"])]
+        )
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+
+        config = self._config_path(tmp_path).read_text()
+        assert "Host github.com" in config
+        assert "Host gitlab.com" in config
+
+    def test_no_hosts_writes_no_host_block(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("hostless", hosts=[])])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+
+        config_path = self._config_path(tmp_path)
+        # No Host block should be emitted; if a config exists it must be marker-only.
+        if config_path.exists():
+            assert "Host " not in config_path.read_text()
+
+    def test_user_config_section_preserved(self, tmp_path: Path) -> None:
+        config_path = self._config_path(tmp_path)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "Host my-personal-server\n  HostName 10.0.0.5\n  User myuser\n"
+        )
+
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+
+        config = config_path.read_text()
+        assert "Host my-personal-server" in config
+        assert "HostName 10.0.0.5" in config
+        assert "Host github.com" in config
+
+    def test_config_permissions_are_600(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+
+        mode = stat.S_IMODE(os.stat(self._config_path(tmp_path)).st_mode)
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+
+    def test_sync_idempotent_on_config(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+        first = self._config_path(tmp_path).read_text()
+        # Key files now exist; second sync is a no-op for files but must
+        # still keep the config block intact (and not duplicate it).
+        svc.sync()
+        second = self._config_path(tmp_path).read_text()
+
+        assert second.count("Host github.com") == 1
+        assert first == second
+
+    def test_config_write_failure_surfaced_in_errors(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+
+        # Force the config write to fail; key-file materialization already
+        # succeeded, so the failure must be captured, not raised.
+        from unittest.mock import patch
+
+        with patch.object(
+            svc._config_manager,
+            "write_config",
+            side_effect=PermissionError("read-only config"),
+        ):
+            result = svc.sync()
+
+        assert any(e.startswith("ssh-config:") for e in result["errors"])
+        assert "read-only config" in " ".join(result["errors"])
+        # Key files were still written despite the config failure.
+        assert (tmp_path / "cidx_github_key").exists()
+
+    def test_config_block_removed_when_host_unassigned(self, tmp_path: Path) -> None:
+        backend = _make_backend([_key_data("cidx_github_key", hosts=["github.com"])])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+        assert "Host github.com" in self._config_path(tmp_path).read_text()
+
+        # Host removed from the key in the backend -> block must disappear.
+        backend.list_keys.return_value = [_key_data("cidx_github_key", hosts=[])]
+        svc.sync()
+        assert "Host github.com" not in self._config_path(tmp_path).read_text()
 
 
 # ---------------------------------------------------------------------------

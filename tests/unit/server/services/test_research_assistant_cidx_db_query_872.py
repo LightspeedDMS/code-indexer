@@ -16,6 +16,8 @@ import shutil
 import pytest
 from unittest.mock import patch, MagicMock
 
+from tests.utils.env_assertions import assert_env_present
+
 BACKGROUND_THREAD_WAIT_SECONDS = 5.0
 
 
@@ -124,13 +126,21 @@ def test_cidx_server_data_dir_and_repo_root_in_subprocess_env(research_service):
     env = envs[0]
     cidx_keys = [k for k in env if "CIDX" in k]
 
-    assert "CIDX_SERVER_DATA_DIR" in env, (
-        "Story #872: CIDX_SERVER_DATA_DIR must be set in subprocess env "
-        "so cidx-db-query.sh can locate config.json and the SQLite database. "
-        f"Got CIDX env keys: {cidx_keys}"
+    assert_env_present(
+        env,
+        "CIDX_SERVER_DATA_DIR",
+        msg=(
+            "Story #872: CIDX_SERVER_DATA_DIR must be set in subprocess env "
+            "so cidx-db-query.sh can locate config.json and the SQLite database. "
+            f"Got CIDX env keys: {cidx_keys}"
+        ),
     )
-    assert "CIDX_REPO_ROOT" in env, (
-        "Story #872: CIDX_REPO_ROOT must be set in subprocess env "
-        "so cidx-db-query.sh can be located by its absolute path. "
-        f"Got CIDX env keys: {cidx_keys}"
+    assert_env_present(
+        env,
+        "CIDX_REPO_ROOT",
+        msg=(
+            "Story #872: CIDX_REPO_ROOT must be set in subprocess env "
+            "so cidx-db-query.sh can be located by its absolute path. "
+            f"Got CIDX env keys: {cidx_keys}"
+        ),
     )

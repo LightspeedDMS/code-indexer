@@ -171,7 +171,8 @@ class DatabaseSchema:
             description TEXT,
             created_at TEXT,
             imported_at TEXT,
-            is_imported BOOLEAN DEFAULT FALSE
+            is_imported BOOLEAN DEFAULT FALSE,
+            private_key TEXT
         )
     """
 
@@ -310,6 +311,15 @@ class DatabaseSchema:
     CREATE_IDX_USER_API_KEYS_USERNAME = """
         CREATE INDEX IF NOT EXISTS idx_user_api_keys_username
         ON user_api_keys(username)
+    """
+
+    # Bug #1144: partial unique index on key_sha256 for O(1) bearer-auth lookup.
+    # WHERE clause excludes NULL rows (legacy keys without sha256) so the index
+    # does not need covering NULL values and stays lean.
+    CREATE_IDX_USER_API_KEYS_SHA256 = """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_api_keys_sha256
+        ON user_api_keys(key_sha256)
+        WHERE key_sha256 IS NOT NULL
     """
 
     # user_mcp_credentials: looked up by username (listing) and client_id (auth)
@@ -589,6 +599,100 @@ class DatabaseSchema:
         ON dependency_latency_samples(dependency_name, timestamp)
     """
 
+    # Issue #1159: Search event log table
+    CREATE_SEARCH_EVENT_LOG_TABLE = """
+        CREATE TABLE IF NOT EXISTS search_event_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp           REAL NOT NULL,
+            username            TEXT NOT NULL,
+            repo_alias          TEXT,
+            search_type         TEXT NOT NULL,
+            query_text          TEXT NOT NULL,
+            voyage_cache_hit    INTEGER,
+            voyage_cache_mode   TEXT,
+            voyage_latency_ms   INTEGER,
+            cohere_cache_hit    INTEGER,
+            cohere_cache_mode   TEXT,
+            cohere_latency_ms   INTEGER,
+            total_latency_ms    INTEGER NOT NULL,
+            result_count        INTEGER NOT NULL,
+            node_id             TEXT NOT NULL,
+            correlation_id      TEXT
+        )
+    """
+
+    CREATE_IDX_SEL_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_sel_timestamp
+            ON search_event_log (timestamp)
+    """
+
+    CREATE_IDX_SEL_USER = """
+        CREATE INDEX IF NOT EXISTS idx_sel_user
+            ON search_event_log (username)
+    """
+
+    # Issue #1160: Query analytics exports table
+    CREATE_QUERY_ANALYTICS_EXPORTS_TABLE = """
+        CREATE TABLE IF NOT EXISTS query_analytics_exports (
+            id              TEXT PRIMARY KEY,
+            initiated_by    TEXT NOT NULL,
+            created_at      REAL NOT NULL,
+            status          TEXT NOT NULL,
+            filter_summary  TEXT NOT NULL,
+            file_path       TEXT,
+            file_size_bytes INTEGER,
+            row_count       INTEGER,
+            error_message   TEXT,
+            retention_until REAL
+        )
+    """
+
+    CREATE_IDX_QAE_CREATED_AT = """
+        CREATE INDEX IF NOT EXISTS idx_qae_created_at
+            ON query_analytics_exports (created_at)
+    """
+
+    CREATE_IDX_QAE_INITIATED_BY = """
+        CREATE INDEX IF NOT EXISTS idx_qae_initiated_by
+            ON query_analytics_exports (initiated_by)
+    """
+
+    # Story #1293 (Epic #1288): Query-embedding decision event recording.
+    # Durable, phantom-free source of truth for every query-embedding decision
+    # on every server query path. correlation_id is NOT NULL (application
+    # layer guarantees a UUID fallback -- see search_embed_event_emit.py).
+    CREATE_SEARCH_EMBED_EVENT_TABLE = """
+        CREATE TABLE IF NOT EXISTS search_embed_event (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       REAL NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            node_id         TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            model           TEXT,
+            config_digest   TEXT,
+            cache_mode      TEXT,
+            outcome         TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            live_batch_id   TEXT,
+            embed_key       TEXT,
+            long_key        INTEGER,
+            latency_ms      INTEGER,
+            shadow_cosine   REAL,
+            audit_sampled   INTEGER,
+            audit_cosine    REAL
+        )
+    """
+
+    CREATE_IDX_SEE_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_see_timestamp
+            ON search_embed_event (timestamp)
+    """
+
+    CREATE_IDX_SEE_CORRELATION_ID = """
+        CREATE INDEX IF NOT EXISTS idx_see_correlation_id
+            ON search_embed_event (correlation_id)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -611,7 +715,17 @@ class DatabaseSchema:
 
         Creates parent directories with secure permissions (0700) if they don't exist.
         Enables WAL mode for concurrent reads during writes.
+
+        Bug #1178: A cross-process filelock serializes concurrent first-boot
+        bootstrap across all uvicorn worker processes.  The lock file lives at
+        ``{db_path}.bootstrap.lock`` next to the database.  Because every DDL
+        statement uses ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT
+        EXISTS`` and every migration helper is idempotent, workers that acquire
+        the lock after the first worker has already completed bootstrap simply
+        run a series of no-op statements and return cleanly.
         """
+        import filelock  # already a project dependency (ssh_key_manager.py)
+
         db_path = Path(self.db_path)
 
         # Create parent directory with secure permissions
@@ -622,6 +736,23 @@ class DatabaseSchema:
             # Ensure existing directory has secure permissions
             os.chmod(parent_dir, 0o700)
 
+        lock_path = str(db_path) + ".bootstrap.lock"
+        # is_singleton=True: one FileLock instance per path per process.
+        # This makes the lock reentrant — if service_init.py already holds the
+        # outer bootstrap lock at the same path, this inner acquire nests cleanly
+        # without deadlock (the lock object is the same instance, so the acquire
+        # counter simply increments).  Cross-process exclusion is preserved.
+        with filelock.FileLock(lock_path, timeout=120, is_singleton=True):
+            self._initialize_database_locked(db_path)
+
+    def _initialize_database_locked(self, db_path: Path) -> None:
+        """
+        Inner bootstrap body executed while holding the cross-process file lock.
+
+        Separated from initialize_database() so the lock acquisition and the
+        actual DDL/migration work are in distinct scopes, making it easier to
+        unit-test each independently.
+        """
         # Create database and tables
         conn = sqlite3.connect(str(db_path))
         try:
@@ -710,6 +841,18 @@ class DatabaseSchema:
             conn.execute(self.CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP)
             # Story #719: Hide Repositories from Auto-Discovery View
             conn.execute(self.CREATE_HIDDEN_DISCOVERY_REPOS_TABLE)
+            # Issue #1159: Search event log
+            conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
+            conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_SEL_USER)
+            # Issue #1160: Query analytics exports
+            conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
+            conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
+            conn.execute(self.CREATE_IDX_QAE_INITIATED_BY)
+            # Story #1293: Query-embedding decision event recording
+            conn.execute(self.CREATE_SEARCH_EMBED_EVENT_TABLE)
+            conn.execute(self.CREATE_IDX_SEE_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_SEE_CORRELATION_ID)
 
             conn.commit()
 
@@ -751,6 +894,15 @@ class DatabaseSchema:
             # Story #876: executing_node + claimed_at columns and index
             # (mirrors PostgreSQL migrations 001 lines 150-151 and 005).
             self._migrate_add_executing_node_claimed_at(conn)
+            # Story #1032 AC12: actor_username column for audit trail
+            # (mirrors PostgreSQL migration 026).
+            self._migrate_background_jobs_actor_username(conn)
+            # Bug #1072 Chunk 1: private_key column for cluster-aware SSH key storage
+            # (mirrors PostgreSQL migration 027).
+            self._migrate_ssh_keys_private_key(conn)
+            # Bug #1144: SHA-256 lookup column for API key bearer authentication
+            # (mirrors PostgreSQL migration 029).
+            self._migrate_user_api_keys_sha256(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -784,6 +936,78 @@ class DatabaseSchema:
             logger.info(
                 f"Migrated background_jobs schema for phase progress: added {migrations_applied}"
             )
+
+    def _migrate_background_jobs_actor_username(self, conn: sqlite3.Connection) -> None:
+        """
+        Add actor_username column to background_jobs table (Story #1032 AC12).
+
+        Tracks WHO actually triggered a background job (the actor) separately from
+        WHOSE resource is being operated on (username). Required for admin deactivations
+        of other users' repos, reaper auto-deactivation, and audit trail integrity.
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: existing rows get NULL (treated as "actor unknown / same as owner").
+        """
+        cursor = conn.execute("PRAGMA table_info(background_jobs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "actor_username" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN actor_username TEXT")
+            conn.commit()
+            logger.info("Migrated background_jobs schema: added actor_username column")
+
+    def _migrate_ssh_keys_private_key(self, conn: sqlite3.Connection) -> None:
+        """
+        Add private_key column to ssh_keys table (Bug #1072 Chunk 1).
+
+        Stores encrypted private key content for cluster-aware SSH key distribution.
+        Existing rows get NULL (file-path-only mode — no stored content).
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: nullable column, no NOT NULL constraint.
+        """
+        cursor = conn.execute("PRAGMA table_info(ssh_keys)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "private_key" not in existing_columns:
+            conn.execute("ALTER TABLE ssh_keys ADD COLUMN private_key TEXT")
+            conn.commit()
+            logger.info("Migrated ssh_keys schema: added private_key column")
+
+    def _migrate_user_api_keys_sha256(self, conn: sqlite3.Connection) -> None:
+        """
+        Add key_sha256 column to user_api_keys (Bug #1144).
+
+        key_sha256: deterministic SHA-256 hex of the raw key — enables O(1)
+            bearer-auth lookup without bcrypt-scanning all rows.
+
+        Also creates the partial unique index on key_sha256 for existing databases.
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: column is nullable; existing rows get NULL.
+        Legacy keys (NULL key_sha256) simply will not authenticate via Bearer —
+        the path never worked before this migration.
+
+        Mirrors PostgreSQL migration 029.
+        """
+        cursor = conn.execute("PRAGMA table_info(user_api_keys)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+        if "key_sha256" not in existing_columns:
+            conn.execute("ALTER TABLE user_api_keys ADD COLUMN key_sha256 TEXT")
+            migrations_applied.append("key_sha256")
+
+        # Idempotent partial unique index — CREATE UNIQUE INDEX IF NOT EXISTS
+        conn.execute(self.CREATE_IDX_USER_API_KEYS_SHA256)
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Bug #1144: Migrated user_api_keys schema: added {migrations_applied}"
+            )
+        else:
+            conn.commit()
 
     def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
         """

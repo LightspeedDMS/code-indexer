@@ -23,6 +23,8 @@ from code_indexer.global_repos.dependency_map_analyzer import (
     _VERIFICATION_SEMAPHORE_STATE,
     _get_verification_semaphore,
 )
+from code_indexer.server.services.claude_invoker import ClaudeInvoker
+from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 _SYNC_TIMEOUT: float = 5.0
 _JOIN_TIMEOUT: float = 10.0
@@ -183,8 +185,8 @@ def _build_dispatching_run(
     """First call blocks (CLI); second is fast (verification) and signals ver_entered_run.
 
     The verification branch (seq != 1) writes different content to doc_path and
-    returns FILE_EDIT_COMPLETE in stdout so all three verification postconditions
-    (sentinel, content-change, non-empty content) are satisfied.
+    returns non-empty stdout so all verification postconditions
+    (file readable, non-empty content) are satisfied.
     """
 
     def dispatching_fake_run(*args, **kwargs):
@@ -200,7 +202,7 @@ def _build_dispatching_run(
         # (constant write — no read — avoids races with concurrent re-seeds)
         doc_path.write_text("# Test\n\nVerified.\n")
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+            args=[], returncode=0, stdout="verification done", stderr=""
         )
 
     return dispatching_fake_run
@@ -261,6 +263,13 @@ class TestCliVerificationShared(_Base):
         the semaphore; it proceeds immediately after CLI releases."""
         cap = 1
         analyzer = _make_analyzer(self._tmp_path)
+        # Inject a real CliDispatcher so invoke_verification_pass routes through
+        # ClaudeInvoker.invoke -> subprocess.run (which is patched below) instead
+        # of trying to build a dispatcher via _build_shared_dispatcher ->
+        # get_config_service -> config_service -> fastapi (unavailable under
+        # Python 3.11).  _get_cached_dispatcher checks _cli_dispatcher first and
+        # short-circuits the build path when it is not None.
+        analyzer._cli_dispatcher = CliDispatcher(ClaudeInvoker(analysis_model="opus"))
         doc_path = self._tmp_path / "ver_doc.md"
         doc_path.write_text("# Test\n\nContent for verification.\n")
         sem = _get_verification_semaphore(cap)
@@ -276,10 +285,17 @@ class TestCliVerificationShared(_Base):
         config_mock = MagicMock()
         config_mock.get_config.return_value.claude_integration_config.max_concurrent_claude_cli = cap
 
+        # _invoke_claude_cli does a LOCAL import of config_service inside the function
+        # body, bypassing any module-level patch.  Inject a mock module into sys.modules
+        # so the local `from code_indexer.server.services.config_service import
+        # get_config_service` resolves to our mock.
+        mock_cs_module = MagicMock()
+        mock_cs_module.get_config_service.return_value = config_mock
+
         with (
-            patch(
-                "code_indexer.server.services.config_service.get_config_service",
-                return_value=config_mock,
+            patch.dict(
+                "sys.modules",
+                {"code_indexer.server.services.config_service": mock_cs_module},
             ),
             patch(
                 "subprocess.run",
@@ -363,18 +379,25 @@ class TestColdStartSemaphoreCompatibility(_Base):
                 return subprocess.CompletedProcess(
                     args=[], returncode=0, stdout="CLI result text here", stderr=""
                 )
-            # Verification call: satisfy FILE_EDIT_COMPLETE, mtime-change, non-empty
+            # Verification call: write non-empty content to satisfy postconditions
             doc_path.write_text("# Cold Start Test\n\nVerified content.\n")
             future_time = time.time() + 2.0
             os.utime(doc_path, (future_time, future_time))
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+                args=[], returncode=0, stdout="verification done", stderr=""
             )
 
+        # _invoke_claude_cli does a LOCAL import of config_service inside the function
+        # body, bypassing any module-level patch.  Inject a mock module into sys.modules
+        # so the local `from code_indexer.server.services.config_service import
+        # get_config_service` resolves to our mock.
+        mock_cs_module = MagicMock()
+        mock_cs_module.get_config_service.return_value = config_mock
+
         with (
-            patch(
-                "code_indexer.server.services.config_service.get_config_service",
-                return_value=config_mock,
+            patch.dict(
+                "sys.modules",
+                {"code_indexer.server.services.config_service": mock_cs_module},
             ),
             patch("subprocess.run", side_effect=_fake_run),
         ):

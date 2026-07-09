@@ -102,19 +102,20 @@ class SemanticQueryRequest(BaseModel):
     )
     at_commit: Optional[str] = Field(
         None,
-        description="Query code at specific commit hash or ref. Requires temporal index.",
+        description=(
+            "Query code at a specific commit hash or ref (point-in-time scoping "
+            "-- resolves the ref via git and restricts results to commits AT or "
+            "BEFORE it). Requires temporal index. An unresolvable ref/hash "
+            "returns HTTP 400."
+        ),
     )
-    include_removed: bool = Field(
-        False,
-        description="Include files removed from current HEAD. Requires temporal index.",
-    )
-    show_evolution: bool = Field(
-        False,
-        description="Show code evolution timeline with diffs. Requires temporal index.",
-    )
-    evolution_limit: Optional[int] = Field(
-        None, ge=1, description="Limit number of evolution entries. User-controlled."
-    )
+    # Bug #1301: show_evolution, evolution_limit, and include_removed were
+    # REMOVED (retired, not implemented). They were advertised end-to-end but
+    # were permanent silent no-ops on the per-commit temporal index (Epic
+    # #1289) -- neither filtering/augmenting results nor returning a
+    # warning/error. Per-file diff timelines belong to the existing git
+    # tools (git_file_history, git_log, git_blame, git_diff), not the
+    # semantic temporal path (anti-duplication). Do NOT re-add these fields.
 
     # Temporal filtering parameters (Story #503 Phase 3)
     diff_type: Optional[Union[str, List[str]]] = Field(
@@ -129,6 +130,16 @@ class SemanticQueryRequest(BaseModel):
         None,
         description="Filter temporal results by chunk type (commit_message or commit_diff).",
     )
+    temporal_embedder: Optional[str] = Field(
+        None,
+        description=(
+            "Explicit temporal embedder override (e.g. 'embed-v4.0'). Omit to use "
+            "temporal.active_embedder. An override naming an embedder with no "
+            "indexed collections returns an empty/typed result -- it never "
+            "silently falls back to active_embedder. Requires a temporal query "
+            "(time_range, time_range_all, or at_commit)."
+        ),
+    )
 
     # Omni-search parameters (Story #521)
     aggregation_mode: Optional[str] = Field(
@@ -138,6 +149,38 @@ class SemanticQueryRequest(BaseModel):
     exclude_patterns: Optional[List[str]] = Field(
         default=None,
         description="Regex patterns to exclude repositories from omni-search",
+    )
+
+    # Story #1108 (S4): per-request bypass of the query-embedding cache read.
+    # When True the cache lookup is skipped for this request; the live embedding
+    # is computed and the cache write still fires (shadow/miss path).
+    no_embedding_cache_shortcut: bool = Field(
+        default=False,
+        description=(
+            "When true, skip the query-embedding cache lookup for this request. "
+            "The live embedding is computed fresh and the cache write (shadow/miss) "
+            "still fires. Use for cache-busting or debugging stale results."
+        ),
+    )
+
+    # Bug #1209: REST reranking parity with MCP/CLI.
+    # When rerank_query is provided (non-empty), the result set is reranked using
+    # the configured reranker (Voyage or Cohere) before truncation and response.
+    # Matches MCP search_code rerank_query / rerank_instruction semantics exactly.
+    rerank_query: Optional[str] = Field(
+        default=None,
+        description=(
+            "When provided, rerank results against this query using the configured "
+            "reranker (Voyage or Cohere) before returning. Absent or None means no "
+            "reranking (byte-identical to pre-fix behavior)."
+        ),
+    )
+    rerank_instruction: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional instruction forwarded to the reranker alongside rerank_query. "
+            "Has no effect when rerank_query is absent."
+        ),
     )
 
     @field_validator("query_text")

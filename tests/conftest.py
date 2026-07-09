@@ -325,21 +325,29 @@ def initialize_api_metrics_service(tmp_path_factory):
 
     # Initialize via src.code_indexer path (used by most unit tests)
     try:
+        from src.code_indexer.server.storage.sqlite_backends import (
+            ApiMetricsSqliteBackend as SrcBackend,
+        )
         from src.code_indexer.server.services.api_metrics_service import (
             api_metrics_service as src_service,
         )
 
-        src_service.initialize(str(db_path))
+        src_backend = SrcBackend(str(db_path))
+        src_service.initialize(str(db_path), storage_backend=src_backend)
     except ImportError:
         pass
 
     # Initialize via code_indexer path (used by some integration tests)
     try:
+        from code_indexer.server.storage.sqlite_backends import (
+            ApiMetricsSqliteBackend as PkgBackend,
+        )
         from code_indexer.server.services.api_metrics_service import (
             api_metrics_service as pkg_service,
         )
 
-        pkg_service.initialize(str(db_path))
+        pkg_backend = PkgBackend(str(db_path))
+        pkg_service.initialize(str(db_path), storage_backend=pkg_backend)
     except ImportError:
         pass
 
@@ -358,9 +366,8 @@ def fresh_api_metrics():
     Example:
         def test_semantic_search_increments_counter(fresh_api_metrics):
             # Metrics are reset at start
-            assert fresh_api_metrics.get_metrics()["semantic_searches"] == 0
+            assert fresh_api_metrics.get_metrics_bucketed(900)["semantic_searches"] == 0
             # ... do something that should increment ...
-            assert fresh_api_metrics.get_metrics()["semantic_searches"] == 1
     """
     try:
         from src.code_indexer.server.services.api_metrics_service import (

@@ -542,3 +542,98 @@ class TestGetInstanceWithPersistencePath:
         assert not warning_msgs, (
             f"No-arg get_instance() after path-based install must not warn, got: {warning_msgs}"
         )
+
+    def test_none_to_real_path_emits_debug_not_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug #1177: None->real_path transition must emit DEBUG, never WARNING.
+
+        semantic_query_manager.py creates the singleton with path=None before
+        cli.py can supply a real persistence path. This is a benign ordering
+        issue - no sin-bin state is lost because a path=None singleton never
+        loaded any. Only a WARNING should fire when two *different* non-None
+        paths compete (see test_real_path_a_to_real_path_b_still_warns).
+        """
+        logger_name = "code_indexer.services.provider_health_monitor"
+        real_path = tmp_path / "reranker_state.json"
+
+        # First call: singleton created with path=None (semantic_query_manager pattern)
+        instance_a = ProviderHealthMonitor.get_instance()
+        assert instance_a._persistence_path is None
+
+        # Second call: cli.py supplies a real persistence path
+        with caplog.at_level(logging.DEBUG, logger=logger_name):
+            instance_b = ProviderHealthMonitor.get_instance(persistence_path=real_path)
+
+        # Must return the existing singleton unchanged
+        assert instance_b is instance_a, (
+            "Existing singleton must be returned unchanged on None->real_path transition"
+        )
+
+        # Must NOT emit a WARNING
+        warning_msgs = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert not warning_msgs, (
+            f"None->real_path must not produce WARNING, got: {warning_msgs}"
+        )
+
+        # Must emit exactly one DEBUG record mentioning the ignored path
+        debug_msgs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "ignoring requested path" in r.getMessage()
+        ]
+        assert len(debug_msgs) == 1, (
+            f"Expected exactly one DEBUG 'ignoring requested path' record, got: {debug_msgs}"
+        )
+
+    def test_real_path_a_to_real_path_b_still_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug #1177 regression guard: two different non-None paths must still WARNING.
+
+        The genuinely dangerous case - two distinct persistence files competing
+        for the singleton - must still emit a WARNING so operators can diagnose
+        configuration mistakes.
+        """
+        path_a = tmp_path / "state_a.json"
+        path_b = tmp_path / "state_b.json"
+
+        # First call: singleton with a real path
+        ProviderHealthMonitor.get_instance(persistence_path=path_a)
+
+        # Second call: different real path -> must still WARNING
+        with caplog.at_level(
+            logging.WARNING,
+            logger="code_indexer.services.provider_health_monitor",
+        ):
+            instance = ProviderHealthMonitor.get_instance(persistence_path=path_b)
+
+        assert instance._persistence_path == path_a, (
+            "Existing singleton must be returned unchanged when two non-None paths differ"
+        )
+        warning_msgs = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("persistence_path" in m for m in warning_msgs), (
+            f"Expected WARNING about persistence_path mismatch, got: {warning_msgs}"
+        )
+
+    def test_none_to_none_no_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Bug #1177: None->None (both calls without path) produces no log output at all."""
+        logger_name = "code_indexer.services.provider_health_monitor"
+
+        # First call: no path
+        ProviderHealthMonitor.get_instance()
+
+        # Second call: also no path - must produce zero records for this logger
+        with caplog.at_level(logging.DEBUG, logger=logger_name):
+            caplog.clear()
+            ProviderHealthMonitor.get_instance()
+
+        all_msgs = [r.getMessage() for r in caplog.records]
+        assert not all_msgs, (
+            f"None->None second call must produce no log records at all, got: {all_msgs}"
+        )

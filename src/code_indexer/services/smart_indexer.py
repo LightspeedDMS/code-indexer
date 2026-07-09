@@ -37,6 +37,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Pre-flight availability flag for hnswlib (custom fork, Story #54).
+# Patched to False in tests that simulate a missing hnswlib installation.
+try:
+    import hnswlib as _hnswlib  # noqa: F401
+
+    HNSWLIB_AVAILABLE = True
+except ImportError:
+    HNSWLIB_AVAILABLE = False
+
 # Number of files between periodic progress callbacks during deletion
 PROGRESS_BATCH_SIZE = 100
 
@@ -296,6 +305,14 @@ class SmartIndexer(HighThroughputProcessor):
         Returns:
             ProcessingStats with operation results
         """
+        # Pre-flight: hnswlib must be importable before we do any work
+        if not HNSWLIB_AVAILABLE:
+            raise RuntimeError(
+                "hnswlib is not installed. "
+                "Install the custom fork: "
+                "git submodule update --init && pip install -e ."
+            )
+
         # Create indexing lock to prevent concurrent operations
         metadata_dir = self.progressive_metadata.metadata_path.parent
         indexing_lock = create_indexing_lock(metadata_dir)
@@ -308,6 +325,9 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Initialize FTS manager variable before try block to ensure it's defined for finally block
         fts_manager: Optional[TantivyIndexManager] = None
+        # Initialized here so it's always in scope when passed to _do_incremental_index,
+        # even when enable_fts=False (in which case fts_manager is also None).
+        create_new_fts: bool = False
 
         try:
             # Get current git status
@@ -574,6 +594,7 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
+                create_new_fts,
             )
 
         except KeyboardInterrupt:
@@ -915,6 +936,7 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
+        create_new_fts: bool = False,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
@@ -1088,6 +1110,10 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.update_commit_watermark(
                     current_branch, current_commit
                 )
+            # FTS bootstrap: if brand-new FTS index requested but nothing to embed,
+            # still build FTS from all files on disk.
+            if fts_manager is not None and create_new_fts:
+                self._populate_fts_from_all_files(fts_manager, progress_callback)
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()
@@ -1256,6 +1282,43 @@ class SmartIndexer(HighThroughputProcessor):
             self.progress_log.mark_session_cancelled()
 
         return stats
+
+    def _populate_fts_from_all_files(self, fts_manager, progress_callback=None):
+        """Build FTS index from all codebase files when no semantic re-indexing is needed."""
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info="FTS index is new - scanning all files to build full-text index...",
+            )
+        codebase = Path(self.config.codebase_dir)
+        files = list(self.file_finder.find_files())
+        count = 0
+        for file_path in files:
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+                lines = text.splitlines()
+                rel_path = str(file_path.relative_to(codebase))
+                language = file_path.suffix.lstrip(".") or "txt"
+                fts_manager.add_document(
+                    {
+                        "path": rel_path,
+                        "content": text,
+                        "content_raw": text,
+                        "identifiers": text.split(),
+                        "line_start": 1,
+                        "line_end": max(len(lines), 1),
+                        "language": language,
+                    }
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"FTS: skipping {file_path}: {e}")
+        if progress_callback:
+            progress_callback(
+                0, 0, Path(""), info=f"FTS index built from {count} files"
+            )
 
     def _do_reconcile_with_database(
         self,
@@ -1719,6 +1782,78 @@ class SmartIndexer(HighThroughputProcessor):
 
         return stats
 
+    @staticmethod
+    def _reanchor_resume_path(stored_path: str, codebase_dir: Path) -> Path:
+        """Re-anchor a stored resume path onto the CURRENT walk root.
+
+        Resume reads file paths persisted by a PRIOR run
+        (``ProgressiveMetadata.set_files_to_index`` stores ``str(path)``).
+        Those strings are absolute paths carrying whatever filesystem prefix
+        the prior run accessed the repo under. On the cow-daemon backend the
+        same logical directory is reachable under TWO different absolute
+        prefixes -- the NFS *mount* path (e.g.
+        ``/mnt/cow-storage/golden-repos/<repo>``) and the daemon-LOCAL path
+        (e.g. ``/home/jsbattig/cow-storage/golden-repos/<repo>``). If the
+        prior run stored the mount prefix but the current run's
+        ``codebase_dir`` is the daemon-local prefix (or vice versa), using the
+        stored path verbatim makes ``file_path.relative_to(codebase_dir)``
+        raise ``ValueError: ... is not in the subpath of ...`` -> the staging
+        "Hash calculation failed" / "Git-aware resume failed" loop.
+
+        Re-anchoring rules (path-domain agnostic, walk-root authoritative):
+        - A RELATIVE stored path joins onto ``codebase_dir`` (legacy behavior).
+        - An ABSOLUTE stored path already under ``codebase_dir`` is returned
+          unchanged -- the normal / local-backend case stays byte-identical.
+        - An ABSOLUTE stored path with a stale prefix is re-anchored by
+          locating the ``codebase_dir`` leaf name within the stored path's
+          parts and joining the trailing subpath onto ``codebase_dir``.
+        - If no leaf match is found the stored path is returned UNCHANGED so
+          the downstream ``.exists()`` filter (or a genuine error) still
+          surfaces -- we never fabricate a wrong mapping (anti-silent-failure).
+
+        Args:
+            stored_path: Path string as persisted by a prior run.
+            codebase_dir: The current walk root (``config.codebase_dir``).
+
+        Returns:
+            A Path re-anchored under ``codebase_dir`` when possible.
+        """
+        candidate = Path(stored_path)
+
+        # Relative stored path -> join onto the current walk root (legacy).
+        if not candidate.is_absolute():
+            return codebase_dir / candidate
+
+        # Already under the current walk root -> no change (normal/local case).
+        try:
+            candidate.relative_to(codebase_dir)
+            return candidate
+        except ValueError:
+            pass
+
+        # Stale-prefix case: re-anchor by matching the codebase leaf name.
+        # Scan FORWARD so that when the leaf appears more than once (bug #1087,
+        # e.g. golden-repos/fastapi/tests/fastapi/conftest.py) we try each
+        # candidate in order and return the first one that exists on disk.
+        # When no candidate exists (e.g. synthetic paths in tests, or the file
+        # was genuinely deleted) we fall back to the FIRST match found, which
+        # preserves the single-occurrence behavior that callers relied on before.
+        leaf = codebase_dir.name
+        parts = candidate.parts
+        first_match: Optional[Path] = None
+        for index in range(len(parts)):
+            if parts[index] == leaf:
+                tail = parts[index + 1 :]
+                anchored = codebase_dir.joinpath(*tail) if tail else codebase_dir
+                if anchored.exists():
+                    return anchored
+                if first_match is None:
+                    first_match = anchored
+
+        # Return the first (shallowest) match if any were found; otherwise
+        # return unchanged so downstream .exists()/.relative_to can surface it.
+        return first_match if first_match is not None else candidate
+
     def _do_resume_interrupted(
         self,
         batch_size: int,
@@ -1745,11 +1880,15 @@ class SmartIndexer(HighThroughputProcessor):
             self.progress_log.complete_session()
             return ProcessingStats()
 
-        # Convert strings back to Path objects, ensuring absolute paths
+        # Convert strings back to Path objects, re-anchoring each onto the
+        # CURRENT walk root. Stored paths come from a PRIOR run and may carry a
+        # stale filesystem prefix (cow-daemon mount-vs-daemon-local split);
+        # using them verbatim makes the downstream
+        # file_path.relative_to(config.codebase_dir) hash step raise
+        # "not in the subpath" -> "Hash calculation failed" -> resume failure.
         codebase = Path(self.config.codebase_dir)
         remaining_files = [
-            codebase / f if not Path(f).is_absolute() else Path(f)
-            for f in remaining_file_strings
+            self._reanchor_resume_path(f, codebase) for f in remaining_file_strings
         ]
 
         # Filter out files that no longer exist

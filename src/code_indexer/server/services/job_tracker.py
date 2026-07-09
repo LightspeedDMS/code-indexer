@@ -53,9 +53,25 @@ class TrackedJob:
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    actor_username: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
+# Sentinel job_id used by _atomic_insert_or_raise when a unique-violation fires
+# but the blocking row has already completed (fell outside the partial-index
+# predicate) by the time the follow-up SELECT runs.  Callers (e.g.
+# DataRetentionScheduler) see a DuplicateJobError — not a RuntimeError — so they
+# skip silently, which is correct: the concurrent worker already ran the job.
+CONCURRENT_COMPLETED_SENTINEL = "(concurrent-completed)"
+
+# Bug #1252: bounded retry count for _atomic_insert_or_raise when a
+# unique-violation fires but the conflicting row has already vanished
+# (completed) by lookup time. 1 initial attempt + up to 2 retries — enough
+# for the transient race to clear without risking an unbounded loop
+# (Messi Rule #14).
+_MAX_ATOMIC_INSERT_ATTEMPTS = 3
+
+
 # DuplicateJobError exception
 # ---------------------------------------------------------------------------
 
@@ -96,6 +112,23 @@ class _BackendUniqueViolation(Exception):
     Added by Story #876 Phase B-1. Used by the _atomic_insert_impl /
     _atomic_insert_or_raise helpers on JobTracker (added in follow-up edits).
     """
+
+
+def is_active_job_unique_violation(exc: BaseException) -> bool:
+    """
+    True if exc is a unique-violation shape from idx_active_job_per_repo.
+
+    Cross-backend, driver-agnostic detection by exception class name only
+    (sqlite3.IntegrityError on SQLite, psycopg.errors.UniqueViolation on
+    PostgreSQL) — no driver import required. Matches the classification
+    already used on the INSERT path (Bug #1252/#1235) inside
+    _atomic_insert_impl, extracted here as the single source of truth
+    (Bug #1256, Messi Rule #4 anti-duplication) so the UPDATE path
+    (BackgroundJobManager._execute_job's update_status(running) call) can
+    classify the identical benign race for logging purposes without
+    duplicating the check.
+    """
+    return type(exc).__name__ in ("IntegrityError", "UniqueViolation")
 
 
 def _require_non_empty_str(name: str, value: Any) -> None:
@@ -176,6 +209,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         repo_alias,
         progress_info,
         metadata_json,
+        actor_username,
     ) = row
     return TrackedJob(
         job_id=job_id,
@@ -191,6 +225,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         completed_at=_iso_to_dt(completed_at_str),
         error=error,
         result=json.loads(result_json) if result_json else None,
+        actor_username=actor_username,
     )
 
 
@@ -210,6 +245,7 @@ def _tracked_job_to_dict(job: TrackedJob) -> Dict[str, Any]:
         "completed_at": _dt_to_iso(job.completed_at),
         "error": job.error,
         "result": job.result,
+        "actor_username": job.actor_username,
     }
 
 
@@ -242,11 +278,18 @@ def _status_priority_sort_key(job_dict: Dict[str, Any]):
 # Columns fetched by all SELECT queries — keeps column index mapping single-source.
 _SELECT_COLUMNS = (
     "job_id, operation_type, status, created_at, started_at, completed_at, "
-    "result, error, progress, username, repo_alias, progress_info, metadata"
+    "result, error, progress, username, repo_alias, progress_info, metadata, "
+    "actor_username"
 )
 
 # Upper bound for backend list_jobs when enumerating candidates for bulk deletion.
 _CLEANUP_JOB_FETCH_LIMIT = 10000
+
+# Statuses considered terminal for a background job.  Once a row reaches one
+# of these, complete_job/fail_job must never resurrect or overwrite it — the
+# first terminal write always wins (Bug #1258).  Mirrors the terminal-status
+# set already used by cleanup_old_jobs/_evict_stale_from_memory.
+_TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +408,8 @@ class JobTracker:
         username: str,
         repo_alias: str,
         metadata: Optional[Dict[str, Any]] = None,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
     ) -> TrackedJob:
         """
         Atomically register a new pending job unless an active duplicate exists.
@@ -376,6 +421,11 @@ class JobTracker:
 
         repo_alias must be non-empty because the index predicate excludes
         NULL — passing None would silently disable the atomic gate.
+
+        Args:
+            is_admin: Whether this is an admin job (persisted to DB on INSERT).
+            actor_username: Who actually triggered the job (AC12 audit trail).
+                When None, the submitter (username) is the actor.
 
         Raises:
             ValueError: If any required string field is None, empty, or
@@ -398,7 +448,9 @@ class JobTracker:
             metadata=metadata,
         )
 
-        self._atomic_insert_or_raise(job)
+        self._atomic_insert_or_raise(
+            job, is_admin=is_admin, actor_username=actor_username
+        )
 
         with self._lock:
             self._active_jobs[job_id] = job
@@ -488,7 +540,9 @@ class JobTracker:
             job = self._active_jobs.pop(job_id, None)
 
         if job is None:
-            logger.warning(f"JobTracker.complete_job: job {job_id} not in memory")
+            self._finalize_absent_job(
+                job_id, terminal_status="completed", now=now, result=result
+            )
             return
 
         job.status = "completed"
@@ -517,7 +571,9 @@ class JobTracker:
             job = self._active_jobs.pop(job_id, None)
 
         if job is None:
-            logger.warning(f"JobTracker.fail_job: job {job_id} not in memory")
+            self._finalize_absent_job(
+                job_id, terminal_status="failed", now=now, error=error
+            )
             return
 
         job.status = "failed"
@@ -526,6 +582,86 @@ class JobTracker:
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: failed job {job_id}: {error}")
+
+    def _finalize_absent_job(
+        self,
+        job_id: str,
+        terminal_status: str,
+        now: datetime,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        Handle complete_job/fail_job when job_id is absent from _active_jobs.
+
+        Bug #1258: LifecycleBatchRunner.run() is the terminal authority for a
+        description-refresh parent job — it calls complete_job/fail_job on the
+        SAME job_id that description_refresh_scheduler.on_refresh_complete
+        subsequently calls again as a safety net (kept deliberately — it is
+        the only finalization path when run() itself never reaches its own
+        terminal transition, e.g. an exception before it or a missing-wiring
+        early return). By the time the redundant call arrives, the job has
+        usually already been popped from _active_jobs, so unconditionally
+        logging a WARNING and returning floods the logs with a benign
+        "not in memory" message on every successful/failed refresh (240x/36h
+        in production).
+
+        Distinguishes two cases by reading the persisted DB row:
+
+        - Row already terminal (completed/failed/cancelled): benign double
+          dispatch. The first writer already finalized the row — log DEBUG
+          and return WITHOUT writing again (first-terminal-write wins; a
+          redundant fail_job must never downgrade an already-completed row,
+          and vice versa).
+        - Row missing or still non-terminal (e.g. "running"): genuine zombie
+          edge — the in-memory object was lost (pop-before-persist DB write
+          failure, crash, or a caller reaching complete_job/fail_job without
+          ever going through a prior terminal transition). Forces a direct
+          terminal DB update so the job is never stuck at a non-terminal
+          status forever. Logs at WARNING — unlike the benign case above,
+          this path indicates a real gap worth investigating.  When no
+          persisted row exists at all, there is nothing to update; logs
+          WARNING and returns.
+        """
+        persisted = self._load_job_from_sqlite(job_id)
+
+        if persisted is not None and persisted.status in _TERMINAL_JOB_STATUSES:
+            logger.debug(
+                "JobTracker: job %s already terminal (status=%s) — skipping "
+                "redundant %s completion (Bug #1258 benign double-dispatch)",
+                job_id,
+                persisted.status,
+                terminal_status,
+            )
+            return
+
+        if persisted is None:
+            logger.warning(
+                "JobTracker: job %s not in memory and no persisted row found "
+                "— cannot force terminal update",
+                job_id,
+            )
+            return
+
+        logger.warning(
+            "JobTracker: job %s not in memory but DB row is non-terminal "
+            "(status=%s) — forcing terminal update to %s (Bug #1258 "
+            "zombie-prevention fallback)",
+            job_id,
+            persisted.status,
+            terminal_status,
+        )
+        persisted.status = terminal_status
+        persisted.completed_at = now
+        if terminal_status == "completed":
+            persisted.progress = 100
+            if result is not None:
+                persisted.result = result
+        else:
+            if error is not None:
+                persisted.error = error
+
+        self._upsert_job(persisted)
 
     def get_job(self, job_id: str) -> Optional[TrackedJob]:
         """
@@ -615,10 +751,70 @@ class JobTracker:
         with self._lock:
             return list(self._active_jobs.values())
 
+    @staticmethod
+    def _build_exclusion_where_clause(exclude_types: List[str]) -> tuple:
+        """
+        Return (sql_fragment, params_tuple) for NULL-safe operation_type exclusion.
+
+        Uses IS NULL guard so rows with NULL operation_type are never silently
+        dropped (SQL NULL NOT IN (...) evaluates to UNKNOWN, not FALSE).
+
+        Raises:
+            ValueError: If exclude_types is empty (caller must check truthiness).
+        """
+        if not exclude_types:
+            raise ValueError("exclude_types must be non-empty")
+        placeholders = ",".join("?" * len(exclude_types))
+        fragment = f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+        return fragment, tuple(exclude_types)
+
+    def _query_sqlite_recent_jobs(
+        self,
+        seen_ids: set,
+        cutoff_iso: Optional[str],
+        limit: int,
+        exclude_operation_types: Optional[List[str]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute the SQLite historical query and return job dicts not in seen_ids.
+
+        Updates seen_ids in-place for each accepted row to prevent intra-query
+        duplicates. Caller is responsible for pre-validating limit > 0.
+        """
+        conn = self._conn_manager.get_connection()
+        where_parts: List[str] = []
+        params: List[Any] = []
+
+        if cutoff_iso:
+            where_parts.append("created_at >= ?")
+            params.append(cutoff_iso)
+
+        if exclude_operation_types:
+            excl_fragment, excl_params = self._build_exclusion_where_clause(
+                exclude_operation_types
+            )
+            where_parts.append(excl_fragment)
+            params.extend(excl_params)
+
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        sql = (
+            f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
+            f"{where_clause} ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(limit)
+        rows: List[Dict[str, Any]] = []
+        for row in conn.execute(sql, params).fetchall():
+            job = _row_to_tracked_job(row)
+            if job.job_id not in seen_ids:
+                seen_ids.add(job.job_id)
+                rows.append(_tracked_job_to_dict(job))
+        return rows
+
     def get_recent_jobs(
         self,
         limit: int = 20,
         time_filter: str = "24h",
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Merge active in-memory jobs + recent historical jobs from the store.
@@ -627,20 +823,34 @@ class JobTracker:
         Historical jobs are filtered by created_at within the time window.
 
         Args:
-            limit: Maximum number of historical records from the store.
+            limit: Maximum number of historical records from the store (> 0).
             time_filter: "1h", "24h", "7d", "30d", or "all".
+            exclude_operation_types: Optional list of operation_type values to
+                omit (e.g. ["xray_search", "xray_explore"]). None returns all.
 
         Returns:
             List of job dicts (most-recently-created first), deduped by job_id.
+
+        Raises:
+            ValueError: If limit is not a positive integer.
         """
-        # Collect active jobs first (always included)
+        if limit <= 0:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
+
         with self._lock:
-            active_snapshot = list(self._active_jobs.values())
+            active_snapshot = [
+                _tracked_job_to_dict(j) for j in self._active_jobs.values()
+            ]
 
-        seen_ids = {j.job_id for j in active_snapshot}
-        result = [_tracked_job_to_dict(j) for j in active_snapshot]
+        if exclude_operation_types:
+            excl_set = set(exclude_operation_types)
+            active_snapshot = [
+                j for j in active_snapshot if j.get("operation_type") not in excl_set
+            ]
 
-        # Compute cutoff ISO string
+        seen_ids = {j["job_id"] for j in active_snapshot}
+        result = list(active_snapshot)
+
         cutoff_iso: Optional[str] = None
         if time_filter != "all":
             delta_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
@@ -649,8 +859,10 @@ class JobTracker:
             cutoff_iso = cutoff.isoformat()
 
         if self._backend is not None:
-            # Fetch from backend and filter client-side by cutoff
-            historical = self._backend.list_jobs(limit=limit)
+            historical = self._backend.list_jobs(
+                limit=limit,
+                exclude_operation_types=exclude_operation_types or None,
+            )
             for job_dict in historical:
                 if job_dict["job_id"] in seen_ids:
                     continue
@@ -661,29 +873,11 @@ class JobTracker:
             result.sort(key=_status_priority_sort_key)
             return result
 
-        # Query SQLite for historical jobs
-        conn = self._conn_manager.get_connection()
-        if cutoff_iso:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "WHERE created_at >= ? "
-                "ORDER BY created_at DESC LIMIT ?"
+        result.extend(
+            self._query_sqlite_recent_jobs(
+                seen_ids, cutoff_iso, limit, exclude_operation_types
             )
-            cursor = conn.execute(sql, (cutoff_iso, limit))
-        else:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
-            cursor = conn.execute(sql, (limit,))
-
-        for row in cursor.fetchall():
-            job = _row_to_tracked_job(row)
-            if job.job_id not in seen_ids:
-                seen_ids.add(job.job_id)
-                result.append(_tracked_job_to_dict(job))
-
-        # Story #328: Sort with running/pending jobs first, then by time
+        )
         result.sort(key=_status_priority_sort_key)
         return result
 
@@ -965,7 +1159,12 @@ class JobTracker:
     # Private SQLite helpers
     # ------------------------------------------------------------------
 
-    def _atomic_insert_or_raise(self, job: TrackedJob) -> None:
+    def _atomic_insert_or_raise(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Insert a job row atomically, translating a unique-index violation on
         idx_active_job_per_repo (Story #876 Phase C) into DuplicateJobError.
@@ -977,35 +1176,86 @@ class JobTracker:
         Backend path catches the narrow _BackendUniqueViolation marker that
         _atomic_insert_impl raises in place of psycopg's IntegrityError.
 
-        If the lookup for the blocking row returns None, raises RuntimeError
-        — treating an inconsistent database state as a hard error rather
-        than substituting a fallback value (Messi Rule #2 anti-fallback).
+        Bug #1252: if the violation fires but the follow-up lookup finds no
+        active blocking row, the conflicting job completed between our INSERT
+        and our SELECT — a benign TOCTOU race. The partial index no longer
+        has any conflicting active row, so the slot is genuinely free and the
+        INSERT should now succeed: retry (bounded by
+        _MAX_ATOMIC_INSERT_ATTEMPTS) instead of immediately treating a freed
+        slot as a duplicate. A real duplicate (blocking row found) raises
+        DuplicateJobError immediately, without retrying. If the
+        no-active-row state persists across every bounded attempt (Messi
+        Rule #14 — no unbounded loop), falls back to the Bug #1235 behavior
+        of DuplicateJobError with CONCURRENT_COMPLETED_SENTINEL rather than
+        ever raising a fatal RuntimeError (Messi Rule #2 anti-fallback still
+        honored: this is a deliberate, logged, bounded degradation — never a
+        silently substituted success).
+
+        Args:
+            is_admin: Persisted to the DB row on INSERT (AC12 audit trail).
+            actor_username: Persisted to the DB row on INSERT (AC12 audit trail).
         """
         assert job.repo_alias is not None, (
             "atomic insert requires non-null repo_alias — partial index excludes NULL"
         )
-        try:
-            self._atomic_insert_impl(job)
-            return
-        except (sqlite3.IntegrityError, _BackendUniqueViolation):
-            pass
+        for attempt in range(1, _MAX_ATOMIC_INSERT_ATTEMPTS + 1):
+            try:
+                self._atomic_insert_impl(
+                    job, is_admin=is_admin, actor_username=actor_username
+                )
+                return
+            except (sqlite3.IntegrityError, _BackendUniqueViolation):
+                pass
 
-        existing_id = self._find_blocking_active_job_id(
-            job.operation_type, job.repo_alias
-        )
-        if existing_id is None:
-            raise RuntimeError(
-                f"atomic insert raised IntegrityError for "
-                f"({job.operation_type}, {job.repo_alias}) but no active row "
-                f"was found in the lookup; database state is inconsistent"
+            existing_id = self._find_blocking_active_job_id(
+                job.operation_type, job.repo_alias
             )
+            if existing_id is not None:
+                # A real active row is blocking us — genuine duplicate.
+                raise DuplicateJobError(
+                    operation_type=job.operation_type,
+                    repo_alias=job.repo_alias,
+                    existing_job_id=existing_id,
+                )
+
+            if attempt < _MAX_ATOMIC_INSERT_ATTEMPTS:
+                logger.debug(
+                    "atomic insert raised unique-violation for (%s, %s) on "
+                    "attempt %d/%d but no active row is visible — retrying; "
+                    "concurrent worker likely completed the job between "
+                    "INSERT and SELECT",
+                    job.operation_type,
+                    job.repo_alias,
+                    attempt,
+                    _MAX_ATOMIC_INSERT_ATTEMPTS,
+                )
+
+        # Bug #1235: bounded retries exhausted and the no-active-row state
+        # persisted on every attempt. Treat as a benign duplicate so the
+        # caller (e.g. DataRetentionScheduler, refresh schedulers) skips
+        # silently rather than crashing with RuntimeError. We use a sentinel
+        # job_id because the actual job_id is no longer visible (it fell
+        # outside the partial index predicate when it completed).
+        logger.debug(
+            "atomic insert raised unique-violation for (%s, %s) repeatedly "
+            "with no active row visible after %d attempt(s) — treating as "
+            "benign duplicate (concurrent worker completed the job)",
+            job.operation_type,
+            job.repo_alias,
+            _MAX_ATOMIC_INSERT_ATTEMPTS,
+        )
         raise DuplicateJobError(
             operation_type=job.operation_type,
             repo_alias=job.repo_alias,
-            existing_job_id=existing_id,
+            existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
         )
 
-    def _atomic_insert_impl(self, job: TrackedJob) -> None:
+    def _atomic_insert_impl(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Raw INSERT that surfaces partial-unique-index violations.
 
@@ -1014,10 +1264,19 @@ class JobTracker:
         narrow try/except that translates psycopg's IntegrityError /
         UniqueViolation into the _BackendUniqueViolation marker without
         importing psycopg. All other exceptions are re-raised.
+
+        Args:
+            is_admin: Persisted to the is_admin column (AC12 audit trail).
+            actor_username: Persisted to the actor_username column (AC12).
         """
         if self._backend is not None:
             try:
-                self._backend.save_job(
+                # Use atomic_claim_insert (plain INSERT, no OR IGNORE) so that
+                # sqlite3.IntegrityError / psycopg UniqueViolation propagates
+                # when idx_active_job_per_repo is violated.  save_job uses
+                # INSERT OR IGNORE which silently swallows the violation and
+                # makes the try/except below dead code (Bug #1065).
+                self._backend.atomic_claim_insert(
                     job_id=job.job_id,
                     operation_type=job.operation_type,
                     status=job.status,
@@ -1031,11 +1290,13 @@ class JobTracker:
                     repo_alias=job.repo_alias,
                     progress_info=job.progress_info,
                     metadata=job.metadata,
+                    is_admin=is_admin,
+                    actor_username=actor_username,
                 )
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
                 # shapes into the marker; re-raise anything else untouched.
-                if type(exc).__name__ in ("IntegrityError", "UniqueViolation"):
+                if is_active_job_unique_violation(exc):
                     raise _BackendUniqueViolation(str(exc)) from exc
                 raise
             return
@@ -1046,8 +1307,8 @@ class JobTracker:
                    (job_id, operation_type, status, created_at, started_at,
                     completed_at, result, error, progress, username,
                     is_admin, cancelled, repo_alias, resolution_attempts,
-                    progress_info, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)""",
+                    progress_info, metadata, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?)""",
                 (
                     job.job_id,
                     job.operation_type,
@@ -1059,9 +1320,11 @@ class JobTracker:
                     job.error,
                     job.progress,
                     job.username,
+                    1 if is_admin else 0,
                     job.repo_alias,
                     _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
+                    actor_username,
                 ),
             )
 
@@ -1078,24 +1341,23 @@ class JobTracker:
         idx_active_job_per_repo, so the caller can populate
         DuplicateJobError.existing_job_id.
 
-        Returns None if no blocking row is visible — the caller treats that
-        as an inconsistent database state (row vanished between INSERT and
-        lookup) and raises RuntimeError rather than substituting a fallback.
+        Returns None if no blocking row is visible — the row vanished
+        (completed) between the INSERT and this lookup. The caller
+        (_atomic_insert_or_raise, Bug #1252) retries the insert (bounded)
+        rather than immediately treating the now-free slot as a duplicate.
         """
         if self._backend is not None:
-            for status in ("running", "pending"):
-                rows = self._backend.list_jobs(
-                    status=status, operation_type=operation_type
-                )
-                for row in rows:
-                    if row.get("repo_alias") == repo_alias:
-                        # Explicit type narrowing: list_jobs returns
-                        # List[Dict[str, Any]], so row.get("job_id") is Any.
-                        # A well-formed row has a string job_id; guard
-                        # defensively rather than suppress mypy.
-                        candidate = row.get("job_id")
-                        return candidate if isinstance(candidate, str) else None
-            return None
+            # Bug #1220: use the direct backend lookup instead of the paginated
+            # list_jobs + Python repo_alias filter approach.  The paginated path
+            # can miss the blocking row when it falls outside the top-N results,
+            # causing _atomic_insert_or_raise to raise RuntimeError instead of
+            # DuplicateJobError.  find_active_job_by_type_and_alias queries by
+            # (operation_type, repo_alias, status IN pending/running) directly,
+            # with no pagination and no Python-side filtering.
+            result: Optional[str] = self._backend.find_active_job_by_type_and_alias(
+                operation_type, repo_alias
+            )
+            return result
 
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(

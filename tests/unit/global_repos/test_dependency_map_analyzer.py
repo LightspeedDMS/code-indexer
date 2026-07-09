@@ -2529,7 +2529,7 @@ class TestIteration13LargeDomainDetection:
     """Test large domain detection and output-first prompt selection (Iteration 13)."""
 
     def test_large_domain_uses_output_first_prompt(self, tmp_path):
-        """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
+        """With 4+ repos, verify prompt uses the output-first ANALYSIS GROUNDING section."""
         from code_indexer.server.services.intelligence_cli_invoker import (
             InvocationResult,
         )
@@ -2572,12 +2572,14 @@ class TestIteration13LargeDomainDetection:
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify output-first prompt characteristics
-        assert "WRITE YOUR ANALYSIS FIRST" in prompt
+        assert "ANALYSIS GROUNDING" in prompt
         assert "Source Code Exploration Mandate" not in prompt
         assert "Required Searches" not in prompt
         assert "run at least one search" not in prompt.lower()
-        assert "AT MOST 5" in prompt  # Limited searches
-        assert "OPTIONAL" in prompt  # Searches are optional
+        # Bug #1261: no artificial search-call ceiling -- search is mandatory/unbounded
+        assert "AT MOST 5" not in prompt
+        assert "OPTIONAL" not in prompt
+        assert "MANDATORY" in prompt
 
     def test_small_domain_uses_standard_prompt(self, tmp_path):
         """With 3 or fewer repos, verify prompt references the analysis guidelines file."""
@@ -2811,8 +2813,8 @@ class TestIteration13OutputFirstPrompt:
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    def test_output_first_prompt_limits_search_calls(self, tmp_path):
-        """Verify prompt contains 'AT MOST 5' and 'OPTIONAL'."""
+    def test_output_first_prompt_does_not_limit_search_calls(self, tmp_path):
+        """Bug #1261: verify prompt does NOT contain 'AT MOST 5' or 'OPTIONAL' search caps."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -2827,8 +2829,9 @@ class TestIteration13OutputFirstPrompt:
 
         prompt = analyzer._build_output_first_prompt(domain, [domain], [], None)
 
-        assert "AT MOST 5" in prompt
-        assert "OPTIONAL" in prompt
+        assert "AT MOST 5" not in prompt
+        assert "OPTIONAL" not in prompt
+        assert "MANDATORY" in prompt
 
     def test_output_first_prompt_includes_pass1_evidence(self, tmp_path):
         """Verify prompt includes evidence from domain dict."""
@@ -3064,7 +3067,21 @@ class TestIteration14PurposeDrivenHooks:
 
     @patch("subprocess.run")
     def test_insufficient_output_retry_is_write_only(self, mock_subprocess, tmp_path):
-        """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt."""
+        """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt.
+
+        Load-safety fix: patch _get_verification_semaphore to return a fresh per-test
+        semaphore, preventing the module-level singleton from blocking this test when a
+        parallel test holds the semaphore (the singleton is never released if the holder
+        crashes, causing _sem.acquire() here to deadlock under concurrent load).
+        """
+        import threading as _threading
+
+        from code_indexer.global_repos import dependency_map_analyzer as _dma_module
+
+        # Provide a fresh, isolated semaphore so this test never contends with
+        # parallel tests that share the module-level singleton.
+        _fresh_sem = _threading.Semaphore(1)
+
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -3089,16 +3106,19 @@ class TestIteration14PurposeDrivenHooks:
             ),
         ]
 
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
-        )
+        with patch.object(
+            _dma_module, "_get_verification_semaphore", return_value=_fresh_sem
+        ):
+            analyzer.run_pass_2_per_domain(
+                staging_dir, domain, [domain], repo_list=[], max_turns=50
+            )
 
         # Should have been called twice (primary + retry)
         assert mock_subprocess.call_count == 2
 
-        # Check retry call (second call)
+        # Check retry call (second call) — use .kwargs accessor (robust across Python versions)
         retry_call = mock_subprocess.call_args_list[1]
-        retry_cmd = retry_call[0][0]
+        retry_cmd = retry_call.args[0]
 
         # Verify allowed_tools="" (write-only mode)
         if "--allowedTools" in retry_cmd:
@@ -3108,7 +3128,7 @@ class TestIteration14PurposeDrivenHooks:
             )
 
         # Verify retry prompt includes write-focused language
-        retry_prompt = retry_call[1]["input"]
+        retry_prompt = retry_call.kwargs["input"]
         assert "Write your dependency analysis NOW" in retry_prompt
         assert (
             "NO searching" in retry_prompt
@@ -3307,8 +3327,8 @@ class TestIteration15InsideOutAndConciseness:
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    def test_standard_prompt_has_output_budget(self, tmp_path):
-        """Test that standard prompt includes Output Budget section with 3,000-10,000 character limit."""
+    def test_standard_prompt_has_no_hard_output_budget(self, tmp_path):
+        """Bug #1261: standard prompt must NOT hardcode a 3,000-10,000 character range."""
         analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
@@ -3324,9 +3344,12 @@ class TestIteration15InsideOutAndConciseness:
         mock_dispatcher.dispatch.assert_called_once()
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        assert "Output Budget" in prompt
-        assert "3,000" in prompt or "3000" in prompt
-        assert "10,000" in prompt or "10000" in prompt
+        assert "3,000" not in prompt
+        assert "10,000" not in prompt
+        assert "3000" not in prompt
+        assert "10000" not in prompt
+        # Qualitative conciseness guidance must still be present
+        assert "CONCISE" in prompt
 
     def test_prohibited_content_includes_search_audit(self, tmp_path):
         """Test that PROHIBITED Content section explicitly forbids 'MCP Searches Performed' sections."""

@@ -4,6 +4,7 @@ Tests the ParallelCommandExecutor class that executes commands
 across multiple repositories concurrently using ThreadPoolExecutor.
 """
 
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 import subprocess
@@ -57,6 +58,26 @@ class TestParallelCommandExecutor(unittest.TestCase):
         # Verify env contains COLUMNS=200
         self.assertIn("env", call_args.kwargs)
         self.assertEqual(call_args.kwargs["env"]["COLUMNS"], "200")
+
+    @patch("code_indexer.proxy.parallel_executor.subprocess.run")
+    def test_execute_single_absolutizes_relative_pythonpath(self, mock_run):
+        """Bug #1328: a relative PYTHONPATH must be absolutized before the
+        child subprocess changes cwd to the target repository, otherwise the
+        relative entry re-anchors into the repo dir and can shadow an
+        installed dependency with a same-named package inside the repo.
+        """
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
+        with patch.dict(os.environ, {"PYTHONPATH": "./src"}):
+            self.executor._execute_single("/tmp/repo1", "query", ["test"])
+
+        call_args = mock_run.call_args
+        env = call_args.kwargs["env"]
+        assert env["PYTHONPATH"] == os.path.abspath("./src")
 
     @patch("code_indexer.proxy.parallel_executor.subprocess.run")
     def test_execute_single_repository_failure(self, mock_run):

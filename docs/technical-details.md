@@ -146,6 +146,10 @@ cidx query "web server" --language python --exclude-language javascript
 
 #### Excluding Files by Path Pattern
 
+Patterns starting with `*/` match at any depth, including the repository root.
+`*/tests/*` matches both `tests/foo.py` (root) and `src/tests/foo.py` (nested).
+`**/tests/**` is equivalent and also accepted.
+
 ```bash
 # Exclude all test files
 cidx query "production code" --exclude-path "*/tests/*" --exclude-path "*_test.py"
@@ -530,5 +534,4 @@ FTS queries use Tantivy index for efficient text search:
 
 - **[Architecture](architecture.md)** - System design and architecture decisions
 - **[Algorithms](algorithms.md)** - Detailed algorithm descriptions
-- **[Server Mode](server-mode.md)** - Multi-user server setup and API reference
-- **[Development Guide](development.md)** - Contributor guidelines
+- **[Server Deployment](server-deployment.md)** - Multi-user server setup and API reference

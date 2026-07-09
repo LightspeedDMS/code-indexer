@@ -73,7 +73,7 @@ class SCIPMultiService:
 
     def __init__(
         self,
-        max_workers: int = 2,
+        max_workers: int = 8,
         query_timeout_seconds: int = 30,
         reference_limit: int = DEFAULT_REFERENCE_LIMIT,
         dependency_depth: int = DEFAULT_DEPENDENCY_DEPTH,
@@ -519,7 +519,10 @@ class SCIPMultiService:
             FileNotFoundError: If repository not found in global repositories
         """
         from code_indexer.server import app as app_module
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
 
         # Get golden_repos_dir from server configuration
         golden_repos_dir = _get_golden_repos_dir()
@@ -535,9 +538,12 @@ class SCIPMultiService:
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
-        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        # Use AliasManager to get current target path (registry path becomes stale after refresh),
+        # falling back to the registry's index_path when the alias pointer is missing (Bug #1315).
         alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repo_id)
+        target_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_id, repo_entry=repo_entry
+        )
 
         if not target_path:
             raise FileNotFoundError(

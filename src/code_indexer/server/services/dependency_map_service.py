@@ -16,12 +16,14 @@ Deferred to future refactoring to avoid disrupting Story #193 acceptance criteri
 
 import json
 import logging
-import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
+
+import yaml
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -40,7 +42,12 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
+from .jittered_dispatcher import (
+    DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS,
+    sleep_with_jitter,
+)
 from .metadata_reader import read_current_commit
+from .shared_job_sentinel import AnalysisAlreadyRunningError, SharedJobSentinel
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,55 @@ _DEFAULT_DELTA_INTERVAL_HOURS = (
 _AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
     8  # Story #927: hex suffix length for auto-repair job IDs
 )
+# TODO: expose via Web UI Config Screen (Story #1035 follow-up)
+ANALYSIS_STALE_TIMEOUT_SECONDS = 14400  # 4 hours — sentinel stale recovery threshold
+
+# Re-export for backward compatibility (callers importing from this module)
+__all__ = ["AnalysisAlreadyRunningError", "DependencyMapService"]
+
+# ---------------------------------------------------------------------------
+# YAML timestamp-safe helpers (Bug #1114 Defect 2)
+#
+# yaml.safe_load converts ISO-8601 timestamps to datetime objects; yaml.safe_dump
+# re-emits them without the 'T' separator or wraps fresh ISO strings in single
+# quotes.  Both break the line-based downstream readers that expect the canonical
+# ISO format with 'T'.
+#
+# Fix: load with _NoTimestampSafeLoader so timestamps stay as str, then post-
+# process safe_dump output to strip single-quotes around ISO timestamp strings.
+# ---------------------------------------------------------------------------
+
+
+class _NoTimestampSafeLoader(yaml.SafeLoader):
+    """SafeLoader subclass that never converts ISO-8601 strings to datetime.
+
+    Overrides the implicit resolver table to remove the timestamp tag so that
+    values like ``2024-01-01T00:00:00+00:00`` are loaded as plain ``str``
+    rather than ``datetime`` objects.
+    """
+
+
+_NoTimestampSafeLoader.yaml_implicit_resolvers = {
+    k: [(tag, regexp) for tag, regexp in v if tag != "tag:yaml.org,2002:timestamp"]
+    for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+# Matches a single-quoted ISO timestamp as emitted by yaml.safe_dump when the
+# value is a plain str that looks like a timestamp.
+_ISO_TS_SINGLE_QUOTED_RE = re.compile(r"'(\d{4}-\d{2}-\d{2}T[^']+)'")
+
+
+def _safe_dump_iso_aware(data: Any, **kwargs: Any) -> str:
+    """yaml.safe_dump wrapper that un-quotes single-quoted ISO timestamps.
+
+    yaml.safe_dump wraps ISO-8601 strings in single quotes to prevent
+    re-interpretation as timestamps.  This restores the unquoted form so that
+    the line-based downstream readers (dep_map_domain_service:513, etc.) can
+    capture them with a simple regex.  The companion _NoTimestampSafeLoader
+    ensures a future load of the emitted text keeps the value as str.
+    """
+    raw = yaml.safe_dump(data, **kwargs)
+    return _ISO_TS_SINGLE_QUOTED_RE.sub(r"\1", raw)
 
 
 class _DomainUpdateResult(Enum):
@@ -162,10 +218,55 @@ class DependencyMapService:
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
+        # Story #1040: Cancellation flag for running analysis jobs.
+        # Set by cancel_running_analysis(); checked in domain loops.
+        # Cleared at the start of each run to prevent stale flags.
+        self._cancel_event = threading.Event()
+
     @property
     def activity_journal(self) -> ActivityJournalService:
         """Return the ActivityJournalService instance (Story #329)."""
         return self._activity_journal  # type: ignore[no-any-return]
+
+    def get_sentinel_dir(self) -> Optional[Path]:
+        """Return the sentinel directory used by SharedJobSentinel (Story #1035 B6).
+
+        Single source of truth for the dep-map sentinel path so route handlers
+        and MCP handlers do not re-derive it independently.
+
+        Returns None when golden_repos_manager is not yet initialised (e.g. during
+        early startup before the manager is wired up).
+        """
+        try:
+            return (
+                Path(self._golden_repos_manager.golden_repos_dir)
+                / "cidx-meta"
+                / "dependency-map"
+            )
+        except (AttributeError, TypeError):
+            # _golden_repos_manager is None, lacks golden_repos_dir, or returns
+            # a non-path type (e.g. Mock in tests). All are early-startup no-ops.
+            return None
+
+    def get_activity_journal_dir(self) -> Optional[Path]:
+        """Return the shared activity journal directory on NFS (.scratch/).
+
+        Returns a path under {golden_repos_dir}/.scratch/depmap-activity-journal/
+        which is visible to all cluster nodes via NFS mount.
+
+        Returns None when golden_repos_manager is not yet initialised (e.g. during
+        early startup before the manager is wired up).
+        """
+        try:
+            return (
+                Path(self._golden_repos_manager.golden_repos_dir)
+                / ".scratch"
+                / "depmap-activity-journal"
+            )
+        except (AttributeError, TypeError):
+            # _golden_repos_manager is None, lacks golden_repos_dir, or returns
+            # a non-path type (e.g. Mock in tests). All are early-startup no-ops.
+            return None
 
     def set_repair_invoker_fn(
         self,
@@ -179,50 +280,92 @@ class DependencyMapService:
         """
         self._repair_invoker_fn = fn
 
+    def cancel_running_analysis(self) -> dict:
+        """Signal cancellation to any running analysis job (Story #1040).
+
+        Checks whether an analysis is currently in progress by attempting a
+        non-blocking lock acquire.  If the lock is free (nothing running),
+        returns a no_active_job response and does NOT set the cancel event.
+        If the lock is held (analysis running), sets _cancel_event and returns
+        a success response.
+
+        Returns:
+            {"success": True, "message": "Cancellation signalled"} when running.
+            {"status": "no_active_job"} when nothing is running.
+        """
+        # Non-blocking probe: if we can acquire the lock, nothing is running.
+        acquired = self._lock.acquire(blocking=False)
+        if acquired:
+            self._lock.release()
+            return {"status": "no_active_job"}
+        # Lock is held by a running analysis — signal cancellation.
+        self._cancel_event.set()
+        return {"success": True, "message": "Cancellation signalled"}
+
     def _run_verification_pass(
         self,
         *,
         document_path: Path,
         repo_list: List[Dict[str, Any]],
         context_label: str,
-    ) -> None:
-        """Run verification pass (Story #724 v2 file-edit contract).
+    ) -> bool:
+        """Run verification pass — best-effort (Bug #1038).
 
-        Delegates to DependencyMapAnalyzer.invoke_verification_pass which edits
-        the file at document_path in-place.  Emits a single structured log on
-        completion.  Raises VerificationFailed if both attempts fail — callers
-        must not swallow this exception.
-
-        Story #724 v2.
+        Returns True on success, False on any failure.
+        Never raises — callers use unverified content on False.
         """
         ci_config = self._config_manager.get_claude_integration_config()
-        self._analyzer.invoke_verification_pass(
-            document_path=document_path,
-            repo_list=repo_list,
-            config=ci_config,
-        )
+        try:
+            return bool(
+                self._analyzer.invoke_verification_pass(
+                    document_path=document_path,
+                    repo_list=repo_list,
+                    config=ci_config,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "verification pass raised for %s", context_label, exc_info=True
+            )
+            return False
 
     def is_available(self) -> bool:
         """
-        Check if dependency map analysis can be started (Story #195).
+        Check if dependency map analysis can be started (Story #195, Story #1035).
 
-        Performs a non-blocking lock probe to determine if the service
-        is available for a new analysis.
+        Consults SharedJobSentinel on the mutable cidx-meta base path (cluster-aware).
+        A stale sentinel (older than ANALYSIS_STALE_TIMEOUT_SECONDS) is treated as
+        absent — the crashed owner can be reclaimed.
+
+        The in-process threading.Lock is checked as a fast-path belt after the
+        sentinel, to guard same-process re-entrancy without a filesystem round-trip.
 
         Returns:
-            True if no analysis is running (lock available)
-            False if analysis is already in progress (lock held)
+            True if no fresh analysis sentinel exists (slot available)
+            False if a fresh sentinel is held by any cluster node
         """
-        # Try to acquire lock without blocking
-        acquired = self._lock.acquire(blocking=False)
+        dep_map_dir = self.get_sentinel_dir()
+        if dep_map_dir is None:
+            # Manager not yet wired; fall through to threading.Lock only
+            acquired = self._lock.acquire(blocking=False)
+            if acquired:
+                self._lock.release()
+                return True
+            return False
 
+        sentinel = SharedJobSentinel(dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS)
+        active = sentinel.read_active("analysis")
+        if active is not None and not sentinel.is_stale(
+            active, ANALYSIS_STALE_TIMEOUT_SECONDS
+        ):
+            return False
+
+        # In-process belt: also consult the threading.Lock for same-process guard
+        acquired = self._lock.acquire(blocking=False)
         if acquired:
-            # Lock was available - release it immediately and return True
             self._lock.release()
             return True
-        else:
-            # Lock is held by another operation
-            return False
+        return False
 
     def run_graph_repair_dry_run(self) -> Dict[str, Any]:
         """Run Phase 3.7 graph-channel repair in dry-run mode (Story #919 AC5).
@@ -294,7 +437,9 @@ class DependencyMapService:
         # (enable_graph_channel_repair=False).  cast narrows the type for mypy only.
         return asdict(cast(DryRunReport, report))
 
-    def run_full_analysis(self, job_id: Optional[str] = None) -> Dict[str, Any]:
+    def run_full_analysis(
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
+    ) -> Dict[str, Any]:
         """
         Orchestrate full dependency map analysis pipeline.
 
@@ -302,6 +447,10 @@ class DependencyMapService:
             job_id: Optional caller-provided job ID for unified job tracking.
                     When None, a new UUID-based ID is generated internally.
                     MCP handler passes its own job_id for consistency (AC4).
+            pre_claimed: When True, the caller has already claimed the sentinel
+                    (synchronous pre-flight in route layer). The method skips
+                    try_claim but still initialises _sentinel for the finally
+                    release so the sentinel is always cleaned up (Story #1035 B3).
 
         Returns:
             Dict with status, domains_count, repos_analyzed, errors
@@ -309,7 +458,12 @@ class DependencyMapService:
         Raises:
             RuntimeError: If analysis is already in progress
             DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
+            AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
+        # Story #1040: Clear stale cancel flag before each run so a previous
+        # cancellation does not kill this new analysis.
+        self._cancel_event.clear()
+
         # Story #876 Phase B-1 Deliverable 2: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern (check_operation_conflict +
         # register_job).  register_job_if_no_conflict is backed by the partial
@@ -394,6 +548,41 @@ class DependencyMapService:
                         f"JobTracker fail_job (lock conflict) failed (non-fatal): {tracker_err}"
                     )
             raise RuntimeError("Dependency map analysis already in progress")
+
+        # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
+        # The sentinel is the cluster-wide authority; threading.Lock is the same-process belt.
+        # When pre_claimed=True the route layer already claimed before spawning the thread,
+        # so we skip try_claim but still initialise _sentinel for the finally release (B3).
+        _sentinel_job_id = (
+            _tracked_job_id or job_id or f"dep-map-full-{uuid.uuid4().hex[:8]}"
+        )
+        _dep_map_dir = self.get_sentinel_dir() or (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        _sentinel = SharedJobSentinel(_dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS)
+        if not pre_claimed:
+            _claim = _sentinel.try_claim(
+                "analysis", _sentinel_job_id, self._get_node_id()
+            )
+            if not _claim.success:
+                self._lock.release()
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(
+                            _tracked_job_id,
+                            error="Analysis already in progress (sentinel held)",
+                        )
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker fail_job (sentinel conflict) failed (non-fatal): {tracker_err}"
+                        )
+                raise AnalysisAlreadyRunningError(
+                    active_job_id=_claim.active.job_id
+                    if _claim.active
+                    else _sentinel_job_id
+                )
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
@@ -480,7 +669,8 @@ class DependencyMapService:
                 run_type="full",
             )
 
-            _analysis_succeeded = True
+            if not self._cancel_event.is_set():
+                _analysis_succeeded = True
             try:
                 self._activity_journal.log(
                     f"Analysis complete: {len(domain_list)} domains analyzed"
@@ -548,17 +738,29 @@ class DependencyMapService:
 
             self._lock.release()
 
-            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if (
-                _analysis_succeeded
-                and _tracked_job_id is not None
-                and self._job_tracker is not None
-            ):
+            # Story #1035: Release shared sentinel so other nodes can claim.
+            if "_sentinel" in locals() and "_sentinel_job_id" in locals():
                 try:
-                    self._job_tracker.complete_job(_tracked_job_id)
+                    _sentinel.release("analysis", expected_job_id=_sentinel_job_id)
+                except Exception as sentinel_err:
+                    logger.warning(
+                        "run_full_analysis: sentinel.release failed (non-fatal): %s",
+                        sentinel_err,
+                    )
+
+            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
+            # Story #1040: Call fail_job when analysis was cancelled.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    if _analysis_succeeded:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    elif self._cancel_event.is_set():
+                        self._job_tracker.fail_job(
+                            _tracked_job_id, error="Cancelled by admin"
+                        )
                 except Exception as tracker_err:
                     logger.warning(
-                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                        f"JobTracker complete_job/fail_job failed (non-fatal): {tracker_err}"
                     )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
@@ -671,17 +873,23 @@ class DependencyMapService:
             # Save journal immediately to prevent loss if crash occurs before Pass 1
             self._save_journal(staging_dir, journal)
             # Story #329: Initialize activity journal AFTER staging dir cleanup
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                self._activity_journal.init(staging_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     f"Starting full analysis with {len(repo_list)} repositories"
                 )
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
         else:
-            # Resuming — init journal in existing staging dir (don't wipe)
+            # Resuming — init journal in shared NFS dir (don't wipe)
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                self._activity_journal.init(staging_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Resuming analysis")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error (resume): {e}")
@@ -734,6 +942,18 @@ class DependencyMapService:
         pass2_start = time.time()
         total_domains = len(domain_list)
         for domain_idx, domain in enumerate(domain_list):
+            # Story #1040: Check for cancellation at the top of each domain iteration.
+            if self._cancel_event.is_set():
+                logger.info(
+                    "Cancellation requested, stopping full analysis after "
+                    "%d/%d domains",
+                    domain_idx,
+                    len(domain_list),
+                )
+                break
+            # Bug #1056: jitter between Claude CLI calls to avoid thundering-herd.
+            if domain_idx > 0:
+                sleep_with_jitter(DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS)
             domain_name = domain["name"]
             domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
 
@@ -783,11 +1003,16 @@ class DependencyMapService:
                 if chars > 0:
                     # Story #724 v2: optional post-generation verification pass
                     if config.dep_map_fact_check_enabled:
-                        self._run_verification_pass(
+                        verified = self._run_verification_pass(
                             document_path=domain_file,
                             repo_list=repo_list,
                             context_label=f"pass2:{domain_name}",
                         )
+                        if not verified:
+                            logger.warning(
+                                "Verification failed for pass2:%s — keeping unverified content",
+                                domain_name,
+                            )
                         chars = (
                             len(domain_file.read_text()) if domain_file.exists() else 0
                         )
@@ -1145,6 +1370,30 @@ class DependencyMapService:
             except OSError as e:
                 logger.warning("Failed to list versioned cidx-meta dirs: %s", e)
 
+        # Bug #1084 B3: on the cow-daemon backend the snapshot lives under the
+        # daemon mount, NOT under golden-repos/.versioned, so the local glob above
+        # finds nothing and the old code fell back to the mutable base clone --
+        # reading a different version than semantic search. Consult the Phase A
+        # discovery API (VersionedSnapshotManager.latest_snapshot) so we read the
+        # alias-pointed snapshot on every backend. Only when no snapshot exists do
+        # we fall through to the live path (preserving read==write consistency).
+        snapshot_manager = getattr(
+            self._golden_repos_manager, "_snapshot_manager", None
+        )
+        if snapshot_manager is not None and hasattr(
+            snapshot_manager, "latest_snapshot"
+        ):
+            try:
+                latest = snapshot_manager.latest_snapshot("cidx-meta")
+                if latest:
+                    return Path(latest)
+            except Exception as e:
+                logger.warning(
+                    "Discovery-API latest_snapshot('cidx-meta') failed, "
+                    "falling back to live path: %s",
+                    e,
+                )
+
         # Fallback: try get_actual_repo_path (handles non-versioned repos)
         try:
             actual_path = self._golden_repos_manager.get_actual_repo_path("cidx-meta")
@@ -1156,6 +1405,24 @@ class DependencyMapService:
             )
 
         return golden_repos_dir / "cidx-meta"
+
+    def _get_node_id(self) -> str:
+        """
+        Return the cluster node identifier for use in sentinel payloads (Story #1035).
+
+        Reads `cluster.node_id` from bootstrap config.json (BOOTSTRAP_ONLY per CLAUDE.md).
+        Falls back to socket.gethostname() in solo mode (no config or key absent).
+        """
+        try:
+            cfg_path = Path.home() / ".cidx-server" / "config.json"
+            if cfg_path.exists():
+                cfg_data = json.loads(cfg_path.read_text())
+                node_id = cfg_data.get("cluster", {}).get("node_id", "")
+                if node_id:
+                    return str(node_id)
+        except Exception as exc:
+            logger.debug("_get_node_id: could not read bootstrap config: %s", exc)
+        return socket.gethostname()
 
     @property
     def cidx_meta_read_path(self) -> Path:
@@ -1824,7 +2091,11 @@ class DependencyMapService:
                 next_run_str = tracking.get("next_run")
 
                 if next_run_str:
-                    next_run = datetime.fromisoformat(next_run_str)
+                    next_run = (
+                        next_run_str
+                        if isinstance(next_run_str, datetime)
+                        else datetime.fromisoformat(next_run_str)
+                    )
                     now = datetime.now(timezone.utc)
 
                     if now >= next_run:
@@ -1846,7 +2117,11 @@ class DependencyMapService:
                         now = datetime.now(timezone.utc)
 
                         if refinement_next:
-                            ref_next_dt = datetime.fromisoformat(refinement_next)
+                            ref_next_dt = (
+                                refinement_next
+                                if isinstance(refinement_next, datetime)
+                                else datetime.fromisoformat(refinement_next)
+                            )
                             if now >= ref_next_dt:
                                 # Bug #931: duplicate update_tracking(refinement_next_run=...)
                                 # removed here. run_refinement_cycle (called via
@@ -1895,16 +2170,20 @@ class DependencyMapService:
         tracking = self._tracking_backend.get_tracking()
         stored_hashes_json = tracking.get("commit_hashes")
 
-        # Parse stored hashes (may be None for first run)
+        # Parse stored hashes (may be None for first run).
+        # PostgreSQL JSONB returns a dict directly; SQLite returns a JSON string.
         stored_hashes = {}
         if stored_hashes_json:
-            try:
-                stored_hashes = json.loads(stored_hashes_json)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Failed to parse stored commit hashes, treating as empty"
-                )
-                stored_hashes = {}
+            if isinstance(stored_hashes_json, dict):
+                stored_hashes = stored_hashes_json
+            else:
+                try:
+                    stored_hashes = json.loads(stored_hashes_json)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to parse stored commit hashes, treating as empty"
+                    )
+                    stored_hashes = {}
 
         # Get current repos
         current_repos = self._get_activated_repos()
@@ -2080,6 +2359,14 @@ class DependencyMapService:
         """
         Update last_analyzed timestamp in YAML frontmatter (Story #193).
 
+        Parses the existing frontmatter as a YAML dict, sets last_analyzed,
+        then re-emits via yaml.safe_dump — so any duplicated or malformed keys
+        (e.g. the participating_repos corruption from bug #1114) are self-healed
+        rather than propagated.
+
+        On yaml.YAMLError the method logs a WARNING, falls back to a minimal
+        valid dict, and continues without raising.
+
         Args:
             existing_content: Original domain file content with frontmatter
             new_body: New content body from Claude CLI
@@ -2090,35 +2377,38 @@ class DependencyMapService:
         """
         now = datetime.now(timezone.utc).isoformat()
 
-        # Parse existing frontmatter
+        # Parse existing frontmatter block
         frontmatter_match = re.match(
             r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
         )
 
         if frontmatter_match:
-            # Update last_analyzed in existing frontmatter
             frontmatter_text = frontmatter_match.group(1)
-            frontmatter_lines = frontmatter_text.split("\n")
-            updated_lines = []
-            found_last_analyzed = False
+            try:
+                fm_dict = yaml.load(frontmatter_text, Loader=_NoTimestampSafeLoader)
+                if not isinstance(fm_dict, dict):
+                    fm_dict = {}
+            except yaml.YAMLError as exc:
+                logger.warning(
+                    "_update_frontmatter_timestamp: malformed YAML frontmatter "
+                    "for domain '%s' — falling back to minimal dict. Error: %s",
+                    domain_name,
+                    exc,
+                )
+                fm_dict = {"domain": domain_name}
 
-            for line in frontmatter_lines:
-                if line.startswith("last_analyzed:"):
-                    updated_lines.append(f"last_analyzed: {now}")
-                    found_last_analyzed = True
-                else:
-                    updated_lines.append(line)
-
-            if not found_last_analyzed:
-                updated_lines.append(f"last_analyzed: {now}")
-
-            new_frontmatter = "\n".join(updated_lines)
-            return f"---\n{new_frontmatter}\n---\n\n{new_body}"
+            fm_dict["last_analyzed"] = now
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
+            )
+            return f"---\n{yaml_text}---\n\n{new_body}"
         else:
             # No frontmatter found, create minimal one
-            return (
-                f"---\ndomain: {domain_name}\nlast_analyzed: {now}\n---\n\n{new_body}"
+            fm_dict = {"domain": domain_name, "last_analyzed": now}
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
             )
+            return f"---\n{yaml_text}---\n\n{new_body}"
 
     def _update_domain_file(
         self,
@@ -2222,17 +2512,25 @@ class DependencyMapService:
                 tmp_path = Path(tmp.name)
 
             try:
-                self._run_verification_pass(
+                verified = self._run_verification_pass(
                     document_path=tmp_path,
                     repo_list=delta_repo_list,
                     context_label=f"delta_merge:{domain_name}",
                 )
-                final_content = tmp_path.read_text(encoding="utf-8")
+                if verified:
+                    final_content = tmp_path.read_text(encoding="utf-8")
+                else:
+                    logger.warning(
+                        "Verification failed for delta_merge:%s — using unverified content",
+                        domain_name,
+                    )
             finally:
                 tmp_path.unlink(missing_ok=True)
 
         # Single write with (verified or original) content
-        domain_file.write_text(final_content)
+        atomic_tmp = domain_file.with_suffix(".tmp")
+        atomic_tmp.write_text(final_content)
+        atomic_tmp.replace(domain_file)
 
         logger.info(f"Updated domain file in-place: {domain_file}")
         return _DomainUpdateResult.WRITTEN
@@ -2245,9 +2543,19 @@ class DependencyMapService:
         new_repos: List[Dict[str, Any]],
         removed_repos: List[str],
         config,
+        fingerprint: Optional[str] = None,
     ) -> List[str]:
         """
         Update all affected domain files (Story #193, AC5).
+
+        Story #1053: When *fingerprint* is supplied, per-domain frontmatter skip logic
+        is active.  Before invoking Claude for a domain, the existing .md file's YAML
+        frontmatter is read; if ``last_delta_applied == fingerprint`` the domain is
+        skipped and an activity-journal entry is emitted.  After a successful Claude
+        invocation the .md is written atomically via write_atomic with updated
+        frontmatter (``last_delta_applied = fingerprint``, ``last_applied_at = <now>``).
+        Operator-managed fields are preserved; any frontmatter echoed by Claude is
+        stripped before re-rendering.
 
         Args:
             affected_domains: Set of domain names to update
@@ -2256,10 +2564,20 @@ class DependencyMapService:
             new_repos: List of new repo dicts
             removed_repos: List of removed repo aliases
             config: Claude integration config
+            fingerprint: Optional delta fingerprint from compute_delta_fingerprint.
+                         When provided, enables per-domain frontmatter journal logic.
 
         Returns:
             List of error messages (empty if all successful)
         """
+        from datetime import datetime, timezone
+
+        from .dep_map_delta_journal import (
+            parse_frontmatter,
+            render_md,
+            write_atomic,
+        )
+
         errors: list[str] = []
         changed_aliases = [r["alias"] for r in changed_repos]
         new_aliases = [r["alias"] for r in new_repos]
@@ -2278,11 +2596,58 @@ class DependencyMapService:
         # Code Review M4: Sort for deterministic processing order
         total_affected = len(affected_domains)
         for domain_idx, domain_name in enumerate(sorted(affected_domains)):
+            # Story #1040: Check for cancellation at the top of each domain iteration.
+            if self._cancel_event.is_set():
+                logger.info(
+                    "Cancellation requested, stopping delta domain update after "
+                    "%d/%d domains",
+                    domain_idx,
+                    total_affected,
+                )
+                break
             domain_file = dependency_map_dir / f"{domain_name}.md"
 
-            if not domain_file.exists():
-                logger.warning(f"Domain file not found: {domain_file}, skipping")
-                continue
+            # Story #1053: Per-domain frontmatter journal skip logic.
+            # Read existing file (or treat as empty for missing files — synthetic creation).
+            if domain_file.exists():
+                existing_text = domain_file.read_text()
+            else:
+                # Scenario 15: domain file missing — log synthetic creation intent and
+                # create an empty placeholder so _update_domain_file can read it.
+                logger.info(
+                    "Domain file missing for '%s' — synthetic creation", domain_name
+                )
+                existing_text = ""
+                try:
+                    domain_file.write_text("")
+                except Exception as create_exc:
+                    logger.error(
+                        "Cannot create placeholder for missing domain '%s': %s",
+                        domain_name,
+                        create_exc,
+                    )
+                    errors.append(
+                        f"{domain_name}: cannot create placeholder: {create_exc}"
+                    )
+                    continue
+
+            if fingerprint is not None:
+                fm, _body = parse_frontmatter(existing_text, domain_hint=domain_name)
+                if fm.get("last_delta_applied") == fingerprint:
+                    # Already processed in a prior run — skip.
+                    logger.info(
+                        "Skipping domain '%s' (%d/%d) — frontmatter matches current delta",
+                        domain_name,
+                        domain_idx + 1,
+                        total_affected,
+                    )
+                    try:
+                        self._activity_journal.log(
+                            f"Resume: skipping {domain_name} (already applied)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Non-fatal journal log error: {e}")
+                    continue
 
             try:
                 self._activity_journal.log(
@@ -2317,6 +2682,63 @@ class DependencyMapService:
                             f"{attempt}/{MAX_DOMAIN_RETRIES}: {exc}, retrying",
                         )
                     continue
+
+                if update_result == _DomainUpdateResult.WRITTEN:
+                    # Story #1053: Re-read what _update_domain_file wrote and wrap in
+                    # frontmatter journal.  If fingerprint is not provided (legacy path),
+                    # skip the frontmatter rewrap — the file was already written by the
+                    # caller via the old atomic_tmp pattern.
+                    if fingerprint is not None and domain_file.exists():
+                        try:
+                            written_text = domain_file.read_text()
+                            # The file written by _update_domain_file has:
+                            #   ---\n<system-managed frontmatter>\n---\n\n<claude_output>
+                            # where <claude_output> may itself start with a frontmatter
+                            # block if Claude echoed the file back (Scenario 9).
+                            # Strip the system-managed frontmatter first, then strip any
+                            # echoed frontmatter from Claude's output.
+                            _, after_system_fm = parse_frontmatter(
+                                written_text, domain_hint=domain_name
+                            )
+                            # Strip Claude-echoed frontmatter (double-frontmatter prevention).
+                            _, new_body = parse_frontmatter(
+                                after_system_fm, domain_hint=domain_name
+                            )
+
+                            # Scenario 14: reject empty/whitespace body — do not advance journal.
+                            if not new_body.strip():
+                                logger.error(
+                                    "Delta domain '%s': Claude returned empty/whitespace body "
+                                    "— not advancing frontmatter journal",
+                                    domain_name,
+                                )
+                                # Restore original content (do not leave empty file).
+                                if existing_text:
+                                    write_atomic(domain_file, existing_text)
+                                update_result = _DomainUpdateResult.FAILED
+                            else:
+                                # Preserve operator fields; overwrite only journal keys.
+                                orig_fm, _ = parse_frontmatter(
+                                    existing_text, domain_hint=domain_name
+                                )
+                                new_fm = {
+                                    k: v
+                                    for k, v in orig_fm.items()
+                                    if k
+                                    not in ("last_delta_applied", "last_applied_at")
+                                }
+                                new_fm["domain"] = domain_name
+                                new_fm["last_delta_applied"] = fingerprint
+                                new_fm["last_applied_at"] = datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                                write_atomic(domain_file, render_md(new_fm, new_body))
+                        except Exception as journal_exc:
+                            logger.warning(
+                                "Story #1053: frontmatter journal update failed for '%s': %s",
+                                domain_name,
+                                journal_exc,
+                            )
 
                 if update_result == _DomainUpdateResult.WRITTEN:
                     try:
@@ -2502,7 +2924,9 @@ class DependencyMapService:
         write_file = Path(dependency_map_dir) / "_domains.json"
         try:
             Path(dependency_map_dir).mkdir(parents=True, exist_ok=True)
-            write_file.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp = write_file.with_suffix(".tmp")
+            atomic_tmp.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp.replace(write_file)
         except OSError as e:
             logger.warning(f"Failed to write _domains.json: {e}")
 
@@ -2564,7 +2988,9 @@ class DependencyMapService:
         write_domains_file = dependency_map_dir / "_domains.json"
         try:
             dependency_map_dir.mkdir(parents=True, exist_ok=True)
-            write_domains_file.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp = write_domains_file.with_suffix(".tmp")
+            atomic_tmp.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp.replace(write_domains_file)
             logger.info(
                 f"Cleaned _domains.json: removed {len(removed_set)} stale repo alias(es)"
             )
@@ -2644,7 +3070,7 @@ class DependencyMapService:
             )
 
     def run_delta_analysis(
-        self, job_id: Optional[str] = None
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Run delta analysis to refresh only affected domains (Story #193, AC1-8).
@@ -2653,13 +3079,21 @@ class DependencyMapService:
             job_id: Optional caller-provided job ID for unified job tracking.
                     When None, a new UUID-based ID is generated internally.
                     MCP handler passes its own job_id for consistency (AC4).
+            pre_claimed: When True, the caller has already claimed the sentinel
+                    (synchronous pre-flight in route layer). The method skips
+                    try_claim but still initialises _delta_sentinel for the
+                    finally release (Story #1035 B3).
 
         Returns:
             Dict with status or None if skipped (lock held or disabled)
 
         Raises:
             DuplicateJobError: If job_tracker detects a concurrent delta analysis (AC6)
+            AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
+        # Story #1040: Clear stale cancel flag before each run.
+        self._cancel_event.clear()
+
         # Story #876 Phase B-1 Deliverable 3: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern.  register_job_if_no_conflict
         # is backed by the partial unique index idx_active_job_per_repo so
@@ -2740,6 +3174,45 @@ class DependencyMapService:
                     )
             return None
 
+        # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
+        # The sentinel is the cluster-wide authority; threading.Lock is the same-process belt.
+        # When pre_claimed=True the route layer already claimed before spawning the thread,
+        # so we skip try_claim but still initialise _delta_sentinel for the finally release (B3).
+        _delta_sentinel_job_id = (
+            _tracked_job_id or job_id or f"dep-map-delta-{uuid.uuid4().hex[:8]}"
+        )
+        _delta_dep_map_dir = self.get_sentinel_dir() or (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        _delta_sentinel = SharedJobSentinel(
+            _delta_dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS
+        )
+        if not pre_claimed:
+            _delta_claim = _delta_sentinel.try_claim(
+                "analysis", _delta_sentinel_job_id, self._get_node_id()
+            )
+            if not _delta_claim.success:
+                self._lock.release()
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(
+                            _tracked_job_id,
+                            error="Analysis already in progress (sentinel held)",
+                        )
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker fail_job (delta sentinel conflict) failed (non-fatal): {tracker_err}"
+                        )
+                raise AnalysisAlreadyRunningError(
+                    active_job_id=(
+                        _delta_claim.active.job_id
+                        if _delta_claim.active
+                        else _delta_sentinel_job_id
+                    )
+                )
+
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
@@ -2759,11 +3232,11 @@ class DependencyMapService:
                 return None
 
             # Story #329: Initialize activity journal for this delta analysis run
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                delta_journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-delta-journal/")
-                )
-                self._activity_journal.init(delta_journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Starting delta analysis")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
@@ -2901,6 +3374,16 @@ class DependencyMapService:
                 all_repos, dep_map_dir=dependency_map_dir
             )
 
+            # Story #1053: Compute delta fingerprint for frontmatter journal.
+            from .dep_map_delta_journal import (
+                all_new_repos_have_domain_assignments,
+                compute_delta_fingerprint,
+            )
+
+            delta_fingerprint = compute_delta_fingerprint(
+                changed_repos, new_repos, removed_repos
+            )
+
             # Handle new repo domain discovery (AC6, Story #216)
             discovery_write_success = True
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
@@ -2914,14 +3397,30 @@ class DependencyMapService:
                     if dependency_map_dir.exists()
                     else []
                 )
-                discovered, discovery_write_success = (
-                    self._discover_and_assign_new_repos(
-                        new_repos=new_repos,
-                        existing_domains=existing_domains,
-                        dependency_map_dir=dependency_map_dir,
-                        config=config,
+
+                # Story #1053 Phase C: new-repo discovery idempotency.
+                # If _domains.json already covers all new repos, skip the Claude call.
+                domains_json_path = dependency_map_dir / "_domains.json"
+                if all_new_repos_have_domain_assignments(new_repos, domains_json_path):
+                    logger.info(
+                        "Resume: skipping new-repo discovery — _domains.json covers all new repos"
                     )
-                )
+                    try:
+                        self._activity_journal.log(
+                            "Resume: skipping new-repo discovery (already complete)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Non-fatal journal log error: {e}")
+                    discovered: Set[str] = set()
+                else:
+                    discovered, discovery_write_success = (
+                        self._discover_and_assign_new_repos(
+                            new_repos=new_repos,
+                            existing_domains=existing_domains,
+                            dependency_map_dir=dependency_map_dir,
+                            config=config,
+                        )
+                    )
                 affected_domains.update(discovered)
 
             # Story #716: Discover and assign uncovered repos
@@ -2990,6 +3489,7 @@ class DependencyMapService:
                 new_repos,
                 removed_repos,
                 config,
+                fingerprint=delta_fingerprint,
             )
             merge_s = time.time() - t_merge_start
 
@@ -3059,9 +3559,10 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal copy error: {e}")
 
-            _delta_succeeded = True
+            if not self._cancel_event.is_set():
+                _delta_succeeded = True
             return {
-                "status": "completed",
+                "status": "completed" if _delta_succeeded else "cancelled",
                 "affected_domains": len(affected_domains),
                 "errors": errors,
             }
@@ -3115,17 +3616,31 @@ class DependencyMapService:
 
             self._lock.release()
 
-            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if (
-                _delta_succeeded
-                and _tracked_job_id is not None
-                and self._job_tracker is not None
-            ):
+            # Story #1035: Release shared sentinel so other nodes can claim.
+            if "_delta_sentinel" in locals() and "_delta_sentinel_job_id" in locals():
                 try:
-                    self._job_tracker.complete_job(_tracked_job_id)
+                    _delta_sentinel.release(
+                        "analysis", expected_job_id=_delta_sentinel_job_id
+                    )
+                except Exception as sentinel_err:
+                    logger.warning(
+                        "run_delta_analysis: sentinel.release failed (non-fatal): %s",
+                        sentinel_err,
+                    )
+
+            # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
+            # Story #1040: Call fail_job when analysis was cancelled.
+            if _tracked_job_id is not None and self._job_tracker is not None:
+                try:
+                    if _delta_succeeded:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    elif self._cancel_event.is_set():
+                        self._job_tracker.fail_job(
+                            _tracked_job_id, error="Cancelled by admin"
+                        )
                 except Exception as tracker_err:
                     logger.warning(
-                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                        f"JobTracker complete_job/fail_job failed (non-fatal): {tracker_err}"
                     )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
@@ -3285,14 +3800,17 @@ class DependencyMapService:
 
         Returns None in all cases (early exit when disabled or no domains).
         """
+        # Story #1040: Clear stale cancel flag before each run.
+        self._cancel_event.clear()
+
         config = self._config_manager.get_claude_integration_config()
         if not config or not config.refinement_enabled:
             logger.debug("Refinement disabled, skipping refinement cycle")
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     "Refinement: disabled in config, skipping cycle"
                 )
@@ -3303,11 +3821,11 @@ class DependencyMapService:
         # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
         if not self._lock.acquire(blocking=False):
             logger.info("Refinement cycle skipped - analysis already in progress")
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     "Refinement: skipped - analysis already in progress"
                 )
@@ -3325,11 +3843,11 @@ class DependencyMapService:
         any_changed = False
         try:
             # Initialize activity journal for this refinement cycle run
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Starting refinement cycle")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
@@ -3391,6 +3909,15 @@ class DependencyMapService:
             # Bug #874 Story C: time the refinement work so phase_timings_json has honest refine_s.
             t_refine_start = time.time()
             for domain_idx, domain_info in enumerate(batch):
+                # Story #1040: Check for cancellation at the top of each domain iteration.
+                if self._cancel_event.is_set():
+                    logger.info(
+                        "Cancellation requested, stopping refinement after "
+                        "%d/%d domains",
+                        domain_idx,
+                        len(batch),
+                    )
+                    break
                 domain_name = domain_info.get("name", "")
                 if not domain_name:
                     continue
@@ -3509,6 +4036,14 @@ class DependencyMapService:
         Preserves all existing frontmatter fields (including last_analyzed).
         Adds or updates last_refined to the current UTC timestamp.
 
+        Parses the existing frontmatter as a YAML dict, sets last_refined,
+        then re-emits via yaml.safe_dump — so any duplicated or malformed keys
+        (e.g. the participating_repos corruption from bug #1114) are self-healed
+        rather than propagated.
+
+        On yaml.YAMLError the method logs a WARNING, falls back to a minimal
+        valid dict, and continues without raising.
+
         Args:
             existing_content: Original domain file content (may include frontmatter)
             new_body: Refined document body from Claude CLI
@@ -3522,20 +4057,31 @@ class DependencyMapService:
             r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
         )
         if not frontmatter_match:
-            return f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{new_body}"
+            fm_dict: dict = {"domain": domain_name, "last_refined": now}
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
+            )
+            return f"---\n{yaml_text}---\n\n{new_body}"
 
-        lines = frontmatter_match.group(1).split("\n")
-        updated, found_refined = [], False
-        for line in lines:
-            if line.startswith("last_refined:"):
-                updated.append(f"last_refined: {now}")
-                found_refined = True
-            else:
-                updated.append(line)  # Preserve last_analyzed and all other fields
-        if not found_refined:
-            updated.append(f"last_refined: {now}")
-        frontmatter_body = "\n".join(updated)
-        return f"---\n{frontmatter_body}\n---\n\n{new_body}"
+        frontmatter_text = frontmatter_match.group(1)
+        try:
+            fm_dict = yaml.load(frontmatter_text, Loader=_NoTimestampSafeLoader)
+            if not isinstance(fm_dict, dict):
+                fm_dict = {}
+        except yaml.YAMLError as exc:
+            logger.warning(
+                "_build_refinement_frontmatter: malformed YAML frontmatter "
+                "for domain '%s' — falling back to minimal dict. Error: %s",
+                domain_name,
+                exc,
+            )
+            fm_dict = {"domain": domain_name}
+
+        fm_dict["last_refined"] = now
+        yaml_text = _safe_dump_iso_aware(
+            fm_dict, sort_keys=False, default_flow_style=False
+        )
+        return f"---\n{yaml_text}---\n\n{new_body}"
 
     def _refine_existing_domain(
         self,

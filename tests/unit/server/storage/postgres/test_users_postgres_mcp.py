@@ -285,6 +285,106 @@ class TestGetMcpCredentialByClientId:
         assert "some-client-id" in params
         assert "some-client-id" not in sql
 
+    def test_get_mcp_credential_by_client_id_sanitizes_datetime_objects(self) -> None:
+        """PG datetime objects for created_at/last_used_at must be converted to exact ISO strings."""
+        from datetime import datetime, timezone
+
+        pool, conn, cursor = _make_pool_and_conn()
+        dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        cursor.fetchone.return_value = (
+            "alice",
+            "cred-1",
+            "client-id-1",
+            "secret-hash",
+            "cx_",
+            "My Key",
+            dt,  # created_at as datetime object (PG TIMESTAMPTZ behaviour)
+            dt,  # last_used_at as datetime object
+        )
+        backend = _make_backend(pool)
+
+        result = backend.get_mcp_credential_by_client_id("client-id-1")
+
+        assert result is not None
+        _, cred = result
+        assert cred["created_at"] == dt.isoformat(), (
+            "created_at must equal dt.isoformat()"
+        )
+        assert cred["last_used_at"] == dt.isoformat(), (
+            "last_used_at must equal dt.isoformat()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# datetime sanitization for list_all_mcp_credentials
+# ---------------------------------------------------------------------------
+
+
+class TestListAllMcpCredentialsSanitizesDatetimeObjects:
+    def test_list_all_mcp_credentials_sanitizes_datetime_objects(self) -> None:
+        """PG datetime objects for created_at/last_used_at must equal dt.isoformat()."""
+        from datetime import datetime, timezone
+
+        pool, conn, cursor = _make_pool_and_conn()
+        dt = datetime(2024, 6, 15, 9, 30, 0, tzinfo=timezone.utc)
+        cursor.fetchall.return_value = [
+            (
+                "alice",
+                "cred-1",
+                "client-id-1",
+                "cx_",
+                "Key 1",
+                dt,  # created_at as datetime object (PG TIMESTAMPTZ behaviour)
+                dt,  # last_used_at as datetime object
+            ),
+        ]
+        backend = _make_backend(pool)
+
+        result = backend.list_all_mcp_credentials()
+
+        assert len(result) == 1
+        assert result[0]["created_at"] == dt.isoformat(), (
+            "created_at must equal dt.isoformat()"
+        )
+        assert result[0]["last_used_at"] == dt.isoformat(), (
+            "last_used_at must equal dt.isoformat()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# datetime sanitization for get_system_mcp_credentials
+# ---------------------------------------------------------------------------
+
+
+class TestGetSystemMcpCredentialsSanitizesDatetimeObjects:
+    def test_get_system_mcp_credentials_sanitizes_datetime_objects(self) -> None:
+        """PG datetime objects for created_at/last_used_at must equal dt.isoformat()."""
+        from datetime import datetime, timezone
+
+        pool, conn, cursor = _make_pool_and_conn()
+        dt = datetime(2024, 6, 15, 9, 30, 0, tzinfo=timezone.utc)
+        cursor.fetchall.return_value = [
+            (
+                "cred-1",
+                "client-id-1",
+                "cx_",
+                "Sys Key",
+                dt,  # created_at as datetime object (PG TIMESTAMPTZ behaviour)
+                dt,  # last_used_at as datetime object
+            ),
+        ]
+        backend = _make_backend(pool)
+
+        result = backend.get_system_mcp_credentials()
+
+        assert len(result) == 1
+        assert result[0]["created_at"] == dt.isoformat(), (
+            "created_at must equal dt.isoformat()"
+        )
+        assert result[0]["last_used_at"] == dt.isoformat(), (
+            "last_used_at must equal dt.isoformat()"
+        )
+
 
 # ---------------------------------------------------------------------------
 # get_user_by_email

@@ -61,6 +61,18 @@
             <small>Last {{ time_filter or '24h' }}</small>
         </footer>
     </article>
+
+    <article class="stat-card stat-warning">
+        <header>
+            <h3>Active Deactivations</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?job_type=deactivate_repository&status=running">{{ active_deactivations if active_deactivations is defined else 0 }}</a>
+        </div>
+        <footer>
+            <small>Pending or running</small>
+        </footer>
+    </article>
 </div>
 
 <!-- Repository Statistics Section -->
@@ -179,9 +191,39 @@
     </div>
 </div>
 
+<!-- Query-Embedding Cache Metrics Section (Story #1109 S5; windowed Story #1294) -->
+<!-- Mirrors the langfuse-section polling pattern: 30s auto-refresh, HTMX only.
+     Story #1294: the cache-window dropdown lives OUTSIDE the refresh target
+     (Story #69 convention) and is re-read on every HTMX request via
+     hx-include, with an extra "change from:#cache-window" trigger so picking
+     a new window refreshes immediately instead of waiting for the next poll. -->
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>Cache Metrics</h2>
+    <div>
+        <label for="cache-window" style="margin-right: 0.5rem;">Time Window:</label>
+        <select id="cache-window" name="cache_window" style="padding: 0.25rem 0.5rem;">
+            <option value="900" {{ 'selected' if cache_window == 900 else '' }}>Last 15 Minutes</option>
+            <option value="3600" {{ 'selected' if cache_window == 3600 else '' }}>Last 1 Hour</option>
+            <option value="86400" {{ 'selected' if cache_window is not defined or cache_window is none or cache_window == 86400 else '' }}>Last 24 Hours</option>
+            <option value="604800" {{ 'selected' if cache_window == 604800 else '' }}>Last 7 Days</option>
+            <option value="1296000" {{ 'selected' if cache_window == 1296000 else '' }}>Last 15 Days</option>
+        </select>
+    </div>
+</div>
+<div id="cache-metrics-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-cache-metrics"
+    hx-trigger="load, every 30s, change from:#cache-window"
+    hx-include="#cache-window"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading cache metrics...</p>
+    </div>
+</div>
+
 <!-- Recent Activity Section (Story #201: Fixed to 24h, dropdown removed) -->
 <h2>Recent Activity</h2>
 
+{% set has_providers = (has_provider_results | default(false)) or (recent_jobs and recent_jobs | selectattr('result') | selectattr('result.provider_results', 'defined') | list | length > 0) %}
 <div class="recent-activity">
     <table role="grid">
         <thead>
@@ -189,29 +231,14 @@
                 <th>Repository</th>
                 <th>Job Type</th>
                 <th>Completed</th>
+                <th>User</th>
                 <th>Status</th>
+                {% if has_providers %}<th>Providers</th>{% endif %}
             </tr>
         </thead>
         <!-- Story #69: Granular refresh target for table body ONLY -->
         <tbody id="recent-jobs-tbody">
-            {% if recent_jobs and recent_jobs|length > 0 %}
-            {% for job in recent_jobs %}
-            <tr>
-                <td>
-                    <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
-                </td>
-                <td>{{ job.job_type }}</td>
-                <td>{{ job.completion_time[:19] if job.completion_time else 'N/A' }}</td>
-                <td>
-                    <span class="job-status status-{{ job.status }}">{{ job.status | capitalize }}</span>
-                </td>
-            </tr>
-            {% endfor %}
-            {% else %}
-            <tr>
-                <td colspan="4" style="text-align: center;">No recent activity to display.</td>
-            </tr>
-            {% endif %}
+            {% include "partials/dashboard_recent_jobs.html" %}
         </tbody>
     </table>
 </div>

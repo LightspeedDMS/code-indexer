@@ -26,6 +26,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "repository_status",
         "sync_repository",
         "switch_branch",
+        "store_xray_pattern",
         "list_files",
         "get_file_content",
         "browse_directory",
@@ -173,10 +174,14 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "xray_search",
         "xray_explore",
         "xray_dump_ast",
+        # Story #1055: cross-repo multi-expression X-Ray batch
+        "xray_search_batch",
         # Story #996: cancel background jobs with process termination
         "cancel_job",
         # Payload cache retrieval handler (added post-v10)
         "cidx_fetch_cached_payload",
+        # Story 4 (Epic #1213): Memory Governor observability MCP twin
+        "get_memory_governor_stats",
     }
 )
 

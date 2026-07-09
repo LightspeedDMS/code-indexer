@@ -33,6 +33,8 @@ from typing import Any, List, Optional
 
 from psycopg.rows import tuple_row
 
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+
 logger = logging.getLogger(__name__)
 
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
@@ -85,6 +87,11 @@ class NodeHeartbeatService:
         self._active_threshold_seconds = active_threshold_seconds
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        self._db_throttle = DbOutageThrottle(
+            service_name=f"NodeHeartbeatService[{node_id}]"
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -152,9 +159,8 @@ class NodeHeartbeatService:
             and ``status = 'online'``.
         """
         with self._pool.connection() as conn:
-            # Explicit tuple_row cursor: don't rely on the borrowed connection's
-            # row_factory (a prior borrower may have left it as dict_row), so
-            # positional row[0] access below is always correct.
+            # Use explicit tuple_row to avoid KeyError when a pooled connection
+            # has been contaminated with dict_row by another service.
             with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute(
                     """
@@ -209,63 +215,39 @@ class NodeHeartbeatService:
         """Insert or update this node's row with the given status."""
         import os
 
-        # C6 Phase 1: peers address this node at hostname:port for shard routing.
-        # Prefer the routable pod IP from the downward API (POD_IP); fall back to
-        # the node name. Port is the server port (CIDX_PORT), default 8090.
-        hostname = os.environ.get("POD_IP") or os.uname().nodename
-        try:
-            port = int(os.environ.get("CIDX_PORT", "8090"))
-        except ValueError:
-            port = 8090
+        hostname = os.uname().nodename
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO cluster_nodes (node_id, hostname, port, status, last_heartbeat)
-                    VALUES (%s, %s, %s, %s, NOW())
+                    INSERT INTO cluster_nodes (node_id, hostname, status, last_heartbeat)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (node_id) DO UPDATE
                         SET status         = EXCLUDED.status,
                             hostname       = EXCLUDED.hostname,
-                            port           = EXCLUDED.port,
                             last_heartbeat = NOW()
                     """,
-                    (self._node_id, hostname, port, status),
+                    (self._node_id, hostname, status),
                 )
             conn.commit()
-
-    def get_node_addresses(self) -> "dict[str, str]":
-        """Return ``{node_id: 'host:port'}`` for currently-online nodes.
-
-        Used by the shard router (C6 Phase 1) to reach the pod that owns a repo.
-        Uses an explicit tuple_row cursor so positional access is correct
-        regardless of the borrowed connection's row_factory (Bug: row_factory
-        leakage).
-        """
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=tuple_row) as cur:
-                cur.execute(
-                    """
-                    SELECT node_id, hostname, port
-                    FROM   cluster_nodes
-                    WHERE  status = 'online'
-                      AND  last_heartbeat >= NOW() - %s * INTERVAL '1 second'
-                    """,
-                    (self._active_threshold_seconds,),
-                )
-                rows = cur.fetchall()
-        return {str(row[0]): f"{row[1]}:{row[2] or 8090}" for row in rows if row[1]}
 
     def _heartbeat_loop(self) -> None:
         """Background loop: update heartbeat every heartbeat_interval seconds."""
         while not self._stop_event.is_set():
             try:
                 self.update_heartbeat()
+                self._db_throttle.on_db_success(logger)
                 logger.debug(
                     "NodeHeartbeatService [%s]: heartbeat updated", self._node_id
                 )
-            except Exception:
-                logger.exception(
-                    "NodeHeartbeatService [%s]: error updating heartbeat",
-                    self._node_id,
-                )
-            self._stop_event.wait(self._heartbeat_interval)
+            except Exception as exc:
+                # Bug #1249: a connectivity error is throttled (single ERROR
+                # transition, DEBUG follow-ups); anything else still logs
+                # normally every time.
+                if not self._db_throttle.on_db_error(exc, logger):
+                    logger.exception(
+                        "NodeHeartbeatService [%s]: error updating heartbeat",
+                        self._node_id,
+                    )
+            wait_seconds = self._db_throttle.next_wait_seconds(self._heartbeat_interval)
+            self._stop_event.wait(wait_seconds)

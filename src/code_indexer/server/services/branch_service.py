@@ -26,15 +26,11 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# get_branches bottleneck fix. list_branches reads a commit object PER branch
-# (GitPython) across all local + remote refs -> O(refs) object reads, ~13s on
-# many-branch repos (e.g. evolution-global). Cache the result per
-# (repo working dir, include_remote) with a short TTL. The immutable versioned
-# golden-repo snapshot's branch set is fixed, so repeated get_branches calls
-# reuse the listing; the TTL bounds staleness for mutable activated repos.
-# Module-level because BranchService is constructed per request.
-# ---------------------------------------------------------------------------
+# Per-request latency: list_branches reads .commit for every local and remote
+# ref (GitPython loads each commit object), which cost tens of seconds on repos
+# with many refs and ran on every get_branches call. Cache the result per
+# (codebase_dir, include_remote) for a short TTL so repeated calls reuse the
+# walk. Branch state is eventually-consistent within the TTL.
 _BRANCHES_CACHE_TTL_SECONDS = 30.0
 _BRANCHES_CACHE_MAX = 128
 _branches_cache: "OrderedDict[Tuple[str, bool], Tuple[float, List[BranchInfo]]]" = (
@@ -80,6 +76,56 @@ class BranchService:
             self.repo = None  # type: ignore[assignment]
 
     def list_branches(self, include_remote: bool = False) -> List[BranchInfo]:
+        """List branches, CACHED per (codebase_dir, include_remote).
+
+        The underlying walk (:meth:`_list_branches_uncached`) reads ``.commit``
+        for every local and remote ref; on repos with many refs it cost tens of
+        seconds and ran on every request. Results are cached for
+        ``_BRANCHES_CACHE_TTL_SECONDS`` so repeated calls reuse the walk. Branch
+        state is eventually-consistent within the TTL.
+        """
+        if not self._is_git_repo:
+            return []
+
+        key = (str(self.git_topology_service.codebase_dir), include_remote)
+        now = time.monotonic()
+        with _branches_cache_lock:
+            entry = _branches_cache.get(key)
+            if entry is not None and now < entry[0]:
+                _branches_cache.move_to_end(key)
+                return entry[1]
+
+        branches = self._list_branches_uncached(include_remote=include_remote)
+
+        # Anchor expiry to POST-walk time (not the pre-walk `now` captured
+        # above). A walk that takes longer than the TTL must not be born
+        # already-expired -- that would deliver zero cache benefit for
+        # exactly the slow repos this cache targets.
+        expiry = time.monotonic() + _BRANCHES_CACHE_TTL_SECONDS
+        with _branches_cache_lock:
+            _branches_cache[key] = (expiry, branches)
+            _branches_cache.move_to_end(key)
+            while len(_branches_cache) > _BRANCHES_CACHE_MAX:
+                _branches_cache.popitem(last=False)
+        return branches
+
+    @staticmethod
+    def invalidate(codebase_dir: "str | Path") -> None:
+        """Invalidate all cached branch listings for ``codebase_dir``.
+
+        Drops BOTH the ``include_remote=True`` and ``include_remote=False``
+        cache entries so a branch mutation (git_branch_create/switch/delete)
+        is immediately visible on the next :meth:`list_branches` call for
+        this codebase_dir, instead of serving a stale listing for up to
+        ``_BRANCHES_CACHE_TTL_SECONDS``. Thread-safe under the same lock
+        used by :meth:`list_branches`.
+        """
+        key_str = str(Path(codebase_dir))
+        with _branches_cache_lock:
+            _branches_cache.pop((key_str, False), None)
+            _branches_cache.pop((key_str, True), None)
+
+    def _list_branches_uncached(self, include_remote: bool = False) -> List[BranchInfo]:
         """List all branches in the repository.
 
         Args:
@@ -91,31 +137,10 @@ class BranchService:
         Raises:
             ValueError: If git operations fail
         """
+        # Return empty list for non-git repositories
         if not self._is_git_repo:
             return []
 
-        cache_key = (str(self.repo.working_dir), include_remote)
-        now = time.monotonic()
-        with _branches_cache_lock:
-            entry = _branches_cache.get(cache_key)
-            if entry is not None and now < entry[0]:
-                _branches_cache.move_to_end(cache_key)
-                return entry[1]
-
-        branches_result = self._list_branches_uncached(include_remote)
-
-        with _branches_cache_lock:
-            _branches_cache[cache_key] = (
-                now + _BRANCHES_CACHE_TTL_SECONDS,
-                branches_result,
-            )
-            _branches_cache.move_to_end(cache_key)
-            while len(_branches_cache) > _BRANCHES_CACHE_MAX:
-                _branches_cache.popitem(last=False)
-        return branches_result
-
-    def _list_branches_uncached(self, include_remote: bool = False) -> List[BranchInfo]:
-        """Uncached branch listing: reads a commit object per local + remote ref."""
         try:
             branches = []
             current_branch_name = self.git_topology_service.get_current_branch()

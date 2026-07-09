@@ -12,9 +12,11 @@ Implements:
 - AC7: Actionable Error Messages (timeout recommendations)
 """
 
+import contextvars
 import logging
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
@@ -30,6 +32,11 @@ logger = logging.getLogger(__name__)
 # Constants for timeout recommendations
 MAX_RECOMMENDED_REPOS = 10
 RECOMMENDED_MIN_SCORE = 0.7
+
+# Story #1009: module-level singleton state so the ThreadPoolExecutor is
+# reused across MCP handler invocations instead of being torn down each call.
+_singleton_instance: Optional["MultiSearchService"] = None
+_singleton_lock: threading.Lock = threading.Lock()
 
 
 def _get_golden_repos_dir() -> str:
@@ -64,31 +71,56 @@ class MultiSearchService:
     Timeout: 30s default for all queries (configurable)
     """
 
-    def __init__(self, config: MultiSearchConfig):
+    @classmethod
+    def get_instance(
+        cls,
+        config: MultiSearchConfig,
+        hnsw_index_cache: Optional[Any] = None,
+    ) -> "MultiSearchService":
+        """Return the module-level singleton, creating it on first call (Story #1009).
+
+        Thread-safe via double-checked locking. Reuses the internal
+        ThreadPoolExecutor across MCP handler invocations.
+        """
+        global _singleton_instance
+        if _singleton_instance is None:
+            with _singleton_lock:
+                if _singleton_instance is None:
+                    _singleton_instance = cls(config, hnsw_index_cache=hnsw_index_cache)
+        return _singleton_instance
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        """Reset the module-level singleton. For test isolation only.
+
+        Shuts down the executor before clearing the reference so threads
+        are released cleanly before the singleton is dropped.
+        """
+        global _singleton_instance
+        with _singleton_lock:
+            if _singleton_instance is not None:
+                _singleton_instance.thread_executor.shutdown(wait=False)
+            _singleton_instance = None
+
+    def __init__(
+        self,
+        config: MultiSearchConfig,
+        hnsw_index_cache: Optional[Any] = None,
+    ):
         """
         Initialize multi-search service.
 
         Args:
             config: Multi-search configuration
+            hnsw_index_cache: Optional HNSW index cache for server-side performance
+                              (Story #1170). When set, temporal searches build
+                              FilesystemVectorStore with cache injection (mirroring
+                              the regular semantic search path). None for CLI mode.
         """
         self.config = config
+        self.hnsw_index_cache = hnsw_index_cache
         self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self._shutdown = False
-
-        # C6 Phase 3: shard ownership (cluster mode). When set, per-repo searches
-        # populate this pod's index cache only for repos it OWNS -- so a sharded
-        # multi-repo search warms the owner's cache (bounded to its shard) instead
-        # of load-and-discarding. None in solo mode -> cache bypassed (Bug #881).
-        self._shard_ownership: Optional[Any] = None
-
-    def set_shard_ownership(self, shard_ownership: Any) -> None:
-        """Inject shard ownership so owned-repo searches warm the cache (C6)."""
-        self._shard_ownership = shard_ownership
-
-    def _owns_for_cache(self, repo_id: str) -> bool:
-        """True if this node should cache ``repo_id`` (owned; sharding active)."""
-        shard_ownership = self._shard_ownership
-        return shard_ownership is not None and shard_ownership.owns(repo_id)
 
     def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
@@ -173,11 +205,19 @@ class MultiSearchService:
         repo_results: Dict[str, List[Dict[str, Any]]] = {}
         errors: Dict[str, str] = {}
 
-        # Submit all search tasks
-        future_to_repo = {
-            self.thread_executor.submit(search_func, repo_id, request): repo_id
-            for repo_id in request.repositories
-        }
+        # Submit all search tasks. Story #1293 S1b [A2]: copy the calling
+        # thread's context (correlation_id, etc.) per repo so it propagates
+        # into the worker thread -- ContextVars do NOT cross a bare
+        # ThreadPoolExecutor.submit() boundary (Python 3.9). Mirrors the
+        # identical contextvars.copy_context() pattern already used by
+        # semantic_query_manager.py's "parallel" strategy dispatch.
+        future_to_repo = {}
+        for repo_id in request.repositories:
+            _ctx = contextvars.copy_context()
+            future = self.thread_executor.submit(
+                _ctx.run, search_func, repo_id, request
+            )
+            future_to_repo[future] = repo_id
 
         # Collect results as they complete
         for future in as_completed(future_to_repo):
@@ -292,22 +332,80 @@ class MultiSearchService:
             exclude_language=request.exclude_language,
             exclude_path=request.exclude_path,
             accuracy=request.accuracy,
+            no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
         )
 
         # Execute search using path resolved via GlobalRegistry (Story #43)
         # Use self._get_repository_path() for consistent path resolution
         try:
             repo_path = self._get_repository_path(repo_id)
-            # C6 Phase 3: cache the index for repos this node OWNS (bounded to its
-            # shard), so a sharded multi-repo search warms the owner's cache. For
-            # non-owned repos and solo mode, keep hnsw_cache=None -- Bug #881: this
-            # prevents fan-out from populating the cache with repos this pod would
-            # not normally serve, avoiding unbounded memory growth.
-            _cache_kwargs = (
-                {} if self._owns_for_cache(repo_id) else {"hnsw_cache": None}
-            )
+            # Bug #881 Phase 3: pass hnsw_cache=None to prevent fan-out searches
+            # from populating the global HNSW index cache and causing unbounded
+            # memory growth when many repositories are searched concurrently.
+            # Story #1148 PART 1: pass precomputed_query_vector so the omni
+            # fan-out reuses ONE embedding computed before fan-out, avoiding
+            # K separate coalesced_query_embedding calls (K cache key-resolutions).
+            # Defect #1148 fix (mixed-config isolation): only reuse the precomputed
+            # vector when this repo's embedding service has the SAME provider-config
+            # digest as the one used to produce the vector.  A different digest
+            # (different provider, model, endpoint, or key) means different vector
+            # space / dimension — using the wrong vector would produce incorrect
+            # search results ("Query is everything").  Repos with a different digest
+            # receive None and embed via their own chokepoint with the correct config.
+            effective_precomputed: Optional[List[float]] = None
+            if (
+                request.precomputed_query_vector is not None
+                and request.precomputed_query_vector_digest
+            ):
+                try:
+                    from code_indexer.server.services.search_service import (
+                        EmbeddingProviderFactory,
+                        _load_repo_config,
+                        _get_http_client_factory,
+                    )
+                    from code_indexer.server.services.coalescer_registry import (
+                        _digest_for_provider,
+                        is_fallback_digest,
+                    )
+
+                    repo_config = _load_repo_config(repo_path)
+                    repo_embedding_service = EmbeddingProviderFactory.create(
+                        config=repo_config,
+                        http_client_factory=_get_http_client_factory(),
+                    )
+                    repo_digest = _digest_for_provider(repo_embedding_service)
+                    precomp_digest = request.precomputed_query_vector_digest
+                    allow_reuse = (
+                        not is_fallback_digest(precomp_digest)
+                        and not is_fallback_digest(repo_digest)
+                        and repo_digest == precomp_digest
+                    )
+                    if allow_reuse:
+                        effective_precomputed = request.precomputed_query_vector
+                    else:
+                        logger.debug(
+                            "multi_search: repo %s digest %s differs/sentinel — "
+                            "embedding via own provider (precomp digest %s)",
+                            repo_id,
+                            repo_digest[:12] if repo_digest else "",
+                            precomp_digest[:12] if precomp_digest else "",
+                        )
+                except Exception as _dex:  # noqa: BLE001
+                    # Digest comparison failed (config missing, factory unavailable,
+                    # etc.) — do NOT reuse the precomputed vector; let the repo embed
+                    # independently.  Logged at DEBUG; never breaks query path.
+                    logger.debug(
+                        "multi_search: digest comparison failed for repo %s (%s); "
+                        "embedding via own provider",
+                        repo_id,
+                        _dex,
+                    )
+
             response = search_service.search_repository_path(
-                repo_path, single_repo_request, **_cache_kwargs
+                repo_path,
+                single_repo_request,
+                hnsw_cache=None,
+                precomputed_query_vector=effective_precomputed,
             )
 
             # Convert response to dict format
@@ -351,8 +449,7 @@ class MultiSearchService:
             Exception: If FTS search fails
         """
         from pathlib import Path as PathLib
-        from ..cache import get_global_fts_cache
-        from ..cache.fts_search import cached_fts_search
+        from ...services.tantivy_index_manager import TantivyIndexManager
 
         try:
             # Get repository path
@@ -366,33 +463,24 @@ class MultiSearchService:
                     f"FTS index not found for repository {repo_id} at {fts_index_dir}"
                 )
 
+            # Initialize FTS manager and search
+            tantivy_manager = TantivyIndexManager(fts_index_dir)
+            tantivy_manager.open_for_search()
+
             # Convert language filter to list if present
             languages = [request.language] if request.language else None
 
             # Convert path filter to list if present
             path_filters = [request.path_filter] if request.path_filter else None
 
-            # C6 shard cache-admission: only cache FTS indexes this node owns
-            # (mirrors the HNSW hnsw_cache gate in _search_semantic_sync). Fails
-            # open -> caches in solo mode / on any ownership error.
-            fts_cache = (
-                get_global_fts_cache() if self._owns_for_cache(repo_id) else None
-            )
-
-            # Cached, writer-free FTS read: no per-query Tantivy writer lock
-            # (safe on immutable/NFS .versioned snapshots); repeated queries
-            # reuse one open index.
-            fts_results = cached_fts_search(
-                fts_index_dir,
-                {
-                    "query_text": request.query,
-                    "limit": min(request.limit, self.config.max_results_per_repo),
-                    "languages": languages,
-                    "path_filters": path_filters,
-                    "use_regex": False,
-                    "snippet_lines": 3,
-                },
-                fts_cache=fts_cache,
+            # Execute FTS search
+            fts_results = tantivy_manager.search(
+                query_text=request.query,
+                limit=min(request.limit, self.config.max_results_per_repo),
+                languages=languages,
+                path_filters=path_filters,
+                use_regex=False,
+                snippet_lines=3,
             )
 
             # Convert FTS results to standardized format
@@ -450,13 +538,32 @@ class MultiSearchService:
             config_manager = ConfigManager.create_with_backtrack(repo_path)
             config = config_manager.get_config()
 
-            # Initialize vector store for temporal search
+            # Initialize vector store for temporal search.
+            # Story #1170: mirror filesystem_backend.py get_vector_store_client()
+            # pattern so the temporal path benefits from the same HNSW/ID cache
+            # injection that the regular semantic search path already uses.
             index_dir = repo_path / ".code-indexer" / "index"
+            id_index_cache = None
+            if self.hnsw_index_cache is not None:
+                from ...server.cache.id_index_cache import get_global_id_index_cache
+
+                id_index_cache = get_global_id_index_cache()
+            from ..services.memory_governor import get_memory_governor
+
             vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=repo_path
+                base_path=index_dir,
+                project_root=repo_path,
+                hnsw_index_cache=self.hnsw_index_cache,
+                id_index_cache=id_index_cache,
+                memory_governor=get_memory_governor(),
             )
 
-            # Execute temporal query via fusion dispatch (Story #640)
+            # Execute temporal query via fusion dispatch (Story #640).
+            # NOTE: the shared thread pool (self.thread_executor) is intentionally NOT
+            # forwarded as parallel_executor here.  Outer per-repo tasks already run on
+            # that bounded pool.  If inner search tasks were also submitted to it, all
+            # pool slots would be occupied by outer tasks waiting for inner tasks that
+            # can never start => permanent deadlock with >= max_workers repos in flight.
             temporal_results = execute_temporal_query_with_fusion(
                 config=config,
                 index_path=index_dir,
@@ -465,6 +572,10 @@ class MultiSearchService:
                 limit=min(request.limit, self.config.max_results_per_repo),
                 language=request.language,
                 file_path_filter=request.path_filter,
+                # Story #1108 (S4): forward per-request cache bypass flag
+                no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=request.temporal_embedder,
             )
 
             # If no temporal index found, raise to match original behavior
@@ -644,7 +755,10 @@ class MultiSearchService:
             FileNotFoundError: If repository not found in global repositories
         """
         from code_indexer.server import app as app_module
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
 
         # Get golden_repos_dir from server configuration
         golden_repos_dir = _get_golden_repos_dir()
@@ -660,9 +774,13 @@ class MultiSearchService:
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
-        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        # Use AliasManager to get current target path (registry path becomes stale
+        # after refresh operations). Bug #1315: fall back to the registry's own
+        # index_path when the alias pointer file is missing/unreadable.
         alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repo_id)
+        target_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_id, repo_entry=repo_entry
+        )
 
         if not target_path:
             raise FileNotFoundError(

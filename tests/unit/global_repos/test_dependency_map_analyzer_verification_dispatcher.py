@@ -25,7 +25,6 @@ from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnaly
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
 
 _DEFAULT_PASS_TIMEOUT = 600
-_COMPLETION_SIGNAL = "FILE_EDIT_COMPLETE"
 
 
 # ---------------------------------------------------------------------------
@@ -74,19 +73,17 @@ def _make_verification_success_result(
 ) -> InvocationResult:
     """Build a successful InvocationResult that passes all postconditions.
 
-    Writes updated content + FILE_EDIT_COMPLETE to the document file so
-    _check_verification_postconditions passes (non-empty file + sentinel as last line).
+    Writes updated content to the document file so _check_verification_postconditions
+    passes (file readable + non-empty). No sentinel needed (Bug #1038: sentinel removed).
     """
     document_path.write_text(
         document_path.read_text(encoding="utf-8")
-        + "\n## Verified\n\nAll claims confirmed.\n"
-        + _COMPLETION_SIGNAL
-        + "\n",
+        + "\n## Verified\n\nAll claims confirmed.\n",
         encoding="utf-8",
     )
     return InvocationResult(
         success=True,
-        output=_COMPLETION_SIGNAL,
+        output="verification done",
         error="",
         cli_used=cli_used,
         was_failover=False,
@@ -178,7 +175,7 @@ def test_verification_dispatches_with_correct_flow_name(tmp_path: Path):
     The test:
     - Creates a real domain document file.
     - Injects a mock dispatcher whose dispatch() side-effect writes updated content
-      + FILE_EDIT_COMPLETE sentinel to satisfy all postconditions.
+      to satisfy all postconditions (file readable + non-empty).
     - Patches get_prompt to return a minimal fact-check template.
     - Asserts dispatcher.dispatch was called with the correct flow name.
     - Asserts subprocess.run was NOT called (proving the dispatcher path was taken).

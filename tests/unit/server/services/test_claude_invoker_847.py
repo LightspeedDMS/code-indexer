@@ -20,6 +20,7 @@ from code_indexer.server.services.intelligence_cli_invoker import (
     IntelligenceCliInvoker,
     InvocationResult,
 )
+from tests.utils.env_assertions import assert_env_absent
 
 if TYPE_CHECKING:
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
@@ -398,4 +399,4 @@ class TestClaudeInvokerSubprocessParams:
                 # Positive passthrough: ordinary var must be present
                 assert env.get("MY_CUSTOM_VAR") == "my_value"
                 # Negative: CLAUDECODE must be stripped
-                assert "CLAUDECODE" not in env
+                assert_env_absent(env, "CLAUDECODE")

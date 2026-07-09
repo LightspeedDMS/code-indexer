@@ -47,9 +47,17 @@ def _make_scheduler(tmp_path: Path, registry: Mock) -> RefreshScheduler:
 
 
 def _make_registry() -> Mock:
-    """Registry that returns one due git repo."""
+    """Registry that returns one due git repo via both list_global_repos and list_due_repos.
+
+    list_global_repos is used by the unscheduled-spread pass.
+    list_due_repos is used by the main due-repo submission pass (refactored loop).
+    Both must return the due repo so the loop actually processes it.
+    """
     registry = Mock()
     registry.list_global_repos.return_value = [_DUE_REPO]
+    # list_due_repos accepts (limit=..., now=...) keyword args; return the due repo
+    # regardless of those parameters so the loop drives _submit_refresh_job.
+    registry.list_due_repos.return_value = [_DUE_REPO]
     registry.update_next_refresh.return_value = None
     return registry
 
@@ -60,6 +68,10 @@ def _stop_after_first_refresh(scheduler: RefreshScheduler):
     Sets both _running = False (exit the while loop) and _stop_event (unblock
     the _stop_event.wait(timeout=poll_interval) call so the test exits
     immediately instead of blocking for MIN_POLL_SECONDS=30 seconds).
+
+    NOTE: only use this when update_next_refresh IS called (DuplicateJobError path).
+    For RuntimeError, _submit_failed=True skips update_next_refresh entirely;
+    use _make_one_shot_wait() instead.
     """
 
     def _side_effect(alias_name, next_refresh):
@@ -67,6 +79,28 @@ def _stop_after_first_refresh(scheduler: RefreshScheduler):
         scheduler._stop_event.set()
 
     return _side_effect
+
+
+def _make_one_shot_wait(scheduler: RefreshScheduler):
+    """Return a side_effect for _stop_event.wait that stops the loop after the first poll.
+
+    Used when update_next_refresh is never called (RuntimeError path with _submit_failed=True),
+    so _stop_after_first_refresh cannot fire.  The first time the loop reaches the
+    _stop_event.wait() at the bottom of the iteration, we flip _running=False and
+    set the event so the outer while condition exits cleanly on the next check.
+    """
+    call_count = [0]
+    original_wait = scheduler._stop_event.wait
+
+    def _one_shot(timeout=None):
+        call_count[0] += 1
+        if call_count[0] >= 1:
+            scheduler._running = False
+            scheduler._stop_event.set()
+            return True  # simulate stop-event fired
+        return original_wait(timeout=timeout)
+
+    return _one_shot
 
 
 class _Base(TestCase):
@@ -130,10 +164,12 @@ class TestGenuineErrorLogLevel(_Base):
 
     def test_genuine_refresh_errors_still_logged_at_error(self) -> None:
         """When _submit_refresh_job raises a generic RuntimeError, the scheduler
-        logs it at ERROR level."""
-        self._registry.update_next_refresh.side_effect = _stop_after_first_refresh(
-            self._scheduler
-        )
+        logs it at ERROR level.
+
+        RuntimeError sets _submit_failed=True, so update_next_refresh is NEVER
+        called — we cannot use _stop_after_first_refresh on update_next_refresh.
+        Instead, patch _stop_event.wait so the loop exits after the first poll.
+        """
         self._scheduler._running = True
 
         with patch.object(self._scheduler, "cleanup_stale_write_mode_markers"):
@@ -142,10 +178,16 @@ class TestGenuineErrorLogLevel(_Base):
                 "_submit_refresh_job",
                 side_effect=RuntimeError("unexpected failure"),
             ):
-                with self.assertLogs(
-                    "code_indexer.global_repos.refresh_scheduler", level=logging.DEBUG
-                ) as log_ctx:
-                    self._scheduler._scheduler_loop()
+                with patch.object(
+                    self._scheduler._stop_event,
+                    "wait",
+                    side_effect=_make_one_shot_wait(self._scheduler),
+                ):
+                    with self.assertLogs(
+                        "code_indexer.global_repos.refresh_scheduler",
+                        level=logging.DEBUG,
+                    ) as log_ctx:
+                        self._scheduler._scheduler_loop()
 
         error_records = [r for r in log_ctx.records if r.levelno >= logging.ERROR]
         self.assertTrue(

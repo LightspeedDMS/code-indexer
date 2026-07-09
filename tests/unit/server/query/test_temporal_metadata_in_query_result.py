@@ -310,9 +310,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 min_score=None,
                 time_range="2025-01-01..2025-12-31",
                 at_commit=None,
-                include_removed=False,
-                show_evolution=False,
-                evolution_limit=None,
             )
 
             # Verify results
@@ -405,9 +402,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 min_score=None,
                 time_range="2025-01-01..2025-12-31",
                 at_commit=None,
-                include_removed=False,
-                show_evolution=False,
-                evolution_limit=None,
             )
 
             assert len(results) == 1
@@ -499,9 +493,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 min_score=None,
                 time_range="2025-01-01..2025-12-31",
                 at_commit=None,
-                include_removed=False,
-                show_evolution=False,
-                evolution_limit=None,
             )
 
             assert len(results) == 1
@@ -613,9 +604,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 min_score=None,
                 time_range="2025-01-01..2025-12-31",
                 at_commit=None,
-                include_removed=False,
-                show_evolution=False,
-                evolution_limit=None,
             )
 
             assert len(results) == 1

@@ -115,6 +115,49 @@ class TestConfigPageDefaults:
         assert config["claude_cli"]["description_refresh_interval_hours"] == 24
         assert config["claude_cli"]["research_assistant_timeout_seconds"] == 300
 
+    def test_claude_cli_empty_dict_dependency_map_turns_default_to_zero(self):
+        """Bug #1261: dependency_map_pass2/delta_max_turns fallback defaults must be
+        0 (unlimited), matching the real ClaudeIntegrationConfig dataclass default --
+        not the stale 60/30 values that predate the fix."""
+        settings = self._create_base_settings(claude_cli_value={})
+
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
+            mock_config_service = Mock()
+            mock_config_service.get_all_settings.return_value = settings
+            mock_service.return_value = mock_config_service
+
+            config = _get_current_config()
+
+        assert config["claude_cli"]["dependency_map_pass1_max_turns"] == 0
+        assert config["claude_cli"]["dependency_map_pass2_max_turns"] == 0
+        assert config["claude_cli"]["dependency_map_delta_max_turns"] == 0
+
+    def test_claude_cli_partial_config_dependency_map_turns_default_to_zero(self):
+        """Bug #1261: the merge-with-existing-values branch (non-empty claude_cli
+        dict missing dependency_map keys) must also fall back to 0 (unlimited),
+        not the stale 60/30 values."""
+        settings = self._create_base_settings(
+            claude_cli_value={
+                "max_concurrent_claude_cli": 5,
+                # dependency_map_pass2_max_turns / delta_max_turns intentionally missing
+            }
+        )
+
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
+            mock_config_service = Mock()
+            mock_config_service.get_all_settings.return_value = settings
+            mock_service.return_value = mock_config_service
+
+            config = _get_current_config()
+
+        assert config["claude_cli"]["dependency_map_pass1_max_turns"] == 0
+        assert config["claude_cli"]["dependency_map_pass2_max_turns"] == 0
+        assert config["claude_cli"]["dependency_map_delta_max_turns"] == 0
+
     def test_provider_api_keys_with_empty_claude_cli(self):
         """Test that provider_api_keys works even when claude_cli is empty."""
         # Given: Settings with empty claude_cli

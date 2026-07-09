@@ -6,6 +6,9 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
+from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
 import os
@@ -16,7 +19,10 @@ import logging
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.shared.clone_backend import CloneBackend
 from pydantic import BaseModel
 
 from .golden_repo_manager import GoldenRepoManager
@@ -24,6 +30,24 @@ from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
+
+
+def _dict_row_factory() -> Any:
+    """Return psycopg v3 dict_row row factory, loaded lazily."""
+    from psycopg.rows import dict_row
+
+    return dict_row
+
+
+# Story #1032 deactivation helpers — extracted to deactivation_helpers.py per
+# opus review M3 (MESSI Rule 6 file-bloat). Re-exported here for backward
+# compatibility with tests/callers that patch the manager namespace.
+from .deactivation_helpers import (  # noqa: F401, E402 — re-export at original helper location for patch compat
+    _fd_anchored_phase1_rename,
+    _fd_anchored_rmtree,
+    _predeactivation_leak_scan_enabled,
+    _safe_purge_trash_entry,
+)
 
 
 class ActivatedRepoError(Exception):
@@ -73,11 +97,21 @@ class ActivatedRepoManager:
     GIT_COMMAND_TIMEOUT = 30  # seconds for general git commands
     GIT_FETCH_TIMEOUT = 60  # seconds for git fetch operations
 
+    # Bug #1285: fallback CoW clone timeout (seconds) used only when
+    # golden_repo_manager.resource_config is unavailable. Kept in sync with
+    # ServerResourceConfig.cow_clone_timeout (1 hour, sized for very large
+    # repos e.g. evolution ~1M files, phoenix 40GB). Real deployments always
+    # have resource_config wired, so this is defense-in-depth, never the
+    # primary source of truth.
+    _COW_CLONE_TIMEOUT_DEFAULT: int = 3600  # 1 hour
+
     def __init__(
         self,
         data_dir: Optional[str] = None,
         golden_repo_manager: Optional[GoldenRepoManager] = None,
         background_job_manager: Optional[BackgroundJobManager] = None,
+        clone_backend: Optional["CloneBackend"] = None,
+        index_manager: Optional[Any] = None,
     ):
         """
         Initialize activated repository manager.
@@ -86,6 +120,12 @@ class ActivatedRepoManager:
             data_dir: Data directory path (defaults to ~/.cidx-server/data)
             golden_repo_manager: Golden repo manager instance
             background_job_manager: Background job manager instance
+            clone_backend: Optional CloneBackend for CoW snapshot operations
+                (Commit 1 injection point — stored, used in later commits).
+            index_manager: Optional ActivatedRepoIndexManager for branch-delta
+                reindex after activation/switch/sync on non-default branches
+                (Bug #1203). When None, post-activation reindex is skipped
+                (safe for legacy callers until lifespan wires this in).
         """
         if data_dir:
             self.data_dir = data_dir
@@ -93,10 +133,19 @@ class ActivatedRepoManager:
             home_dir = Path.home()
             self.data_dir = str(home_dir / ".cidx-server" / "data")
 
-        self.activated_repos_dir = os.path.join(self.data_dir, "activated-repos")
-
-        # Ensure directory structure exists
-        os.makedirs(self.activated_repos_dir, exist_ok=True)
+        # Resolve any symlinks on the configured activated-repos directory so
+        # deactivation helpers (which open the dir with O_NOFOLLOW for
+        # security against tampering inside the tree) work correctly when
+        # operators deploy this path as a symlink — e.g. cluster setup where
+        # `~/.cidx-server/data/activated-repos -> /mnt/cow-storage/activated-repos`
+        # so the CoW daemon can clone into its managed filesystem.  The
+        # admin-controlled top-level path is safe to resolve; per-user/alias
+        # subpaths underneath still get O_NOFOLLOW protection.
+        configured_path = os.path.join(self.data_dir, "activated-repos")
+        # Bug #1229: use safe helper so a dangling CoW/NFS symlink does not
+        # crash the worker with FileExistsError on startup.
+        _safe_makedirs_cow(configured_path)
+        self.activated_repos_dir = os.path.realpath(configured_path)
 
         # Cluster mode: PostgreSQL connection pool (Bug #587)
         self._pool: Any = None
@@ -114,6 +163,10 @@ class ActivatedRepoManager:
             )
         self.golden_repo_manager = golden_repo_manager
         self.background_job_manager = background_job_manager or BackgroundJobManager()
+        self._clone_backend = clone_backend
+        # Bug #1203: injected index manager for branch-delta reindex on
+        # non-default branch activations/switches/syncs. None = skip reindex.
+        self._index_manager = index_manager
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -130,7 +183,10 @@ class ActivatedRepoManager:
         """Set NFS shared directory for activated repo clones in cluster mode."""
         shared_activated = Path(shared_dir) / "activated-repos"
         shared_activated.mkdir(parents=True, exist_ok=True)
-        self.activated_repos_dir = str(shared_activated)
+        # Same realpath rationale as __init__: deactivation helpers need a
+        # resolved path so O_NOFOLLOW on the admin-controlled top-level dir
+        # does not block legitimate symlinked deployments.
+        self.activated_repos_dir = os.path.realpath(str(shared_activated))
         self.logger.info(
             "ActivatedRepoManager: using shared storage at %s",
             self.activated_repos_dir,
@@ -234,18 +290,13 @@ class ActivatedRepoManager:
 
     def _load_metadata_pg(self, username: str, user_alias: str) -> Optional[dict]:
         """Load metadata from PostgreSQL (cluster mode)."""
-        from psycopg.rows import dict_row
-
         assert self._pool is not None
-        # _pg_row_to_metadata reads by column name -> opt into dict rows explicitly
-        # (the pool default is tuple_row; never rely on a leaked row_factory).
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                row = cur.execute(
                     "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
                     (username, user_alias),
-                )
-                row = cur.fetchone()
+                ).fetchone()
         if row is None:
             return None
         return self._pg_row_to_metadata(row)
@@ -323,6 +374,7 @@ class ActivatedRepoManager:
                     user_alias = repo_data.get("user_alias", "")
                     repo_dir = os.path.join(user_dir, user_alias)
                     if os.path.exists(repo_dir):
+                        repo_data.setdefault("username", username)
                         repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
@@ -340,42 +392,72 @@ class ActivatedRepoManager:
         return self._list_all_repos_fs()
 
     def _list_all_repos_fs(self) -> List[dict]:
-        """List all activated repos from filesystem (standalone mode)."""
+        """List all activated repos from filesystem (standalone mode).
+
+        Unlike _list_user_repos_fs (which hides dangling registrations so that
+        per-user consumers only see usable repos), this admin path includes ALL
+        registrations regardless of whether the on-disk directory exists.  Each
+        entry carries a boolean ``path_exists`` field so admins can identify and
+        clean up dangling registrations.
+        """
         if not os.path.exists(self.activated_repos_dir):
             return []
         all_repos: List[dict] = []
         for username in os.listdir(self.activated_repos_dir):
             user_dir = os.path.join(self.activated_repos_dir, username)
-            if os.path.isdir(user_dir):
-                all_repos.extend(self._list_user_repos_fs(username))
+            if not os.path.isdir(user_dir):
+                continue
+            for filename in os.listdir(user_dir):
+                if not filename.endswith("_metadata.json"):
+                    continue
+                metadata_path = os.path.join(user_dir, filename)
+                try:
+                    with open(metadata_path) as f:
+                        repo_data = json.load(f)
+                    user_alias = repo_data.get("user_alias", "")
+                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_data.setdefault("username", username)
+                    repo_data["path_exists"] = os.path.exists(repo_dir)
+                    all_repos.append(repo_data)
+                except (json.JSONDecodeError, KeyError, IOError) as e:
+                    self.logger.warning(
+                        "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
         return all_repos
 
     def _list_user_repos_pg(self, username: str) -> List[dict]:
         """List activated repos for a user from PostgreSQL (cluster mode)."""
-        from psycopg.rows import dict_row
-
         assert self._pool is not None
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                rows = cur.execute(
                     "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
                     (username,),
-                )
-                rows = cur.fetchall()
+                ).fetchall()
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def _list_all_repos_pg(self) -> List[dict]:
-        """List all activated repos from PostgreSQL (cluster mode)."""
-        from psycopg.rows import dict_row
+        """List all activated repos from PostgreSQL (cluster mode).
 
+        Adds a ``path_exists`` boolean to each entry so the admin view is
+        consistent with the solo (_list_all_repos_fs) path.
+        """
         assert self._pool is not None
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                rows = cur.execute(
                     "SELECT * FROM activated_repos ORDER BY username, user_alias"
-                )
-                rows = cur.fetchall()
-        return [self._pg_row_to_metadata(r) for r in rows]
+                ).fetchall()
+        result = []
+        for r in rows:
+            entry = self._pg_row_to_metadata(r)
+            repo_path = r.get("repo_path") or ""
+            entry["path_exists"] = bool(repo_path) and os.path.exists(repo_path)
+            result.append(entry)
+        return result
 
     def activate_repository(
         self,
@@ -624,7 +706,13 @@ class ActivatedRepoManager:
                 self._update_composite_config(composite_path)
 
             except Exception as e:
-                # Clean up on failure
+                # Activation failure — clean up the partially-created composite
+                # directory.  Path is trusted: composite_path =
+                # self.activated_repos_dir / username / user_alias, computed
+                # entirely from instance state and validated function args in
+                # this frame.  No metadata row was ever written (Step 6 comes
+                # later), so the rename-to-trash pattern used during
+                # deactivation is both unnecessary and inappropriate here.
                 if composite_path.exists():
                     shutil.rmtree(composite_path, ignore_errors=True)
                 raise ActivatedRepoError(
@@ -665,7 +753,13 @@ class ActivatedRepoManager:
                     )
 
                 except Exception as e:
-                    # Clean up on failure
+                    # Activation failure during CoW clone — roll back the
+                    # partially-created composite directory.  Path is trusted:
+                    # composite_path = self.activated_repos_dir / username /
+                    # user_alias, freshly created in this function frame.  No
+                    # metadata row exists yet (Step 6 writes it only after all
+                    # clones succeed), so the deactivation rename-to-trash path
+                    # is not applicable here.
                     self.logger.error(
                         f"Failed to clone repository '{alias}': {str(e)}",
                         extra={"correlation_id": get_correlation_id()},
@@ -687,7 +781,12 @@ class ActivatedRepoManager:
                 proxy_config.refresh_repositories()
                 update_progress(90, "Repository discovery completed")
             except Exception as e:
-                # Clean up on failure
+                # Activation failure during proxy-config refresh — roll back
+                # the composite directory.  Path is trusted: composite_path =
+                # self.activated_repos_dir / username / user_alias, computed in
+                # this frame with no user-controlled traversal.  No metadata row
+                # was written (Step 6 follows this block), so the deactivation
+                # rename-to-trash path does not apply.
                 self.logger.error(
                     f"Failed to refresh repositories: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
@@ -719,7 +818,13 @@ class ActivatedRepoManager:
             try:
                 self._save_metadata(username, user_alias, metadata)
             except Exception as e:
-                # Clean up on failure
+                # Activation failure: metadata write failed so no row was
+                # committed.  Roll back the composite directory.  Path is
+                # trusted: composite_path = self.activated_repos_dir / username
+                # / user_alias, computed in this frame.  Because _save_metadata
+                # raised before completing, there is no registered metadata to
+                # clean up via _delete_metadata — path-based rmtree is the
+                # correct rollback here.
                 self.logger.error(
                     f"Failed to create metadata: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
@@ -776,6 +881,24 @@ class ActivatedRepoManager:
             List of activated repository dictionaries
         """
         return self._list_user_repos(username)
+
+    def user_has_activated_repo(self, username: str, alias: str) -> bool:
+        """Return True if *username* has *alias* in their activated-repo list.
+
+        Used by the bare-to-global fallback (Story #1039) to decide whether
+        the fallback should be skipped (activated repo takes precedence).
+
+        Args:
+            username: Authenticated user's username.
+            alias: Repository alias to look up (bare, no ``-global`` suffix).
+
+        Returns:
+            ``True`` when the user has an activated repo whose ``user_alias``
+            matches *alias*; ``False`` otherwise.
+        """
+        return alias in {
+            r["user_alias"] for r in self.list_activated_repositories(username)
+        }
 
     def list_all_activated_repositories(self) -> List[Dict[str, Any]]:
         """
@@ -838,13 +961,21 @@ class ActivatedRepoManager:
 
         return matching_repos
 
-    def deactivate_repository(self, username: str, user_alias: str) -> str:
+    def deactivate_repository(
+        self,
+        username: str,
+        user_alias: str,
+        actor_username: Optional[str] = None,
+    ) -> str:
         """
         Deactivate a repository for a user (background job).
 
         Args:
-            username: Username requesting deactivation
+            username: Username of the resource owner (target user)
             user_alias: User's alias for the repository
+            actor_username: Who actually triggered the deactivation (AC12).
+                When None, defaults to username (self-service). Pass the
+                admin's session username when called from an admin route.
 
         Returns:
             Job ID for tracking deactivation progress
@@ -852,14 +983,14 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If repository not found
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
-
-        # Check if repository exists
-        if (
-            not os.path.exists(repo_dir)
-            or self._load_metadata(username, user_alias) is None
-        ):
+        # Bug #1120: gate on the authoritative registry (_load_metadata), NOT on
+        # os.path.exists(repo_dir).  In cluster (PG) mode the PG row IS the
+        # registration; the on-disk directory may be absent (dangling registration)
+        # while the row still exists.  Checking the filesystem caused a permanent
+        # 404 when the dir was gone, with no front-door cleanup path.
+        # _load_metadata() dispatches to PG (cluster) or JSON file (solo) and is
+        # the single source of truth for both modes.
+        if self._load_metadata(username, user_alias) is None:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -872,6 +1003,7 @@ class ActivatedRepoManager:
             user_alias=user_alias,
             submitter_username=username,
             repo_alias=user_alias,  # AC5: Fix unknown repo bug
+            actor_username=actor_username,  # AC12: audit trail
         )
 
         return job_id
@@ -1045,6 +1177,16 @@ class ActivatedRepoManager:
             repo_data["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
             self._save_metadata(username, user_alias, repo_data)
+
+            # Step 4.5 (Bug #1203): Run branch-aware delta reindex when the
+            # new branch differs from the golden repo's default branch.
+            # _run_branch_delta_index is a no-op when _index_manager is None
+            # or when user_alias ends with '-global'.
+            golden_repo_alias_sw = repo_data.get("golden_repo_alias")
+            if golden_repo_alias_sw:
+                _gr_sw = self.golden_repo_manager.get_golden_repo(golden_repo_alias_sw)
+                if _gr_sw is not None and branch_name != _gr_sw.default_branch:
+                    self._run_branch_delta_index(repo_dir, user_alias)
 
             # Step 5: Return success with detailed operation information
             message = f"Successfully switched to branch '{branch_name}' in repository '{user_alias}'"
@@ -1279,6 +1421,18 @@ class ActivatedRepoManager:
 
             self._save_metadata(username, user_alias, repo_data)
 
+            # Step 4.5 (Bug #1203): Run branch-aware delta reindex when the
+            # current branch differs from the golden repo's default branch.
+            # Merged changes on a non-default branch may shift file content
+            # relative to the stored embeddings; reindex corrects this.
+            # _run_branch_delta_index is a no-op when _index_manager is None
+            # or when user_alias ends with '-global'.
+            _gr_alias_sync = repo_data.get("golden_repo_alias")
+            if _gr_alias_sync:
+                _gr_sync = self.golden_repo_manager.get_golden_repo(_gr_alias_sync)
+                if _gr_sync is not None and current_branch != _gr_sync.default_branch:
+                    self._run_branch_delta_index(repo_dir, user_alias)
+
             # Step 5: Return success message with details
             changed_files = (
                 diff_result.stdout.strip().split("\n")
@@ -1487,7 +1641,7 @@ class ActivatedRepoManager:
             raise GitOperationError(f"Failed to list branches: {str(e)}")
 
     def get_repository(
-        self, username: str, user_alias: str
+        self, username: str, user_alias: str, *, touch: bool = True
     ) -> Optional[Dict[str, Any]]:
         """
         Get repository metadata with fresh discovered_repos for composite repos.
@@ -1498,6 +1652,9 @@ class ActivatedRepoManager:
         Args:
             username: Username
             user_alias: User's alias for the repository
+            touch: If True (default), stamp last_accessed and persist metadata.
+                   Set to False for read-only admin/dashboard paths so the reaper
+                   is not defeated by non-access reads.
 
         Returns:
             Repository metadata dictionary or None if not found
@@ -1528,11 +1685,12 @@ class ActivatedRepoManager:
                         f"Using cached list."
                     )
 
-            # Update last_accessed timestamp
-            metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            if touch:
+                # Update last_accessed timestamp
+                metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-            # Save updated metadata
-            self._save_metadata(username, user_alias, metadata)
+                # Save updated metadata
+                self._save_metadata(username, user_alias, metadata)
 
             return metadata
 
@@ -1572,6 +1730,51 @@ class ActivatedRepoManager:
         if metadata is None:
             return False
         return bool(metadata.get("wiki_enabled", False))
+
+    def touch_last_accessed(
+        self,
+        username: str,
+        user_alias: str,
+        throttle_seconds: float = 3600,
+    ) -> None:
+        """Stamp last_accessed for an activated repo, throttled to avoid excessive writes.
+
+        Reads metadata directly (no composite-repo refresh) and only persists a
+        new timestamp when the existing last_accessed is absent or older than
+        throttle_seconds.  Non-fatal: all exceptions are caught and logged at
+        WARNING so a storage error never aborts the caller (typically the search
+        path).
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+            throttle_seconds: Minimum seconds between writes (default 3600 = 1h)
+        """
+        try:
+            metadata = self._load_metadata(username, user_alias)
+            if metadata is None:
+                return
+
+            existing_ts = metadata.get("last_accessed")
+            if existing_ts is not None:
+                try:
+                    last_dt = datetime.fromisoformat(existing_ts)
+                    age_seconds = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    if age_seconds < throttle_seconds:
+                        return
+                except (ValueError, TypeError):
+                    # Unparseable timestamp — treat as absent and refresh
+                    pass
+
+            metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            self._save_metadata(username, user_alias, metadata)
+        except Exception as exc:
+            self.logger.warning(
+                "touch_last_accessed: failed for %s/%s: %s",
+                username,
+                user_alias,
+                exc,
+            )
 
     def set_wiki_enabled(self, username: str, user_alias: str, enabled: bool) -> None:
         """Set wiki_enabled flag on activated repo metadata.
@@ -1672,7 +1875,14 @@ class ActivatedRepoManager:
                 )
 
                 if result.returncode != 0:
-                    # Clean up on failure
+                    # Activation failure: branch checkout failed — roll back
+                    # the cloned directory.  Path is trusted: activated_repo_path
+                    # = self.activated_repos_dir / username / user_alias,
+                    # computed from instance state and validated args in this
+                    # frame.  No metadata row has been written yet (metadata
+                    # is persisted only after this block succeeds), so
+                    # _delete_metadata is not needed and the deactivation
+                    # rename-to-trash path does not apply.
                     shutil.rmtree(activated_repo_path, ignore_errors=True)
                     raise GitOperationError(
                         f"Failed to switch to branch '{branch_name}': {result.stderr}"
@@ -1731,10 +1941,33 @@ class ActivatedRepoManager:
                     + (f", ssh_key_used={ssh_key_used}" if ssh_key_used else "")
                 )
 
+            # Bug #1203: Run branch-aware delta reindex for non-default branches.
+            # The CoW clone copies the golden repo's default-branch index byte-
+            # for-byte.  When the activated branch differs, files that diverge
+            # from the default branch would return default-branch embeddings.
+            # _run_branch_delta_index is a no-op when _index_manager is None or
+            # when user_alias ends with '-global'.
+            if branch_name != golden_repo.default_branch:
+                update_progress(88, f"Reindexing branch '{branch_name}' (branch-delta)")
+                try:
+                    self._run_branch_delta_index(activated_repo_path, user_alias)
+                except ActivatedRepoError:
+                    # Bug #1203 MEDIUM 2: reindex failed BEFORE metadata was written.
+                    # Remove the orphaned CoW clone so a failed activation does not
+                    # leak a directory with no corresponding metadata.
+                    self.logger.warning(
+                        f"Removing orphaned clone at '{activated_repo_path}' "
+                        f"after reindex failure for '{user_alias}'",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                    raise
+
             # Create metadata file
-            update_progress(88, "Creating repository metadata")
+            update_progress(90, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
             metadata = {
+                "username": username,
                 "user_alias": user_alias,
                 "golden_repo_alias": golden_repo_alias,
                 "current_branch": branch_name,
@@ -1798,9 +2031,65 @@ class ActivatedRepoManager:
             metadata = self._load_metadata(username, user_alias)
 
             if metadata is None:
-                raise ActivatedRepoError(
-                    f"Metadata not found for repository '{user_alias}'"
+                # Orphan cleanup: repo has no metadata but may have a leftover
+                # directory.  Treat as "already deactivated" — clean up any
+                # remaining artifacts and return success so the reaper does not
+                # reschedule this job every cycle (Bug #1030).
+                # HIGH #1 fix: replace path-based shutil.rmtree with
+                # fd-anchored rename-then-purge so orphan cleanup is also
+                # TOCTOU-immune.  If the directory is already gone (ENOENT on
+                # opening the username fd or the rename), absorb silently.
+                repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
+                if os.path.exists(repo_dir):
+                    trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                    try:
+                        trash_name = _fd_anchored_phase1_rename(
+                            activated_repos_dir=self.activated_repos_dir,
+                            username=username,
+                            user_alias=user_alias,
+                        )
+                        try:
+                            _safe_purge_trash_entry(trash_root, trash_name)
+                        except Exception as purge_err:  # noqa: BLE001 — best-effort
+                            self.logger.warning(
+                                "Bug #1030 orphan cleanup: trash purge incomplete, "
+                                "orphan sweeper will retry: %s",
+                                str(purge_err),
+                            )
+                    except FileNotFoundError:
+                        # Directory vanished between os.path.exists and rename
+                        # open — already gone, treat as success.
+                        pass
+                    except (OSError, IOError, ValueError) as e:
+                        self.logger.warning(
+                            "Bug #1030 orphan cleanup: failed to remove repo dir %s: %s",
+                            repo_dir,
+                            str(e),
+                        )
+                # _delete_metadata is safe to call when metadata is absent
+                try:
+                    self._delete_metadata(username, user_alias)
+                except Exception as e:
+                    self.logger.warning(
+                        "Bug #1030 orphan cleanup: _delete_metadata error for %s/%s: %s",
+                        username,
+                        user_alias,
+                        str(e),
+                    )
+                self.logger.warning(
+                    "Bug #1030 orphan cleanup: repository '%s' for user '%s' had no "
+                    "metadata — treating as already deactivated",
+                    user_alias,
+                    username,
                 )
+                return {
+                    "success": True,
+                    "message": (
+                        f"Repository '{user_alias}' already deactivated "
+                        f"(no metadata found) — orphan artifacts cleaned up"
+                    ),
+                    "user_alias": user_alias,
+                }
 
             # Route to appropriate deactivation method
             if metadata.get("is_composite", False):
@@ -1852,60 +2141,117 @@ class ActivatedRepoManager:
             user_dir = os.path.join(self.activated_repos_dir, username)
             repo_dir = os.path.join(user_dir, user_alias)
 
-            # Pre-deactivation resource analysis
-            initial_size = 0
-            file_count = 0
+            # Story #1032 AC6: pre-flight leak scan is OFF by default — runs only
+            # when ops flips the bootstrap flag during incident investigation.
+            # Walk #1 (os.walk size telemetry) was removed entirely as pure overhead.
+            potential_leaks: List[str] = []
+            if _predeactivation_leak_scan_enabled():
+                potential_leaks = self._detect_resource_leaks(repo_dir, user_alias)
+                if potential_leaks:
+                    resource_summary["potential_leaks"] = potential_leaks
+                    cleanup_warnings.extend(
+                        [f"Resource leak detected: {leak}" for leak in potential_leaks]
+                    )
 
-            if os.path.exists(repo_dir):
-                try:
-                    for root, dirs, files in os.walk(repo_dir):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            try:
-                                file_size = os.path.getsize(file_path)
-                                initial_size += file_size
-                                file_count += 1
-                            except (OSError, IOError):
-                                cleanup_warnings.append(
-                                    f"Unable to analyze file: {file_path}"
-                                )
-                except (OSError, IOError) as e:
-                    cleanup_warnings.append(f"Directory analysis failed: {str(e)}")
-
-            # Check for potential resource leaks before cleanup
-            potential_leaks = self._detect_resource_leaks(repo_dir, user_alias)
-            if potential_leaks:
-                resource_summary["potential_leaks"] = potential_leaks
-                cleanup_warnings.extend(
-                    [f"Resource leak detected: {leak}" for leak in potential_leaks]
-                )
-
-            # Administrative logging before cleanup
+            # Administrative logging before cleanup (size/file_count dropped per AC6)
             self.logger.warning(
                 "Repository deactivation initiated",
                 extra={
                     "username": username,
                     "user_alias": user_alias,
-                    "repo_size_mb": round(initial_size / 1024 / 1024, 2),
-                    "file_count": file_count,
                     "potential_leaks": len(potential_leaks),
                     "operation": "deactivation_start",
                 },
             )
 
-            # Remove repository directory with detailed tracking
+            # AC7: rename-then-delete.  Rename is atomic on same-FS (XFS + NFSv4)
+            # so the source directory disappears from listings within milliseconds.
+            # The slow recursive delete then happens against the trash entry,
+            # invisible to UI clients.
+            # Phase 1 uses fd-anchored rename (BLOCKER #1 + #2 fix): both the
+            # .trash dir and the {username} dir are opened with
+            # O_DIRECTORY|O_NOFOLLOW before os.rename is called with dual
+            # dir_fd args, so ancestor symlink swaps cannot redirect the rename.
+            # Codex RED-review fix: TWO explicit flags, NO post-hoc exists() checks.
+            #   rename_was_attempted: did we enter the rename branch at all?
+            #   phase1_succeeded:    did the rename helper actually return?
+            # Outer metadata-delete uses ONLY these flags — never re-checks
+            # filesystem state, which can lie under permission errors and
+            # would re-open the ghost-state attack window.
+            rename_was_attempted = False
+            phase1_succeeded = False
             if os.path.exists(repo_dir):
+                rename_was_attempted = True
+                trash_root = os.path.join(self.activated_repos_dir, ".trash")
                 try:
-                    shutil.rmtree(repo_dir)
-                    resource_summary["directories_removed"] = 1
-                    resource_summary["files_removed"] = file_count
-                    resource_summary["size_freed_mb"] = round(
-                        initial_size / 1024 / 1024, 2
+                    # Phase 1: fd-anchored atomic rename into .trash.
+                    trash_name = _fd_anchored_phase1_rename(
+                        activated_repos_dir=self.activated_repos_dir,
+                        username=username,
+                        user_alias=user_alias,
                     )
-                except (OSError, IOError) as e:
+                    phase1_succeeded = True  # Only set after rename returns.
+                    trash_path = os.path.join(trash_root, trash_name)
+                    # Phase 1 done — source dir is gone from user-visible space.
+                    # HIGH #2 fix: delete metadata immediately after Phase 1 rename,
+                    # BEFORE Phase 2 purge.  In PG/cluster mode, _list_user_repos_pg
+                    # reads from PG, so the UI sees the repo gone as soon as the
+                    # metadata row is removed.  If Phase 2 later fails, metadata is
+                    # already gone (repo is logically deactivated); the orphan sweeper
+                    # handles the leftover trash entry.
+                    try:
+                        self._delete_metadata(username, user_alias)
+                    except (OSError, IOError) as meta_err:
+                        cleanup_warnings.append(
+                            f"Failed to remove metadata after Phase 1: {str(meta_err)}"
+                        )
+                        self.logger.warning(
+                            "Metadata cleanup issue after Phase 1 rename",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "error": str(meta_err),
+                                "impact": "minor",
+                            },
+                        )
+                    # Phase 2: slow recursive delete via fd-anchored helper.
+                    try:
+                        _safe_purge_trash_entry(trash_root, trash_name)
+                    except Exception as purge_err:  # noqa: BLE001 — phase 2 is best-effort
+                        cleanup_warnings.append(
+                            f"Trash purge incomplete (will be retried by startup sweeper): {purge_err}"
+                        )
+                        self.logger.warning(
+                            "Trash purge incomplete -- orphan sweeper will retry",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "trash_path": trash_path,
+                                "error": str(purge_err),
+                            },
+                        )
+                    resource_summary["directories_removed"] = 1
+                except (OSError, IOError, ValueError) as e:
                     cleanup_warnings.append(
                         f"Failed to remove repository directory: {str(e)}"
                     )
+                    # AC6: post-failure diagnostic — surface whatever blocked deletion
+                    try:
+                        failure_leaks = self._detect_resource_leaks(
+                            repo_dir, user_alias
+                        )
+                        if failure_leaks:
+                            resource_summary["potential_leaks"] = failure_leaks
+                            cleanup_warnings.extend(
+                                [
+                                    f"Resource leak detected (post-failure): {leak}"
+                                    for leak in failure_leaks
+                                ]
+                            )
+                    except Exception as leak_err:  # noqa: BLE001 — diagnostic best-effort
+                        cleanup_warnings.append(
+                            f"Post-failure leak detection failed: {leak_err}"
+                        )
                     # Log as potential resource leak
                     self.logger.error(
                         "RESOURCE LEAK WARNING: Failed to remove repository directory",
@@ -1918,20 +2264,53 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Remove metadata via dual-mode helper
-            try:
-                self._delete_metadata(username, user_alias)
-            except (OSError, IOError) as e:
-                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
-                self.logger.warning(
-                    "Metadata cleanup issue",
+            # Remove metadata via dual-mode helper.
+            # GHOST REPO PREVENTION (codex RED-review fix): use the explicit
+            # phase1_succeeded flag, NOT os.path.exists() — which returns False
+            # on permission errors (e.g. parent chmod 000), creating a ghost-
+            # state false-negative.  Logic:
+            #   - phase1_succeeded=True:  rename returned → metadata already
+            #     deleted in the inner Phase 1 block; _delete_metadata is
+            #     idempotent so a second call is safe.
+            #   - phase1_succeeded=False AND repo_dir exists: Phase 1 failed
+            #     (rename raised or initial existence-check ran on a present
+            #     dir but rename never returned). The live dir is on disk →
+            #     PRESERVE metadata to avoid ghost state.
+            #   - phase1_succeeded=False AND repo_dir absent: orphan-already-
+            #     gone state (initial existence-check returned False → outer
+            #     block never entered). Metadata is stale → delete it.
+            if rename_was_attempted and not phase1_succeeded:
+                cleanup_warnings.append(
+                    "Phase 1 rename failed -- metadata preserved to prevent "
+                    "ghost repo (live dir still on disk, requires admin attention)"
+                )
+                self.logger.error(
+                    "GHOST REPO PREVENTION: skipping metadata delete because "
+                    "rename was attempted but did not succeed -- live dir still "
+                    "on disk in user namespace",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
-                        "error": str(e),
-                        "impact": "minor",
+                        "repo_dir": repo_dir,
+                        "rename_was_attempted": rename_was_attempted,
+                        "phase1_succeeded": phase1_succeeded,
+                        "requires_admin_cleanup": True,
                     },
                 )
+            else:
+                try:
+                    self._delete_metadata(username, user_alias)
+                except (OSError, IOError) as e:
+                    cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                    self.logger.warning(
+                        "Metadata cleanup issue",
+                        extra={
+                            "username": username,
+                            "user_alias": user_alias,
+                            "error": str(e),
+                            "impact": "minor",
+                        },
+                    )
 
             # Post-cleanup verification
             cleanup_success = not os.path.exists(repo_dir) and (
@@ -2016,47 +2395,97 @@ class ActivatedRepoManager:
             # Step 1: Stop any running services (non-fatal if fails)
             self._stop_composite_services(repo_path)
 
-            # Step 2: Clean up component repositories
+            # Step 2: Remove entire composite repository directory atomically.
+            # BLOCKER #3 fix: replace per-component shutil.rmtree + full-dir
+            # shutil.rmtree with a single fd-anchored rename-then-purge:
+            #   Phase 1 (fast): rename {username}/{user_alias} into .trash/ with
+            #     O_DIRECTORY|O_NOFOLLOW-pinned parent fds — atomic, TOCTOU-immune.
+            #   Phase 2 (slow): fd-anchored recursive delete of the trash entry.
+            # Components are included in the single rename (they live inside the
+            # composite dir), so no per-component rmtree is needed.
+            # Codex RED-review fix: TWO explicit flags for composite, no exists()
+            # in the outer guard. See _do_deactivate_single for full rationale.
+            rename_was_attempted = False
+            phase1_succeeded = False
             if repo_path.exists():
+                rename_was_attempted = True
+                trash_root = os.path.join(self.activated_repos_dir, ".trash")
                 try:
-                    from ...proxy.config_manager import ProxyConfigManager
-
-                    proxy_config = ProxyConfigManager(repo_path)
-                    discovered_repos = proxy_config.get_repositories()
-
-                    for repo_name in discovered_repos:
-                        subrepo_path = repo_path / repo_name
-                        if subrepo_path.exists():
-                            try:
-                                shutil.rmtree(subrepo_path)
-                                components_removed += 1
-                                self.logger.info(
-                                    f"Removed component: {repo_name}",
-                                    extra={"correlation_id": get_correlation_id()},
-                                )
-                            except (OSError, IOError) as e:
-                                cleanup_warnings.append(
-                                    f"Failed to remove component '{repo_name}': {str(e)}"
-                                )
-                except Exception as e:
-                    # Non-fatal - we'll still remove the entire directory
-                    cleanup_warnings.append(f"Failed to enumerate components: {str(e)}")
-                    self.logger.warning(
-                        f"Component enumeration failed, will remove entire directory: {str(e)}"
+                    trash_name = _fd_anchored_phase1_rename(
+                        activated_repos_dir=self.activated_repos_dir,
+                        username=username,
+                        user_alias=user_alias,
                     )
-
-            # Step 3: Remove entire composite repository directory
-            # This includes .code-indexer config and any remaining components
-            if repo_path.exists():
-                try:
-                    shutil.rmtree(repo_path)
+                    phase1_succeeded = True  # Only set after rename returns.
+                    trash_path = os.path.join(trash_root, trash_name)
                     self.logger.info(
-                        f"Removed composite repository directory: {repo_path}"
+                        f"Phase 1 complete: composite repo renamed to trash: {trash_path}"
                     )
-                except (OSError, IOError) as e:
+                    # HIGH #2 fix: delete metadata immediately after Phase 1 rename,
+                    # BEFORE Phase 2 purge.  In PG/cluster mode, _list_user_repos_pg
+                    # reads from PG, so the UI sees the repo gone as soon as the
+                    # metadata row is removed.  If Phase 2 later fails, metadata is
+                    # already gone (repo is logically deactivated); the orphan sweeper
+                    # handles the leftover trash entry.
+                    try:
+                        self._delete_metadata(username, user_alias)
+                        self.logger.info(
+                            f"Removed metadata for '{user_alias}' after Phase 1",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    except (OSError, IOError) as meta_err:
+                        cleanup_warnings.append(
+                            f"Failed to remove metadata after Phase 1: {str(meta_err)}"
+                        )
+                        self.logger.warning(
+                            "Composite metadata cleanup issue after Phase 1 rename",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "error": str(meta_err),
+                                "impact": "minor",
+                            },
+                        )
+                    # Phase 2: fd-anchored recursive delete.
+                    try:
+                        _safe_purge_trash_entry(trash_root, trash_name)
+                        components_removed = 1  # whole composite dir removed
+                        self.logger.info(
+                            f"Phase 2 complete: composite repository directory purged: {repo_path}"
+                        )
+                    except Exception as purge_err:  # noqa: BLE001 — phase 2 best-effort
+                        cleanup_warnings.append(
+                            f"Trash purge incomplete (will be retried by startup sweeper): {purge_err}"
+                        )
+                        self.logger.warning(
+                            "Composite trash purge incomplete -- orphan sweeper will retry",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "trash_path": trash_path,
+                                "error": str(purge_err),
+                            },
+                        )
+                except (OSError, IOError, ValueError) as e:
                     cleanup_warnings.append(
                         f"Failed to remove composite directory: {str(e)}"
                     )
+                    # AC6: post-failure diagnostic — surface whatever blocked deletion
+                    try:
+                        failure_leaks = self._detect_resource_leaks(
+                            str(repo_path), user_alias
+                        )
+                        if failure_leaks:
+                            cleanup_warnings.extend(
+                                [
+                                    f"Resource leak detected (post-failure): {leak}"
+                                    for leak in failure_leaks
+                                ]
+                            )
+                    except Exception as leak_err:  # noqa: BLE001 — diagnostic best-effort
+                        cleanup_warnings.append(
+                            f"Post-failure leak detection failed: {leak_err}"
+                        )
                     self.logger.error(
                         "RESOURCE LEAK WARNING: Failed to remove composite directory",
                         extra={
@@ -2068,24 +2497,48 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Step 4: Remove metadata via dual-mode helper
-            try:
-                self._delete_metadata(username, user_alias)
-                self.logger.info(
-                    f"Removed metadata for '{user_alias}'",
-                    extra={"correlation_id": get_correlation_id()},
+            # Step 4: Remove metadata via dual-mode helper.
+            # GHOST REPO PREVENTION (codex RED-review fix): use explicit
+            # phase1_succeeded flag — NOT Path.exists() which false-negatives
+            # on permission errors and would re-open the ghost-state attack
+            # window. See _do_deactivate_single for full rationale.
+            if rename_was_attempted and not phase1_succeeded:
+                cleanup_warnings.append(
+                    "Phase 1 rename failed -- metadata preserved to prevent "
+                    "ghost composite repo (live dir still on disk, requires "
+                    "admin attention)"
                 )
-            except (OSError, IOError) as e:
-                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
-                self.logger.warning(
-                    "Metadata cleanup issue",
+                self.logger.error(
+                    "GHOST COMPOSITE REPO PREVENTION: skipping metadata "
+                    "delete because rename was attempted but did not succeed "
+                    "-- live composite dir still on disk in user namespace",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
-                        "error": str(e),
-                        "impact": "minor",
+                        "directory": str(repo_path),
+                        "rename_was_attempted": rename_was_attempted,
+                        "phase1_succeeded": phase1_succeeded,
+                        "requires_admin_cleanup": True,
                     },
                 )
+            else:
+                try:
+                    self._delete_metadata(username, user_alias)
+                    self.logger.info(
+                        f"Removed metadata for '{user_alias}'",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                except (OSError, IOError) as e:
+                    cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                    self.logger.warning(
+                        "Metadata cleanup issue",
+                        extra={
+                            "username": username,
+                            "user_alias": user_alias,
+                            "error": str(e),
+                            "impact": "minor",
+                        },
+                    )
 
             # Post-cleanup verification
             cleanup_success = not repo_path.exists() and (
@@ -2158,6 +2611,7 @@ class ActivatedRepoManager:
                 cwd=str(repo_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=30,
             )
 
@@ -2188,6 +2642,69 @@ class ActivatedRepoManager:
                 f"Service stop attempted but failed: {str(e)}",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def sweep_orphan_trash_dirs(self, cap: int = 0) -> int:
+        """AC8: Scan the .trash root and purge orphan entries up to `cap`.
+
+        Called at server startup to recover from crashes that left a trash
+        directory half-deleted.  Idempotent: missing or empty .trash returns 0.
+
+        Each entry is purged synchronously via the fd-anchored helper.
+
+        Args:
+            cap: Maximum number of entries to purge in one call.  0 (default)
+                means unlimited — purge all found entries.  Set to a positive
+                integer (e.g. 100) at startup to prevent blocking for minutes
+                when thousands of orphans accumulate (HIGH #3 fix).  Remaining
+                entries are left for the next restart and logged at WARNING so
+                operators know more sweeps are needed.
+
+        Returns:
+            Count of orphan entries successfully purged.
+        """
+        trash_root = os.path.join(self.activated_repos_dir, ".trash")
+        if not os.path.isdir(trash_root):
+            return 0
+        try:
+            entries = os.listdir(trash_root)
+        except OSError as e:
+            self.logger.warning(
+                "Orphan trash sweep: cannot list trash root",
+                extra={"trash_root": trash_root, "error": str(e)},
+            )
+            return 0
+
+        purged = 0
+        for entry_name in entries:
+            if cap > 0 and purged >= cap:
+                remaining = len(entries) - purged
+                self.logger.warning(
+                    "Orphan trash sweep: capped at %d entries; %d orphan(s) remain "
+                    "in %s — will be picked up on next restart",
+                    cap,
+                    remaining,
+                    trash_root,
+                )
+                break
+            try:
+                _safe_purge_trash_entry(trash_root, entry_name)
+                purged += 1
+            except Exception as e:  # noqa: BLE001 — best-effort startup recovery
+                self.logger.warning(
+                    "Orphan trash sweep: failed to purge entry",
+                    extra={
+                        "trash_root": trash_root,
+                        "entry_name": entry_name,
+                        "error": str(e),
+                    },
+                )
+        if purged > 0:
+            self.logger.info(
+                "Orphan trash sweep: purged %d orphan trash entries from %s",
+                purged,
+                trash_root,
+            )
+        return purged
 
     def _detect_resource_leaks(self, repo_dir: str, user_alias: str) -> List[str]:
         """
@@ -2283,16 +2800,32 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Use cp --reflink=auto to attempt CoW, fallback to regular copy
-            result = subprocess.run(
-                ["cp", "--reflink=auto", "-r", source_path, dest_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
+            if self._clone_backend is None:
+                raise RuntimeError(
+                    "ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. "
+                    "Story #1034 Commit 4 requires clone_backend injection."
+                )
+            # Bug #1285: a fixed 120s wall-clock kill on the CoW clone
+            # subprocess terminated legitimately long clones of large golden
+            # repos (e.g. a repo with a populated .code-indexer/ index
+            # containing hundreds of thousands of files). Drive the deadline
+            # from the same resource_config.cow_clone_timeout knob
+            # GoldenRepoManager already uses for its own CoW operations
+            # (default 3600s / 1 hour, sized for very large repos e.g.
+            # evolution ~1M files, phoenix 40GB) instead of a fixed low
+            # literal.
+            rc = getattr(self.golden_repo_manager, "resource_config", None)
+            clone_timeout = (
+                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+                if rc is not None
+                else self._COW_CLONE_TIMEOUT_DEFAULT
             )
-
-            if result.returncode != 0:
-                raise ActivatedRepoError(f"CoW clone failed: {result.stderr}")
+            self._clone_backend.create_clone_at_path(
+                source_path,
+                dest_path,
+                preserve_attrs=False,
+                timeout=clone_timeout,
+            )
 
             self.logger.info(
                 f"CoW clone successful: {source_path} -> {dest_path}",
@@ -2340,6 +2873,14 @@ class ActivatedRepoManager:
                         dst_item = os.path.join(git_dir_new, item)
                         if os.path.exists(dst_item):
                             if os.path.isdir(dst_item):
+                                # Remove a pre-existing git-internal directory
+                                # before moving the bare-repo counterpart into
+                                # its place.  Path is trusted: dst_item is
+                                # entirely within dest_path/.git/, where
+                                # dest_path was just created by cp --reflink in
+                                # the same call frame and `item` comes from
+                                # os.listdir of that freshly-created dir.  No
+                                # user-controlled traversal crosses this path.
                                 shutil.rmtree(dst_item)
                             else:
                                 os.remove(dst_item)
@@ -2411,6 +2952,7 @@ class ActivatedRepoManager:
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=60,
                 )
 
@@ -2426,50 +2968,31 @@ class ActivatedRepoManager:
             return True
 
         except subprocess.TimeoutExpired:
+            # Bug #1285 follow-up: a timed-out CoW clone must not leak the
+            # partial dest_path directory (measured 15-21GB per timed-out
+            # activation in production, ~99GB total orphaned). Path is
+            # trusted for the same reason as the generic Exception branch
+            # below: dest_path is the caller-supplied destination for
+            # cp --reflink=auto, computed with no user-controlled traversal,
+            # and the clone never completed so no metadata row was
+            # committed — the deactivation rename-to-trash pattern does not
+            # apply here either.
+            if os.path.exists(dest_path):
+                shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(
                 f"Clone operation timed out: {source_path} -> {dest_path}"
             )
         except Exception as e:
-            # Clean up on failure
+            # Clone failure — remove partial clone directory.  Path is trusted:
+            # dest_path is the caller-supplied destination for cp --reflink=auto
+            # (activated_repo_path or composite subrepo path), computed from
+            # self.activated_repos_dir / username / user_alias in the calling
+            # frame with no user-controlled traversal.  The clone never
+            # completed so no metadata row was committed; the deactivation
+            # rename-to-trash pattern does not apply.
             if os.path.exists(dest_path):
                 shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(f"Clone operation failed: {str(e)}")
-
-    def _fallback_copy_on_write_clone(self, source_path: str, dest_path: str) -> bool:
-        """
-        Fallback CoW clone implementation.
-
-        Args:
-            source_path: Source repository path
-            dest_path: Destination repository path
-
-        Returns:
-            True if cloning succeeded
-
-        Raises:
-            ActivatedRepoError: If CoW clone fails
-        """
-        result = subprocess.run(
-            ["cp", "--reflink=always", "-r", source_path, dest_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        if result.returncode != 0:
-            raise ActivatedRepoError(f"CoW clone failed: {result.stderr}")
-
-        self.logger.info(
-            f"CoW clone successful: {source_path} -> {dest_path}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Configure git structure if destination is a git repository
-        git_dir = os.path.join(dest_path, ".git")
-        if os.path.exists(git_dir):
-            self._configure_git_structure(source_path, dest_path)
-
-        return True
 
     def _setup_origin_remote_for_local_repo(
         self, source_path: str, dest_path: str
@@ -2630,7 +3153,6 @@ class ActivatedRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.GIT_FETCH_TIMEOUT,
-                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -2814,6 +3336,84 @@ class ActivatedRepoManager:
             raise ActivatedRepoError("Migration operation timed out")
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
+
+    def _run_branch_delta_index(self, repo_path: str, user_alias: str) -> None:
+        """
+        Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
+
+        Called after activation/switch/sync when the target branch differs from
+        the golden repo's default branch. The CoW clone inherits the default-
+        branch index byte-for-byte; this corrects it for files that differ on
+        the non-default branch.
+
+        Skip conditions (no-op, returns immediately):
+        - self._index_manager is None  (not injected — legacy callers)
+        - user_alias ends with '-global'  (global repos share the golden index)
+
+        Args:
+            repo_path: Filesystem path of the activated repository clone.
+            user_alias: User's alias for the repository.
+
+        Raises:
+            ActivatedRepoError: If indexing fails (correctness-first: the
+                caller's operation is considered incomplete/failed).
+        """
+        if self._index_manager is None:
+            return
+        if user_alias.endswith("-global"):
+            self.logger.info(
+                f"Skipping branch-delta reindex for global repo '{user_alias}'"
+            )
+            return
+
+        self.logger.info(
+            f"Running branch-delta reindex for '{user_alias}' at '{repo_path}'",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            self._index_manager.run_branch_delta_index(repo_path)
+        except RuntimeError as exc:
+            error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
+            self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            raise ActivatedRepoError(error_msg) from exc
+
+        # Bug #1203 cache fix: evict in-memory HNSW and id_index cache entries so
+        # the next query reloads the freshly written on-disk index.  The subprocess
+        # (`cidx index`) rewrote the collection files but cannot reach the server's
+        # in-process RAM caches — invalidation must happen here.
+        #
+        # Cache key shape (filesystem_vector_store.py:2555/2582):
+        #   str(collection_path.resolve())  where collection_path =
+        #   <repo_root>/.code-indexer/index/<collection_name>
+        #
+        # So we must evict by prefix = <repo_root>/.code-indexer/index, which
+        # covers all collection entries under that repo's index directory.
+        #
+        # FTS (TantivyIndexManager) is built fresh per query from the on-disk
+        # directory — it has NO in-process cache, so no FTS invalidation is needed.
+        #
+        # Non-fatal: a cache-eviction failure must never fail an already-successful
+        # reindex.
+        try:
+            index_base = str(Path(repo_path) / ".code-indexer" / "index")
+            get_global_cache().invalidate_prefix(index_base)
+            get_global_id_index_cache().invalidate_prefix(index_base)
+            self.logger.info(
+                f"Evicted HNSW+id_index cache entries for '{user_alias}' "
+                f"under '{index_base}'",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as cache_exc:
+            self.logger.warning(
+                f"Failed to evict caches after branch-delta reindex "
+                f"for '{user_alias}': {cache_exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        self.logger.info(
+            f"Branch-delta reindex completed for '{user_alias}'",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
     def _validate_branch_name(self, branch_name: str) -> None:
         """
@@ -3106,6 +3706,12 @@ class ActivatedRepoManager:
                         golden_repo_alias
                     )
                     if golden_repo is None:
+                        continue
+
+                    # local:// is an internal scheme (cidx-meta, langfuse, etc.)
+                    # that has no canonical git URL. Skip before normalization to
+                    # avoid a spurious WARNING (Bug #1188).
+                    if golden_repo.repo_url.startswith("local://"):
                         continue
 
                     # Normalize the golden repository's URL

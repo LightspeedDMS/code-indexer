@@ -36,7 +36,6 @@ from __future__ import annotations
 from pathlib import Path
 from subprocess import CompletedProcess
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
@@ -177,24 +176,6 @@ def test_repos_cat(
     assert result.stdout.strip(), (
         f"cidx repos cat returned empty output for {KNOWN_ROOT_FILE}"
     )
-
-
-@pytest.mark.skip(reason="requires a known branch name in the markupsafe golden repo")
-def test_repos_switch_branch(
-    authenticated_workspace: Path,
-    activated_golden_repo: str,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx repos switch-branch markupsafe main exits 0 (skipped -- branch unknown)."""
-    result = run_cidx(
-        "repos",
-        "switch-branch",
-        MARKUPSAFE_ALIAS,
-        "main",
-        cwd=str(authenticated_workspace),
-        env=e2e_cli_env,
-    )
-    _assert_ok(result, "cidx repos switch-branch")
 
 
 def test_repos_sync(

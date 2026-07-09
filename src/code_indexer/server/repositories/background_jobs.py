@@ -10,13 +10,14 @@ import logging
 import multiprocessing
 import queue
 import threading
+import time
 import uuid
 import inspect
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 
 # Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
 # DatabaseConnectionManager instances and proactively closes the worker
@@ -24,6 +25,12 @@ from dataclasses import dataclass, asdict
 # at module scope (not under TYPE_CHECKING) because we need the runtime
 # class object, not just the type annotation.
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+# Bug #1256: driver-agnostic classifier shared with the INSERT-path
+# unique-violation detection in job_tracker._atomic_insert_impl (Bug
+# #1252/#1235). No circular import risk: job_tracker.py does not import
+# from this module.
+from code_indexer.server.services.job_tracker import is_active_job_unique_violation
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -100,10 +107,31 @@ class BackgroundJob:
     )
     phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
+    # Story #1032 AC12: audit trail — WHO triggered the job (may differ from username)
+    # When None, actor is the same as username (legacy / self-service).
+    actor_username: Optional[str] = None
 
-# Upper bound for DB fetch when performing client-side dedup/sort/pagination.
-# Large enough to cover realistic workloads; avoids unbounded queries.
-_MAX_DB_FETCH_FOR_PAGINATION = 10000
+
+_BG_JOB_FIELDS = {f.name for f in fields(BackgroundJob)}
+
+# Safety cap for get_jobs_by_operation_and_params: fetches ALL jobs of the requested
+# op-types so callers get a complete in-memory view.  This is an operational scan
+# (not a paginated fetch), so a large safety cap is appropriate.  Pagination paths
+# now use MAX_PAGE_SIZE instead.
+_MAX_OP_TYPE_SCAN = 10000
+
+# Bug #1063 Part 2: Debounce interval for progress_callback → _persist_jobs.
+# Rapid intermediate ticks (e.g., every chunk during indexing) are coalesced:
+# in-memory state is updated on every tick, but _persist_jobs is called at
+# most once per PROGRESS_DEBOUNCE_INTERVAL seconds for intermediate updates.
+# Terminal states (COMPLETED/FAILED/CANCELLED) always flush immediately.
+# Cancellation checks (_check_db_cancellation) also fire on every tick.
+PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
+
+# Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
+# Prevents unbounded DB fetches caused by large or uncapped page_size values.
+# The dashboard and API consumers use at most 50 rows per page in practice.
+MAX_PAGE_SIZE: int = 50
 
 
 class BackgroundJobManager:
@@ -192,20 +220,107 @@ class BackgroundJobManager:
             data_retention_config = DataRetentionConfig()
         self._data_retention_config = data_retention_config
 
-        # Story #26: Semaphore for limiting concurrent job execution
-        self._job_semaphore = threading.Semaphore(
-            self._background_jobs_config.max_concurrent_background_jobs
-        )
+        # Bug #1063 Part 3: Bounded worker pool shutdown signal.
+        self._pool_shutdown = threading.Event()
+
+        # Bug #1153: Cancel-handler registry keyed by operation_type.
+        # Handlers are callables that signal cooperative cancellation to the
+        # service owning the running job (e.g. DependencyMapService._cancel_event).
+        # Registered at startup via register_cancel_handler().
+        self._cancel_handlers: Dict[str, Callable[[], Any]] = {}
 
         # Load persisted jobs
         self._load_jobs()
 
+        # Bug #1063 Part 3: Start fixed pool of worker threads.
+        # Workers pull (job_id, func, args, kwargs) tuples from
+        # _pending_job_queue.  N submits → only pool_size threads alive,
+        # not N per-submit threads each blocking on a semaphore.
+        pool_size = self._background_jobs_config.max_concurrent_background_jobs
+        for _ in range(pool_size):
+            t = threading.Thread(
+                target=self._pool_worker,
+                daemon=True,
+                name=f"bgm-worker-{id(self)}",
+            )
+            t.start()
+            with self._lock:
+                self._running_jobs[f"_pool_{t.ident}"] = t
+
         # Background job manager initialized silently
+
+    def _pool_worker(self) -> None:
+        """Bug #1063 Part 3: Persistent worker thread that processes queued jobs.
+
+        Pulls (job_id, func, args, kwargs) tuples from _pending_job_queue and
+        calls _execute_job().  Exits when _pool_shutdown is set AND the queue
+        is drained (sentinel None item put by shutdown()).
+        """
+        while not self._pool_shutdown.is_set():
+            try:
+                item = self._pending_job_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                # Sentinel: signal from shutdown() to stop this worker.
+                self._pending_job_queue.task_done()
+                break
+            job_id, func, args, kwargs = item
+            try:
+                self._execute_job(job_id, func, args, kwargs)
+            except Exception:
+                logging.exception(
+                    "Unhandled exception in pool worker for job %s", job_id
+                )
+            finally:
+                self._pending_job_queue.task_done()
 
     @property
     def max_concurrent_jobs(self) -> int:
         """Get the maximum number of concurrent background jobs (Story #26)."""
         return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+
+    def register_cancel_handler(
+        self, operation_type: str, handler: Callable[[], Any]
+    ) -> None:
+        """Register a cooperative-cancellation handler for a given operation_type.
+
+        Bug #1153: when cancel_job is called for a RUNNING local job, the
+        generic path only terminates xray child processes.  For operation types
+        that manage their own threading.Event (e.g. DependencyMapService), the
+        service must register a handler here so cancel_job can signal it.
+
+        The handler is invoked at most once per cancel_job call, wrapped in a
+        try/except so a handler error never breaks the cancel_job response.
+
+        Args:
+            operation_type: The job operation_type string (e.g. "dependency_map_full").
+            handler: Zero-argument callable that signals cancellation to the service.
+        """
+        self._cancel_handlers[operation_type] = handler
+
+    def count_active_refresh_jobs(self) -> int:
+        """Count PENDING+RUNNING global_repo_refresh jobs in memory.
+
+        Bug #1063 Part 1: used by RefreshScheduler to compute the refresh
+        budget per poll cycle (budget = max_concurrent_refresh_jobs - active).
+        Counting in-memory jobs only is intentional: the scheduler runs on this
+        node and submits jobs through this manager; DB-stored jobs from other
+        nodes are refresh jobs submitted by those nodes' schedulers and should
+        not count against THIS node's budget.
+
+        Returns:
+            Number of in-memory PENDING or RUNNING global_repo_refresh jobs.
+        """
+        count = 0
+        with self._lock:
+            for job in self.jobs.values():
+                if job.operation_type == "global_repo_refresh" and job.status in (
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                ):
+                    count += 1
+        return count
 
     # Bug #467: Staleness threshold for detecting truly stuck jobs.
     # Since indexing no longer has a timeout, use a generous 24-hour threshold.
@@ -287,6 +402,7 @@ class BackgroundJobManager:
         submitter_username: str,
         is_admin: bool = False,
         repo_alias: Optional[str] = None,  # AC5: Fix unknown repo bug
+        actor_username: Optional[str] = None,  # AC12: who triggered the job
         **kwargs,
     ) -> str:
         """
@@ -296,9 +412,11 @@ class BackgroundJobManager:
             operation_type: Type of operation (e.g., 'add_golden_repo')
             func: Function to execute
             *args: Function arguments
-            submitter_username: Username of the job submitter
+            submitter_username: Username of the job submitter (resource owner)
             is_admin: Whether this is an admin job (higher priority)
             repo_alias: Repository alias being processed (AC5: Fix unknown repo bug)
+            actor_username: Who actually triggered the job (AC12). When None,
+                defaults to submitter_username for backward compatibility.
             **kwargs: Function keyword arguments
 
         Returns:
@@ -333,6 +451,12 @@ class BackgroundJobManager:
 
         job_id = str(uuid.uuid4())
 
+        # AC12: When actor_username is None, default to submitter_username
+        # so old callers that don't pass actor_username preserve existing semantics.
+        resolved_actor = (
+            actor_username if actor_username is not None else submitter_username
+        )
+
         job = BackgroundJob(
             job_id=job_id,
             operation_type=operation_type,
@@ -346,58 +470,101 @@ class BackgroundJobManager:
             username=submitter_username,
             is_admin=is_admin,
             repo_alias=repo_alias,  # AC5: Store repo_alias
+            actor_username=resolved_actor,  # AC12: audit trail
         )
 
-        with self._lock:
-            # Bug #133: Check for duplicate operation on same repo
-            # This check MUST be inside the lock to prevent TOCTOU race conditions
-            if repo_alias:
-                conflict_job_id = self._check_operation_conflict(
-                    operation_type, repo_alias
-                )
-                if conflict_job_id:
-                    raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
-
-            self.jobs[job_id] = job
-
-        # Story #267 Component 3-4: Persist outside lock
-        self._persist_jobs(job_id=job_id)
-
-        # Story #311: Register with JobTracker for unified cross-service tracking
-        if self._job_tracker is not None:
+        # Bug #1065: For repo-scoped operations, use the cluster-atomic
+        # register_job_if_no_conflict gate (idx_active_job_per_repo partial
+        # unique index) BEFORE adding to in-memory state and BEFORE spawning
+        # any worker thread.  This replaces the legacy two-step TOCTOU pattern
+        # (in-process lock precheck + non-atomic register_job) which provided
+        # no real cross-node protection and swallowed constraint violations.
+        #
+        # For non-repo-scoped operations (repo_alias is None/empty) the old
+        # in-process gate is retained as a best-effort local guard, because
+        # the partial index predicate excludes NULL repo_alias rows.
+        if repo_alias and self._job_tracker is not None:
+            # Attempt atomic DB-layer claim.  DuplicateJobError propagates
+            # as a hard reject — no swallowing — before any thread is spawned.
+            # is_admin and actor_username are threaded directly into the atomic
+            # INSERT so no second write is needed (Bug #1065 AC12 fix).
             try:
-                self._job_tracker.register_job(
+                from code_indexer.server.services.job_tracker import (
+                    DuplicateJobError as _TrackerDuplicateJobError,
+                )
+
+                self._job_tracker.register_job_if_no_conflict(
                     job_id=job_id,
                     operation_type=operation_type,
                     username=submitter_username,
                     repo_alias=repo_alias,
+                    is_admin=is_admin,
+                    actor_username=resolved_actor,
                 )
-            except Exception:
-                logging.warning(
-                    f"JobTracker.register_job failed for {job_id} — "
-                    "continuing without tracker registration",
-                    exc_info=True,
-                )
+            except _TrackerDuplicateJobError as exc:
+                # Translate into the canonical DuplicateJobError that all
+                # callers of submit_job already catch.
+                raise DuplicateJobError(
+                    exc.operation_type,
+                    exc.repo_alias,
+                    exc.existing_job_id,
+                ) from exc
 
-        # Execute job in background thread
-        thread = threading.Thread(
-            target=self._execute_job,
-            args=(job_id, func, args, kwargs),
-            daemon=True,  # Bug #549: daemon thread allows graceful shutdown;
-            # orphaned jobs are reclaimed by JobReconciliationService
-        )
-        thread.start()
+            # Atomic claim succeeded: add to in-memory dict only.
+            # DB persistence was done atomically by register_job_if_no_conflict.
+            with self._lock:
+                self.jobs[job_id] = job
 
-        # Track running thread
-        with self._lock:
-            self._running_jobs[job_id] = thread
+        else:
+            # Non-repo-scoped path (repo_alias is None/empty) OR no job_tracker:
+            # retain the legacy in-process TOCTOU guard as a best-effort local
+            # dedup, then persist and optionally register with tracker.
+            with self._lock:
+                # Bug #133: Check for duplicate operation on same repo
+                if repo_alias:
+                    conflict_job_id = self._check_operation_conflict(
+                        operation_type, repo_alias
+                    )
+                    if conflict_job_id:
+                        raise DuplicateJobError(
+                            operation_type, repo_alias, conflict_job_id
+                        )
+
+                self.jobs[job_id] = job
+
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+
+            # Story #311: Register with JobTracker for unified cross-service tracking
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.register_job(
+                        job_id=job_id,
+                        operation_type=operation_type,
+                        username=submitter_username,
+                        repo_alias=repo_alias,
+                    )
+                except Exception:
+                    logging.warning(
+                        f"JobTracker.register_job failed for {job_id} — "
+                        "continuing without tracker registration",
+                        exc_info=True,
+                    )
+
+        # Bug #1063 Part 3: Enqueue the job for the bounded worker pool.
+        # Workers pull from _pending_job_queue and call _execute_job().
+        # This avoids spawning one thread per submit (N submits = N blocking
+        # threads under the old semaphore model).
+        self._pending_job_queue.put((job_id, func, args, kwargs))
 
         logging.info(
             f"Background job {job_id} submitted by {submitter_username}: {operation_type}"
         )
         return job_id
 
-    def get_job_status(self, job_id: str, username: str) -> Optional[Dict[str, Any]]:
+    def get_job_status(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """
         Get status of a background job with user isolation.
 
@@ -407,6 +574,7 @@ class BackgroundJobManager:
         Args:
             job_id: Job ID to check
             username: Username requesting the status (for authorization)
+            is_admin: When True, skip ownership check — admin can see any job (AC11)
 
         Returns:
             Job status dictionary or None if job not found or not authorized
@@ -414,7 +582,7 @@ class BackgroundJobManager:
         with self._lock:
             job = self.jobs.get(job_id)
             if job:
-                if job.username != username:
+                if not is_admin and job.username != username:
                     return None
                 return {
                     "job_id": job.job_id,
@@ -441,13 +609,17 @@ class BackgroundJobManager:
                     # Story #480: Real-time phase progress fields
                     "current_phase": job.current_phase,
                     "phase_detail": job.phase_detail,
+                    # Story #1032 AC12: audit trail
+                    "actor_username": job.actor_username,
                 }
 
         # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
         if self._sqlite_backend:
             try:
                 db_job = self._sqlite_backend.get_job(job_id)
-                if db_job and db_job.get("username") == username:
+                # AC11: when is_admin=True, bypass ownership check so admin can
+                # fetch any user's completed job from the DB.
+                if db_job and (is_admin or db_job.get("username") == username):
                     # v10.4.6 (Obs 3.2): scrub internal is_admin field from public
                     # response. The in-memory path above already omits it; the SQLite
                     # row includes it for internal scheduling/ownership-bypass logic
@@ -481,6 +653,8 @@ class BackgroundJobManager:
             "failure_reason": job.failure_reason,
             "extended_error": job.extended_error,
             "language_resolution_status": job.language_resolution_status,
+            # Story #1032 AC12: audit trail
+            "actor_username": job.actor_username,
         }
 
     def list_jobs(
@@ -489,6 +663,7 @@ class BackgroundJobManager:
         status_filter: Optional[str] = None,
         limit: int = 10,
         offset: int = 0,
+        is_admin: bool = False,
     ) -> Dict[str, Any]:
         """
         List jobs for a user with filtering and pagination.
@@ -498,21 +673,42 @@ class BackgroundJobManager:
         (overriding DB entries for the same job_id) to provide fresher progress data.
 
         Args:
-            username: Username to filter jobs for
+            username: Username to filter jobs for (ignored when is_admin=True)
             status_filter: Optional status filter
             limit: Maximum number of jobs to return
             offset: Number of jobs to skip
+            is_admin: When True, skip username filter and return ALL users' jobs (AC11)
 
         Returns:
             Dictionary with jobs list and total count
         """
+        # Bug #1063 Part 4: cap page_size at MAX_PAGE_SIZE unconditionally so
+        # the cap applies to BOTH the SQLite path and the in-memory fallback.
+        capped_limit = min(limit, MAX_PAGE_SIZE)
+
         if self._sqlite_backend is not None:
             try:
-                # Fetch all matching jobs from DB; paginate client-side after merging
+                # Count active in-memory jobs that match the criteria so we can
+                # fetch enough rows from DB to fill the page after merging.
+                with self._lock:
+                    active_matching = [
+                        job
+                        for job in self.jobs.values()
+                        if (is_admin or job.username == username)
+                        and (not status_filter or job.status.value == status_filter)
+                    ]
+                active_count = len(active_matching)
+
+                # Fetch only as many DB rows as needed for this page after merge.
+                # Adding active_count ensures we have enough rows to deduplicate
+                # and still fill capped_limit rows for the caller.
+                db_fetch_limit = capped_limit + active_count
+
+                # AC11: when is_admin=True, pass username=None to skip the WHERE filter.
                 db_jobs = self._sqlite_backend.list_jobs(
-                    username=username,
+                    username=None if is_admin else username,
                     status=status_filter,
-                    limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                    limit=db_fetch_limit,
                 )
                 # Build dict keyed by job_id from DB results.
                 # v10.4.6 (Obs 3.2): scrub internal is_admin field from each
@@ -522,10 +718,11 @@ class BackgroundJobManager:
                 for j in db_jobs:
                     j.pop("is_admin", None)
                     merged[j["job_id"]] = j
-                # Override with in-memory jobs (fresher progress) for matching criteria
+                # Override with in-memory jobs (fresher progress) for matching criteria.
+                # AC11: when is_admin=True, include all in-memory jobs regardless of owner.
                 with self._lock:
                     for job in self.jobs.values():
-                        if job.username != username:
+                        if not is_admin and job.username != username:
                             continue
                         if status_filter and job.status.value != status_filter:
                             continue
@@ -537,19 +734,24 @@ class BackgroundJobManager:
                     reverse=True,
                 )
                 total_count = len(all_jobs)
-                paginated = all_jobs[offset : offset + limit]
+                paginated = all_jobs[offset : offset + capped_limit]
                 return {
                     "jobs": paginated,
                     "total": total_count,
-                    "limit": limit,
+                    "limit": capped_limit,
                     "offset": offset,
                 }
             except Exception as e:
                 logging.error(f"Failed to list jobs from SQLite backend: {e}")
 
         with self._lock:
-            # Filter jobs by user
-            user_jobs = [job for job in self.jobs.values() if job.username == username]
+            # AC11: when is_admin=True, include all jobs regardless of owner.
+            if is_admin:
+                user_jobs = list(self.jobs.values())
+            else:
+                user_jobs = [
+                    job for job in self.jobs.values() if job.username == username
+                ]
 
             # Apply status filter if provided
             if status_filter:
@@ -562,13 +764,13 @@ class BackgroundJobManager:
 
             total_count = len(user_jobs)
 
-            # Apply pagination
-            paginated_jobs = user_jobs[offset : offset + limit]
+            # Apply pagination using capped_limit (Bug #1063 Part 4)
+            paginated_jobs = user_jobs[offset : offset + capped_limit]
 
             return {
                 "jobs": [self._job_to_dict(job) for job in paginated_jobs],
                 "total": total_count,
-                "limit": limit,
+                "limit": capped_limit,
                 "offset": offset,
             }
 
@@ -690,8 +892,45 @@ class BackgroundJobManager:
             # Story #996: Terminate driver processes for running xray jobs
             if was_running:
                 self._terminate_child_processes(job_id)
+                # Bug #1153: Invoke cooperative-cancellation handler for the
+                # operation_type (e.g. DependencyMapService.cancel_running_analysis).
+                # Without this, dep-map workers keep running and the
+                # SharedJobSentinel is never released, causing 409 forever.
+                _cancel_handler = self._cancel_handlers.get(job.operation_type)
+                if _cancel_handler is not None:
+                    try:
+                        _cancel_handler()
+                    except Exception:
+                        logging.exception(
+                            "Cancel handler for operation_type=%s raised; "
+                            "cancellation still marked on job %s",
+                            job.operation_type,
+                            job_id,
+                        )
             logging.info(f"Job {job_id} cancelled by user {username}")
             return {"success": True, "message": "Job cancelled successfully"}
+
+        # Bug #1070 Workstream A: xray jobs bypass submit_job and are never placed in
+        # self.jobs. They register only in JobTracker + self._child_processes. Catch them
+        # here (before the SQLite cross-node path) so _terminate_child_processes is called.
+        with self._child_processes_lock:
+            has_local_children = job_id in self._child_processes
+
+        if has_local_children and self._job_tracker is not None:
+            tracked_job = self._job_tracker.get_job(job_id)
+            if tracked_job is not None:
+                if not is_admin and tracked_job.username != username:
+                    return {
+                        "success": False,
+                        "message": "Job not found or not authorized",
+                    }
+                self._terminate_child_processes(job_id)
+                self._job_tracker.fail_job(job_id, "cancelled")
+                logging.info(
+                    f"Job {job_id} (xray local) cancelled and child processes terminated "
+                    f"by user {username}"
+                )
+                return {"success": True, "message": "Job cancelled successfully"}
 
         # Job not in memory — check DB backend for cross-node jobs
         if self._sqlite_backend is not None:
@@ -718,6 +957,29 @@ class BackgroundJobManager:
                     cancelled=True,
                     completed_at=datetime.now(timezone.utc).isoformat(),
                 )
+
+                # Bug #1153: Dep-map jobs reach this path because they register
+                # via JobTracker.register_job_if_no_conflict WITHOUT submit_job,
+                # so self.jobs is empty for their job_id.  The self.jobs branch
+                # above never fires, meaning the cancel handler was silently skipped.
+                # Fix: for locally-running jobs (JobTracker has the job as "running"
+                # and a handler is registered for its operation_type), invoke the
+                # handler here so the dep-map worker's _cancel_event gets set and
+                # the SharedJobSentinel is released.
+                if db_status == "running" and self._job_tracker is not None:
+                    _op_type = db_job.get("operation_type") or ""
+                    _cancel_handler = self._cancel_handlers.get(_op_type)
+                    if _cancel_handler is not None:
+                        try:
+                            _cancel_handler()
+                        except Exception:
+                            logging.exception(
+                                "Cancel handler for operation_type=%s raised; "
+                                "cancellation still marked on job %s",
+                                _op_type,
+                                job_id,
+                            )
+
                 logging.info(f"Job {job_id} cancelled in DB by user {username}")
                 return {"success": True, "message": "Job cancelled successfully"}
             except Exception as e:
@@ -725,6 +987,39 @@ class BackgroundJobManager:
                 return {"success": False, "message": "Failed to cancel job"}
 
         return {"success": False, "message": "Job not found or not authorized"}
+
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed on startup.
+
+        Server restart kills threads but leaves job rows as running/pending
+        in the DB, blocking new submissions via the partial unique index.
+        Called from lifespan startup to clean these orphans.
+
+        Returns the number of jobs failed.
+        """
+        count = 0
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            for job in list(self.jobs.values()):
+                if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
+                    job.status = JobStatus.FAILED
+                    job.completed_at = now
+                    job.error = error
+                    count += 1
+
+        if self._sqlite_backend is not None:
+            try:
+                db_count = self._sqlite_backend.fail_orphaned_jobs(error)
+                count += db_count
+            except AttributeError:
+                pass
+            except Exception as e:
+                logging.warning("fail_orphaned_jobs DB cleanup failed: %s", e)
+
+        return count
 
     def _check_db_cancellation(self, job_id: str) -> None:
         """Poll DB for external cancellation (cross-node cluster support).
@@ -802,16 +1097,21 @@ class BackgroundJobManager:
         # race (RC-3) where short-lived job threads accumulated tracked
         # connections faster than the demand-driven cleanup sweep could
         # drain them.
-        try:
-            # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
-            # Job remains in PENDING state while waiting
-            logging.debug(
-                f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
-            )
-            self._job_semaphore.acquire()
 
+        # Bug #1063 Part 3: Register current (pool worker) thread as the
+        # per-job entry in _running_jobs so shutdown() can find and cancel
+        # running jobs, and tests can poll _running_jobs[job_id] for completion.
+        # The inner finally already removes it on completion/failure.
+        with self._lock:
+            self._running_jobs[job_id] = threading.current_thread()
+
+        try:
+            # Bug #1063 Part 3: Semaphore acquire removed.  Concurrency is now
+            # enforced by the bounded worker pool (queue depth == max_concurrent_jobs).
+            # The pool worker calls _execute_job only when it picks up the item
+            # from _pending_job_queue, so exactly pool_size jobs run concurrently.
             try:
-                # Now we have a slot - check if job was cancelled while waiting
+                # Check if job was cancelled while waiting in the queue.
                 with self._lock:
                     job = self.jobs[job_id]
                     if job.cancelled:
@@ -833,15 +1133,36 @@ class BackgroundJobManager:
                 if self._job_tracker is not None:
                     try:
                         self._job_tracker.update_status(job_id, status="running")
-                    except Exception:
-                        logging.warning(
-                            f"JobTracker.update_status(running) failed for {job_id}",
-                            exc_info=True,
-                        )
+                    except Exception as exc:
+                        # Bug #1256: a unique-violation from idx_active_job_per_repo
+                        # here is a benign cluster-restart race (a stale row for the
+                        # same singleton (operation_type, repo_alias) key is still
+                        # active) — the job still executes correctly either way, so
+                        # this is log-noise, not a real failure. Classify via the
+                        # same driver-agnostic helper used on the INSERT path
+                        # (Bug #1252/#1235) and demote to DEBUG with no traceback.
+                        # Anything else keeps the original WARNING+traceback
+                        # (Messi #13 anti-silent-failure — never swallow silently).
+                        if is_active_job_unique_violation(exc):
+                            logging.debug(
+                                f"JobTracker.update_status(running) skipped for {job_id}: "
+                                f"tracker slot already owned by a concurrent/stale holder "
+                                f"(benign idx_active_job_per_repo dedup race)"
+                            )
+                        else:
+                            logging.warning(
+                                f"JobTracker.update_status(running) failed for {job_id}",
+                                exc_info=True,
+                            )
 
                 logging.info(f"Starting background job {job_id}")
 
-                # Create progress callback function
+                # Create progress callback function.
+                # Bug #1063 Part 2: debounce intermediate persists.
+                # _last_persist_time is a single-element list used as a mutable
+                # closure cell (Python closures cannot rebind bare names).
+                _last_persist_time: list = [0.0]
+
                 def progress_callback(
                     progress: int,
                     phase: Optional[str] = None,
@@ -855,9 +1176,17 @@ class BackgroundJobManager:
                                 self.jobs[job_id].current_phase = phase
                             if detail is not None:
                                 self.jobs[job_id].phase_detail = detail
-                    # Story #267 Component 3-4: Persist outside lock
-                    self._persist_jobs(job_id=job_id)
-                    # Bug #584: Check DB for cross-node cancellation
+                    # Bug #1063 Part 2: coalesce rapid ticks.
+                    # _persist_jobs is only called when the debounce window has
+                    # elapsed.  The in-memory state above is always updated so
+                    # get_job() is always current even when the persist is skipped.
+                    # Story #267 Component 3-4: Persist outside lock.
+                    now_ts = time.monotonic()
+                    if now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL:
+                        self._persist_jobs(job_id=job_id)
+                        _last_persist_time[0] = now_ts
+                    # Bug #584: Check DB for cross-node cancellation on every tick
+                    # (cheap read; must not be gated by the debounce window).
                     self._check_db_cancellation(job_id)
 
                 # Check if function accepts progress callback
@@ -912,7 +1241,8 @@ class BackgroundJobManager:
                         job.status = JobStatus.CANCELLED
                         job.completed_at = datetime.now(timezone.utc)
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: capture persist success so eviction is gated on durable write.
+                terminal_persisted = self._persist_jobs(job_id=job_id)
 
                 # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
                 if self._job_tracker is not None:
@@ -944,14 +1274,25 @@ class BackgroundJobManager:
                 # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
                 # Only when SQLite backend is available (data is preserved in DB)
                 # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
+                # Bug fix: gate eviction on terminal persist having succeeded. If the
+                # persist failed, keep the job in memory with its terminal status so
+                # get_job_status() can still serve the correct state from memory instead
+                # of falling back to SQLite where the row still shows RUNNING.
                 if self._sqlite_backend and job.status in (
                     JobStatus.COMPLETED,
                     JobStatus.COMPLETED_PARTIAL,
                     JobStatus.CANCELLED,
                     JobStatus.FAILED,
                 ):
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if terminal_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for job {job_id} "
+                            f"(status={job.status.value}); retaining in memory "
+                            "to prevent stuck-RUNNING zombie state."
+                        )
 
                 if job.status == JobStatus.FAILED:
                     logging.warning(
@@ -970,13 +1311,20 @@ class BackgroundJobManager:
                     job.error = str(e)
                     job.progress = 0
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: gate eviction on persist success.
+                interrupted_persisted = self._persist_jobs(job_id=job_id)
                 # Tracker notification skipped for InterruptedError (always
                 # cancellation) — fail_job would overwrite status to "failed".
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if interrupted_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for cancelled job {job_id}; "
+                            "retaining in memory to prevent stuck-RUNNING zombie state."
+                        )
             except Exception as e:
                 error_msg = str(e)
 
@@ -998,7 +1346,8 @@ class BackgroundJobManager:
                         job.progress = 0
                         logging.error(f"Background job {job_id} failed: {error_msg}")
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: gate eviction on persist success.
+                exception_persisted = self._persist_jobs(job_id=job_id)
                 # Story #311 AC3: Notify tracker of failure (skip for
                 # cancelled jobs — fail_job overwrites status to "failed").
                 if self._job_tracker is not None and not job.cancelled:
@@ -1014,13 +1363,19 @@ class BackgroundJobManager:
                         )
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if exception_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for job {job_id} "
+                            f"(status={job.status.value}); retaining in memory "
+                            "to prevent stuck-RUNNING zombie state."
+                        )
 
             finally:
-                # Story #26: Release semaphore slot to allow another job to run
-                self._job_semaphore.release()
-                # Clean up running job reference
+                # Bug #1063 Part 3: Semaphore removed; bounded pool manages
+                # concurrency via queue depth.  Only clean up running job ref.
                 with self._lock:
                     self._running_jobs.pop(job_id, None)
         finally:
@@ -1279,9 +1634,18 @@ class BackgroundJobManager:
         Cancels all running jobs and waits for threads to complete.
         This method should be called during application shutdown.
         """
+        # Bug #1063 Part 3: Signal pool workers to stop accepting new work.
+        self._pool_shutdown.set()
+        pool_size = self._background_jobs_config.max_concurrent_background_jobs
+        # Send one sentinel per worker so each blocked worker.get() wakes up.
+        for _ in range(pool_size):
+            self._pending_job_queue.put(None)
+
         with self._lock:
-            # Cancel all running jobs
-            running_job_ids = list(self._running_jobs.keys())
+            # Cancel all running jobs (only real job entries, not pool-_ keys)
+            running_job_ids = [
+                jid for jid in self._running_jobs.keys() if not jid.startswith("_pool_")
+            ]
             for job_id in running_job_ids:
                 job = self.jobs.get(job_id)
                 if job and job.status == JobStatus.RUNNING:
@@ -1293,7 +1657,8 @@ class BackgroundJobManager:
             # Snapshot jobs under lock for persistence
             jobs_snapshot = {jid: self._snapshot_job(j) for jid, j in self.jobs.items()}
 
-            # Get list of threads to wait for
+            # Get list of threads to wait for (pool workers only — real job
+            # threads no longer exist; pool workers finish their current item)
             threads_to_wait = list(self._running_jobs.values())
 
         # Persist final job states OUTSIDE lock to avoid blocking
@@ -1341,7 +1706,7 @@ class BackgroundJobManager:
                 for op_type in operation_types:
                     db_jobs = self._sqlite_backend.list_jobs(
                         operation_type=op_type,
-                        limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                        limit=_MAX_OP_TYPE_SCAN,
                     )
                     for j in db_jobs:
                         merged[j["job_id"]] = j
@@ -1391,16 +1756,21 @@ class BackgroundJobManager:
             # Story #480: Real-time phase progress fields (Bug fix: persist to SQLite)
             "current_phase": job.current_phase,
             "phase_detail": job.phase_detail,
+            # Story #1032 AC12: audit trail
+            "actor_username": job.actor_username,
         }
 
-    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
+    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> bool:
         """Persist a single job snapshot to SQLite without holding the memory lock.
 
         Story #267 Component 4: This method does SQLite I/O outside the lock.
         If the write fails, the in-memory state is still correct.
+
+        Returns:
+            True if the persist succeeded, False if it was swallowed (logged as error).
         """
         if not self._sqlite_backend:
-            return
+            return True  # No backend — nothing to persist, treat as success
         try:
             existing = self._sqlite_backend.get_job(job_id)
             if existing:
@@ -1443,11 +1813,15 @@ class BackgroundJobManager:
                     language_resolution_status=snapshot["language_resolution_status"],
                     current_phase=snapshot.get("current_phase"),
                     phase_detail=snapshot.get("phase_detail"),
+                    # Story #1032 AC12: persist actor_username audit trail
+                    actor_username=snapshot.get("actor_username"),
                 )
+            return True
         except Exception as e:
             logging.error(f"Failed to persist job {job_id} to SQLite: {e}")
+            return False
 
-    def _persist_jobs(self, job_id: Optional[str] = None) -> None:
+    def _persist_jobs(self, job_id: Optional[str] = None) -> bool:
         """
         Persist jobs to storage (SQLite or JSON file).
 
@@ -1457,20 +1831,27 @@ class BackgroundJobManager:
         Note: For SQLite single-job persist, this method can be called outside the lock
         since it uses _persist_job_to_sqlite which does its own error handling.
         For full persist and JSON, this should be called within a lock.
+
+        Returns:
+            True if the persist succeeded (or no persistence backend is configured),
+            False if the single-job SQLite persist failed (caller should retain the
+            job in memory so get_job_status can still serve the terminal state).
+            Bulk/JSON paths always return True — they are not on the terminal-eviction
+            hot path.
         """
         # Use SQLite backend if enabled
         if self._sqlite_backend:
             if job_id is not None:
                 # Story #267 Component 1: Single-job persist (2 ops instead of 20K)
-                self._persist_single_job_sqlite(job_id)
+                return self._persist_single_job_sqlite(job_id)
             else:
                 # Full persist (shutdown only)
                 self._persist_jobs_sqlite()
-            return
+                return True
 
         # Fall back to JSON file storage
         if not self.storage_path:
-            return
+            return True
 
         try:
             storage_file = Path(self.storage_path)
@@ -1500,22 +1881,27 @@ class BackgroundJobManager:
             # Jobs should still work in memory even if persistence fails
             logging.error(f"Failed to persist jobs: {e}")
 
-    def _persist_single_job_sqlite(self, job_id: str) -> None:
+        return True
+
+    def _persist_single_job_sqlite(self, job_id: str) -> bool:
         """Persist a single job to SQLite.
 
         Story #267 Component 1: Instead of iterating all jobs (20K ops),
         persist only the one job that changed (2 ops: get + save/update).
+
+        Returns:
+            True if the persist succeeded (or there is no backend), False on failure.
         """
         if not self._sqlite_backend:
-            return
+            return True  # No backend — treat as success
 
         with self._lock:
             job = self.jobs.get(job_id)
             if job is None:
-                return  # Job was removed between lock release and persist
+                return True  # Job was removed between lock release and persist
             snapshot = self._snapshot_job(job)
 
-        self._persist_job_to_sqlite(job_id, snapshot)
+        return self._persist_job_to_sqlite(job_id, snapshot)
 
     def _persist_jobs_sqlite(self) -> None:
         """
@@ -1576,6 +1962,8 @@ class BackgroundJobManager:
                         failure_reason=job.failure_reason,
                         extended_error=job.extended_error,
                         language_resolution_status=job.language_resolution_status,
+                        # Story #1032 AC12: persist actor_username audit trail
+                        actor_username=job.actor_username,
                     )
         except Exception as e:
             logging.error(f"Failed to persist jobs to SQLite: {e}")
@@ -1611,14 +1999,16 @@ class BackgroundJobManager:
             for job_id, job_dict in stored_jobs.items():
                 # Convert ISO strings back to datetime objects
                 for field in ["created_at", "started_at", "completed_at"]:
-                    if job_dict[field] is not None:
+                    if job_dict[field] is not None and isinstance(job_dict[field], str):
                         job_dict[field] = datetime.fromisoformat(job_dict[field])
 
                 # Convert string status back to enum
                 job_dict["status"] = JobStatus(job_dict["status"])
 
-                # Create job object
-                job = BackgroundJob(**job_dict)
+                # Create job object (filter unknown keys for forward-compat)
+                job = BackgroundJob(
+                    **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
+                )
                 self.jobs[job_id] = job
 
             logging.info(f"Loaded {len(stored_jobs)} jobs from storage")
@@ -1686,14 +2076,18 @@ class BackgroundJobManager:
         """
         # Convert ISO strings back to datetime objects
         for field_name in ["created_at", "started_at", "completed_at"]:
-            if job_dict.get(field_name) is not None:
+            if job_dict.get(field_name) is not None and isinstance(
+                job_dict[field_name], str
+            ):
                 job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
 
         # Convert string status back to enum
         job_dict["status"] = JobStatus(job_dict["status"])
 
-        # Create job object
-        job = BackgroundJob(**job_dict)
+        # Create job object (filter unknown keys for forward-compat)
+        job = BackgroundJob(
+            **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
+        )
         self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
@@ -1823,13 +2217,19 @@ class BackgroundJobManager:
                         if status in ("running", "pending"):
                             created_str = db_job.get("created_at")
                             if created_str:
-                                created_dt = datetime.fromisoformat(created_str)
+                                if isinstance(created_str, str):
+                                    created_dt = datetime.fromisoformat(created_str)
+                                else:
+                                    created_dt = created_str
                                 if created_dt >= cutoff_time:
                                     include_db_job = True
                         elif status in ("completed", "failed"):
                             completed_str = db_job.get("completed_at")
                             if completed_str:
-                                completed_dt = datetime.fromisoformat(completed_str)
+                                if isinstance(completed_str, str):
+                                    completed_dt = datetime.fromisoformat(completed_str)
+                                else:
+                                    completed_dt = completed_str
                                 if completed_dt >= cutoff_time:
                                     include_db_job = True
 
@@ -1859,7 +2259,10 @@ class BackgroundJobManager:
 
             # Parse time for sorting (newest first = reverse, so negate)
             if time_str:
-                dt = datetime.fromisoformat(time_str)
+                if isinstance(time_str, str):
+                    dt = datetime.fromisoformat(time_str)
+                else:
+                    dt = time_str
             else:
                 dt = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -1939,20 +2342,33 @@ class BackgroundJobManager:
                 "repository_url": getattr(job, "repository_url", None),
                 "progress_info": getattr(job, "progress_info", None),
                 "duration_seconds": duration_seconds,
+                # Story #1032 AC12: audit trail for display surfaces
+                "actor_username": job.actor_username,
             }
         else:
             # --- SQLite row dict (from _row_to_dict) ---
             started_at_str = job.get("started_at")
             completed_at_str = job.get("completed_at")
 
-            # Calculate duration_seconds from ISO strings
+            # Calculate duration_seconds from ISO strings or datetime objects
             duration_seconds = None
             if started_at_str and completed_at_str:
                 try:
-                    started_dt = datetime.fromisoformat(started_at_str)
-                    completed_dt = datetime.fromisoformat(completed_at_str)
+                    started_dt = (
+                        started_at_str
+                        if isinstance(started_at_str, datetime)
+                        else datetime.fromisoformat(started_at_str)
+                    )
+                    completed_dt = (
+                        completed_at_str
+                        if isinstance(completed_at_str, datetime)
+                        else datetime.fromisoformat(completed_at_str)
+                    )
                     duration_seconds = int((completed_dt - started_dt).total_seconds())
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logging.warning(
+                        f"Failed to calculate duration_seconds for job: {e}"
+                    )
                     duration_seconds = None
 
             operation_type = job.get("operation_type") or ""
@@ -1974,6 +2390,8 @@ class BackgroundJobManager:
                 "repository_url": None,  # Not stored in DB
                 "progress_info": None,  # Not stored in DB
                 "duration_seconds": duration_seconds,
+                # Story #1032 AC12: audit trail for display surfaces
+                "actor_username": job.get("actor_username"),
             }
 
     def get_jobs_for_display(
@@ -1983,10 +2401,13 @@ class BackgroundJobManager:
         search_text: str = None,  # type: ignore[assignment]
         page: int = 1,
         page_size: int = 50,
+        is_admin: bool = False,
+        username: Optional[str] = None,
     ) -> tuple:
         """Return (jobs_list, total_count, total_pages) merging memory + SQLite.
 
         Story #271 Component 2: Filtered, paginated jobs for the Web UI jobs page.
+        AC11: is_admin=True bypasses username filter; username= scopes to one user.
 
         Algorithm:
         1. Collect active jobs (running/pending) from self.jobs under self._lock.
@@ -2002,6 +2423,8 @@ class BackgroundJobManager:
             search_text: Case-insensitive substring to search repo name / username.
             page: 1-based page number.
             page_size: Number of results per page.
+            is_admin: When True, skip username scoping (AC11 admin bypass).
+            username: When provided and is_admin=False, scope results to this user.
 
         Returns:
             Tuple of (jobs: List[Dict], total_count: int, total_pages: int).
@@ -2013,6 +2436,10 @@ class BackgroundJobManager:
         with self._lock:
             for job in self.jobs.values():
                 if job.status not in (JobStatus.RUNNING, JobStatus.PENDING):
+                    continue
+
+                # AC11: when not admin and username is specified, scope to that user
+                if not is_admin and username is not None and job.username != username:
                     continue
 
                 # Apply filters to memory jobs in Python
@@ -2042,17 +2469,49 @@ class BackgroundJobManager:
                 active_jobs.append(self._normalize_job_to_display_dict(job))
                 seen_ids.add(job.job_id)
 
-        # Step 2: Query SQLite for historical / non-active jobs with same filters
+        # Bug #1063 Part 4: cap page_size at MAX_PAGE_SIZE before touching the DB.
+        capped_page_size = min(page_size, MAX_PAGE_SIZE)
+
+        # Step 2: Query SQLite for historical / non-active jobs with same filters.
+        # Algorithm: build a virtual global ordering where active jobs occupy the
+        # first active_count global slots and DB (historical) jobs follow.
+        # For page N the global window is [global_start, global_end).
+        # The DB window is offset by active_count within the historical rows.
+        #
+        #   global_start = (page - 1) * capped_page_size
+        #   global_end   = page * capped_page_size
+        #   db_offset    = max(0, global_start - active_count)
+        #   db_limit     = max(0, global_end - max(global_start, active_count))
+        #
+        # This ensures:
+        # - Active jobs appear only on the page(s) where their global index
+        #   falls in the window (effectively only page 1 when active_count
+        #   <= page_size).
+        # - No DB rows are skipped at page boundaries.
+        # - The DB query is always bounded (never a full-table scan).
         db_jobs_normalized: List[Dict[str, Any]] = []
         db_total_from_sqlite = 0
 
         if self._sqlite_backend:
             try:
+                # H2: non-admin users scope DB query to their own jobs;
+                # admin (is_admin=True) sees all users' jobs (username=None = no filter).
+                db_username_filter = None if is_admin else username
+                active_count = len(active_jobs)
+                global_start = (page - 1) * capped_page_size
+                global_end = page * capped_page_size
+                # DB rows start after active_count global slots.
+                db_offset = max(0, global_start - active_count)
+                # How many DB rows fall inside this page's global window.
+                db_limit = max(0, global_end - max(global_start, active_count))
                 db_rows, db_count = self._sqlite_backend.list_jobs_filtered(
                     status=status_filter,
                     operation_type=type_filter,
                     search_text=search_text,
                     exclude_ids=seen_ids if seen_ids else None,
+                    username=db_username_filter,
+                    limit=db_limit,
+                    offset=db_offset,
                 )
                 db_total_from_sqlite = db_count
                 for row in db_rows:
@@ -2060,13 +2519,108 @@ class BackgroundJobManager:
             except Exception as e:
                 logging.error(f"Failed to get jobs for display from SQLite: {e}")
 
-        # Step 3: Merge and compute total_count
-        all_jobs = active_jobs + db_jobs_normalized
+        # Step 3: Merge and compute total_count.
+        # total_count uses the DB COUNT(*) so it reflects the FULL matching set —
+        # this enables the "N more jobs" footer even though we only fetched one page.
         total_count = len(active_jobs) + db_total_from_sqlite
 
-        # Step 4: Paginate
-        total_pages = max(1, (total_count + page_size - 1) // page_size)
-        offset = (page - 1) * page_size
-        paginated = all_jobs[offset : offset + page_size]
+        # Step 4: Slice active_jobs to only those falling within this page's
+        # global window, then append the DB rows for this page.
+        # active jobs at global index [0, active_count); page window is
+        # [global_start, global_end).  Their intersection is
+        # [global_start, min(global_end, active_count)).
+        active_count = len(active_jobs)
+        global_start = (page - 1) * capped_page_size
+        global_end = page * capped_page_size
+        active_slice = active_jobs[global_start : min(global_end, active_count)]
+        paginated = active_slice + db_jobs_normalized
 
+        total_pages = max(1, (total_count + capped_page_size - 1) // capped_page_size)
         return paginated, total_count, total_pages
+
+    def list_display_job_ids(
+        self,
+        status_filter: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> set:
+        """Return the set of all job_ids visible to the display layer for the given filters.
+
+        Uses list_job_ids_filtered on the storage backend so only ONE DB round-trip
+        is needed regardless of how many pages the result set spans.  This replaces
+        the old all-pages loop in routes._get_all_jobs() which issued ~bg_total_pages
+        DB round-trips per render (O(bg_total / page_size) = ~8,400 at 30-day retention).
+
+        A safety cap of 50,000 is applied inside list_job_ids_filtered so the query
+        is always bounded.
+
+        Returns empty set (not raises) when no backend is available or on backend error,
+        so callers always get a usable result for the dedup logic.
+
+        Args:
+            status_filter: Filter by exact status value
+            type_filter: Filter by exact operation_type value
+            search_text: Case-insensitive substring filter (same columns as display)
+            username: When provided, scope to this user's jobs (non-admin path)
+
+        Returns:
+            set of matching job_ids (str), or empty set when no backend is available.
+        """
+        if not self._sqlite_backend:
+            return set()
+        try:
+            result: set = self._sqlite_backend.list_job_ids_filtered(
+                status=status_filter,
+                operation_type=type_filter,
+                search_text=search_text,
+                username=username,
+            )
+            return result
+        except Exception as e:
+            logging.error(f"Failed to get display job ids from backend: {e}")
+            return set()
+
+    def count_active_deactivations(self) -> int:
+        """Count PENDING+RUNNING deactivate_repository jobs across all users.
+
+        AC1: Used by the dashboard 'Active deactivations' tile.
+        Returns 0 when no active deactivations exist.
+
+        Cluster-aware: also queries the SQLite/PG backend so jobs submitted
+        on other cluster nodes (stored in shared DB but not in this node's
+        in-memory dict) are included.  De-duplicates by job_id so a job
+        present in both sources is counted only once.
+        """
+        # Step 1: collect matching in-memory job_ids
+        seen_ids: set = set()
+        with self._lock:
+            for job in self.jobs.values():
+                if job.operation_type == "deactivate_repository" and job.status in (
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                ):
+                    seen_ids.add(job.job_id)
+
+        count = len(seen_ids)
+
+        # Step 2: also query DB backend for active deactivations not in memory
+        if self._sqlite_backend is not None:
+            try:
+                for status_val in ("pending", "running"):
+                    db_rows, _ = self._sqlite_backend.list_jobs_filtered(
+                        status=status_val,
+                        operation_type="deactivate_repository",
+                    )
+                    for row in db_rows:
+                        job_id = row.get("job_id")
+                        if job_id and job_id not in seen_ids:
+                            seen_ids.add(job_id)
+                            count += 1
+            except Exception as e:
+                logging.error(
+                    f"Failed to query DB for active deactivations count: {e}",
+                    exc_info=True,
+                )
+
+        return count

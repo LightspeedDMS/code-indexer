@@ -21,6 +21,9 @@ from code_indexer.server.repositories.background_jobs import (
 )
 from code_indexer.server.services.git_state_manager import GitStateManager
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.self_monitoring.llm_response_parser import (
+    extract_json_from_llm_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,9 +276,25 @@ Status values:
     def _parse_claude_response(
         self, stdout: bytes, job_id: str, project_path: str
     ) -> ClaudeResponse:
-        """Parse and validate Claude Code JSON response."""
+        """Parse and validate Claude Code JSON response.
+
+        Routes raw Claude CLI stdout through ``extract_json_from_llm_response``
+        so the pace-maker telemetry preamble (a leading ``§ ...`` line injected
+        on every cluster node), ``Warning:`` prose lines, and markdown code
+        fences are stripped before JSON parsing. A genuinely empty/garbage
+        response is re-raised as ``json.JSONDecodeError`` to preserve the
+        caller's existing error contract -- a failed parse is still reported
+        loudly and surfaced as ``unresolvable`` (MESSI rule #13,
+        anti-silent-failure), never coerced into a false success.
+        """
         stdout_text = stdout.decode("utf-8")
-        response_data = json.loads(stdout_text)
+        try:
+            response_data = extract_json_from_llm_response(stdout_text)
+        except (ValueError, TypeError) as e:
+            # Preserve the caller's `except json.JSONDecodeError` contract: a
+            # failed extraction (empty/preamble-only/garbage) must surface as a
+            # JSON parse error, not silently succeed.
+            raise json.JSONDecodeError(str(e), stdout_text or " ", 0) from e
 
         status = response_data.get("status")
         if status not in ("progress", "no_progress", "unresolvable"):

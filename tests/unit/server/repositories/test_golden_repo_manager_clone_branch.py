@@ -74,7 +74,7 @@ def _run_clone_and_get_cmd(branch, tmp_path):
             isinstance(cmd, list)
             and len(cmd) >= 2
             and cmd[0] == "git"
-            and cmd[1] == "clone"
+            and "clone" in cmd
         ):
             return cmd
     raise AssertionError(f"No 'git clone' call found in: {mock_run.call_args_list}")

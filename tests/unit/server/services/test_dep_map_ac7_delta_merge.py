@@ -11,7 +11,7 @@ _SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess
 _MTIME_TICK_S = 0.05
 
 
-def _make_subprocess_result(returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""):
+def _make_subprocess_result(returncode=0, stdout="delta merge done", stderr=""):
     from unittest.mock import MagicMock
 
     result = MagicMock()
@@ -141,7 +141,7 @@ class TestInvokeDeltaMergeFileAllowedTools:
         mock_dispatcher = MagicMock()
         mock_dispatch_result = MagicMock()
         mock_dispatch_result.success = True
-        mock_dispatch_result.output = "FILE_EDIT_COMPLETE"
+        mock_dispatch_result.output = "delta merge done"
         mock_dispatch_result.was_failover = False
         mock_dispatcher.dispatch.return_value = mock_dispatch_result
 

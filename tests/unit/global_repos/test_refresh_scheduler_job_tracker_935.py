@@ -102,7 +102,8 @@ _BACKGROUND_JOBS_DDL = """
         repo_alias TEXT,
         resolution_attempts INTEGER DEFAULT 0,
         progress_info TEXT,
-        metadata TEXT
+        metadata TEXT,
+        actor_username TEXT
     )
 """
 

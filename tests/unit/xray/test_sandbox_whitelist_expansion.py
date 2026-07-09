@@ -201,39 +201,23 @@ class TestGroupBComprehensionsAndTernaries:
 
     # --- SetComp ---
 
-    def test_set_comp_validates_ok(self):
-        """SetComp is now in ALLOWED_NODES."""
-        _validate_ok(
-            "types = {c.type for c in node.named_children}\n"
-            "return 'function_definition' in types"
-        )
-
-    def test_set_comp_executes_correctly(self):
-        """SetComp collects unique types; membership check works."""
-        result = _run_ok(
+    def test_set_comp_rejected(self):
+        """SetComp removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails(
             "types = {c.type for c in node.named_children}\n"
             "return 'function_definition' in types",
-            source="def foo(): pass",
+            "SetComp",
         )
-        assert result.value is True
 
     # --- DictComp ---
 
-    def test_dict_comp_validates_ok(self):
-        """DictComp is now in ALLOWED_NODES."""
-        _validate_ok(
-            "counts = {c.type: 1 for c in node.named_children}\n"
-            "return 'function_definition' in counts"
-        )
-
-    def test_dict_comp_executes_correctly(self):
-        """DictComp builds a type-to-count mapping; key membership check works."""
-        result = _run_ok(
+    def test_dict_comp_rejected(self):
+        """DictComp removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails(
             "counts = {c.type: 1 for c in node.named_children}\n"
             "return 'function_definition' in counts",
-            source="def foo(): pass",
+            "DictComp",
         )
-        assert result.value is True
 
     # --- IfExp (ternary) ---
 
@@ -380,7 +364,7 @@ class TestBoundaryRejections:
         _validate_fails("class Foo: pass", "ClassDef")
 
     def test_function_def_still_rejected(self):
-        """FunctionDef is now ALLOWED (Story #993 Group G) — was previously blocked."""
+        """FunctionDef remains in ALLOWED_NODES (transpilable to Rust)."""
         _validate_ok("def foo(): pass")
 
     def test_import_still_rejected(self):
@@ -388,8 +372,8 @@ class TestBoundaryRejections:
         _validate_fails("import os", "Import")
 
     def test_lambda_still_rejected(self):
-        """Lambda is now ALLOWED (Story #993 Group G) — was previously blocked."""
-        _validate_ok("lambda x: x")
+        """Lambda removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails("lambda x: x", "Lambda")
 
 
 # ---------------------------------------------------------------------------
@@ -504,33 +488,27 @@ class TestGroupCControlFlow:
 
     # --- Negative: still-banned nodes remain rejected ---
 
-    def test_try_except_now_accepted(self):
-        """Try/Except (ast.Try / ast.ExceptHandler) are now ACCEPTED after v10.4.0 lift.
+    def test_try_except_now_rejected(self):
+        """Try/Except removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails(
+            "try:\n    return True\nexcept Exception:\n    return False", "Try"
+        )
 
-        Directive D lifted the ban on ast.Try, ast.ExceptHandler, and ast.Raise.
-        All three are now in ALLOWED_NODES so evaluators can safely catch exceptions.
-        """
-        _validate_ok("try:\n    return True\nexcept Exception:\n    return False")
+    def test_raise_now_rejected(self):
+        """ast.Raise removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails("raise ValueError()", "Raise")
 
-    def test_raise_now_accepted(self):
-        """ast.Raise is now ACCEPTED after v10.4.0 lift.
-
-        Directive D added ast.Raise to ALLOWED_NODES so evaluators can raise
-        exceptions to signal evaluation errors.
-        """
-        _validate_ok("raise ValueError()")
-
-    def test_function_def_still_rejected_in_group_c(self):
-        """FunctionDef is now ALLOWED (Story #993 Group G) — was previously blocked."""
+    def test_function_def_now_rejected_in_group_c(self):
+        """FunctionDef remains in ALLOWED_NODES (transpilable to Rust)."""
         _validate_ok("def foo(): pass")
 
     def test_class_def_still_rejected_in_group_c(self):
         """ClassDef must remain blocked (re-confirmed in group C context)."""
         _validate_fails("class Foo: pass", "ClassDef")
 
-    def test_lambda_still_rejected_in_group_c(self):
-        """Lambda is now ALLOWED (Story #993 Group G) — was previously blocked."""
-        _validate_ok("lambda x: x")
+    def test_lambda_now_rejected_in_group_c(self):
+        """Lambda removed from ALLOWED_NODES (Rust-only path — not transpilable)."""
+        _validate_fails("lambda x: x", "Lambda")
 
     def test_import_still_rejected_in_group_c(self):
         """Import must remain blocked (re-confirmed in group C context)."""
@@ -604,142 +582,53 @@ class TestGroupCControlFlow:
 
 
 # ---------------------------------------------------------------------------
-# Section 5: Group D — Try/ExceptHandler/Raise/Finally (Directive D)
+# Section 5: Group D — Try/ExceptHandler/Raise/Finally now rejected
 # ---------------------------------------------------------------------------
 
 
-class TestGroupDTryExceptRaise:
-    """Group D: Try, ExceptHandler, Raise AST nodes lifted from banned list.
+class TestGroupDTryExceptRaiseRejected:
+    """Group D: Try, ExceptHandler, Raise removed from ALLOWED_NODES.
 
-    Subprocess-level timeout (HARD_TIMEOUT_SECONDS=5.0) remains the
-    authoritative termination guarantee.  try/except/raise/finally are
-    now allowed for structured evaluator error handling.
+    These constructs are not transpilable to Rust and must be rejected at
+    validation time.
     """
 
-    # --- Positive: newly-allowed nodes pass validation ---
-
-    def test_try_except_validates_ok(self):
-        """ast.Try and ast.ExceptHandler are now in ALLOWED_NODES."""
-        _validate_ok(
+    def test_try_except_validates_rejected(self):
+        """ast.Try is not in ALLOWED_NODES — must be rejected."""
+        _validate_fails(
             "try:\n"
             "    x = node.named_children\n"
             "except Exception:\n"
             "    x = []\n"
-            "return len(x) >= 0"
+            "return len(x) >= 0",
+            "Try",
         )
 
-    def test_try_except_finally_validates_ok(self):
-        """try/except/finally block validates without error."""
-        _validate_ok(
+    def test_try_except_finally_validates_rejected(self):
+        """try/except/finally block is rejected at validation."""
+        _validate_fails(
             "try:\n"
             "    x = 1\n"
             "except Exception:\n"
             "    x = 2\n"
             "finally:\n"
             "    x = x + 0\n"
-            "return x >= 0"
+            "return x >= 0",
+            "Try",
         )
 
-    def test_raise_validates_ok(self):
-        """ast.Raise is now in ALLOWED_NODES."""
-        _validate_ok(
+    def test_raise_validates_rejected(self):
+        """ast.Raise is not in ALLOWED_NODES — must be rejected."""
+        _validate_fails(
             "if node.type == 'bogus':\n"
             "    raise ValueError('unexpected type')\n"
-            "return True"
+            "return True",
+            "Raise",
         )
 
-    def test_bare_except_validates_ok(self):
-        """Bare except clause (no exception type) passes validation."""
-        _validate_ok(
-            "try:\n    x = node.named_children\nexcept:\n    x = []\nreturn len(x) >= 0"
+    def test_bare_except_validates_rejected(self):
+        """Bare except clause is rejected because ast.Try is not allowed."""
+        _validate_fails(
+            "try:\n    x = node.named_children\nexcept:\n    x = []\nreturn len(x) >= 0",
+            "Try",
         )
-
-    # --- Positive: execution tests ---
-
-    def test_try_except_executes_correctly(self):
-        """try/except block: successful branch returns correct value."""
-        result = _run_ok(
-            "try:\n    x = 1\nexcept Exception:\n    x = 99\nreturn x == 1",
-            source="def foo(): pass",
-        )
-        assert result.value is True
-
-    def test_try_except_handler_catches_exception(self):
-        """ExceptHandler catches exception from inner code."""
-        result = _run_ok(
-            "try:\n"
-            "    x = undefined_var_xyz\n"
-            "except Exception:\n"
-            "    x = 42\n"
-            "return x == 42",
-            source="def foo(): pass",
-        )
-        assert result.value is True
-
-    def test_try_finally_executes_finally_block(self):
-        """finally block executes after try body."""
-        result = _run_ok(
-            "x = 0\ntry:\n    x = 1\nfinally:\n    x = x + 10\nreturn x == 11",
-            source="def foo(): pass",
-        )
-        assert result.value is True
-
-    def test_raise_produces_evaluator_crash(self):
-        """raise statement causes EvaluatorCrash (not validation_failed)."""
-        sb = PythonEvaluatorSandbox()
-        node, root = _make_node_root()
-        result = sb.run(
-            "raise ValueError('test_error_msg')",
-            node=node,
-            root=root,
-            source="def foo(): pass",
-            lang="python",
-            file_path="/src/main.py",
-        )
-        # raise produces subprocess crash, not validation failure
-        assert result.failure == "evaluator_subprocess_died", (
-            f"Expected evaluator_subprocess_died but got failure={result.failure!r}"
-        )
-        assert result.detail is not None
-
-    # --- Security canaries: dunder still blocked inside try/except ---
-
-    def test_dunder_inside_try_body_still_blocked(self):
-        """Dunder access inside try body must trigger validation_failed."""
-        result = _run_expecting_validation_failed(
-            "try:\n"
-            "    x = node.__class__\n"
-            "except Exception:\n"
-            "    x = None\n"
-            "return x is None"
-        )
-        assert result.detail is not None
-
-    def test_dunder_inside_except_handler_still_blocked(self):
-        """Dunder access inside except handler must trigger validation_failed."""
-        result = _run_expecting_validation_failed(
-            "try:\n"
-            "    x = 1\n"
-            "except Exception as e:\n"
-            "    x = e.__class__\n"
-            "return x is not None"
-        )
-        assert result.detail is not None
-
-    def test_dunder_inside_finally_still_blocked(self):
-        """Dunder access inside finally block must trigger validation_failed."""
-        result = _run_expecting_validation_failed(
-            "try:\n    x = 1\nfinally:\n    y = node.__globals__\nreturn x == 1"
-        )
-        assert result.detail is not None
-
-    def test_subscript_dunder_inside_try_still_blocked(self):
-        """Subscript dunder access inside try body triggers validation_failed."""
-        result = _run_expecting_validation_failed(
-            "try:\n"
-            "    x = node.__dict__['key']\n"
-            "except Exception:\n"
-            "    x = None\n"
-            "return x is None"
-        )
-        assert result.detail is not None

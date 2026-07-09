@@ -8,8 +8,9 @@ pagination (Story #754): all repos are fetched in a single exhaustive pass.
 """
 
 import logging
+import math
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set, Tuple
 
 import httpx
 
@@ -324,9 +325,14 @@ class GitHubProvider(RepositoryProviderBase):
 
     def _fetch_all_pages_graphql(
         self,
+        progress_callback: Optional[Callable] = None,
     ) -> Tuple[List[DiscoveredRepository], int]:
         """
         Fetch every page from GitHub GraphQL until hasNextPage=False.
+
+        Args:
+            progress_callback: Optional callable(progress, phase=, detail=) for progress
+                reporting. Called after each page with percentage capped at 90.
 
         Returns:
             Tuple of (all_repos, total_count_from_api)
@@ -373,6 +379,15 @@ class GitHubProvider(RepositoryProviderBase):
 
             for node in nodes:
                 all_repos.append(self._parse_graphql_response(node))
+
+            if progress_callback is not None and total_count > 0:
+                total_pages = math.ceil(total_count / _DISCOVERY_GRAPHQL_PAGE_SIZE)
+                pct = min(90, int(_page / total_pages * 90))
+                progress_callback(
+                    pct,
+                    phase="fetching",
+                    detail=f"Fetched {len(all_repos)}/{total_count} repos",
+                )
 
             page_info = repos_data.get("pageInfo", {})
             has_next = page_info.get("hasNextPage", False)
@@ -454,6 +469,7 @@ class GitHubProvider(RepositoryProviderBase):
         self,
         indexed_urls: Set[str],
         hidden_identifiers: Set[str],
+        progress_callback: Optional[Callable] = None,
     ) -> dict:
         """
         Exhaustively fetch all GitHub repositories and return as JSON dict.
@@ -461,6 +477,8 @@ class GitHubProvider(RepositoryProviderBase):
         Args:
             indexed_urls: Canonical URLs of already-indexed repositories to exclude.
             hidden_identifiers: Set of 'platform:url' identifiers for hidden repos.
+            progress_callback: Optional callable(progress, phase=, detail=) for progress
+                reporting. Threaded through to _fetch_all_pages_graphql.
 
         Returns:
             Dict with keys: repositories (list), total_source (int),
@@ -477,7 +495,9 @@ class GitHubProvider(RepositoryProviderBase):
         if not self.is_configured():
             return {"repositories": [], "total_source": 0, "total_unregistered": 0}
 
-        all_repos, total_source = self._fetch_all_pages_graphql()
+        all_repos, total_source = self._fetch_all_pages_graphql(
+            progress_callback=progress_callback
+        )
         repo_dicts = self._map_repos_to_dicts_github(
             all_repos, indexed_urls, hidden_identifiers
         )

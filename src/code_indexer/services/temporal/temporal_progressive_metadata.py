@@ -5,8 +5,15 @@ import fcntl
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Set
+
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,17 +34,61 @@ class TemporalProgressiveMetadata:
         self.progress_path = temporal_dir / "temporal_progress.json"
         self._lock_path = temporal_dir / "temporal_progress.json.lock"
         self._tmp_path = temporal_dir / "temporal_progress.json.tmp"
+        # Bug #1206 Fix 2: in-memory staging set.  mark_commit_indexed() adds to
+        # this set without touching the disk.  flush_pending() drains it in one
+        # atomic write, bounding per-commit disk cost to O(1) amortized.
+        self._pending: Set[str] = set()
+        # Bug #1206 Fix 2 (race fix): guard _pending mutations so that commits
+        # added between flush_pending()'s snapshot and its .clear() are not lost.
+        # The lock is held ONLY for the in-memory snapshot+clear; the slow
+        # _atomic_update (fsync) runs OUTSIDE the lock so add() is never blocked
+        # during disk I/O.
+        self._pending_lock = threading.Lock()
 
     def mark_commit_indexed(self, commit_hash: str) -> None:
-        """Mark a single commit as indexed (canonical per-commit update method).
+        """Stage a commit as indexed in memory (O(1), no disk write).
 
-        Atomic read-modify-write under file lock.
+        Bug #1206 Fix 2: previously this called _atomic_update which re-sorted and
+        rewrote the entire progress file on every call.  Now it stages the hash in
+        an in-memory set.  Call flush_pending() to persist the staged hashes.
+
+        Durability contract: staged but unflushed commits are absent from
+        load_completed() on a fresh instance (correct for crash-resume: the
+        indexer will re-index them).
         """
-        self._atomic_update(lambda data: data["completed_commits"].append(commit_hash))
+        with self._pending_lock:
+            self._pending.add(commit_hash)
+
+    def flush_pending(self) -> None:
+        """Flush all staged commits to disk in ONE atomic write.
+
+        Bug #1206 Fix 2: snapshots and clears _pending under _pending_lock so
+        that commits added between the snapshot and the clear are not lost.
+        The slow _atomic_update (fsync) runs OUTSIDE the lock so that concurrent
+        mark_commit_indexed() calls are never blocked during disk I/O.
+
+        Must be called AFTER the corresponding vectors have been persisted so
+        that a crash before this call does not mark a commit complete whose
+        vectors are absent.
+        """
+        with self._pending_lock:
+            if not self._pending:
+                return
+            to_flush = set(self._pending)
+            self._pending.clear()
+        # _atomic_update runs outside the lock — other threads can add() freely
+        # during the fsync without their commits being lost.
+        self._atomic_update(lambda data: data["completed_commits"].extend(to_flush))
 
     def save_completed(self, commit_hash: str) -> None:
-        """Mark a commit as completed. Legacy API — delegates to mark_commit_indexed."""
-        self.mark_commit_indexed(commit_hash)
+        """Mark a commit as completed and immediately persist to disk.
+
+        Legacy API: stages the commit then flushes immediately, preserving the
+        original single-call durability semantics for callers that do not use
+        the new batch-then-flush pattern.
+        """
+        self._pending.add(commit_hash)
+        self.flush_pending()
 
     def mark_completed(self, commit_hashes: list) -> None:
         """Mark multiple commits as completed."""
@@ -46,9 +97,18 @@ class TemporalProgressiveMetadata:
         )
 
     def load_completed(self) -> Set[str]:
-        """Load set of completed commit hashes."""
+        """Load set of completed commit hashes.
+
+        Returns the union of on-disk flushed commits and any in-memory staged
+        commits not yet flushed.  A fresh instance (after crash/restart) returns
+        only flushed commits — staged-but-unflushed commits are intentionally
+        absent (correct crash-resume semantics: the indexer will re-index them).
+        """
         data = self._load()
-        return set(data.get("completed_commits", []))
+        on_disk = set(data.get("completed_commits", []))
+        with self._pending_lock:
+            pending_snapshot = set(self._pending)
+        return on_disk | pending_snapshot
 
     def set_state(self, state: str) -> None:
         """Set the indexing state (idle, building, failed)."""
@@ -138,8 +198,11 @@ class TemporalProgressiveMetadata:
         """
         self.temporal_dir.mkdir(parents=True, exist_ok=True)
         lock_file = open(self._lock_path, "w")
+        _used_lockf = False
+        _lock_acquired = False
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _lock_acquired = True
 
             data = self._load()
             modifier(data)
@@ -153,7 +216,8 @@ class TemporalProgressiveMetadata:
 
             self._write_atomic(data)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            if _lock_acquired:
+                nfs_safe_funlock(lock_file.fileno(), _used_lockf)
             lock_file.close()
 
     def _write_atomic(self, data: dict) -> None:
@@ -162,5 +226,5 @@ class TemporalProgressiveMetadata:
         with open(self._tmp_path, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
-            os.fsync(f.fileno())
+            nfs_safe_fsync(f.fileno())
         os.replace(str(self._tmp_path), str(self.progress_path))

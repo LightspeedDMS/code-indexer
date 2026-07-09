@@ -436,13 +436,9 @@ class WikiService:
                 return full_tag
             if href.startswith("/articles/"):
                 return full_tag
-            if "/" in href:
-                new_href = f"/wiki/{repo_alias}/{href}"
-            else:
-                if current_dir:
-                    new_href = f"/wiki/{repo_alias}/{current_dir}/{href}"
-                else:
-                    new_href = f"/wiki/{repo_alias}/{href}"
+
+            resolved = self._resolve_wiki_link(href, current_dir)
+            new_href = f"/wiki/{repo_alias}/{resolved}"
             return full_tag.replace(
                 f"href={quote_char}{href}{quote_char}",
                 f"href={quote_char}{new_href}{quote_char}",
@@ -454,6 +450,33 @@ class WikiService:
             _rewrite_href,
             html,
         )
+
+    @staticmethod
+    def _resolve_wiki_link(href: str, current_dir: str) -> str:
+        """Resolve a relative wiki href against current_dir, collapsing dot segments.
+
+        Splits off any trailing ``#fragment`` or ``?query`` before normalising
+        the path, then re-attaches it. ``..`` segments that climb above the repo
+        root are clamped (dropped) so the resulting path is always repo-root
+        relative with no remaining ``..``.
+        """
+        import posixpath
+
+        suffix = ""
+        sep_match = re.search(r"[#?]", href)
+        if sep_match:
+            suffix = href[sep_match.start() :]
+            href = href[: sep_match.start()]
+
+        joined = posixpath.join(current_dir, href) if current_dir else href
+        normalized = posixpath.normpath(joined).lstrip("/")
+        # Clamp any ../ that escaped the repo root
+        while normalized.startswith("../"):
+            normalized = normalized[3:]
+        if normalized in (".", ".."):
+            normalized = ""
+
+        return f"{normalized}{suffix}"
 
     def build_breadcrumbs(
         self, article_path: str, repo_alias: str

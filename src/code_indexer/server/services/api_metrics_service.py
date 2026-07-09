@@ -9,32 +9,26 @@ Tracks API call timestamps using rolling window approach:
 
 SQLite database storage allows multiple uvicorn workers to share metrics.
 Timestamps older than 24 hours are automatically cleaned up.
+
+Story #1083 — batched background writer:
+    The hot path enqueues metric events; the background ``_writer_loop`` drains the
+    currently-queued backlog (bounded by ``min(qsize(), _MAX_DRAIN_BATCH)``) and
+    writes ALL of them via a SINGLE ``backend.upsert_buckets_batch()`` transaction
+    per drain — collapsing the previous one-``BEGIN EXCLUSIVE``-per-event churn
+    (~4N transactions) into ~1.  Counts are coalesced per bucket key and preserved
+    exactly.  ``stop_writer()`` signals + joins the thread + final-drains so no
+    queued counts are lost on shutdown (wired into lifespan).
 """
 
 import logging
 import queue
-import random
 import socket
-import sqlite3
 import threading
-import time
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, cast
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
-
-# Maximum age for timestamps - 24 hours
-MAX_TIMESTAMP_AGE_SECONDS = 86400  # 24 hours
-
-# Cleanup interval - only cleanup every N inserts (reduces write contention)
-CLEANUP_INTERVAL = 100
-
-# Retry configuration for database operations
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 0.01  # 10ms base delay
 
 # Background writer queue capacity
 _QUEUE_MAXSIZE = 10_000
@@ -44,6 +38,11 @@ _BUCKET_CLEANUP_INTERVAL = 100
 
 # Background writer queue poll timeout (seconds)
 _QUEUE_POLL_TIMEOUT_S = 1.0
+
+# Story #1083: max metric events coalesced into a single batched write/transaction.
+# Caps per-drain loop iterations + in-memory event list + transaction size so the
+# batched writer stays bounded under sustained producer pressure (MESSI #14).
+_MAX_DRAIN_BATCH = 1_000
 
 
 def _truncate_min1(dt: datetime) -> str:
@@ -76,15 +75,10 @@ class ApiMetricsService:
         service = ApiMetricsService()
         service.initialize("/path/to/metrics.db")
         service.increment_semantic_search()
-        metrics = service.get_metrics(window_seconds=60)
     """
 
     def __init__(self):
         """Initialize the API metrics service (database not yet connected)."""
-        self._db_path: Optional[str] = None
-        self._conn_manager: Optional[DatabaseConnectionManager] = None
-        self._insert_count = 0
-        self._insert_count_lock = threading.Lock()
         self._backend: Optional[Any] = None
         self._node_id: Optional[str] = None
         self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
@@ -97,21 +91,21 @@ class ApiMetricsService:
         storage_backend: Optional[Any] = None,
         node_id: Optional[str] = None,
     ) -> None:
-        """Initialize the database connection and create schema.
+        """Initialize the service with a storage backend.
 
         Args:
-            db_path: Path to SQLite database file (used only when storage_backend is None)
-            storage_backend: Optional injected storage backend (e.g. ApiMetricsSqliteBackend
-                or ApiMetricsPostgresBackend). When provided, SQLite setup is skipped.
+            db_path: Ignored (kept for call-site compatibility). The SQLite-direct
+                api_metrics table path was removed in Story #1083 dead-code cleanup.
+            storage_backend: Required storage backend (ApiMetricsSqliteBackend or
+                ApiMetricsPostgresBackend). Raises ValueError when None.
             node_id: Optional cluster node identifier. Defaults to socket.gethostname()
                 when not provided.
 
         Raises:
-            ValueError: If db_path is None or empty and no storage_backend is provided
+            ValueError: If storage_backend is None.
 
         Note:
             Can be called multiple times safely (idempotent).
-            Creates the api_metrics table and index if they don't exist (SQLite-only mode).
         """
         self._node_id = node_id or socket.gethostname()
         self._backend = storage_backend
@@ -121,219 +115,168 @@ class ApiMetricsService:
                 f"ApiMetricsService using injected storage backend "
                 f"(node_id={self._node_id!r})"
             )
-            self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True, name="api-metrics-writer"
-            )
-            self._writer_thread.start()
+            # Clear any stop flag left over from a previous stop_writer() so a
+            # SECOND lifespan startup in the same process (e.g. in-process
+            # FastAPI TestClient E2E) starts a writer that actually runs. Without
+            # this, the re-init thread sees the stale stop flag and exits
+            # immediately, silently dropping every enqueued metric (MESSI #13).
+            self._stop_event.clear()
+            # Only (re)start when no writer is already running, so an idempotent
+            # re-init while the existing writer is still alive does not spawn a
+            # duplicate thread.
+            if self._writer_thread is None or not self._writer_thread.is_alive():
+                self._writer_thread = threading.Thread(
+                    target=self._writer_loop, daemon=True, name="api-metrics-writer"
+                )
+                self._writer_thread.start()
             return
 
-        if not db_path:
-            raise ValueError("db_path must be a non-empty string")
+        # storage_backend is required: the SQLite-direct fallback (api_metrics table)
+        # was removed in Story #1083 dead-code cleanup.
+        raise ValueError(
+            "storage_backend must be provided; direct SQLite api_metrics path is removed"
+        )
 
-        self._db_path = db_path
-        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+    @staticmethod
+    def _bucket_map_for(timestamp: datetime) -> Dict[str, str]:
+        """Precompute the 4-tier (granularity -> bucket_start) map for one event."""
+        return {
+            "min1": _truncate_min1(timestamp),
+            "min5": _truncate_min5(timestamp),
+            "hour1": _truncate_hour1(timestamp),
+            "day1": _truncate_day1(timestamp),
+        }
 
-        # Ensure parent directory exists
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    def _drain_and_write(self, first_item: Tuple[str, str, datetime]) -> int:
+        """Drain the currently-queued backlog (starting with first_item) and write
+        it to the backend in ONE batched transaction (Story #1083).
 
-        # Enable WAL mode outside any transaction — PRAGMA journal_mode=WAL
-        # cannot be executed inside a transaction (execute_atomic wraps in BEGIN).
-        conn = self._conn_manager.get_connection()
-        conn.execute("PRAGMA journal_mode=WAL")
+        Returns the number of events written so the caller can drive periodic
+        cleanup.
 
-        # Create table and index using atomic operation for safe resource handling
-        def _do_schema(conn: sqlite3.Connection) -> None:
-            cursor = conn.cursor()
+        PROVABLE BOUND (MESSI #14): the additional drain count is fixed up-front to
+        ``min(qsize() snapshot, _MAX_DRAIN_BATCH)``.  Items producers enqueue AFTER
+        the snapshot are NOT chased — they roll to the next drain cycle.  This caps
+        both the loop iterations and the in-memory ``events`` list / transaction
+        size regardless of sustained producer pressure.
+        """
+        events: List[Dict[str, Any]] = []
+        metric_type, username, timestamp = first_item
+        events.append(
+            {
+                "username": username,
+                "metric_type": metric_type,
+                "buckets": self._bucket_map_for(timestamp),
+            }
+        )
+        # Snapshot the backlog ONCE; drain at most that many (capped) more items.
+        backlog = min(self._queue.qsize(), _MAX_DRAIN_BATCH)
+        for _ in range(backlog):
+            try:
+                metric_type, username, timestamp = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            events.append(
+                {
+                    "username": username,
+                    "metric_type": metric_type,
+                    "buckets": self._bucket_map_for(timestamp),
+                }
+            )
 
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS api_metrics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    metric_type TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    node_id TEXT
+        if self._backend is None:
+            return 0
+
+        try:
+            self._backend.upsert_buckets_batch(events, node_id=self._node_id)
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-050",
+                    f"Failed to batch-upsert {len(events)} metric event(s): {e}",
                 )
-                """
             )
-
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_api_metrics_type_timestamp
-                ON api_metrics(metric_type, timestamp)
-                """
-            )
-
-            # Migrate existing databases: add node_id column if missing
-            cursor.execute("PRAGMA table_info(api_metrics)")
-            columns = {row[1] for row in cursor.fetchall()}
-            if "node_id" not in columns:
-                cursor.execute("ALTER TABLE api_metrics ADD COLUMN node_id TEXT")
-
-        self._conn_manager.execute_atomic(_do_schema)
-
-        logger.debug(f"ApiMetricsService initialized with database: {db_path}")
+        return len(events)
 
     def _writer_loop(self) -> None:
-        """Background thread: drain queue and write bucket UPSERTs for all 4 tiers.
+        """Background thread: drain the queue and write buckets in BATCHED writes.
 
-        Runs until _stop_event is set. Polls the queue with a bounded timeout so
-        the loop terminates cleanly when the service shuts down.
+        Story #1083: instead of one BEGIN EXCLUSIVE transaction per metric event,
+        the loop blocks for the next event then drains the currently-queued backlog
+        (bounded) and writes it in ONE upsert_buckets_batch transaction.  This
+        collapses ~4N per-event transactions into ~1 per drain under load.
+
+        Runs until _stop_event is set; on shutdown the trailing queue is drained by
+        stop_writer().  Polls with a bounded timeout so the loop terminates cleanly.
         """
         write_count = 0
         while not self._stop_event.is_set():
             try:
-                metric_type, username, timestamp = self._queue.get(
-                    timeout=_QUEUE_POLL_TIMEOUT_S
-                )
+                first_item = self._queue.get(timeout=_QUEUE_POLL_TIMEOUT_S)
             except queue.Empty:
                 continue
 
-            if self._backend is not None:
+            write_count += self._drain_and_write(first_item)
+            if write_count >= _BUCKET_CLEANUP_INTERVAL and self._backend is not None:
                 try:
-                    self._backend.upsert_bucket(
-                        username,
-                        "min1",
-                        _truncate_min1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "min5",
-                        _truncate_min5(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "hour1",
-                        _truncate_hour1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "day1",
-                        _truncate_day1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
+                    self._backend.cleanup_expired_buckets()
                 except Exception as e:
                     logger.warning(
                         format_error_log(
-                            "APP-GENERAL-050",
-                            f"Failed to upsert bucket for {metric_type}/{username}: {e}",
+                            "APP-GENERAL-051",
+                            f"Failed to cleanup expired buckets: {e}",
                         )
                     )
+                write_count = 0
 
-                write_count += 1
-                if write_count >= _BUCKET_CLEANUP_INTERVAL:
-                    try:
-                        self._backend.cleanup_expired_buckets()
-                    except Exception as e:
-                        logger.warning(
-                            format_error_log(
-                                "APP-GENERAL-051",
-                                f"Failed to cleanup expired buckets: {e}",
-                            )
-                        )
-                    write_count = 0
+    def stop_writer(self, join_timeout: float = 5.0) -> None:
+        """Stop the background writer and drain any remaining queued events.
 
-    def _cleanup_old(self) -> None:
-        """Remove timestamps older than 24 hours from the database.
+        Story #1083: signals the stop event, joins the writer thread, then performs
+        a FINAL bounded drain so no queued metric counts are lost on shutdown.
+        Idempotent and safe to call when no writer thread was ever started.
 
-        Deletes all records with timestamps older than MAX_TIMESTAMP_AGE_SECONDS.
-        Called automatically on each insert to keep the database size bounded.
+        Args:
+            join_timeout: Max seconds to wait for the writer thread to exit.
         """
-        if self._backend is not None:
-            return  # Backend handles its own cleanup
-        if not self._conn_manager:
+        self._stop_event.set()
+        thread = self._writer_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=join_timeout)
+
+        if self._backend is None:
             return
 
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=MAX_TIMESTAMP_AGE_SECONDS)
-        ).isoformat()
-
-        def _do_delete(conn: sqlite3.Connection) -> None:
-            conn.cursor().execute(
-                "DELETE FROM api_metrics WHERE timestamp < ?",
-                (cutoff,),
-            )
-
-        self._conn_manager.execute_atomic(_do_delete)
+        # Final drain: flush whatever remained queued at shutdown. Bounded by the
+        # queue's finite maxsize — after the writer thread has stopped there are no
+        # more producers in the shutdown path, so each pass strictly shrinks the
+        # queue and the loop terminates (MESSI #14).
+        while True:
+            try:
+                first_item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            self._drain_and_write(first_item)
 
     def _insert_metric(self, metric_type: str, username: str = "_anonymous") -> None:
-        """Insert a metric record into the database.
+        """Enqueue a metric event to the background writer (non-blocking hot path).
 
         Args:
             metric_type: Type of metric ('semantic', 'other_index', 'regex', 'other_api')
             username: Username for bucket attribution. Defaults to '_anonymous'.
 
-        Note:
-            When a storage backend is set, enqueues to the background writer (non-blocking).
-            If the queue is full, the metric is dropped with a warning (never crashes).
-            Falls back to direct SQLite writes when no backend is configured.
+        If the queue is full, the metric is dropped with a warning (never crashes).
         """
         now = datetime.now(timezone.utc)
-
-        # Story #672: Backend path — enqueue to background writer (non-blocking hot path)
-        if self._backend is not None:
-            try:
-                self._queue.put_nowait((metric_type, username, now))
-            except queue.Full:
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-048",
-                        f"API metrics queue full, dropping metric {metric_type} for {username}",
-                    )
-                )
-            return
-
-        if not self._conn_manager:
+        try:
+            self._queue.put_nowait((metric_type, username, now))
+        except queue.Full:
             logger.warning(
                 format_error_log(
-                    "APP-GENERAL-047",
-                    f"ApiMetricsService not initialized, skipping {metric_type} increment",
+                    "APP-GENERAL-048",
+                    f"API metrics queue full, dropping metric {metric_type} for {username}",
                 )
             )
-            return
-
-        node_id = self._node_id
-
-        # Retry logic for database lock errors
-        for attempt in range(MAX_RETRIES):
-            try:
-                now_iso = now.isoformat()
-
-                def _do_insert(conn: sqlite3.Connection) -> None:
-                    conn.cursor().execute(
-                        "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
-                        (metric_type, now_iso, node_id),
-                    )
-
-                self._conn_manager.execute_atomic(_do_insert)
-                break  # Success
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                    delay = RETRY_BASE_DELAY * (2**attempt) + random.uniform(0, 0.01)
-                    time.sleep(delay)
-                    continue
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-048", f"Failed to insert metric {metric_type}: {e}"
-                    )
-                )
-                return  # Graceful degradation
-
-        # Periodic cleanup (not on every insert)
-        with self._insert_count_lock:
-            self._insert_count += 1
-            should_cleanup = self._insert_count >= CLEANUP_INTERVAL
-            if should_cleanup:
-                self._insert_count = 0
-
-        if should_cleanup:
-            self._cleanup_old()
 
     def increment_semantic_search(self, username: str = "_anonymous") -> None:
         """Record a semantic search call timestamp."""
@@ -358,72 +301,6 @@ class ApiMetricsService:
         which may differ from the default socket.gethostname().
         """
         self._node_id = node_id
-
-    def get_metrics(
-        self, window_seconds: int = 60, node_id: Optional[str] = None
-    ) -> Dict[str, int]:
-        """Get metrics for the specified time window.
-
-        Args:
-            window_seconds: Time window in seconds. Default is 60 (1 minute).
-                Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
-            node_id: When provided, filter to metrics from this node only.
-                     When None, aggregate across all nodes.
-
-        Returns:
-            Dictionary with counts for each metric category within the window.
-        """
-        _zeros: Dict[str, int] = {
-            "semantic_searches": 0,
-            "other_index_searches": 0,
-            "regex_searches": 0,
-            "other_api_calls": 0,
-        }
-
-        # Story #531: Backend delegation path
-        if self._backend is not None:
-            try:
-                return self._backend.get_metrics(window_seconds, node_id=node_id)  # type: ignore[no-any-return]
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-049",
-                        f"Failed to get metrics via backend: {e}",
-                    )
-                )
-                return _zeros
-
-        # Return zeros if not initialized
-        if not self._conn_manager:
-            return _zeros
-
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-        ).isoformat()
-
-        # Query counts grouped by metric type within the window
-        conn = self._conn_manager.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT metric_type, COUNT(*) as count
-            FROM api_metrics
-            WHERE timestamp >= ?
-            GROUP BY metric_type
-            """,
-            (cutoff,),
-        )
-        rows = cursor.fetchall()
-
-        # Build result dict from query results
-        counts = {row[0]: row[1] for row in rows}
-
-        return {
-            "semantic_searches": counts.get("semantic", 0),
-            "other_index_searches": counts.get("other_index", 0),
-            "regex_searches": counts.get("regex", 0),
-            "other_api_calls": counts.get("other_api", 0),
-        }
 
     def get_metrics_bucketed(
         self,
@@ -502,22 +379,9 @@ class ApiMetricsService:
         return []
 
     def reset(self) -> None:
-        """Clear all timestamp data from the database.
-
-        Note: With rolling window approach, this method is largely unnecessary
-        as timestamps naturally age out. Kept for backward compatibility and testing.
-        """
+        """Clear all bucket data from the database (used for testing / manual resets)."""
         if self._backend is not None:
             self._backend.reset()
-            return
-
-        if not self._conn_manager:
-            return
-
-        def _do_reset(conn: sqlite3.Connection) -> None:
-            conn.cursor().execute("DELETE FROM api_metrics")
-
-        self._conn_manager.execute_atomic(_do_reset)
 
 
 # Global service instance

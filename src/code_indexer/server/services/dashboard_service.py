@@ -46,7 +46,10 @@ def _format_time_label(bucket_start: str, period_seconds: int) -> str:
             other periods:           'HH:MM'   fallback
     """
     try:
-        dt = datetime.fromisoformat(bucket_start)
+        if isinstance(bucket_start, datetime):
+            dt = bucket_start
+        else:
+            dt = datetime.fromisoformat(bucket_start)
     except ValueError:
         logger.warning("Invalid bucket_start format, using raw value: %s", bucket_start)
         return bucket_start
@@ -89,6 +92,8 @@ class RecentJob:
     job_type: str
     completion_time: str
     status: str
+    username: str = ""
+    actor_username: Optional[str] = None
 
 
 @dataclass
@@ -493,7 +498,13 @@ class DashboardService:
             job_tracker = self._get_job_tracker()
             if job_tracker is not None:
                 recent_jobs_data = job_tracker.get_recent_jobs(
-                    limit=20, time_filter=time_filter
+                    limit=20,
+                    time_filter=time_filter,
+                    exclude_operation_types=[
+                        "xray_search",
+                        "xray_explore",
+                        "xray_search_batch",
+                    ],
                 )
             else:
                 # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
@@ -534,6 +545,8 @@ class DashboardService:
                         job_type=job.get("operation_type", "unknown"),
                         completion_time=job.get("completed_at", ""),
                         status=job.get("status", "unknown"),
+                        username=job.get("username") or "",
+                        actor_username=job.get("actor_username"),
                     )
                 )
 
@@ -726,7 +739,12 @@ class DashboardService:
         all_stale = True
         for m in metrics.values():
             if m.get("last_sync_time"):
-                last = datetime.fromisoformat(m["last_sync_time"])
+                last_sync_time = m["last_sync_time"]
+                last = (
+                    last_sync_time
+                    if isinstance(last_sync_time, datetime)
+                    else datetime.fromisoformat(last_sync_time)
+                )
                 if (now - last).total_seconds() < interval_seconds * 2:
                     all_stale = False
                     break
@@ -839,7 +857,9 @@ class DashboardService:
             if not activated_manager:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 
-            repo_info = activated_manager.get_repository(username, repo_alias)
+            repo_info = activated_manager.get_repository(
+                username, repo_alias, touch=False
+            )
             if not repo_info:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 

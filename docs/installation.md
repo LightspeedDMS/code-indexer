@@ -21,7 +21,11 @@ Complete installation guide for Code Indexer (CIDX) across all platforms and sce
 
 ### System Requirements
 
-- **Python**: Version 3.9 or higher
+- **Python**: Version 3.9 to 3.12 (Python 3.13 is not yet supported)
+- **C++ compiler**: Required at install time to build the HNSW vector index library from source
+  - Ubuntu/Debian: `sudo apt install gcc g++ python3-dev`
+  - RHEL/Rocky/Fedora: `sudo dnf install gcc gcc-c++ python3-devel`
+  - macOS: `xcode-select --install` (provides clang via Xcode Command Line Tools)
 - **RAM**: 4GB minimum (8GB+ recommended for large codebases)
 - **Disk Space**: 500MB for installation + index storage (varies by codebase size)
 - **Network**: Internet connection for VoyageAI API (semantic search)
@@ -66,13 +70,13 @@ Best for most users - provides isolated environment with global command access:
 
 ```bash
 # Install the package
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # Verify installation
 cidx --version
 ```
 
-[Corrected by fact-checker: Removed `cidx setup-global-registry` command - this is DEPRECATED as of v8.0 container cleanup. The command still exists but displays deprecation notice stating "deprecated - no longer needed" since filesystem backend doesn't require port coordination or registry setup. See cli.py:setup_global_registry function.]
+**Note**: The `cidx setup-global-registry` command is deprecated as of v8.0. The filesystem backend does not require port coordination or registry setup. The command still exists but displays a deprecation notice.
 
 **If `cidx` command is not found** after installation:
 
@@ -99,7 +103,7 @@ source code-indexer-env/bin/activate  # Linux/macOS
 code-indexer-env\Scripts\activate     # Windows
 
 # Install CIDX
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # Verify installation
 cidx --version
@@ -134,8 +138,8 @@ cidx --version
 
 **Development dependencies include**:
 - pytest (testing framework)
-- ruff (linter)
-- black (code formatter)
+- ruff (linter and formatter — `ruff format` is used instead of black)
+- black (listed as dev dependency; `ruff format` is used for formatting in this project)
 - mypy (type checker)
 
 ## Environment Setup
@@ -168,7 +172,7 @@ source ~/.bashrc  # or ~/.zshrc
 echo 'VOYAGE_API_KEY=your-api-key-here' > .env.local
 ```
 
-[Corrected by fact-checker: Changed .env.local format from `export VOYAGE_API_KEY="..."` to `VOYAGE_API_KEY=...` (no export statement). Note: CIDX does NOT automatically load .env.local files. For CLI usage, set VOYAGE_API_KEY via shell environment variable as shown in Option A.]
+**Note**: Use `VOYAGE_API_KEY=...` format (no `export` statement) in `.env.local`. CIDX does NOT automatically load `.env.local` files. For CLI usage, set `VOYAGE_API_KEY` via shell environment variable as shown in Option A.
 
 **Option C: System-Wide Configuration**
 
@@ -178,7 +182,7 @@ echo 'export VOYAGE_API_KEY="your-api-key-here"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-[Corrected by fact-checker: Removed ~/.config/cidx/config.env reference - this directory/file does NOT exist in CIDX implementation. There is no code in src/code_indexer/ that reads from ~/.config/cidx/. The correct system-wide approach is to add VOYAGE_API_KEY to shell profile (.bashrc, .zshrc, etc.) as shown in Option A and this corrected Option C.]
+**Note**: There is no `~/.config/cidx/config.env` file. CIDX does not read from `~/.config/cidx/`. The correct system-wide approach is to add `VOYAGE_API_KEY` to your shell profile (`.bashrc`, `.zshrc`, etc.) as shown in Option A and Option C above.
 
 ### 3. Verify API Key Setup
 
@@ -191,8 +195,6 @@ echo $VOYAGE_API_KEY
 
 ## Global Registry Setup (DEPRECATED - No Longer Required)
 
-[Corrected by fact-checker: This entire section describes a DEPRECATED feature. The `cidx setup-global-registry` command is marked as "deprecated - no longer needed" in cli.py since v8.0 container cleanup (Story #506). The filesystem backend doesn't require port coordination or global registry setup.]
-
 **Important**: You can skip this section entirely. CIDX v8.0+ uses filesystem-based storage that doesn't require a global registry.
 
 The `~/.code-indexer/` directory is still used by CIDX server mode for storing golden repositories and user data, but does NOT require manual setup via `cidx setup-global-registry` command. The directory is created automatically when needed.
@@ -204,7 +206,7 @@ The `~/.code-indexer/` directory is still used by CIDX server mode for storing g
 ```bash
 # 1. Check version
 cidx --version
-# Output: code-indexer, version 8.13.0
+# Output: code-indexer, version X.Y.Z
 
 # 2. Check help
 cidx --help
@@ -289,7 +291,7 @@ python -m pipx ensurepath
 # Restart terminal
 
 # Install CIDX
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 ```
 
 **Path issues**: If `cidx` not found:
@@ -327,10 +329,10 @@ pip install --upgrade git+https://github.com/LightspeedDMS/code-indexer.git@mast
 
 ```bash
 # pipx
-pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # pip
-pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@latest
 ```
 
 ### Post-Upgrade Steps
@@ -371,7 +373,7 @@ cidx index
 3. **Reinstall**:
    ```bash
    pipx uninstall code-indexer
-   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
    ```
 
 ### Python Version Too Old
@@ -396,7 +398,7 @@ cidx index
 
 3. **Use specific Python version**:
    ```bash
-   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
    ```
 
 ### VoyageAI API Key Not Found
@@ -416,11 +418,8 @@ cidx index
    source ~/.bashrc
    ```
 
-3. **Use .env file** (MCP bridge only):
-   ```bash
-   echo 'VOYAGE_API_KEY=your-key-here' > .env.local
-   ```
-   Note: .env.local only works with CIDX MCP bridge, not with CLI commands.
+3. **Note on .env files**: CIDX does NOT automatically load `.env` or `.env.local` files.
+   Set `VOYAGE_API_KEY` via your shell profile (`.bashrc`, `.zshrc`) as shown in option 2 above.
 
 ### Permission Denied Errors
 
@@ -465,9 +464,7 @@ cidx index
 
 ### Global Registry Not Created (DEPRECATED Issue)
 
-[Corrected by fact-checker: This troubleshooting section is obsolete. The `cidx setup-global-registry` command is deprecated since v8.0. CIDX no longer requires registry.json for normal CLI operations. The ~/.code-indexer/ directory is used by CIDX server mode and created automatically when needed.]
-
-**Note**: If you see registry-related errors, you're likely using an outdated workflow or documentation. CIDX v8.0+ uses filesystem-based storage without requiring registry setup.
+**Note**: If you see registry-related errors, you're likely using an outdated workflow or documentation. The `cidx setup-global-registry` command is deprecated since v8.0. CIDX no longer requires `registry.json` for normal CLI operations. The `~/.code-indexer/` directory is used by CIDX server mode and created automatically when needed. CIDX v8.0+ uses filesystem-based storage without requiring registry setup.
 
 ### SCIP Indexing Fails
 

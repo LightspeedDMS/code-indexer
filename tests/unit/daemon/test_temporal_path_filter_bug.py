@@ -82,8 +82,12 @@ class TestTemporalPathFilterBug(TestCase):
         )
 
     def test_daemon_handles_multiple_path_filters_correctly(self):
-        """Daemon should handle multiple path filter patterns correctly."""
-        import json
+        """Daemon should forward multiple path filter patterns to
+        execute_temporal_query_with_fusion() as comma-joined strings (Bug
+        #1302: daemon now routes through the same shard-aware fusion-dispatch
+        machinery the standalone CLI temporal path uses, which accepts a
+        single comma-joined file_path_filter/exclude_path string -- see
+        cli.py's own ",".join(...) convention at the standalone call site)."""
         import tempfile
 
         service = CIDXDaemonService()
@@ -93,18 +97,11 @@ class TestTemporalPathFilterBug(TestCase):
         project_path = Path(temp_dir) / "test_project"
         project_path.mkdir(parents=True, exist_ok=True)
 
-        # Create temporal collection
-        temporal_collection_path = (
-            project_path / ".code-indexer" / "index" / "code-indexer-temporal"
-        )
-        temporal_collection_path.mkdir(parents=True, exist_ok=True)
-
-        metadata = {"hnsw_index": {"index_rebuild_uuid": "uuid-123"}}
-        metadata_file = temporal_collection_path / "collection_meta.json"
-        metadata_file.write_text(json.dumps(metadata))
-
         try:
             from unittest.mock import patch, MagicMock
+            from code_indexer.services.temporal.temporal_search_service import (
+                TemporalSearchResults,
+            )
 
             # Mock dependencies
             with patch(
@@ -114,77 +111,52 @@ class TestTemporalPathFilterBug(TestCase):
                     "code_indexer.backends.backend_factory.BackendFactory.create"
                 ) as mock_backend_factory:
                     with patch(
-                        "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create"
-                    ) as mock_embedding:
-                        with patch(
-                            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-                        ) as mock_temporal_search:
-                            # Setup mocks
-                            mock_config.return_value = MagicMock()
-                            mock_backend = MagicMock()
-                            mock_backend.get_vector_store_client.return_value = (
-                                MagicMock()
-                            )
-                            mock_backend_factory.return_value = mock_backend
-                            mock_embedding.return_value = MagicMock()
+                        "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion"
+                    ) as mock_execute_fusion:
+                        # Setup mocks
+                        mock_config.return_value = MagicMock()
+                        mock_backend = MagicMock()
+                        mock_backend.get_vector_store_client.return_value = MagicMock()
+                        mock_backend_factory.return_value = mock_backend
 
-                            # Mock TemporalSearchService
-                            mock_search_service = MagicMock()
-                            mock_search_result = MagicMock()
-                            mock_search_result.results = []
-                            mock_search_result.query = "test"
-                            mock_search_result.filter_type = None
-                            mock_search_result.filter_value = None
-                            mock_search_result.total_found = 0
-                            mock_search_result.performance = {}
-                            mock_search_result.warning = None
-                            mock_search_service.query_temporal.return_value = (
-                                mock_search_result
-                            )
-                            mock_temporal_search.return_value = mock_search_service
+                        mock_execute_fusion.return_value = TemporalSearchResults(
+                            results=[],
+                            query="authentication",
+                            filter_type="time_range",
+                            filter_value="2024-01-01..2024-12-31",
+                            total_found=0,
+                        )
 
-                            # Patch cache to avoid threading issues
-                            with patch.object(service, "cache_lock"):
-                                with patch.object(service, "_ensure_cache_loaded"):
-                                    with patch.object(
-                                        service, "cache_entry"
-                                    ) as mock_cache_entry:
-                                        mock_cache_entry.temporal_hnsw_index = (
-                                            MagicMock()
-                                        )
-                                        mock_cache_entry.is_temporal_stale_after_rebuild.return_value = False
+                        # Patch cache to avoid threading issues
+                        with patch.object(service, "cache_lock"):
+                            with patch.object(service, "_ensure_cache_loaded"):
+                                with patch.object(
+                                    service, "cache_entry"
+                                ) as mock_cache_entry:
+                                    mock_cache_entry.project_path = project_path
 
-                                        # Call with multiple path filters
-                                        service.exposed_query_temporal(
-                                            project_path=str(project_path),
-                                            query="authentication",
-                                            time_range="2024-01-01..2024-12-31",
-                                            limit=10,
-                                            path_filter=["*.py", "*.js"],
-                                            exclude_path=["*/tests/*", "*/docs/*"],
-                                        )
+                                    # Call with multiple path filters
+                                    service.exposed_query_temporal(
+                                        project_path=str(project_path),
+                                        query="authentication",
+                                        time_range="2024-01-01..2024-12-31",
+                                        limit=10,
+                                        path_filter=["*.py", "*.js"],
+                                        exclude_path=["*/tests/*", "*/docs/*"],
+                                    )
 
-                                        # Verify TemporalSearchService was called
-                                        mock_search_service.query_temporal.assert_called_once()
-                                        call_kwargs = mock_search_service.query_temporal.call_args[
-                                            1
-                                        ]
+                                    # Verify execute_temporal_query_with_fusion was called
+                                    mock_execute_fusion.assert_called_once()
+                                    call_kwargs = mock_execute_fusion.call_args[1]
 
-                                        # Verify lists passed correctly
-                                        path_filter_arg = call_kwargs.get("path_filter")
-                                        exclude_path_arg = call_kwargs.get(
-                                            "exclude_path"
-                                        )
+                                    # Verify comma-joined strings passed correctly
+                                    path_filter_arg = call_kwargs.get(
+                                        "file_path_filter"
+                                    )
+                                    exclude_path_arg = call_kwargs.get("exclude_path")
 
-                                        assert isinstance(path_filter_arg, list)
-                                        assert len(path_filter_arg) == 2
-                                        assert "*.py" in path_filter_arg
-                                        assert "*.js" in path_filter_arg
-
-                                        assert isinstance(exclude_path_arg, list)
-                                        assert len(exclude_path_arg) == 2
-                                        assert "*/tests/*" in exclude_path_arg
-                                        assert "*/docs/*" in exclude_path_arg
+                                    assert path_filter_arg == "*.py,*.js"
+                                    assert exclude_path_arg == "*/tests/*,*/docs/*"
         finally:
             # Cleanup
             import shutil

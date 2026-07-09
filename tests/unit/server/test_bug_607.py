@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from code_indexer.server.mcp.handlers import _provider_index_job
 from code_indexer.services.progress_subprocess_runner import IndexingSubprocessError
+from tests.utils.env_assertions import assert_env_present
 
 _TIMEOUT_SECS = 3600
 
@@ -248,8 +249,10 @@ class TestProviderIndexJobEnvVars:
         ):
             _provider_index_job(str(repo_path), "cohere")
 
-        assert "CO_API_KEY" in captured_env, (
-            "CO_API_KEY must be set in subprocess env for cohere"
+        assert_env_present(
+            captured_env,
+            "CO_API_KEY",
+            msg="CO_API_KEY must be set in subprocess env for cohere",
         )
         assert captured_env["CO_API_KEY"] == "ck-my-cohere-key"
 
@@ -273,8 +276,10 @@ class TestProviderIndexJobEnvVars:
         ):
             _provider_index_job(str(repo_path), "voyage-ai")
 
-        assert "VOYAGE_API_KEY" in captured_env, (
-            "VOYAGE_API_KEY must be set in subprocess env for voyage-ai"
+        assert_env_present(
+            captured_env,
+            "VOYAGE_API_KEY",
+            msg="VOYAGE_API_KEY must be set in subprocess env for voyage-ai",
         )
         assert captured_env["VOYAGE_API_KEY"] == "vk-my-voyage-key"
 

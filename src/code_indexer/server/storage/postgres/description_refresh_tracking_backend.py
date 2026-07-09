@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +34,21 @@ _VALID_FIELDS = frozenset(
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
-    return {
-        "repo_alias": row[0],
-        "last_run": row[1],
-        "next_run": row[2],
-        "status": row[3],
-        "error": row[4],
-        "last_known_commit": row[5],
-        "last_known_files_processed": row[6],
-        "last_known_indexed_at": row[7],
-        "created_at": row[8],
-        "updated_at": row[9],
-        "lifecycle_schema_version": row[10],
-    }
+    return sanitize_row(
+        {
+            "repo_alias": row[0],
+            "last_run": row[1],
+            "next_run": row[2],
+            "status": row[3],
+            "error": row[4],
+            "last_known_commit": row[5],
+            "last_known_files_processed": row[6],
+            "last_known_indexed_at": row[7],
+            "created_at": row[8],
+            "updated_at": row[9],
+            "lifecycle_schema_version": row[10],
+        }
+    )
 
 
 _SELECT_COLUMNS = (

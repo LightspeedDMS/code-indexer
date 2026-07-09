@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, cast
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class GlobalRegistry:
                 with os.fdopen(tmp_fd, "w") as f:
                     json.dump(self._registry_data, f, indent=2)
                     f.flush()
-                    os.fsync(f.fileno())
+                    nfs_safe_fsync(f.fileno())
 
                 # Atomic rename
                 os.replace(tmp_path, str(self.registry_file))
@@ -360,3 +361,45 @@ class GlobalRegistry:
             if alias_name in self._registry_data:
                 self._registry_data[alias_name]["next_refresh"] = next_refresh_str
                 self._save_registry()
+
+    def list_due_repos(self, limit: int, now: float) -> List[Dict[str, Any]]:
+        """
+        Return repos whose next_refresh is due (<= now), oldest-first, capped.
+
+        Bug #1063 Part 1: enables the RefreshScheduler to submit only as many
+        repos as the refresh budget allows, oldest-first, rather than loading
+        ALL repos and submitting everything overdue in one poll cycle.
+
+        Args:
+            limit: Maximum number of repos to return (0 returns empty list).
+            now: Current Unix timestamp; repos with next_refresh <= now are due.
+
+        Returns:
+            List of repo metadata dicts ordered by next_refresh ASC (oldest first).
+        """
+        if limit <= 0:
+            return []
+
+        if self._use_sqlite and self._sqlite_backend is not None:
+            # SQLite backend: delegates to the efficient indexed query.
+            # cast required because _sqlite_backend is Optional[Any].
+            return cast(
+                List[Dict[str, Any]],
+                self._sqlite_backend.list_due_repos(limit=limit, now=now),
+            )
+        else:
+            # JSON fallback: Python-side filter, numeric sort, cap
+            due = []
+            for repo in self._registry_data.values():
+                nr_str = repo.get("next_refresh")
+                if nr_str is None:
+                    continue
+                try:
+                    nr = float(nr_str)
+                except (ValueError, TypeError):
+                    continue
+                if nr <= now:
+                    due.append((nr, repo))
+            # Sort by timestamp ascending (oldest first)
+            due.sort(key=lambda t: t[0])
+            return [repo for _, repo in due[:limit]]

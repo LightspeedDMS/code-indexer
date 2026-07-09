@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -26,8 +27,149 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CI hard-fail marker + loud skip-guard helpers (Story #1123)
+#
+# Policy: locally these guards call pytest.skip() with a LOUD, specific reason
+# so the AC1 SKIP SUMMARY can enumerate it meaningfully.  In CI (when the env
+# var CIDX_E2E_REQUIRE_ALL=true or CIDX_E2E_REQUIRE_ALL=1) they raise
+# RuntimeError instead so a missing prerequisite is a hard build failure.
+# ---------------------------------------------------------------------------
+
+CI_REQUIRE_ALL_ENV_VAR = "CIDX_E2E_REQUIRE_ALL"
+"""Env var that switches skip guards from soft-skip to hard-fail.
+
+Set to 'true' or '1' in CI to ensure missing prerequisites fail the build
+rather than silently skipping tests.
+"""
+
+
+def is_ci_require_all() -> bool:
+    """Return True when CIDX_E2E_REQUIRE_ALL is set to a truthy value."""
+    val = os.environ.get(CI_REQUIRE_ALL_ENV_VAR, "").strip().lower()
+    return val in ("true", "1", "yes")
+
+
+def _guard(reason: str) -> None:
+    """Shared dispatch: hard-fail in CI, soft-skip locally."""
+    if is_ci_require_all():
+        raise RuntimeError(
+            f"{reason}  "
+            f"[Hard-fail: {CI_REQUIRE_ALL_ENV_VAR}=true requires all prerequisites present]"
+        )
+    pytest.skip(reason)
+
+
+def _xray_cli_path() -> Path:
+    """Return the expected path to the xray-cli release binary.
+
+    The binary lives at rust/target/release/xray-cli relative to the repo root.
+    The repo root is two levels up from this file (tests/e2e/helpers.py ->
+    tests/e2e/ -> tests/ -> repo-root).
+    """
+    helpers_dir = Path(__file__).resolve().parent  # tests/e2e/
+    repo_root = helpers_dir.parent.parent  # repo root
+    return repo_root / "rust" / "target" / "release" / "xray-cli"
+
+
+def require_voyage_key() -> None:
+    """Skip (or hard-fail in CI) when no VoyageAI API key is configured.
+
+    Checks VOYAGE_API_KEY and E2E_VOYAGE_API_KEY environment variables.
+    When either is set the guard passes silently.
+
+    Raises:
+        pytest.skip.Exception: Locally when neither key variable is set.
+        RuntimeError: In CI (CIDX_E2E_REQUIRE_ALL=true) when neither key is set.
+    """
+    if os.environ.get("VOYAGE_API_KEY") or os.environ.get("E2E_VOYAGE_API_KEY"):
+        return
+    _guard(
+        "VoyageAI API key is not configured -- set VOYAGE_API_KEY or "
+        "E2E_VOYAGE_API_KEY to enable semantic-search tests."
+    )
+
+
+def require_cohere_key() -> None:
+    """Skip (or hard-fail in CI) when no Cohere API key is configured.
+
+    Checks CO_API_KEY and E2E_COHERE_API_KEY environment variables.
+    When either is set the guard passes silently.
+
+    Raises:
+        pytest.skip.Exception: Locally when neither key variable is set.
+        RuntimeError: In CI (CIDX_E2E_REQUIRE_ALL=true) when neither key is set.
+    """
+    if os.environ.get("CO_API_KEY") or os.environ.get("E2E_COHERE_API_KEY"):
+        return
+    _guard(
+        "Cohere API key is not configured -- set CO_API_KEY or "
+        "E2E_COHERE_API_KEY to enable Cohere reranking / dual-provider tests."
+    )
+
+
+def require_xray_cli() -> None:
+    """Skip (or hard-fail in CI) when the xray-cli toolchain is absent.
+
+    Two checks run in sequence:
+      1. rustc must be on PATH (the Rust toolchain must be installed).
+      2. rust/target/release/xray-cli must exist on disk (must have been built).
+
+    Raises:
+        pytest.skip.Exception: Locally when either check fails.
+        RuntimeError: In CI (CIDX_E2E_REQUIRE_ALL=true) when either check fails.
+    """
+    # Check 1: rustc on PATH
+    try:
+        subprocess.run(
+            ["rustc", "--version"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        _guard(
+            "rustc is not on PATH -- install the Rust toolchain to enable "
+            "xray-cli tests (https://rustup.rs/)."
+        )
+        return  # only reached if _guard called pytest.skip (not RuntimeError)
+
+    # Check 2: xray-cli binary built
+    cli_path = _xray_cli_path()
+    if not cli_path.exists():
+        _guard(
+            f"xray-cli binary not found at {cli_path} -- run "
+            "'cargo build --release' inside rust/ to build it."
+        )
+
+
+def require_postgres() -> None:
+    """Skip (or hard-fail in CI) when PostgreSQL server utilities are absent.
+
+    Checks that initdb (and optionally pg_ctl) are on PATH.  If initdb is
+    missing the PostgreSQL server package is not installed.
+
+    Raises:
+        pytest.skip.Exception: Locally when initdb is not on PATH.
+        RuntimeError: In CI (CIDX_E2E_REQUIRE_ALL=true) when initdb is absent.
+    """
+    try:
+        subprocess.run(
+            ["initdb", "--version"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        _guard(
+            "PostgreSQL is not installed (initdb not on PATH) -- install "
+            "postgresql-server to enable cluster-mode / postgres-backend tests."
+        )
+
 
 # ---------------------------------------------------------------------------
 # CSRF extraction (used by toggle_cidx_meta_backup and unit-testable on its own)

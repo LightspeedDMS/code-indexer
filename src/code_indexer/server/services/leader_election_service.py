@@ -30,6 +30,8 @@ import logging
 import threading
 from typing import Callable, Optional
 
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+
 logger = logging.getLogger(__name__)
 
 # "CIDX_LDR" encoded as a 64-bit integer for pg_advisory_lock.
@@ -70,6 +72,11 @@ class LeaderElectionService:
         self._on_lose_leadership: Optional[Callable[[], None]] = None
         # Story #539: Protect leadership state mutations from concurrent access
         self._state_lock = threading.Lock()
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        self._db_throttle = DbOutageThrottle(
+            service_name=f"LeaderElectionService[{node_id}]"
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,6 +179,9 @@ class LeaderElectionService:
                 row = cur.fetchone()
                 acquired = bool(row[0]) if row else False
 
+            # Bug #1249: a successful round-trip ends any in-progress outage.
+            self._db_throttle.on_db_success(logger)
+
             if acquired:
                 self._lock_conn = conn  # type: ignore[assignment]
                 was_leader = self._is_leader_event.is_set()
@@ -209,11 +219,15 @@ class LeaderElectionService:
                 )
                 return False
 
-        except Exception:
-            logger.exception(
-                "LeaderElectionService [%s]: error trying to acquire leadership",
-                self._node_id,
-            )
+        except Exception as exc:
+            # Bug #1249: a connectivity error is throttled (single ERROR
+            # transition, DEBUG follow-ups); anything else still logs
+            # normally every time.
+            if not self._db_throttle.on_db_error(exc, logger):
+                logger.exception(
+                    "LeaderElectionService [%s]: error trying to acquire leadership",
+                    self._node_id,
+                )
             return False
 
     def release_leadership(self) -> None:
@@ -345,7 +359,8 @@ class LeaderElectionService:
                     self._node_id,
                 )
 
-            self._stop_event.wait(check_interval)
+            wait_seconds = self._db_throttle.next_wait_seconds(check_interval)
+            self._stop_event.wait(wait_seconds)
 
     def _connection_alive(self) -> bool:
         """

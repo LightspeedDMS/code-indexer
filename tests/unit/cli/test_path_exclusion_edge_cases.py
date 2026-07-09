@@ -133,7 +133,9 @@ class TestPathLengthEdgeCases:
         # Single component path (just filename)
         assert matcher.matches_pattern("file.py", "file.py")
         assert matcher.matches_pattern("file.py", "*.py")
-        assert not matcher.matches_pattern("file.py", "*/file.py")
+        # Bug #1211: leading */ is normalized to **/ so */file.py matches at any
+        # depth including root-level file.py.  OLD behavior was False (that was the bug).
+        assert matcher.matches_pattern("file.py", "*/file.py")
 
     def test_root_path_handled_correctly(self):
         """Test that root paths are handled correctly with gitignore semantics."""

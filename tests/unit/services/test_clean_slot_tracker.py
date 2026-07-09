@@ -8,21 +8,15 @@ These tests define the clean architecture requirements:
 4. Simple array scanning for display
 """
 
-import pytest
 import threading
 import time
 from typing import Any
 
-# Import the classes we'll implement
-try:
-    from src.code_indexer.services.clean_slot_tracker import (
-        CleanSlotTracker,
-        FileData,
-        FileStatus,
-    )
-except ImportError:
-    # Expected to fail initially - we'll implement these
-    pytest.skip("CleanSlotTracker not implemented yet", allow_module_level=True)
+from src.code_indexer.services.clean_slot_tracker import (
+    CleanSlotTracker,
+    FileData,
+    FileStatus,
+)
 
 
 class TestCleanSlotTracker:

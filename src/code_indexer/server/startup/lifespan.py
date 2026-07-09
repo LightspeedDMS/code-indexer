@@ -1,5 +1,8 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
+import asyncio
+import json
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import anyio.to_thread
@@ -7,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -137,6 +140,14 @@ def make_lifespan(
         # Story #680: Store latency_tracker in app.state for dashboard route access.
         app.state.latency_tracker = latency_tracker
 
+        # Story #999: Seed .encryption_key_salt before any manager construction.
+        # Propagates on failure so startup aborts — managers require this file.
+        from code_indexer.server.services.encryption_key_salt import (
+            ensure_encryption_key_salt,
+        )
+
+        ensure_encryption_key_salt(Path(server_data_dir), storage_mode)
+
         # Startup: Initialize SQLite log handler FIRST (to capture all startup logs)
         logger.info(
             "Server startup: Initializing SQLite log handler",
@@ -144,6 +155,19 @@ def make_lifespan(
         )
         startup_config = None  # Story #746: ensure always defined before try block
         try:
+            # Story #1198 AC5: try launch.json first for log_level (written by
+            # ConfigService.materialize_launch_config); fall back to config.json.
+            from code_indexer.server.auto_update.deployment_executor import (
+                LAUNCH_CONFIG_PATH,
+            )
+
+            _launch_log_level: Optional[str] = None
+            try:
+                _launch_data = json.loads(LAUNCH_CONFIG_PATH.read_text())
+                _launch_log_level = _launch_data.get("log_level")
+            except Exception:
+                pass  # launch.json absent or unreadable — proceed to load_config()
+
             # Load config to get configured log level (Story #38: respect log_level setting)
             from code_indexer.server.utils.config_manager import ServerConfigManager
 
@@ -158,19 +182,42 @@ def make_lifespan(
                 "ERROR": logging.ERROR,
                 "CRITICAL": logging.CRITICAL,
             }
+            # Story #1198 AC5: prefer log_level from launch.json if available
+            _effective_log_level = (
+                _launch_log_level
+                if _launch_log_level is not None
+                else startup_config.log_level
+            )
             configured_level = log_level_map.get(
-                startup_config.log_level.upper(), logging.INFO
+                _effective_log_level.upper(), logging.INFO
             )
 
             log_db_path = Path(server_data_dir) / "logs.db"
             sqlite_handler = SQLiteLogHandler(log_db_path)
             sqlite_handler.setLevel(configured_level)
-            logging.getLogger().addHandler(sqlite_handler)
+            _root_logger = logging.getLogger()
+            _root_logger.addHandler(sqlite_handler)
 
             # Set app state for web routes to access
             app.state.log_db_path = log_db_path
             # Store handler reference so LogsBackend can be injected later (Story #500 AC4)
             app.state.sqlite_log_handler = sqlite_handler
+
+            # py-spy logging-lock fix (follow-up to Bug #1078): route the root
+            # logger through a single QueueHandler whose QueueListener owns the
+            # REAL handlers (the SQLiteLogHandler installed above plus any console
+            # StreamHandler attached by uvicorn / basicConfig). On a request
+            # thread, a logger.info() call now does only a fast enqueue; all
+            # formatting and handler I/O happen on the single listener thread,
+            # off the /api/query hot path. The listener is stopped (drained +
+            # flushed) on shutdown — see the shutdown section below.
+            from code_indexer.server.services.async_logging import (
+                install_queue_logging,
+            )
+
+            _real_handlers = list(_root_logger.handlers)
+            log_queue_listener = install_queue_logging(_real_handlers)
+            app.state.log_queue_listener = log_queue_listener
 
             logger.info(
                 f"SQLite log handler initialized: {log_db_path} (level: {startup_config.log_level})",
@@ -204,6 +251,160 @@ def make_lifespan(
                 f"Threadpool sized to {_threadpool_size} tokens (anyio default 40)",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+        # Story #1009: Set asyncio loop default executor so all sync MCP handlers
+        # dispatched via loop.run_in_executor(None, ...) share a pool large enough
+        # to absorb ~50 concurrent Claude MCP tool calls without saturating.
+        # Follows the same bootstrap fallback pattern as server_threadpool_size above.
+        _DEFAULT_MCP_POOL_SIZE: int = 128
+        _mcp_pool_size = (
+            getattr(startup_config, "mcp_dispatch_pool_size", _DEFAULT_MCP_POOL_SIZE)
+            if startup_config is not None
+            else _DEFAULT_MCP_POOL_SIZE
+        )
+        if _mcp_pool_size <= 0:
+            raise ValueError(
+                f"mcp_dispatch_pool_size must be > 0, got {_mcp_pool_size}"
+            )
+        _mcp_executor = ThreadPoolExecutor(max_workers=_mcp_pool_size)
+        asyncio.get_running_loop().set_default_executor(_mcp_executor)
+        logger.info(
+            f"MCP dispatch pool sized to {_mcp_pool_size} threads (Story #1009)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # perf: ONE shared, long-lived ThreadPoolExecutor for the query-path
+        # embed||index-load fan-out (FilesystemVectorStore.search). Reusing this
+        # pool across requests eliminates the per-request executor create/destroy
+        # churn that serialized concurrent queries on CPython's process-wide
+        # _global_shutdown_lock. SemanticSearchService injects it via
+        # app.state.query_executor (see search_service._get_query_executor()).
+        # Mirrors the _mcp_executor / _xray_executor bootstrap-fallback pattern.
+        _DEFAULT_QUERY_POOL_SIZE: int = 256
+        _query_pool_size = (
+            getattr(
+                startup_config, "query_executor_pool_size", _DEFAULT_QUERY_POOL_SIZE
+            )
+            if startup_config is not None
+            else _DEFAULT_QUERY_POOL_SIZE
+        )
+        if _query_pool_size <= 0:
+            raise ValueError(
+                f"query_executor_pool_size must be > 0, got {_query_pool_size}"
+            )
+        _query_executor = ThreadPoolExecutor(max_workers=_query_pool_size)
+        app.state.query_executor = _query_executor
+        logger.info(
+            f"Query executor pool sized to {_query_pool_size} threads (perf)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Story #1082: drift-safe per-query repo-config cache. Removes the
+        # per-query config.json json.load + path resolve() from the GIL-bound
+        # hot path. Routes proven-immutable .versioned/{alias}/v_* snapshot
+        # paths to a NO-TTL bounded-LRU sub-cache and everything else (incl. the
+        # MUTABLE base clone returned by get_actual_repo_path Priority-1) to a
+        # SHORT-TTL bounded sub-cache (self-healing safety net). Sized/TTL'd from
+        # named CacheConfig knobs (no hardcoded literals); kill-switch honored.
+        from code_indexer.config import ConfigManager as _ConfigManager
+        from code_indexer.server.services.config_service import (
+            get_config_service as _get_config_service,
+        )
+        from code_indexer.server.services.query_path_cache import (
+            RepoConfigCache as _RepoConfigCache,
+        )
+        from code_indexer.server.utils.config_manager import (
+            CacheConfig as _CacheConfig,
+        )
+
+        try:
+            _cache_cfg = _get_config_service().get_config().cache_config
+        except Exception:
+            # Degraded startup: log and fall back to dataclass defaults (named,
+            # not magic literals) rather than disabling the cache silently.
+            logger.warning(
+                "Failed to read CacheConfig from config service; "
+                "using dataclass defaults for repo-config cache",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            _cache_cfg = _CacheConfig()
+
+        if getattr(_cache_cfg, "query_path_cache_enabled", True):
+
+            def _repo_config_loader(repo_path: str) -> Any:
+                return _ConfigManager.create_with_backtrack(
+                    Path(repo_path)
+                ).get_config()
+
+            app.state.repo_config_cache = _RepoConfigCache(
+                config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
+                config_max_entries=int(_cache_cfg.repo_config_cache_max_entries),
+                loader=_repo_config_loader,
+            )
+            logger.info(
+                "Repo-config cache wired (ttl=%ss, max_entries=%s) (Story #1082)",
+                _cache_cfg.repo_config_cache_ttl_seconds,
+                _cache_cfg.repo_config_cache_max_entries,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            app.state.repo_config_cache = None
+            logger.info(
+                "Repo-config cache DISABLED via query_path_cache_enabled kill-switch",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
+        from code_indexer.server.utils.config_manager import (
+            BackgroundJobsConfig as _BackgroundJobsConfig,
+        )
+
+        _xray_pool_size = _BackgroundJobsConfig().xray_max_concurrent_jobs
+        _xray_executor = ThreadPoolExecutor(max_workers=_xray_pool_size)
+        app.state.xray_executor = _xray_executor
+        from code_indexer.server.mcp.handlers.xray import set_xray_executor
+
+        set_xray_executor(_xray_executor)
+        logger.info(
+            f"xray executor started (max_workers={_xray_pool_size}) (Bug #1070)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Global xray cell concurrency limiter — shared by xray_search, xray_explore,
+        # and xray_search_batch cells. Sized from runtime xray_worker_threads config (default 4).
+        from code_indexer.server.services.resizable_limiter import (
+            ResizableLimiter as _ResizableLimiter,
+        )
+
+        try:
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg,
+            )
+
+            _xray_cell_limit: int = (
+                _get_cfg().get_config().xray_config.xray_worker_threads
+            )  # type: ignore[union-attr]
+        except Exception as _exc:
+            _xray_cell_limit = 4  # safe default if config not yet available
+            logger.warning(
+                "xray_worker_threads config unavailable, defaulting cell limiter to %d: %s",
+                _xray_cell_limit,
+                _exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        _xray_cell_limiter = _ResizableLimiter(
+            initial=_xray_cell_limit, k_min=1, k_max=50
+        )
+        app.state.xray_cell_limiter = _xray_cell_limiter
+        from code_indexer.server.mcp.handlers.xray import set_xray_cell_limiter
+
+        set_xray_cell_limiter(_xray_cell_limiter)
+        logger.info(
+            "xray cell limiter started (limit=%d) — shared gate for all xray scan executions",
+            _xray_cell_limit,
+            extra={"correlation_id": get_correlation_id()},
+        )
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
@@ -318,6 +519,108 @@ def make_lifespan(
                 )
             )
 
+        # Issue #1159: Initialize SearchEventLogWriter (per-query operational stats).
+        # Mirrors ApiMetricsService pattern: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_event_log_writer import (
+                SearchEventLogSqliteBackend,
+                SearchEventLogWriter,
+            )
+
+            if backend_registry is not None and hasattr(
+                backend_registry, "search_event_log"
+            ):
+                _sel_backend = backend_registry.search_event_log
+            else:
+                sel_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _sel_backend = SearchEventLogSqliteBackend(str(sel_db_path))
+
+            app.state.search_event_log_writer = SearchEventLogWriter(_sel_backend)
+            app.state.search_event_log_writer.start()
+
+            logger.info(
+                "SearchEventLogWriter started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _sel_exc:
+            logger.error(
+                "Failed to initialize SearchEventLogWriter: %s",
+                _sel_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_event_log_writer = None
+
+        # Story #1293: Initialize SearchEmbedEventWriter (durable, phantom-free
+        # query-embedding decision events). Mirrors SearchEventLogWriter's
+        # pattern exactly: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_embed_event_writer import (
+                SearchEmbedEventSqliteBackend,
+                SearchEmbedEventWriter,
+            )
+            from code_indexer.server.services.search_embed_event_emit import (
+                set_search_embed_event_writer,
+            )
+
+            if backend_registry is not None:
+                _see_backend = backend_registry.search_embed_event
+            else:
+                see_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _see_backend = SearchEmbedEventSqliteBackend(str(see_db_path))
+
+            app.state.search_embed_event_writer = SearchEmbedEventWriter(_see_backend)
+            app.state.search_embed_event_writer.start()
+            set_search_embed_event_writer(app.state.search_embed_event_writer)
+
+            logger.info(
+                "SearchEmbedEventWriter started (Story #1293)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _see_exc:
+            logger.error(
+                "Failed to initialize SearchEmbedEventWriter: %s",
+                _see_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_embed_event_writer = None
+
+        # Issue #1160: Initialize QueryAnalyticsExportService (export to Excel).
+        # Mirrors SearchEventLogWriter pattern: select backend from registry or fall back
+        # to SQLite. Service is stateless (no threads to start/stop).
+        try:
+            from code_indexer.server.services.query_analytics_export_service import (
+                QueryAnalyticsExportService,
+                QueryAnalyticsExportSqliteBackend,
+            )
+
+            if backend_registry is not None:
+                _qae_backend = backend_registry.query_analytics_exports
+            else:
+                qae_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _qae_backend = QueryAnalyticsExportSqliteBackend(str(qae_db_path))
+
+            app.state.query_analytics_export_service = QueryAnalyticsExportService(
+                backend=_qae_backend,
+                golden_repos_dir=str(golden_repos_dir),
+            )
+            logger.info(
+                "QueryAnalyticsExportService initialized (Issue #1160)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _qae_exc:
+            logger.error(
+                "Failed to initialize QueryAnalyticsExportService: %s",
+                _qae_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.query_analytics_export_service = None
+
         # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
         # (See lines after GoldenRepoManager creation below)
 
@@ -404,6 +707,9 @@ def make_lifespan(
                     backend_registry.audit_log if backend_registry is not None else None
                 ),
             )
+            # Issue #1241 P1.3: start the async background writer so log() and
+            # log_raw() enqueue records instead of blocking the request thread.
+            audit_service.start()
             app.state.audit_service = audit_service
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
@@ -516,29 +822,11 @@ def make_lifespan(
             config_service = get_config_service()
             server_config = config_service.get_config()
 
-            global_lifecycle_manager = GlobalReposLifecycleManager(
-                str(golden_repos_dir),
-                background_job_manager=background_job_manager,
-                resource_config=server_config.resource_config,
-                job_tracker=job_tracker,
-            )
-            global_lifecycle_manager.start()
-
-            # Store lifecycle manager in app state for access by query handlers
-            app.state.global_lifecycle_manager = global_lifecycle_manager
-            app.state.query_tracker = global_lifecycle_manager.query_tracker
-            app.state.golden_repos_dir = str(golden_repos_dir)
-
-            # Wire refresh_scheduler into golden_repo_manager so that
-            # add_indexes_to_golden_repo() and change_branch() can acquire
-            # write locks and perform CoW snapshots (Bug B fix).
-            if golden_repo_manager is not None:
-                golden_repo_manager._refresh_scheduler = (
-                    global_lifecycle_manager.refresh_scheduler
-                )
-
-            # Story #510 AC8: Build VersionedSnapshotManager with configured CloneBackend
-            # and store it in app.state for use by snapshot-aware lifecycle services.
+            # Story #1034 wiring fix: build VersionedSnapshotManager BEFORE
+            # GlobalReposLifecycleManager so RefreshScheduler gets it at construction
+            # time (not as a late post-hoc injection).  Failure is non-fatal — the
+            # lifecycle manager still starts, but CoW clone ops will raise at runtime.
+            snapshot_manager = None
             try:
                 from code_indexer.server.startup.clone_backend_wiring import (
                     build_snapshot_manager,
@@ -570,6 +858,62 @@ def make_lifespan(
                     )
                 )
                 app.state.snapshot_manager = None
+
+            global_lifecycle_manager = GlobalReposLifecycleManager(
+                str(golden_repos_dir),
+                background_job_manager=background_job_manager,
+                resource_config=server_config.resource_config,
+                job_tracker=job_tracker,
+                snapshot_manager=snapshot_manager,
+            )
+            global_lifecycle_manager.start()
+
+            # Store lifecycle manager in app state for access by query handlers
+            app.state.global_lifecycle_manager = global_lifecycle_manager
+            app.state.query_tracker = global_lifecycle_manager.query_tracker
+            app.state.golden_repos_dir = str(golden_repos_dir)
+
+            # Wire refresh_scheduler into golden_repo_manager so that
+            # add_indexes_to_golden_repo() and change_branch() can acquire
+            # write locks and perform CoW snapshots (Bug B fix).
+            if golden_repo_manager is not None:
+                golden_repo_manager._refresh_scheduler = (
+                    global_lifecycle_manager.refresh_scheduler
+                )
+
+            # Story #1034: inject snapshot_manager into GoldenRepoManager so
+            # change_branch CoW routes through VersionedSnapshotManager (single
+            # source of truth).  Belt-and-suspenders: also wire directly into
+            # refresh_scheduler in case it was constructed before snapshot_manager
+            # was ready (should not happen with the ordering fix above, but guards
+            # against future ordering regressions).
+            if snapshot_manager is not None:
+                if golden_repo_manager is not None:
+                    golden_repo_manager._snapshot_manager = snapshot_manager
+                    # Bug #1044: wire clone_backend into ActivatedRepoManager so
+                    # _clone_with_copy_on_write can route CoW clones through Story
+                    # #1034's backend. Without this every activation fails with the
+                    # wiring-bug guard at activated_repo_manager.py:2643.
+                    arm = getattr(golden_repo_manager, "activated_repo_manager", None)
+                    if arm is not None:
+                        arm._clone_backend = snapshot_manager._clone_backend
+                        # Bug #1203: wire ActivatedRepoIndexManager into ARM so
+                        # _run_branch_delta_index is not a no-op in production.
+                        # Pass activated_repo_manager=arm explicitly to avoid the
+                        # circular-construction hazard where the default constructor
+                        # creates a second ActivatedRepoManager.
+                        from code_indexer.server.services.activated_repo_index_manager import (
+                            ActivatedRepoIndexManager,
+                        )
+
+                        arm._index_manager = ActivatedRepoIndexManager(
+                            activated_repo_manager=arm,
+                            background_job_manager=background_job_manager,
+                        )
+                # Direct wire into refresh_scheduler (belt-and-suspenders)
+                global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
+                    snapshot_manager
+                )
 
             logger.info(
                 "Global repos background services started successfully",
@@ -641,23 +985,210 @@ def make_lifespan(
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
 
+        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
+        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
+        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
+        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
+        # table.  Without this early call those flags stay at bootstrap defaults (False)
+        # when the schedulers below call config_service.get_config() -- permanently
+        # skipping the one-shot startup backfill sweeps even when the operator has
+        # enabled the features in the Web UI.
+        # The late set_connection_pool + start_config_reload call in the cluster block
+        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
+        # idempotent via its internal _reload_thread.is_alive() guard).
+        #
+        # Bug #1309 (round 2): this block -- and the API key seeding block right
+        # after it -- MUST run BEFORE the "LLM Lease Lifecycle" block below.
+        # LlmLeaseLifecycleService.start() (subscription mode) sets
+        # os.environ["ANTHROPIC_API_KEY"] from its leased credential; seeding, when
+        # config's anthropic_api_key is blank (the normal case in subscription mode),
+        # unconditionally pops ANTHROPIC_API_KEY. Seeding running after the lease
+        # would clobber the lease-managed key. Placing both this pool switch and
+        # seeding before the lease means: seeding reads the PG-backed config (so
+        # VoyageAI/Cohere keys still seed correctly in cluster mode) AND the lease --
+        # which runs last -- has its ANTHROPIC_API_KEY write survive uncontested.
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _early_config_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _early_config_pool is not None:
+                    get_config_service().set_connection_pool(_early_config_pool)
+                    logger.info(
+                        "APP-GENERAL-052: ConfigService PG pool set early — "
+                        "scheduler inits will read merged runtime config",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-054",
+                            "storage_mode=postgres but no connection pool is "
+                            "available on backend_registry (critical_connection_pool "
+                            "and connection_pool both None); ConfigService will stay "
+                            "on bootstrap SQLite config, and API key seeding below "
+                            "will NOT see PG-backed VoyageAI/Cohere keys",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            except Exception as _early_pool_exc:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-053",
+                        f"Early ConfigService pool set failed (schedulers will use "
+                        f"bootstrap defaults): {_early_pool_exc}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+            # Bug #1313: route temporal collection metadata storage
+            # (TemporalMetadataStore) through PostgreSQL instead of SQLite in
+            # cluster mode. Root cause: the SQLite-WAL temporal_metadata.db
+            # lives on the shared NFS golden-repos mount in cluster mode; NFS
+            # cannot satisfy WAL's -shm requirement, serializing all 8
+            # indexing threads on NFS fsync. Mirrors the coalescer registry
+            # wiring pattern (Story #1079 Phase E): a process-level factory is
+            # installed ONCE here so every TemporalMetadataStore construction
+            # (in filesystem_vector_store.py / dashboard_service.py) routes
+            # through TemporalMetadataPostgresBackend.
+            #
+            # Round-2 rework (Codex Finding A): the registry factory is now
+            # ALWAYS installed in postgres mode -- either the real PostgreSQL
+            # factory on success, or a "poison" factory
+            # (install_poison_temporal_metadata_backend_factory) that raises a
+            # clear operational RuntimeError the moment any caller
+            # constructs a TemporalMetadataStore, on failure. Leaving the
+            # factory unset on failure (the round-1 behavior) let
+            # TemporalMetadataStore's facade silently default to the
+            # SQLite backend, reintroducing the exact NFS-backed
+            # SQLite-WAL Cluster-Aware-State violation this bug fixes.
+            # Server startup itself still survives (mirrors the non-fatal
+            # convention used by every other postgres-mode wiring block in
+            # this file, e.g. the coalescer registry and the early
+            # ConfigService pool switch above) -- only temporal reads/writes
+            # fail, loudly and actionably, instead of silently degrading.
+            try:
+                from code_indexer.server.storage.postgres.temporal_metadata_backend import (
+                    TemporalMetadataPostgresBackend,
+                    make_postgres_temporal_metadata_factory,
+                )
+                from code_indexer.storage.temporal_metadata_backend_registry import (
+                    install_poison_temporal_metadata_backend_factory,
+                    set_temporal_metadata_backend_factory,
+                )
+
+                _temporal_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _temporal_pool is not None:
+                    # Bug #1313 round-3: build the factory via the SINGLE
+                    # shared definition (also used by
+                    # temporal_child_wiring.py for the child-process
+                    # bootstrap path) so both compute an identical
+                    # collection_key for the same collection_path. The type
+                    # annotation keeps TemporalMetadataPostgresBackend
+                    # meaningfully referenced (mypy-checked), not merely
+                    # imported for its own sake.
+                    _pg_factory: Callable[[Path], TemporalMetadataPostgresBackend] = (
+                        make_postgres_temporal_metadata_factory(_temporal_pool)
+                    )
+                    set_temporal_metadata_backend_factory(_pg_factory)
+                    logger.info(
+                        "Bug #1313: temporal metadata backend factory installed "
+                        "(PostgreSQL) — TemporalMetadataStore will bypass the "
+                        "NFS-backed SQLite-WAL bottleneck",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    _pool_unavailable_reason = (
+                        "storage_mode=postgres but no PostgreSQL connection "
+                        "pool is available on backend_registry "
+                        "(critical_connection_pool and connection_pool both "
+                        "None)"
+                    )
+                    install_poison_temporal_metadata_backend_factory(
+                        _pool_unavailable_reason
+                    )
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1313",
+                            f"{_pool_unavailable_reason}; installed a poison "
+                            f"temporal metadata backend factory so temporal "
+                            f"reads/writes fail LOUD instead of silently "
+                            f"degrading to the NFS-backed SQLite backend "
+                            f"(Bug #1313)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+            except Exception as _temporal_backend_exc:
+                try:
+                    from code_indexer.storage.temporal_metadata_backend_registry import (
+                        install_poison_temporal_metadata_backend_factory as _install_poison_on_error,
+                    )
+
+                    _install_poison_on_error(
+                        f"failed to install the PostgreSQL temporal metadata "
+                        f"backend factory: {_temporal_backend_exc!r}"
+                    )
+                except Exception:
+                    logger.critical(
+                        "Bug #1313: could not even install the poison temporal "
+                        "metadata backend factory after a wiring failure -- "
+                        "the registry may be left unset and TemporalMetadataStore "
+                        "could silently fall back to SQLite",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1313-B",
+                        f"Failed to install temporal metadata backend factory; "
+                        f"installed a poison factory so temporal reads/writes "
+                        f"fail LOUD instead of silently degrading to the "
+                        f"NFS-backed SQLite backend: {_temporal_backend_exc}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Auto-seed API keys if server config is blank (Story #20)
+        # Bug #1309: This MUST run after the early ConfigService PG pool switch
+        # above (so postgres/cluster mode reads the PG-backed config with the
+        # VoyageAI/Cohere keys) and BEFORE the LLM Lease Lifecycle block below (so
+        # a lease-managed ANTHROPIC_API_KEY is never clobbered by this seeder's
+        # unconditional pop of a blank-config Anthropic key). This block stays
+        # unconditional (not postgres-gated) so solo/SQLite mode -- where the
+        # block above is skipped entirely -- is unaffected.
         logger.info(
             "Server startup: Checking API key auto-seeding",
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
             from code_indexer.server.startup.api_key_seeding import (
                 seed_api_keys_on_startup,
             )
 
-            seeding_result = seed_api_keys_on_startup(config_service)
+            seeding_result = seed_api_keys_on_startup(get_config_service())
 
-            if seeding_result["anthropic_seeded"] or seeding_result["voyageai_seeded"]:
+            if (
+                seeding_result["anthropic_seeded"]
+                or seeding_result["voyageai_seeded"]
+                or seeding_result["cohere_seeded"]
+            ):
                 logger.info(
                     f"API key auto-seeding completed: "
                     f"anthropic={seeding_result['anthropic_seeded']}, "
-                    f"voyageai={seeding_result['voyageai_seeded']}",
+                    f"voyageai={seeding_result['voyageai_seeded']}, "
+                    f"cohere={seeding_result['cohere_seeded']}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
@@ -728,7 +1259,8 @@ def make_lifespan(
                 initialize_claude_manager_on_startup,
             )
 
-            # Get fresh config (may have been updated by API key seeding)
+            # Get fresh config (reflects the PG-backed runtime config merged by
+            # the ConfigService pool switch earlier in startup, in cluster mode)
             server_config = config_service.get_config()
 
             claude_init_result = initialize_claude_manager_on_startup(
@@ -848,7 +1380,22 @@ def make_lifespan(
             server_config = config_service.get_config()
             db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
 
-            # Create scheduler instance
+            # Bug #1100: select tracking_backend BEFORE constructing the scheduler so
+            # both the scheduler AND the hook use the SAME backend instance.
+            # In cluster/postgres mode: backend_registry.description_refresh_tracking (PG).
+            # In solo mode (backend_registry is None): node-local SQLite fallback.
+            # The scheduler's constructor SQLite fallback must NOT be relied upon in
+            # server mode — that caused the split-brain (hook -> PG, scheduler -> SQLite).
+            if backend_registry is not None:
+                tracking_backend = backend_registry.description_refresh_tracking
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DescriptionRefreshTrackingBackend,
+                )
+
+                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+
+            # Create scheduler instance — receives the registry-selected tracking_backend
             meta_dir = Path(golden_repos_dir) / "cidx-meta"
             description_refresh_scheduler = DescriptionRefreshScheduler(
                 db_path=db_path,
@@ -862,17 +1409,16 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
+                tracking_backend=tracking_backend,
+                golden_backend=(
+                    backend_registry.golden_repo_metadata
+                    if backend_registry is not None
+                    else None
+                ),
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
-            if backend_registry is not None:
-                tracking_backend = backend_registry.description_refresh_tracking
-            else:
-                from code_indexer.server.storage.sqlite_backends import (
-                    DescriptionRefreshTrackingBackend,
-                )
-
-                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+            # tracking_backend already selected above — same instance as scheduler uses.
             meta_description_hook.set_tracking_backend(tracking_backend)
             meta_description_hook.set_scheduler(description_refresh_scheduler)
 
@@ -1018,28 +1564,19 @@ def make_lifespan(
                     )
                 )
 
-            # Start scheduler (internally checks if enabled).
-            # C4 (Bug #580 extension): in cluster (postgres) mode this scheduler is
-            # leader-gated -- started in _on_become_leader so only the leader runs it
-            # (avoids N replicas duplicating work / racing). Solo mode starts now.
+            # Start scheduler (internally checks if enabled)
+            description_refresh_scheduler.start()
             app.state.description_refresh_scheduler = description_refresh_scheduler
-            if storage_mode != "postgres":
-                description_refresh_scheduler.start()
-                if server_config.claude_integration_config.description_refresh_enabled:
-                    logger.info(
-                        f"Description refresh scheduler started "
-                        f"(interval: {server_config.claude_integration_config.description_refresh_interval_hours}h)",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                else:
-                    logger.info(
-                        "Description refresh scheduler is disabled (can be enabled in Web UI)",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+
+            if server_config.claude_integration_config.description_refresh_enabled:
+                logger.info(
+                    f"Description refresh scheduler started "
+                    f"(interval: {server_config.claude_integration_config.description_refresh_interval_hours}h)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             else:
                 logger.info(
-                    "Description refresh scheduler leader-gated "
-                    "(starts on the elected leader in cluster mode)",
+                    "Description refresh scheduler is disabled (can be enabled in Web UI)",
                     extra={"correlation_id": get_correlation_id()},
                 )
 
@@ -1079,26 +1616,95 @@ def make_lifespan(
                 storage_mode=storage_mode,
                 backend_registry=backend_registry,
             )
-            # C4: leader-gated in cluster mode (started in _on_become_leader).
+            data_retention_scheduler.start()
             app.state.data_retention_scheduler = data_retention_scheduler
-            if storage_mode != "postgres":
-                data_retention_scheduler.start()
-                logger.info(
-                    "Data retention scheduler started",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "Data retention scheduler leader-gated "
-                    "(starts on the elected leader in cluster mode)",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            logger.info(
+                "Data retention scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
         except Exception as e:
             # Log error but don't block server startup
             logger.warning(
                 format_error_log(
                     "APP-GENERAL-033",
                     f"Failed to initialize data retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize Research Assistant workspace GC (Bug #1085).
+        # Reconciles ~/.cidx-server/research/<uuid> dirs against the live
+        # research_sessions registry, deleting orphans older than retention.
+        # The first sweep (on .start()) IS the startup reconciliation.
+        research_cleanup_scheduler = None
+        logger.info(
+            "Server startup: Initializing research cleanup scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.research_cleanup_service import (
+                ResearchCleanupScheduler,
+                make_backend_live_folder_provider,
+            )
+            from code_indexer.server.services.research_assistant_service import (
+                _default_research_base_dir,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _rcs_get_config_service,
+            )
+
+            _rcs_config_service = _rcs_get_config_service()
+            _rcs_db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+            def _research_retention_days_provider() -> float:
+                return float(
+                    _rcs_config_service.get_config().research_session_retention_days
+                )
+
+            # Bug #1085 BLOCKING-1: the live set MUST come from the SAME
+            # research_sessions backend the writers use. In cluster/postgres the
+            # registry's backend is PostgreSQL; in solo it is SQLite. A hardcoded
+            # SQLite-only provider read an EMPTY table in postgres mode -> set()
+            # -> mass-deletion of LIVE sessions. The supplier returns a REAL
+            # backend in every mode (registry's, or a local SQLite backend over
+            # the same DB the solo writers use), so list_sessions() always
+            # reflects the active store.
+            def _research_sessions_backend_supplier():
+                # Resolve the active backend lazily (the registry is only wired
+                # after startup). None -> make_backend_live_folder_provider
+                # raises -> cleanup() aborts with ZERO deletions (fail-safe).
+                if backend_registry is not None:
+                    registry_backend = backend_registry.research_sessions
+                    if registry_backend is not None:
+                        return registry_backend
+                # Solo without a registry: the writers use the local SQLite DB,
+                # so read the live set from a SQLite backend over that SAME DB
+                # -- NOT an empty/absent set (which would over-delete).
+                from code_indexer.server.storage.sqlite_backends import (
+                    ResearchSessionsSqliteBackend,
+                )
+
+                return ResearchSessionsSqliteBackend(_rcs_db_path)
+
+            research_cleanup_scheduler = ResearchCleanupScheduler(
+                research_base_dir=_default_research_base_dir(),
+                retention_days_provider=_research_retention_days_provider,
+                live_folder_provider=make_backend_live_folder_provider(
+                    _research_sessions_backend_supplier
+                ),
+            )
+            research_cleanup_scheduler.start()
+            app.state.research_cleanup_scheduler = research_cleanup_scheduler
+            logger.info(
+                "Research cleanup scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            # Never block server startup on the GC scheduler.
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-054",
+                    f"Failed to initialize research cleanup scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -1136,20 +1742,47 @@ def make_lifespan(
                 background_job_manager=background_job_manager,
                 config_service=_reaper_config_service,
             )
-            # C4: leader-gated in cluster mode (started in _on_become_leader).
+            activated_reaper_scheduler.start()
             app.state.activated_reaper_scheduler = activated_reaper_scheduler
-            if storage_mode != "postgres":
-                activated_reaper_scheduler.start()
-                logger.info(
-                    "Activated reaper scheduler started",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "Activated reaper scheduler leader-gated "
-                    "(starts on the elected leader in cluster mode)",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+
+            # Story #1032 AC8 / HIGH #3: orphan trash sweep -- recover leftover
+            # trash entries from crashes mid-Phase-2.
+            # Dispatched as an asyncio background task so server startup never
+            # blocks on large trash directories (HIGH #3 fix; previous synchronous
+            # call could block for ~17 min with 10K orphans × ~100ms each).
+            # The sweep runs after the server is already listening.
+            # Cap is read from bootstrap config (default 100 entries per startup).
+            _sweep_cap: int = getattr(
+                startup_config, "orphan_trash_sweep_per_startup_cap", 100
+            )
+            _arm = golden_repo_manager.activated_repo_manager
+
+            async def _run_orphan_sweep() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+
+                    _swept = await _to_thread.run_sync(
+                        lambda: _arm.sweep_orphan_trash_dirs(cap=_sweep_cap)
+                    )
+                    if _swept > 0:
+                        logger.info(
+                            "Story #1032 AC8: background orphan trash sweep purged %d entries "
+                            "(cap=%d)",
+                            _swept,
+                            _sweep_cap,
+                        )
+                except Exception as _sweep_err:  # noqa: BLE001 — startup safety
+                    logger.warning(
+                        "Story #1032 AC8: background orphan trash sweep failed: %s",
+                        _sweep_err,
+                        exc_info=True,
+                    )
+
+            asyncio.create_task(_run_orphan_sweep())
+            logger.info(
+                "Activated reaper scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -1256,6 +1889,129 @@ def make_lifespan(
             # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
             _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
 
+            # Bug #1040 follow-up: clean stale sentinel lock files on startup.
+            # Server restart kills analysis threads but leaves sentinel files on
+            # disk, blocking the dep-map UI with a stuck "Processing..." state.
+            # CLUSTER SAFETY (Codex SENTINEL-1): only delete sentinels owned by
+            # THIS node. Sibling nodes may have live jobs behind their sentinels.
+            if _dep_map_dir.exists():
+                import glob as _glob_sentinel
+                import json as _json_sentinel
+                import socket as _socket_sentinel
+
+                _this_node_id = ""
+                try:
+                    _sc_path = Path(server_data_dir) / "config.json"
+                    if _sc_path.exists():
+                        _sc_data = _json_sentinel.loads(
+                            _sc_path.read_text(encoding="utf-8")
+                        )
+                        _this_node_id = (
+                            _sc_data.get("cluster", {}).get("node_id", "") or ""
+                        )
+                    if not _this_node_id:
+                        _this_node_id = _socket_sentinel.gethostname()
+                except Exception:
+                    _this_node_id = _socket_sentinel.gethostname()
+
+                for _stale_lock in _glob_sentinel.glob(
+                    str(_dep_map_dir / "_active_*.lock")
+                ):
+                    try:
+                        _lock_text = Path(_stale_lock).read_text(encoding="utf-8")
+                        _lock_data = _json_sentinel.loads(_lock_text)
+                        _lock_node = _lock_data.get("node_id", "")
+                        if _lock_node and _lock_node != _this_node_id:
+                            logger.info(
+                                "Startup: keeping sentinel %s (owned by %s, we are %s)",
+                                _stale_lock,
+                                _lock_node,
+                                _this_node_id,
+                            )
+                            continue
+                        Path(_stale_lock).unlink()
+                        logger.info(
+                            "Startup: removed stale sentinel %s (owned by %s)",
+                            _stale_lock,
+                            _lock_node or "unknown",
+                        )
+                    except (_json_sentinel.JSONDecodeError, KeyError):
+                        Path(_stale_lock).unlink(missing_ok=True)
+                        logger.info("Startup: removed corrupt sentinel %s", _stale_lock)
+                    except OSError as _e:
+                        logger.warning(
+                            "Startup: failed to remove stale sentinel %s: %s",
+                            _stale_lock,
+                            _e,
+                        )
+
+            # Bug #1040 follow-up: fail orphaned running/pending jobs in the DB.
+            # Server restart kills threads but leaves job rows as "running" in
+            # PG/SQLite, blocking new submissions via the partial unique index.
+            try:
+                _orphan_count = background_job_manager.fail_orphaned_jobs(
+                    error="Orphaned by server restart"
+                )
+                if _orphan_count:
+                    logger.info(
+                        "Startup: failed %d orphaned running/pending jobs",
+                        _orphan_count,
+                    )
+            except AttributeError:
+                # fail_orphaned_jobs not yet implemented on this BJM version
+                pass
+            except Exception as _oe:
+                logger.warning("Startup: orphaned job cleanup failed: %s", _oe)
+
+            # Bug #1228: reconcile orphaned query-analytics exports.
+            # Server restart kills export worker threads but leaves rows in
+            # pending/running forever.  Mirror the fail_orphaned_jobs pattern:
+            # fail-soft, log the count, never block startup.
+            _qae_svc = getattr(app.state, "query_analytics_export_service", None)
+            if _qae_svc is not None:
+                try:
+                    _export_orphan_count = _qae_svc.reconcile_orphaned_exports()
+                    if _export_orphan_count:
+                        logger.info(
+                            "Startup: failed %d orphaned pending/running export(s)",
+                            _export_orphan_count,
+                        )
+                except Exception as _eoe:
+                    logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
+
+            # Bug #1317: reconcile golden_repos registry-orphans (rows with
+            # no on-disk clone -- can arise from a provisioning failure that
+            # predates the atomicity guard, a manually-deleted clone
+            # directory, or a lost NFS/CoW volume). Mirrors the
+            # fail_orphaned_jobs / reconcile_orphaned_exports pattern:
+            # fail-soft, log the count, never block startup. Correct on
+            # both SQLite (solo) and PostgreSQL (cluster) since
+            # list_golden_repos() always queries the shared backend.
+            if golden_repo_manager is not None:
+                try:
+                    from code_indexer.server.services.golden_repo_reconciler import (
+                        reconcile_golden_repo_registry,
+                    )
+
+                    _reconcile_result = reconcile_golden_repo_registry(
+                        golden_repo_manager
+                    )
+                    if _reconcile_result.orphans_found:
+                        logger.info(
+                            "Startup: Bug #1317 reconcile found %d golden-repo "
+                            "registry-orphan(s) (%d removal(s) submitted, %d "
+                            "failed to submit): %s",
+                            len(_reconcile_result.orphans_found),
+                            len(_reconcile_result.orphans_removed),
+                            len(_reconcile_result.orphans_failed),
+                            _reconcile_result.orphans_found,
+                        )
+                except Exception as _gre:
+                    logger.warning(
+                        "Startup: golden-repo registry-orphan reconcile failed: %s",
+                        _gre,
+                    )
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,
@@ -1322,6 +2078,20 @@ def make_lifespan(
             # Start scheduler — invoker is bound, safe to start
             dependency_map_service.start_scheduler()
             app.state.dependency_map_service = dependency_map_service
+
+            # Bug #1153: Wire dep-map cooperative-cancellation handlers so that
+            # BackgroundJobManager.cancel_job() can stop the dep-map worker thread
+            # and release the SharedJobSentinel when a cancel is requested via the
+            # generic MCP cancel_job tool.  Without this, the worker keeps running
+            # and new triggers 409 forever.
+            background_job_manager.register_cancel_handler(
+                "dependency_map_full",
+                dependency_map_service.cancel_running_analysis,
+            )
+            background_job_manager.register_cancel_handler(
+                "dependency_map_delta",
+                dependency_map_service.cancel_running_analysis,
+            )
 
             if server_config.claude_integration_config.dependency_map_enabled:
                 logger.info(
@@ -1844,12 +2614,20 @@ def make_lifespan(
             # Start background sync if pull is enabled
             config = config_service.get_config()
             if config.langfuse_config and config.langfuse_config.pull_enabled:
-                langfuse_sync_service.start()  # type: ignore[name-defined]
-                logger.info(
-                    f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
-                    f"projects={len(config.langfuse_config.pull_projects)})",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                if storage_mode == "postgres":
+                    logger.info(
+                        "Langfuse sync deferred to leader election in cluster mode "
+                        f"(interval={config.langfuse_config.pull_sync_interval_seconds}s, "
+                        f"projects={len(config.langfuse_config.pull_projects)})",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    langfuse_sync_service.start()  # type: ignore[name-defined]
+                    logger.info(
+                        f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
+                        f"projects={len(config.langfuse_config.pull_projects)})",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             else:
                 logger.info(
                     "Langfuse pull sync disabled, service initialized but not started",
@@ -1939,35 +2717,16 @@ def make_lifespan(
             try:
                 _pg_dsn = ""
                 _configured_node_id = ""
-                # C6 repo sharding is opt-in (cluster.sharding_enabled, default
-                # False). Off = replication mode (every pod caches+serves all
-                # repos); on = HRW ownership + single-repo forwarding.
-                _sharding_enabled = False
                 try:
                     import json as _json
 
-                    # Bug: read config from the SAME path service_init.py uses
-                    # (CIDX_SERVER_DATA_DIR/config.json), not a hardcoded
-                    # ~/.cidx-server. When CIDX_SERVER_DATA_DIR is overridden
-                    # (e.g. /data in k8s), the old hardcoded path did not exist,
-                    # so postgres_dsn came back empty and the entire cluster-
-                    # services block (leader election, heartbeat, reconciliation)
-                    # was silently skipped in multi-pod deployments.
-                    _server_data_dir = os.environ.get(
-                        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
-                    )
-                    _cfg_path = Path(_server_data_dir) / "config.json"
+                    _cfg_path = Path.home() / ".cidx-server" / "config.json"
                     if _cfg_path.exists():
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
                             _configured_node_id = _cfg_data.get("cluster", {}).get(
                                 "node_id", ""
-                            )
-                            _sharding_enabled = bool(
-                                _cfg_data.get("cluster", {}).get(
-                                    "sharding_enabled", False
-                                )
                             )
                 except Exception:
                     pass
@@ -2018,154 +2777,6 @@ def make_lifespan(
                     _heartbeat.set_leader_election(_leader_election)
                     _heartbeat.start()
                     _cluster_services.append(("heartbeat", _heartbeat))
-
-                    # C6 repo sharding. Phase 0: ShardOwnership decides which repos
-                    # this pod caches (owned -> cache; else load-and-discard).
-                    # Phase 1: ShardRouter forwards single-repo queries for
-                    # non-owned repos to an owner pod that has them cached.
-                    # replicas=2 default (Phase-later Web UI config). All non-fatal
-                    # -> falls back to symmetric caching + local serving.
-                    if _sharding_enabled:
-                        try:
-                            from code_indexer.server.services.shard_ownership import (
-                                ShardOwnership,
-                            )
-                            from code_indexer.server.services.shard_router import (
-                                ShardRouter,
-                            )
-
-                            _shard_ownership = ShardOwnership(
-                                node_id=_node_id,
-                                active_nodes_provider=_heartbeat.get_active_nodes,
-                                replicas=2,
-                            )
-                            _sqm = getattr(app.state, "semantic_query_manager", None)
-                            if _sqm is not None:
-                                _sqm.set_shard_ownership(_shard_ownership)
-                            # Expose ownership on app.state so the multi-repo endpoint
-                            # can warm the multi-search service's cache for owned repos
-                            # (C6 Phase 3).
-                            app.state.shard_ownership = _shard_ownership
-                            # Also inject into the shared multi-search singleton at
-                            # startup so the MCP omni path (which does not go through
-                            # the REST endpoint) caches owned repos too.
-                            try:
-                                from code_indexer.server.routes.multi_query_routes import (
-                                    get_multi_search_service,
-                                )
-
-                                get_multi_search_service().set_shard_ownership(
-                                    _shard_ownership
-                                )
-                            except Exception:
-                                logging.getLogger(__name__).warning(
-                                    "C6: could not inject shard ownership into the "
-                                    "multi-search singleton at startup"
-                                )
-                            # http_client_factory is set later in startup
-                            # (_apply_fault_injection_state), after this cluster block,
-                            # so app.state may not have it yet -- construct a dedicated
-                            # one for internal pod-to-pod routing (fault injection is
-                            # not relevant to internal forwards).
-                            from code_indexer.server.fault_injection.http_client_factory import (
-                                HttpClientFactory,
-                            )
-
-                            _http_factory = getattr(
-                                app.state, "http_client_factory", None
-                            ) or HttpClientFactory(fault_injection_service=None)
-                            app.state.shard_router = ShardRouter(
-                                node_id=_node_id,
-                                shard_ownership=_shard_ownership,
-                                node_addresses_provider=_heartbeat.get_node_addresses,
-                                http_client_factory=_http_factory,
-                            )
-                            logging.getLogger(__name__).info(
-                                "C6: shard ownership + router wired (node_id=%s, replicas=2)",
-                                _node_id,
-                            )
-
-                            # C6 rebalance pre-warming: proactively load this pod's
-                            # owned repos into the cache so the first query after a
-                            # membership change is not a cold load. Best-effort and
-                            # fully fail-safe (a warm failure just leaves the repo cold
-                            # until its first query -- today's behaviour).
-                            try:
-                                from code_indexer.server.services.shard_prewarm_service import (
-                                    ShardPrewarmService,
-                                )
-                                from code_indexer.server.services.search_service import (
-                                    SemanticSearchService,
-                                )
-                                from code_indexer.server.models.api_models import (
-                                    SemanticSearchRequest,
-                                )
-
-                                def _list_shardable_repos() -> list:
-                                    # The shardable set is the GOLDEN repos (the shared,
-                                    # indexed repos queries fan out over) -- resolved
-                                    # lazily from app.state so startup ordering does not
-                                    # matter.
-                                    grm = getattr(
-                                        app.state, "golden_repo_manager", None
-                                    )
-                                    if grm is None:
-                                        return []
-                                    try:
-                                        return [
-                                            str(
-                                                r.get("alias")
-                                                or r.get("alias_name")
-                                                or ""
-                                            )
-                                            for r in grm.list_golden_repos()
-                                        ]
-                                    except Exception:
-                                        return []
-
-                                def _warm_repo(alias: str) -> None:
-                                    grm = getattr(
-                                        app.state, "golden_repo_manager", None
-                                    )
-                                    if grm is None or not alias:
-                                        return
-                                    repo_path = grm.get_actual_repo_path(alias)
-                                    if not repo_path:
-                                        return
-                                    # A minimal search loads the repo's HNSW index into
-                                    # this pod's cache (Phase 0 caches it since owned).
-                                    SemanticSearchService().search_repository_path(
-                                        str(repo_path),
-                                        SemanticSearchRequest(query="warm", limit=1),
-                                    )
-
-                                _prewarm = ShardPrewarmService(
-                                    _shard_ownership,
-                                    _list_shardable_repos,
-                                    _warm_repo,
-                                )
-                                _prewarm.start()
-                                _cluster_services.append(("shard_prewarm", _prewarm))
-                            except Exception:
-                                logging.getLogger(__name__).warning(
-                                    "C6: could not start shard prewarm service"
-                                )
-                        except Exception:
-                            logging.getLogger(__name__).exception(
-                                "C6: failed to wire sharding; falling back to "
-                                "symmetric caching + local serving"
-                            )
-                    else:
-                        # Replication mode (default): no HRW ownership gate and
-                        # no query forwarding, so every pod caches and serves all
-                        # repos locally -> N replicas scale read concurrency. Enable
-                        # cluster.sharding_enabled only when the working set exceeds
-                        # one pod's cache. Fail-open helpers already treat a missing
-                        # shard_ownership/shard_router as 'own everything, serve local'.
-                        logging.getLogger(__name__).info(
-                            "C6: sharding disabled (cluster.sharding_enabled=false); "
-                            "replication mode -- every pod caches and serves all repos"
-                        )
 
                     # Job reconciliation
                     from code_indexer.server.services.job_reconciliation_service import (
@@ -2237,6 +2848,13 @@ def make_lifespan(
                     elevated_session_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
+                    # Task #26: Wire cluster pool for token-bucket rate limiter
+                    from code_indexer.server.auth.token_bucket import (
+                        rate_limiter as _token_bucket_rate_limiter,
+                    )
+
+                    _token_bucket_rate_limiter.set_connection_pool(_cluster_pool)
+
                     # Bug #573: Wire cluster pools for password change
                     # and refresh token rate limiters
                     from code_indexer.server.auth.rate_limiter import (
@@ -2274,7 +2892,115 @@ def make_lifespan(
 
                     _config_svc = get_config_service()
                     _config_svc.set_connection_pool(_cluster_pool)
+                    # Story #1198 AC2/FIX-3: register materialize_launch_config as cb1
+                    # before the reload poller starts, so config changes trigger a re-write.
+                    _config_svc.register_on_change_callback(
+                        lambda _cfg: _config_svc.materialize_launch_config()
+                    )  # noqa: E501
                     _config_svc.start_config_reload(interval_seconds=30)
+
+                    # Bug #998: Late-initialize OIDC on cluster secondary nodes.
+                    # OIDC startup (line ~1649) runs before ConfigService has PG pool,
+                    # so secondary nodes that lack OIDC in bootstrap config.json
+                    # skip initialization. Now that PG config is available, retry.
+                    if _oidc_routes.oidc_manager is None:
+                        _config_svc.load_config()  # Force reload from PG
+                        _late_config = _config_svc.get_config()
+                        if (
+                            _late_config
+                            and hasattr(_late_config, "oidc_provider_config")
+                            and _late_config.oidc_provider_config
+                            and _late_config.oidc_provider_config.enabled
+                        ):
+                            from code_indexer.server.auth.oidc.oidc_manager import (
+                                OIDCManager,
+                            )
+                            from code_indexer.server.auth.oidc.state_manager import (
+                                StateManager,
+                            )
+
+                            _late_state_mgr = StateManager()
+                            _late_oidc_mgr = OIDCManager(
+                                config=_late_config.oidc_provider_config,
+                                user_manager=user_manager,
+                                jwt_manager=jwt_manager,
+                            )
+                            await _late_oidc_mgr.initialize()
+
+                            _oidc_routes.oidc_manager = _late_oidc_mgr
+                            _oidc_routes.state_manager = _late_state_mgr
+                            _oidc_routes.server_config = _late_config
+
+                            _late_state_mgr.set_connection_pool(_cluster_pool)
+
+                            if (
+                                hasattr(app.state, "group_manager")
+                                and app.state.group_manager
+                            ):
+                                _late_oidc_mgr.group_manager = app.state.group_manager
+
+                            logger.info(
+                                "OIDC late-initialized from PG config "
+                                "(cluster node had no OIDC in bootstrap config)",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+
+                    # Bug #998 variant: Late-initialize LLM lease lifecycle
+                    # on cluster secondary nodes.  Early init (line ~687) runs
+                    # before ConfigService has PG pool, so secondary nodes
+                    # that lack subscription mode in local SQLite skip it.
+                    if llm_lifecycle_service is None:
+                        try:
+                            _config_svc.load_config()
+                            _late_llm_config = _config_svc.get_config()
+                            _late_claude_config = (
+                                _late_llm_config.claude_integration_config
+                                if _late_llm_config
+                                else None
+                            )
+                            if (
+                                _late_claude_config
+                                and _late_claude_config.claude_auth_mode
+                                == "subscription"
+                                and _late_claude_config.llm_creds_provider_url
+                                and _late_claude_config.llm_creds_provider_api_key
+                            ):
+                                from code_indexer.server.services.llm_creds_client import (
+                                    LlmCredsClient,
+                                )
+                                from code_indexer.server.config.llm_lease_state import (
+                                    LlmLeaseStateManager,
+                                )
+                                from code_indexer.server.services.claude_credentials_file_manager import (
+                                    ClaudeCredentialsFileManager,
+                                )
+                                from code_indexer.server.services.llm_lease_lifecycle import (
+                                    LlmLeaseLifecycleService,
+                                )
+
+                                _late_llm_client = LlmCredsClient(
+                                    provider_url=_late_claude_config.llm_creds_provider_url,
+                                    api_key=_late_claude_config.llm_creds_provider_api_key,
+                                )
+                                llm_lifecycle_service = LlmLeaseLifecycleService(
+                                    client=_late_llm_client,
+                                    state_manager=LlmLeaseStateManager(),
+                                    credentials_manager=ClaudeCredentialsFileManager(),
+                                )
+                                llm_lifecycle_service.start(
+                                    consumer_id=_late_claude_config.llm_creds_provider_consumer_id
+                                )
+                                app.state.llm_lifecycle_service = llm_lifecycle_service
+                                logger.info(
+                                    "LLM lease lifecycle late-initialized from PG config "
+                                    "(cluster node had no subscription mode in local config)",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                        except Exception as _late_llm_exc:
+                            logger.warning(
+                                "LLM lease lifecycle late-init failed (non-fatal): %s",
+                                _late_llm_exc,
+                            )
 
                     # Bug #587: Wire cluster pool for activated repos
                     if (
@@ -2303,10 +3029,16 @@ def make_lifespan(
                         _cluster_pool
                     )
 
-                    # Bug #581: Sync SSH keys from PG to local ~/.ssh/
+                    # Bug #581 / Bug #1072: Sync SSH keys from PG to local ~/.ssh/
                     try:
                         from code_indexer.server.services.ssh_key_sync_service import (
                             SSHKeySyncService,
+                        )
+                        from code_indexer.server.services.cluster_key_provider import (
+                            load_or_create_fernet_key,
+                        )
+                        from code_indexer.server.services.ssh_key_manager import (
+                            SSHKeyManager,
                         )
 
                         _ssh_backend = (
@@ -2315,7 +3047,24 @@ def make_lifespan(
                             else None
                         )
                         assert _ssh_backend is not None
-                        _ssh_sync = SSHKeySyncService(ssh_keys_backend=_ssh_backend)
+
+                        # Bug #1072: Load (or race-safely create) the Fernet key
+                        # used to encrypt/decrypt SSH private keys in cluster mode.
+                        _ssh_fernet = load_or_create_fernet_key(
+                            _cluster_pool, "ssh_key_encryption_key"
+                        )
+
+                        # Bug #1072: Wire cluster deps into SSHKeyManager so that
+                        # future key registrations encrypt the private content to PG.
+                        SSHKeyManager.set_cluster_dependencies(
+                            _ssh_backend, _ssh_fernet
+                        )
+
+                        # Bug #1072: Pass fernet to sync service so it decrypts
+                        # private keys read from PG before writing to ~/.ssh/.
+                        _ssh_sync = SSHKeySyncService(
+                            ssh_keys_backend=_ssh_backend, fernet=_ssh_fernet
+                        )
                         _sync_result = _ssh_sync.sync()
                         logger.info(
                             "Bug #581: SSH key sync complete: %d written, %d removed, %d unchanged",
@@ -2410,6 +3159,56 @@ def make_lifespan(
                         postgres_dsn=_pg_dsn,
                     )
 
+                    # Story #1002: Detect NFS mount for golden repo volume monitoring.
+                    # Typed as Any because NfsMountValidator is imported conditionally
+                    # inside the try block — the type is unavailable at declaration
+                    # time without a forward reference that would complicate the import.
+                    # On any detection failure the value stays None, which disables NFS
+                    # volume reporting gracefully (non-fatal degradation by design).
+                    _nfs_validator_for_health: Any = None
+                    try:
+                        import psutil as _nfs_psutil
+
+                        _gr_resolved = Path(golden_repos_dir).resolve()
+                        # Find the most specific (longest mountpoint) NFS partition
+                        # that contains the golden repos directory. Use
+                        # Path.is_relative_to() for boundary-safe containment so
+                        # /mnt/repos-backup is not matched by mountpoint /mnt/repos.
+                        _best_nfs_part = None
+                        _best_nfs_len = 0
+                        for _nfs_part in _nfs_psutil.disk_partitions(all=True):
+                            if _nfs_part.fstype not in ("nfs", "nfs4"):
+                                continue
+                            if not _gr_resolved.is_relative_to(
+                                Path(_nfs_part.mountpoint)
+                            ):
+                                continue
+                            if len(_nfs_part.mountpoint) > _best_nfs_len:
+                                _best_nfs_part = _nfs_part
+                                _best_nfs_len = len(_nfs_part.mountpoint)
+                        if _best_nfs_part is not None:
+                            from code_indexer.server.storage.shared.nfs_validator import (
+                                NfsMountValidator,
+                            )
+
+                            _nfs_validator_for_health = NfsMountValidator(
+                                _best_nfs_part.mountpoint
+                            )
+                            logger.info(
+                                "Story #1002: NFS golden repo volume detected at %s"
+                                " (fstype=%s)",
+                                _best_nfs_part.mountpoint,
+                                _best_nfs_part.fstype,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                    except Exception as _nfs_err:
+                        # Detection failure is non-fatal: NFS volume reporting is
+                        # disabled for this startup, local volumes still visible.
+                        logger.debug(
+                            "Could not detect NFS mount for golden repos: %s", _nfs_err
+                        )
+                    app.state.nfs_validator = _nfs_validator_for_health
+
                     # Story #527: Initialize HealthCheckService singleton with
                     # postgres mode so _check_database_health uses PG connectivity.
                     from code_indexer.server.services.health_service import (
@@ -2419,6 +3218,7 @@ def make_lifespan(
                     get_health_service(
                         storage_mode="postgres",
                         postgres_dsn=_pg_dsn,
+                        nfs_validator=_nfs_validator_for_health,
                     )
 
                     # Bug #580: Gate housekeeping services behind leader election.
@@ -2433,22 +3233,20 @@ def make_lifespan(
                         _dist_worker.start()
                         if self_monitoring_service is not None:
                             self_monitoring_service.start()
-                        # C4: start the leader-gated schedulers (only the leader runs
-                        # these in cluster mode; each internally checks its enabled flag).
-                        for _sched in (
-                            description_refresh_scheduler,
-                            data_retention_scheduler,
-                            activated_reaper_scheduler,
-                        ):
-                            if _sched is not None:
-                                try:
-                                    _sched.start()
-                                except Exception as e:
-                                    logger.warning(
-                                        f"C4: Failed to start leader-gated scheduler "
-                                        f"{type(_sched).__name__}: {e}",
-                                        extra={"correlation_id": get_correlation_id()},
-                                    )
+                        # langfuse_sync_service is defined in an outer conditional import
+                        # try-block; type: ignore[name-defined] matches the established
+                        # pattern used at the definition site and call sites above.
+                        if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                            _lf_cfg = config_service.get_config()
+                            if (
+                                _lf_cfg.langfuse_config
+                                and _lf_cfg.langfuse_config.pull_enabled
+                            ):
+                                langfuse_sync_service.start()  # type: ignore[name-defined]
+                                logger.info(
+                                    "Langfuse sync started on leader node",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
 
                     def _on_lose_leadership():
                         logger.info(
@@ -2477,21 +3275,21 @@ def make_lifespan(
                                     f"Bug #580: Failed to stop self-monitoring service: {e}",
                                     extra={"correlation_id": get_correlation_id()},
                                 )
-                        # C4: stop the leader-gated schedulers on losing leadership.
-                        for _sched in (
-                            description_refresh_scheduler,
-                            data_retention_scheduler,
-                            activated_reaper_scheduler,
-                        ):
-                            if _sched is not None:
-                                try:
-                                    _sched.stop()
-                                except Exception as e:
-                                    logger.warning(
-                                        f"C4: Failed to stop leader-gated scheduler "
-                                        f"{type(_sched).__name__}: {e}",
-                                        extra={"correlation_id": get_correlation_id()},
-                                    )
+                        # langfuse_sync_service is defined in an outer conditional import
+                        # try-block; type: ignore[name-defined] matches the established
+                        # pattern used at the definition site and call sites above.
+                        if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                            try:
+                                langfuse_sync_service.stop()  # type: ignore[name-defined]
+                                logger.info(
+                                    "Langfuse sync stopped on leadership loss",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to stop Langfuse sync on leadership loss: {e}",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
 
                     _leader_election._on_become_leader = _on_become_leader
                     _leader_election._on_lose_leadership = _on_lose_leadership
@@ -2553,6 +3351,7 @@ def make_lifespan(
             _node_metrics_writer = NodeMetricsWriterService(
                 backend=_nm_backend,
                 node_id=_nm_node_id,
+                nfs_validator=getattr(app.state, "nfs_validator", None),
             )
             _node_metrics_writer.start()
             app.state.node_metrics_writer = _node_metrics_writer
@@ -2599,7 +3398,452 @@ def make_lifespan(
                 )
             )
 
+        # Story #1079 Phase E: build the embedding coalescer registry ONCE, after
+        # providers + runtime config are available and fault injection has wired
+        # app.state.http_client_factory. The registry holds one EmbeddingCoalescer
+        # per configured :embed lane; coalesced_query_embedding reads it live and
+        # falls back to the direct governed call when it is absent (CLI/solo never
+        # build one). Non-fatal: a failure leaves no registry, so queries simply
+        # use the direct governed single call.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                build_coalescer_registry,
+                set_coalescer_registry,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg_svc,
+            )
+
+            _coalescer_registry = build_coalescer_registry(
+                _get_cfg_svc().get_config(),
+                http_client_factory=getattr(app.state, "http_client_factory", None),
+            )
+            set_coalescer_registry(_coalescer_registry)
+            logger.info(
+                "Embedding coalescer registry built (Story #1079 Phase E)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1079",
+                    f"Failed to build embedding coalescer registry "
+                    f"(queries will use the direct governed call): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Story #1105: build the query embedding cache ONCE after providers +
+        # config are available (same timing as the coalescer registry above).
+        # The cache is sourced from backend_registry.query_embedding_cache in
+        # both SQLite (solo) and PostgreSQL (cluster) modes — no fallback to an
+        # alternative backend so misconfiguration surfaces immediately.
+        # Non-fatal: failure leaves the cache unset so queries use the live path.
+        try:
+            from code_indexer.server.services.governed_call import (
+                set_query_embedding_cache,
+            )
+            from code_indexer.server.services.query_embedding_cache import (
+                QueryEmbeddingCache as _QueryEmbeddingCache,
+            )
+
+            _qec_backend = (
+                backend_registry.query_embedding_cache
+                if backend_registry is not None
+                else None
+            )
+            if _qec_backend is not None:
+                # enabled / mode are read LIVE on every call via the config service
+                # (AC3 "read LIVE each call") — no frozen snapshot at construction.
+                _query_embedding_cache = _QueryEmbeddingCache(
+                    backend=_qec_backend,
+                )
+                set_query_embedding_cache(_query_embedding_cache)
+                # Bug #1181 Perf Fix #2: start the async touch-flush background thread
+                # so cache hits buffer last_used touches instead of doing synchronous
+                # DB writes on the hot query path.
+                _query_embedding_cache.start()
+                logger.info(
+                    "Query embedding cache built and async touch flusher started "
+                    "(Story #1105, Bug #1181 Perf Fix #2)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Query embedding cache: no backend available (solo CLI mode) — "
+                    "cache disabled (Story #1105)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1105",
+                    f"Failed to build query embedding cache "
+                    f"(queries will use the live path): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Story #1295 (Epic #1288 final): build EmbeddingCacheOtelMetrics --
+        # the DB-backed OTEL re-source that replaces the Story #1109 (S5)
+        # in-memory QueryEmbeddingCacheMetrics tracker. Every windowed
+        # instrument (hit_rate, provider_calls, hits, misses, long_key,
+        # audit_top10_overlap, shadow_cosine_*) is sourced from
+        # WindowedCacheMetrics via the search_embed_event_writer installed
+        # above (Story #1293/#1294) -- NOT from an in-memory tally, so there
+        # is exactly one source of truth regardless of node/restart.
+        # total_entries stays UNCHANGED: a cheap query_embedding_cache COUNT,
+        # not event-sourced. Built unconditionally (meter=None when telemetry
+        # is disabled -- the class is a documented no-op in that case; the
+        # windowed values themselves are read live by the dashboard
+        # independent of OTEL/telemetry state). Non-fatal: a failure must
+        # never abort startup.
+        try:
+            from code_indexer.server.services.embedding_cache_otel_metrics import (
+                EmbeddingCacheOtelMetrics,
+            )
+            from code_indexer.server.services.governed_call import (
+                get_query_embedding_cache,
+            )
+            from code_indexer.server.services.search_embed_event_emit import (
+                get_search_embed_event_writer,
+            )
+
+            _wired_cache = get_query_embedding_cache()
+            _total_entries_fn = (
+                _wired_cache.cached_total_entries
+                if _wired_cache is not None
+                else (lambda: 0)
+            )
+
+            def _windowed_metrics_fn(from_ts: float, to_ts: float) -> Any:
+                _see_writer = get_search_embed_event_writer()
+                if _see_writer is None:
+                    from code_indexer.server.services.windowed_cache_metrics import (
+                        empty_windowed_result,
+                    )
+
+                    return empty_windowed_result()
+                return _see_writer.backend.get_windowed_metrics(from_ts, to_ts)
+
+            _cache_otel_meter = (
+                telemetry_manager.get_meter("cidx.cache")
+                if telemetry_manager is not None
+                else None
+            )
+            EmbeddingCacheOtelMetrics(
+                _cache_otel_meter,
+                total_entries_fn=_total_entries_fn,
+                windowed_metrics_fn=_windowed_metrics_fn,
+            )
+            logger.info(
+                "EmbeddingCacheOtelMetrics built and wired "
+                "(telemetry=%s) (Story #1295 DB-backed OTEL re-source)",
+                telemetry_manager is not None,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1295",
+                    f"Failed to build EmbeddingCacheOtelMetrics "
+                    f"(cache OTEL metrics will be disabled): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
+        # temporal collections (AC19/AC20) for every golden repo. Replaces the
+        # old Story #1172 background HNSW-extraction migration (deleted along
+        # with temporal_migration_service.py): the hard cut has no migration
+        # path, only blank-out-then-rebuild. This sweep is cheap (directory
+        # enumeration + marker read + conditional rmtree per repo) so it runs
+        # synchronously rather than as a background job. A repo whose legacy
+        # index is blanked here is simply unavailable for temporal search
+        # until its next `cidx index` run rebuilds it in the per-commit
+        # layout (AC28 — deliberate operator re-index, no automatic
+        # coexistence machinery). Non-fatal per repo: log WARNING and
+        # continue, never block startup.
+        try:
+            from code_indexer.services.temporal.temporal_blank_out import (
+                blank_out_legacy_temporal_collections,
+            )
+
+            _temporal_repos = (
+                golden_repo_manager.list_golden_repos()
+                if golden_repo_manager is not None
+                else []
+            )
+            _blanked_total = 0
+            for _repo in _temporal_repos:
+                _alias = _repo.get("alias", "unknown")
+                _clone_path = _repo.get("clone_path", "")
+                if not _clone_path:
+                    continue
+                _index_path = Path(_clone_path) / ".code-indexer" / "index"
+                try:
+                    _deleted = blank_out_legacy_temporal_collections(_index_path)
+                    _blanked_total += len(_deleted)
+                    if _deleted:
+                        logger.info(
+                            "Story #1290: blanked out %d legacy temporal "
+                            "collection(s) for repo %s: %s",
+                            len(_deleted),
+                            _alias,
+                            _deleted,
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                except Exception as _repo_exc:
+                    logger.warning(
+                        "Story #1290: temporal blank-out failed for repo %s "
+                        "(non-fatal): %s",
+                        _alias,
+                        _repo_exc,
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            logger.info(
+                "Story #1290: temporal blank-out startup sweep complete "
+                "(%d repos checked, %d legacy collections removed)",
+                len(_temporal_repos),
+                _blanked_total,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as _tmig_exc:
+            logger.warning(
+                "Story #1290: temporal blank-out startup sweep failed (non-fatal): %s",
+                _tmig_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Story #1166: HNSW/FTS cache caps are divided by worker count in
+        # initialize_services() (service_init.py) BEFORE the eager
+        # get_global_cache()/get_global_fts_cache() calls build the singletons.
+        # No initialize_caches call here — service_init.py is the single source
+        # of truth so that the division is in place when the singletons are first
+        # constructed, not after.
+
         yield  # Server is now running
+
+        # Story #1083: close the pooled production httpx client owned by the
+        # HttpClientFactory. On the production path (fault injection OFF) the
+        # factory builds ONE long-lived keep-alive client (reused SSLContext +
+        # connection pool) lazily on the first query and reuses it across all
+        # queries. Closing it here releases the connections and prevents leaking
+        # the pool across lifespan cycles.
+        _http_client_factory = getattr(app.state, "http_client_factory", None)
+        if _http_client_factory is not None:
+            try:
+                _http_client_factory.close_pooled_clients()
+            except Exception as _pool_close_exc:
+                # Non-fatal LOG+RECOVER (Messi #13): never abort the remaining
+                # shutdown chain, but keep the failure observable for operators.
+                logger.warning(
+                    "Story #1083: failed to close pooled httpx client during "
+                    "shutdown: %s",
+                    _pool_close_exc,
+                )
+
+        # Story #1083: drain the batched API-metrics writer. The writer coalesces
+        # queued metric events into one transaction per drain; stop_writer() signals
+        # the thread, joins it, and performs a final drain so no queued counts are
+        # lost. Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.api_metrics_service import (
+                api_metrics_service as _ams_shutdown,
+            )
+
+            _ams_shutdown.stop_writer()
+        except Exception as _metrics_stop_exc:
+            logger.warning(
+                "Story #1083: failed to drain api-metrics writer during shutdown: %s",
+                _metrics_stop_exc,
+            )
+
+        # Issue #1159: drain the search-event-log writer on shutdown.
+        try:
+            _sel_writer = getattr(app.state, "search_event_log_writer", None)
+            if _sel_writer is not None:
+                _sel_writer.stop()
+        except Exception as _sel_stop_exc:
+            logger.warning(
+                "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
+                _sel_stop_exc,
+            )
+
+        # Story #1293: drain the search-embed-event writer on shutdown and
+        # clear the process-level accessor.
+        try:
+            from code_indexer.server.services.search_embed_event_emit import (
+                clear_search_embed_event_writer,
+            )
+
+            _see_writer = getattr(app.state, "search_embed_event_writer", None)
+            if _see_writer is not None:
+                _see_writer.stop()
+            clear_search_embed_event_writer()
+        except Exception as _see_stop_exc:
+            logger.warning(
+                "Story #1293: failed to drain search-embed-event writer during shutdown: %s",
+                _see_stop_exc,
+            )
+
+        # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
+        # enqueued audit records are lost on graceful restart/stop.
+        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            _audit_svc = getattr(app.state, "audit_service", None)
+            if _audit_svc is not None:
+                _audit_svc.stop()
+        except Exception as _audit_stop_exc:
+            logger.warning(
+                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
+                _audit_stop_exc,
+            )
+
+        # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
+        # follow-up to Bug #1078). The listener owns the real handlers behind the
+        # root QueueHandler; stop() drains every queued record and then closes the
+        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # any other shutdown step that could raise and skip it. Idempotent and
+        # non-fatal — never abort the remaining shutdown chain.
+        _log_queue_listener = getattr(app.state, "log_queue_listener", None)
+        if _log_queue_listener is not None:
+            try:
+                # Drain in-flight records before stopping the listener.
+                _log_queue_listener.flush()
+                _log_queue_listener.stop()
+            except Exception:
+                pass
+            # Detach the IdentityQueueHandler we installed on the root logger so
+            # it is not leaked across lifespan cycles (mirrors the Bug #1060
+            # symmetry below). removeHandler is a no-op if already detached.
+            try:
+                from code_indexer.server.services.async_logging import (
+                    IdentityQueueHandler,
+                )
+
+                _root = logging.getLogger()
+                for _h in list(_root.handlers):
+                    if isinstance(_h, IdentityQueueHandler):
+                        _root.removeHandler(_h)
+            except Exception:
+                pass
+
+        # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
+        # Symmetric with the install in startup: without this, the handler remains
+        # registered (now behind the listener) after lifespan exits, tries to write
+        # to the now-deleted tmp DB, and silently drops subsequent log records from
+        # other tests. close() flushes the handler's own writer queue (Bug #1078).
+        # Idempotent: removeHandler is a no-op if the handler was never added.
+        _sqlite_handler = getattr(app.state, "sqlite_log_handler", None)
+        if _sqlite_handler is not None:
+            try:
+                logging.getLogger().removeHandler(_sqlite_handler)
+                _sqlite_handler.close()
+            except Exception as _slh_exc:
+                # Non-fatal: don't abort the remaining shutdown chain
+                pass
+
+        # Story #1009: Shut down the MCP dispatch pool on server shutdown.
+        _mcp_executor.shutdown(wait=False)
+        # Bug #1070: Shut down the dedicated xray executor.
+        _xray_executor.shutdown(wait=False)
+        # perf: Shut down the shared query executor (mirror of the two above).
+        _query_executor.shutdown(wait=False)
+
+        # Story #1079 Phase E: clear the process-level coalescer registry so a
+        # subsequent lifespan cycle in the same process does not inherit a stale
+        # registry. Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                clear_coalescer_registry,
+            )
+
+            clear_coalescer_registry()
+        except Exception:
+            logger.debug(
+                "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Bug #1313: clear the process-level temporal metadata backend factory
+        # so a subsequent lifespan cycle in the same process does not inherit a
+        # stale PostgreSQL-backed factory. Non-fatal — never abort the
+        # remaining shutdown chain.
+        try:
+            from code_indexer.storage.temporal_metadata_backend_registry import (
+                clear_temporal_metadata_backend_factory,
+            )
+
+            clear_temporal_metadata_backend_factory()
+        except Exception:
+            logger.debug(
+                "Temporal metadata backend factory clear failed (expected "
+                "during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1213 Story 1: stop the sampler thread then clear the singleton.
+        # stop() must come before clear_memory_governor() so the thread is joined
+        # before the reference is dropped (mirrors other lifecycle service stops).
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.memory_governor import (
+                clear_memory_governor,
+                get_memory_governor,
+            )
+
+            _gov_for_shutdown = get_memory_governor()
+            if _gov_for_shutdown is not None:
+                _gov_for_shutdown.stop(timeout=5.0)
+            clear_memory_governor()
+        except Exception:
+            logger.debug(
+                "MemoryGovernor stop/clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Bug #1181 Perf Fix #2: stop the async touch-flush background thread so
+        # it performs a final drain of buffered last_used touches before the cache
+        # is cleared.  Must run BEFORE clear_query_embedding_cache() below.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            if "_query_embedding_cache" in dir():
+                _query_embedding_cache.stop()
+        except Exception:
+            logger.debug(
+                "Query embedding cache async touch flusher stop failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1105: clear the process-level query embedding cache so a
+        # subsequent lifespan cycle does not inherit a stale cache instance.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.governed_call import (
+                clear_query_embedding_cache,
+            )
+
+            clear_query_embedding_cache()
+        except Exception:
+            logger.debug(
+                "Query embedding cache clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1295 (Epic #1288 final): the Story #1109 (S5) cache-metrics
+        # accessor teardown was deleted along with the in-memory
+        # QueryEmbeddingCacheMetrics tracker it cleared.
+        # EmbeddingCacheOtelMetrics needs no equivalent teardown: its
+        # ObservableGauge instruments are registered on the OTEL SDK's
+        # MeterProvider (torn down independently by the telemetry manager),
+        # not on a process-level accessor that could leak stale state across
+        # lifespan cycles.
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in
@@ -2708,9 +3952,7 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except (
-                Exception
-            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
@@ -2754,6 +3996,27 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop research cleanup scheduler (Bug #1085)
+        research_cleanup_scheduler_state = getattr(
+            app.state, "research_cleanup_scheduler", None
+        )
+        if research_cleanup_scheduler_state is not None:
+            try:
+                research_cleanup_scheduler_state.stop()
+                logger.info(
+                    "Research cleanup scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-055",
+                        f"Error stopping research cleanup scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

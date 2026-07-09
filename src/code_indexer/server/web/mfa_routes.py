@@ -101,6 +101,25 @@ def _check_elevation_window(
     return None
 
 
+def _error_html_page(title: str, message: str, status_code: int) -> HTMLResponse:
+    """Render a minimal styled HTML error page consistent with the MFA UI theme."""
+    body = (
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        f"<title>{html_module.escape(title)} - CIDX</title>"
+        "<style>body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}"
+        ".c{max-width:500px;margin:40px auto;background:#16213e;border-radius:12px;padding:30px}"
+        "h1{color:#00d4ff;font-size:1.4em}"
+        ".err{color:#ff4444;background:#2a0a0a;padding:12px;border-radius:6px;margin:15px 0}"
+        "a{color:#00d4ff;display:block;text-align:center;margin-top:20px;text-decoration:none}"
+        "</style></head><body><div class='c'>"
+        f"<h1>{html_module.escape(title)}</h1>"
+        f"<div class='err'>{html_module.escape(message)}</div>"
+        "<a href='/admin/'>Back to Dashboard</a>"
+        "</div></body></html>"
+    )
+    return HTMLResponse(content=body, status_code=status_code)
+
+
 def _cross_user_setup_guard(
     request: Request,
     admin_username: str,
@@ -108,26 +127,26 @@ def _cross_user_setup_guard(
 ) -> Optional[Any]:
     """Enforce AC5 elevation + confirmation for cross-user TOTP setup.
 
-    Returns a JSONResponse (403 or 400) when the guard fails, or None when
+    Returns an HTMLResponse (403 or 400) when the guard fails, or None when
     all checks pass. Caller emits audit log only on the success path.
     """
-    from fastapi.responses import JSONResponse as _JSONResponse
-
     elev_err = _check_elevation_window(request, required_scope="full")
     if elev_err is not None:
-        return _JSONResponse(content=elev_err, status_code=403)
+        return _error_html_page(
+            "Elevation Required",
+            elev_err.get("message", "Active elevation window required."),
+            403,
+        )
 
     confirm = request.query_params.get("confirm_overwrite")
     if confirm != "1":
-        return _JSONResponse(
-            content={
-                "error": "confirm_overwrite_required",
-                "message": (
-                    "Overwriting another admin's TOTP requires confirm_overwrite=1 "
-                    "in the request."
-                ),
-            },
-            status_code=400,
+        return _error_html_page(
+            "Confirmation Required",
+            (
+                "Overwriting another admin's TOTP requires confirm_overwrite=1 "
+                "in the request."
+            ),
+            400,
         )
     return None
 
@@ -232,7 +251,7 @@ def _render_setup(
             f"<input type='hidden' name='csrf_token' value='{csrf}'>"
             f"<input type='hidden' name='target_user' value='{target_user}'>"
             "<input type='hidden' name='test_only' value='1'>"
-            "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code'>"
+            "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' required>"
             "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
             f"<a href='{recovery_link_prefix}/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
             f"{re_setup_html}"
@@ -320,11 +339,23 @@ def mfa_setup_page(
     target_user = user if user else admin_username
     is_cross_user = target_user != admin_username
 
-    # AC5: cross-user guard (elevation + explicit confirmation)
+    # AC5: cross-user guard.
+    # mode=show is read-only (displays existing QR); only elevation is required.
+    # All other cross-user modes generate a new secret, so confirm_overwrite=1 is
+    # also required to prevent accidental overwrites.
     if is_cross_user:
-        guard_err = _cross_user_setup_guard(request, admin_username, target_user)
-        if guard_err is not None:
-            return guard_err
+        if mode == "show":
+            elev_err = _check_elevation_window(request, required_scope="full")
+            if elev_err is not None:
+                return _error_html_page(
+                    "Elevation Required",
+                    elev_err.get("message", "Active elevation window required."),
+                    403,
+                )
+        else:
+            guard_err = _cross_user_setup_guard(request, admin_username, target_user)
+            if guard_err is not None:
+                return guard_err
 
     if mode == "show":
         uri = _totp_service.get_provisioning_uri(target_user)
@@ -379,8 +410,6 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
     Story #925 AC6: requires active elevation window.
     Cross-user operations require full scope; self-service accepts totp_repair scope.
     """
-    from fastapi.responses import JSONResponse as _JSONResponse
-
     admin_username = _get_session_username(request)
     if not admin_username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
@@ -393,7 +422,11 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
 
     elev_err = _check_elevation_window(request, required_scope=required_scope)
     if elev_err is not None:
-        return _JSONResponse(content=elev_err, status_code=403)
+        return _error_html_page(
+            "Elevation Required",
+            elev_err.get("message", "Active elevation window required."),
+            403,
+        )
 
     codes = _totp_service.generate_recovery_codes(target)
     if codes is None:
@@ -493,8 +526,6 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
 
     Story #925 AC6: requires active totp_repair-scope elevation window.
     """
-    from fastapi.responses import JSONResponse as _JSONResponse
-
     username = _get_session_username(request)
     if not username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
@@ -503,7 +534,11 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
 
     elev_err = _check_elevation_window(request, required_scope="totp_repair")
     if elev_err is not None:
-        return _JSONResponse(content=elev_err, status_code=403)
+        return _error_html_page(
+            "Elevation Required",
+            elev_err.get("message", "Active elevation window required."),
+            403,
+        )
 
     valid = _totp_service.verify_code(
         username, totp_code

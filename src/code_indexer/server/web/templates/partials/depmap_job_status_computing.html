@@ -1,5 +1,5 @@
 <!-- Story #684: Dependency Map dashboard background-job progress partial -->
-<div id="depmap-job-status"
+<div id="depmap-job-status-content"
      hx-get="/admin/partials/depmap-job-status?job_id={{ job_id }}"
      hx-trigger="every 2s"
      hx-swap="outerHTML">
@@ -10,5 +10,12 @@
         <p style="margin-top: 0.5rem; color: var(--pico-muted-color);">
             Processing {{ progress_info }}...
         </p>
+        <button class="contrast"
+                id="depmap-stop-btn"
+                style="width: 100%; font-size: 0.85rem; padding: 0.4rem 0.6rem; margin-top: 0.25rem;"
+                onclick="var b=this;b.disabled=true;b.textContent='Stopping...';fetch('/admin/dependency-map/cancel',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'}}).then(function(r){return r.json()}).then(function(d){var s=document.getElementById('depmap-trigger-status');if(s){s.innerHTML=d.success?'<small style=color:var(--pico-color-amber-550)>Stop signal sent</small>':'<small style=color:var(--pico-muted-color)>No active job</small>'}}).catch(function(){b.disabled=false;b.textContent='Stop Analysis'})">
+            Stop Analysis
+        </button>
+        <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
     </div>
 </div>

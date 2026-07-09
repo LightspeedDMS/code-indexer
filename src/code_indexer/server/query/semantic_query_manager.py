@@ -7,7 +7,9 @@ background job integration, and proper resource management.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
 
+import contextvars
 import json
 import logging
 import re
@@ -31,6 +33,7 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
+from ..services.constants import is_internal_meta_repo
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -141,15 +144,25 @@ class QueryMetadata:
     execution_time_ms: int
     repositories_searched: int
     timeout_occurred: bool
+    # AC7 (Bug #1202): effective routing decision after auto-parallel gate.
+    # Optional so existing callers that build QueryMetadata without these fields
+    # continue to compile.  query_user_repositories always populates them.
+    effective_search_mode: Optional[str] = None
+    effective_query_strategy: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
-        return {
+        result: Dict[str, Any] = {
             "query_text": self.query_text,
             "execution_time_ms": self.execution_time_ms,
             "repositories_searched": self.repositories_searched,
             "timeout_occurred": self.timeout_occurred,
         }
+        if self.effective_search_mode is not None:
+            result["effective_search_mode"] = self.effective_search_mode
+        if self.effective_query_strategy is not None:
+            result["effective_query_strategy"] = self.effective_query_strategy
+        return result
 
 
 class SemanticQueryManager:
@@ -200,31 +213,6 @@ class SemanticQueryManager:
 
         # Track concurrent queries per user (in production this would need persistence)
         self._active_queries_per_user: Dict[str, int] = {}
-
-        # Repo-shard ownership (C6 Phase 0). None in solo/sqlite mode -> this node
-        # caches every repo (today's behaviour). Injected in cluster mode so a pod
-        # only populates its per-pod index cache for repos it owns; non-owned
-        # repos are still served, just load-and-discard (hnsw_cache=None).
-        self._shard_ownership: Optional[Any] = None
-
-    def set_shard_ownership(self, shard_ownership: Any) -> None:
-        """Inject repo-shard ownership (C6 Phase 0), cluster mode only.
-
-        When set, single-repo searches only populate this pod's index cache for
-        repos this node owns; non-owned repos are served load-and-discard.
-        """
-        self._shard_ownership = shard_ownership
-
-    def _owns_for_cache(self, repository_alias: str) -> bool:
-        """Whether this node should use its shared index cache for ``alias``.
-
-        True (use the per-pod cache) when sharding is off (solo mode) or this node
-        owns the alias; False means bypass the cache (load-and-discard) so a
-        non-owned repo does not bloat this pod's cache. Fails open via
-        ShardOwnership.owns, so a query is never denied incorrectly.
-        """
-        shard_ownership = self._shard_ownership
-        return shard_ownership is None or shard_ownership.owns(repository_alias)
 
     def _is_composite_repository(self, repo_path: Path) -> bool:
         """
@@ -295,7 +283,7 @@ class SemanticQueryManager:
         """
         try:
             if self._is_composite_repository(repo_path):
-                self.logger.info(
+                self.logger.debug(
                     f"Routing query to composite handler for repository: {repo_path}",
                     extra={"correlation_id": get_correlation_id()},
                 )
@@ -308,7 +296,7 @@ class SemanticQueryManager:
                     **kwargs,
                 )
 
-            self.logger.info(
+            self.logger.debug(
                 f"Routing query to single repository handler for: {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -396,7 +384,7 @@ class SemanticQueryManager:
         Raises:
             Exception: If CLI execution or parsing fails
         """
-        self.logger.info(
+        self.logger.debug(
             f"Composite repository search for {repo_path} using CLI integration",
             extra={"correlation_id": get_correlation_id()},
         )
@@ -433,9 +421,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -451,8 +436,15 @@ class SemanticQueryManager:
         score_fusion: Optional[str] = None,
         # Multi-provider routing (Story #593)
         preferred_provider: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read.
+        # When True the cache lookup is skipped for this request; the live embedding
+        # is computed and the cache write still fires (shadow/miss path).
+        no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
+        # MUST remain the LAST parameter to preserve positional-arg compatibility.
         precomputed_query_vector: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
@@ -473,10 +465,8 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries (format: YYYY-MM-DD..YYYY-MM-DD)
             time_range_all: Query across all git history without time range limit
-            at_commit: Query code at specific commit hash or ref
-            include_removed: Include files removed from current HEAD
-            show_evolution: Include code evolution timeline with diffs
-            evolution_limit: Limit evolution entries (user-controlled)
+            at_commit: Query code at specific commit hash or ref (point-in-time
+                scoping; unresolvable ref raises ValueError)
             case_sensitive: Enable case-sensitive FTS matching (FTS-only)
             fuzzy: Enable fuzzy matching with edit distance 1 (FTS-only, incompatible with regex)
             edit_distance: Fuzzy match tolerance level 0-3 (FTS-only)
@@ -543,11 +533,52 @@ class SemanticQueryManager:
                 raise SemanticQueryError(
                     f"Repository '{repository_alias}' not found for user '{username}'"
                 )
+        elif search_mode in ("fts", "hybrid"):
+            # Bug #1287 (Defect B): an implicit fan-out (no explicit
+            # repository_alias -- "search everything visible") that requires
+            # an FTS index must skip the internal, auto-bootstrapped
+            # cidx-meta* bookkeeping repos. They are git-metadata stores
+            # (AI-generated repo descriptions, dependency-map markdown) that
+            # are never FTS-indexed by design -- not real user source code.
+            # Without this skip, every such fan-out logs a benign
+            # "FTS index not available for repository 'cidx-meta-global'"
+            # failure at WARNING ([QUERY-MIGRATE-006]) and ERROR
+            # ([QUERY-MIGRATE-008]), and -- when cidx-meta* is the only
+            # visible repo -- propagates to a top-level "Error in
+            # search_code" ERROR log too. An EXPLICIT
+            # repository_alias='cidx-meta-global' FTS request is unaffected
+            # (handled by the branch above) and still fails loud.
+            #
+            # is_internal_meta_repo() is an ANCHORED/EXACT match against
+            # {"cidx-meta", "cidx-meta-global"} -- a loose
+            # str.startswith("cidx-meta") check (the original fix) would
+            # over-match legitimate user repos such as
+            # "cidx-metadata-global" or "cidx-meta-analytics-global" and
+            # silently drop them from the fan-out (code-reviewer finding).
+            #
+            # Note this also excludes cidx-meta's semantic half in hybrid
+            # mode -- acceptable, since cidx-meta is a discovery/bookkeeping
+            # repo, not source code, and is never a hybrid search target.
+            all_repos = [
+                repo
+                for repo in all_repos
+                if not is_internal_meta_repo(str(repo.get("user_alias", "")))
+            ]
 
         # Perform the search
         start_time = time.time()
+        effective_strategy: str = query_strategy or "primary_only"
+        # Bug #1298: per-request out-param capturing the embedder-specific
+        # temporal "no indexed collections" warning, so it survives the
+        # _perform_search -> _search_single_repository -> _execute_temporal_query
+        # call chain instead of being re-derived generically below.
+        _temporal_warning_out: List[str] = []
         try:
-            results = self._perform_search(
+            # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
+            # Routing decision is per-request; no singleton state.
+            # Backward compat: if a test patches _perform_search to return a plain
+            # list (not a tuple), unpack gracefully.
+            _raw = self._perform_search(
                 username,
                 all_repos,
                 query_text,
@@ -565,9 +596,6 @@ class SemanticQueryManager:
                 time_range=time_range,
                 time_range_all=time_range_all,
                 at_commit=at_commit,
-                include_removed=include_removed,
-                show_evolution=show_evolution,
-                evolution_limit=evolution_limit,
                 # FTS-specific parameters (Story #503 Phase 2)
                 case_sensitive=case_sensitive,
                 fuzzy=fuzzy,
@@ -585,7 +613,19 @@ class SemanticQueryManager:
                 preferred_provider=preferred_provider,
                 # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
                 precomputed_query_vector=precomputed_query_vector,
+                # Story #1108 (S4): per-request cache bypass
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
+                # Bug #1298: collect the embedder-specific warning, if any
+                _temporal_warning_out=_temporal_warning_out,
             )
+            # Unpack (results, effective_strategy) tuple; fall back gracefully if
+            # a test patches _perform_search to return a plain list.
+            if isinstance(_raw, tuple):
+                results, effective_strategy = _raw
+            else:
+                results = _raw
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
         except TimeoutError as e:
@@ -603,12 +643,15 @@ class SemanticQueryManager:
                 raise SemanticQueryError(f"Query timed out: {str(e)}")
             raise SemanticQueryError(f"Search failed: {str(e)}")
 
-        # Create metadata
+        # Create metadata — AC7 (Bug #1202): include effective routing decision
+        # from the per-request out-param (no singleton state).
         metadata = QueryMetadata(
             query_text=query_text,
             execution_time_ms=execution_time_ms,
             repositories_searched=len(all_repos),
             timeout_occurred=timeout_occurred,
+            effective_search_mode=search_mode,
+            effective_query_strategy=effective_strategy,
         )
 
         # Handle case where mocked _perform_search returns dict instead of QueryResult list
@@ -632,7 +675,6 @@ class SemanticQueryManager:
                 time_range,
                 time_range_all,
                 at_commit,
-                show_evolution,
                 chunk_type,
                 diff_type,
                 author,
@@ -640,11 +682,24 @@ class SemanticQueryManager:
         )
         warning_message = None
         if has_temporal_params and len(results) == 0:
-            warning_message = (
-                "Temporal index not available for this repository. "
-                "No results returned. "
-                "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
-            )
+            if temporal_embedder and _temporal_warning_out:
+                # Bug #1298: an explicit temporal_embedder override with no
+                # indexed collections produces a typed, embedder-specific
+                # warning at the fusion-dispatch layer (e.g. "Temporal
+                # embedder 'X' has no indexed collections"). Surface it
+                # as-is instead of masking it with the generic message below
+                # -- the anti-fallback behavior (0 results, no redirect to
+                # the active embedder) is unchanged; only the message text
+                # is more specific. Scoped to the explicit-override case only
+                # -- the plain "no temporal index at all" case (no override
+                # requested) keeps its existing generic wording below.
+                warning_message = _temporal_warning_out[0]
+            else:
+                warning_message = (
+                    "Temporal index not available for this repository. "
+                    "No results returned. "
+                    "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
+                )
 
         # Build response with temporal context in results
         response_results = []
@@ -767,9 +822,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -787,9 +839,21 @@ class SemanticQueryManager:
         preferred_provider: Optional[str] = None,
         # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
         precomputed_query_vector: Optional[List[float]] = None,
-    ) -> List[QueryResult]:
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
+    ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
+
+        Returns:
+            Tuple of (results, effective_query_strategy) where effective_query_strategy
+            is the resolved routing decision ("parallel", "primary_only", etc.) after
+            the auto-parallel gate in _search_single_repository.
 
         Supports three search modes:
         - 'semantic': Vector-based semantic similarity search (default)
@@ -811,10 +875,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -836,6 +897,11 @@ class SemanticQueryManager:
 
         all_results: List[QueryResult] = []
         repo_errors: List[str] = []
+        # AC7 (Bug #1202): track the effective routing decision from the first
+        # successfully-searched repo (all repos in one request share the same
+        # search_mode and query_strategy parameters so the resolved value is
+        # constant across the loop).
+        _effective_strategy: str = query_strategy or "primary_only"
 
         # Search each repository
         for repo_info in user_repos:
@@ -876,6 +942,7 @@ class SemanticQueryManager:
 
                 # Create temporary config and search engine for this repository
                 # This would need actual implementation with proper config management
+                _strat_out: List[str] = []
                 results = self._search_single_repository(
                     repo_path,
                     repo_alias,
@@ -894,9 +961,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     # FTS-specific parameters (Story #503 Phase 2)
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
@@ -914,7 +978,20 @@ class SemanticQueryManager:
                     preferred_provider=preferred_provider,
                     # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
                     precomputed_query_vector=precomputed_query_vector,
+                    # Story #1108 (S4): per-request cache bypass
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
+                    # AC7 (Bug #1202): collect resolved routing decision
+                    _effective_strategy_out=_strat_out,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
+                # AC7: capture routing decision from the first resolved repo
+                if _strat_out and _effective_strategy == (
+                    query_strategy or "primary_only"
+                ):
+                    _effective_strategy = _strat_out[0]
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:
@@ -949,7 +1026,7 @@ class SemanticQueryManager:
 
         # Apply global result limit
         effective_limit = min(limit, self.max_results_per_query)
-        return all_results[:effective_limit]
+        return (all_results[:effective_limit], _effective_strategy)
 
     def _both_providers_configured(self, repo_path: str) -> bool:
         """Check if both VoyageAI and Cohere providers have API keys configured."""
@@ -1007,9 +1084,6 @@ class SemanticQueryManager:
         time_range: Optional[str] = None,
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         # FTS-specific parameters (Story #503 Phase 2)
         case_sensitive: bool = False,
         fuzzy: bool = False,
@@ -1027,6 +1101,17 @@ class SemanticQueryManager:
         preferred_provider: Optional[str] = None,
         # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
         precomputed_query_vector: Optional[List[float]] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
+        # AC7 (Bug #1202): out-param for routing decision — caller passes a
+        # single-element list; resolved query_strategy is written into [0].
+        # Per-request, no shared state.
+        _effective_strategy_out: Optional[List[str]] = None,
+        # Bug #1298: out-param for the embedder-specific temporal "no
+        # indexed collections" warning. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1036,7 +1121,7 @@ class SemanticQueryManager:
         - 'fts': Full-text search using Tantivy index
         - 'hybrid': Combined FTS + semantic search with result fusion
 
-        For temporal queries (when time_range, at_commit, or show_evolution provided),
+        For temporal queries (when time_range or at_commit provided),
         uses TemporalSearchService; returns empty list with error if temporal
         index not available.
 
@@ -1062,10 +1147,7 @@ class SemanticQueryManager:
             search_mode: Search mode - 'semantic' (default), 'fts', or 'hybrid'
             time_range: Time range filter for temporal queries
             time_range_all: Query across all git history without time range limit
-            at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Include evolution timeline
-            evolution_limit: Limit evolution entries
+            at_commit: Query at specific commit (point-in-time scoping)
             case_sensitive: Enable case-sensitive FTS matching
             fuzzy: Enable fuzzy matching
             edit_distance: Fuzzy match tolerance 0-3
@@ -1098,6 +1180,7 @@ class SemanticQueryManager:
                 exclude_path=exclude_path,
                 accuracy=accuracy,
                 provider_name=preferred_provider,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
             for r in results:
                 r.source_provider = preferred_provider
@@ -1106,27 +1189,25 @@ class SemanticQueryManager:
         # Story #618: Auto-default to parallel when both providers configured
         # Bug #667: Skip parallel when temporal params present — temporal routing gate
         # at line ~1387 must be reached; parallel block returns early before it.
-        # Same hazard for FTS/hybrid: the parallel block runs a dual-provider
-        # SEMANTIC search and returns before the FTS branch below, so forcing
-        # parallel silently turned every fts/hybrid query into a slow embedding
-        # search (the "dual-embedder FTS" bug) when both providers were configured.
-        # Multi-provider auto-parallel applies to plain semantic search only.
+        # Bug #1202: Skip parallel when search_mode is 'fts' or 'hybrid' — FTS branch
+        # at line ~1563 must be reached; parallel block returns early before it.
+        # Accepted tradeoff: hybrid's semantic half no longer fans out across both
+        # providers when both are configured (single provider path runs instead).
         if query_strategy is None:
             _has_temporal_for_strategy = any(
                 [
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
                 ]
             )
-            _semantic_mode_for_strategy = search_mode == "semantic"
             if (
-                _semantic_mode_for_strategy
-                and not _has_temporal_for_strategy
+                not _has_temporal_for_strategy
+                and search_mode
+                == "semantic"  # Bug #1202: fts/hybrid must not be preempted
                 and self._both_providers_configured(repo_path)
             ):
                 query_strategy = "parallel"
@@ -1134,9 +1215,14 @@ class SemanticQueryManager:
             else:
                 query_strategy = "primary_only"
 
+        # AC7 (Bug #1202): carry the resolved routing decision back to the caller
+        # via the per-request out-param (no singleton state written here).
+        if _effective_strategy_out is not None:
+            _effective_strategy_out[:] = [query_strategy]
+
         # Log query strategy if non-default (Story #488 Phase 4)
         if query_strategy is not None and query_strategy != "primary_only":
-            logger.info(
+            logger.debug(
                 "Query strategy '%s' requested",
                 query_strategy,
                 extra=get_log_extra("QUERY-STRATEGY-001"),
@@ -1164,6 +1250,7 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="voyage-ai",
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             def _secondary() -> List[QueryResult]:
@@ -1180,6 +1267,7 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="cohere",
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             def _to_strategy_failover(r: QueryResult) -> StrategyQueryResult:
@@ -1258,6 +1346,8 @@ class SemanticQueryManager:
                         exclude_path=exclude_path,
                         accuracy=accuracy,
                         provider_name="voyage-ai",
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     ),
                 ),
                 (
@@ -1275,6 +1365,8 @@ class SemanticQueryManager:
                         exclude_path=exclude_path,
                         accuracy=accuracy,
                         provider_name="cohere",
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     ),
                 ),
             ]
@@ -1332,8 +1424,8 @@ class SemanticQueryManager:
                     _degraded_in_query.append(_pname)
                     continue
                 _captured_kwargs = _kwargs
-                provider_tasks[_pname] = lambda _kw=_captured_kwargs: (
-                    self._search_with_provider(**_kw)
+                provider_tasks[_pname] = (
+                    lambda _kw=_captured_kwargs: self._search_with_provider(**_kw)
                 )
 
             primary_results: List[QueryResult] = []
@@ -1348,7 +1440,8 @@ class SemanticQueryManager:
                 futures = {}
                 for name, fn in provider_tasks.items():
                     _t0 = time.monotonic()
-                    fut = executor.submit(fn)
+                    _provider_ctx = contextvars.copy_context()
+                    fut = executor.submit(_provider_ctx.run, fn)
                     futures[fut] = name
                     _future_start[fut] = _t0
                 try:
@@ -1370,12 +1463,18 @@ class SemanticQueryManager:
                                 _e,
                                 extra=get_log_extra("QUERY-STRATEGY-002"),
                             )
-                            # Bug #678: record failure so health monitor can sinbin the provider
-                            _health_monitor.record_call(
-                                provider_name,
-                                latency_ms=_latency_ms,
-                                success=False,
-                            )
+                            # Bug #1236: LocalIndexNotFoundError is a local storage
+                            # problem — the embedding provider completed successfully
+                            # and must NOT be sin-binned.  Only genuine provider
+                            # failures (HTTP errors, rate limits, timeouts, etc.)
+                            # should record a failure against the provider health.
+                            if not isinstance(_e, LocalIndexNotFoundError):
+                                # Bug #678: record failure so health monitor can sinbin the provider
+                                _health_monitor.record_call(
+                                    provider_name,
+                                    latency_ms=_latency_ms,
+                                    success=False,
+                                )
                 except concurrent.futures.TimeoutError:
                     # Bug #678: capture unfinished futures BEFORE cancel() so the
                     # done() check below correctly identifies them — cancel() marks
@@ -1538,7 +1637,6 @@ class SemanticQueryManager:
                     time_range,
                     time_range_all,
                     at_commit,
-                    show_evolution,
                     chunk_type,
                     diff_type,
                     author,
@@ -1555,9 +1653,6 @@ class SemanticQueryManager:
                     time_range=time_range,
                     time_range_all=time_range_all,
                     at_commit=at_commit,
-                    include_removed=include_removed,
-                    show_evolution=show_evolution,
-                    evolution_limit=evolution_limit,
                     language=language,
                     exclude_language=exclude_language,
                     path_filter=path_filter,
@@ -1565,6 +1660,12 @@ class SemanticQueryManager:
                     diff_type=diff_type,
                     author=author,
                     chunk_type=chunk_type,
+                    # Story #1108 (S4): forward per-request cache bypass flag
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: forward explicit embedder override
+                    temporal_embedder=temporal_embedder,
+                    # Bug #1298: relay the embedder-specific warning out-param
+                    _temporal_warning_out=_temporal_warning_out,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -1619,21 +1720,16 @@ class SemanticQueryManager:
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
                 accuracy=accuracy,
+                # Story #1108 (S4): per-request cache bypass
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
 
             # Perform search on the repository using direct path
             # Story #883 Phase C: pass precomputed vector to avoid duplicate Voyage call
-            # C6 Phase 0: for repos this node does not own, bypass the shared index
-            # cache (hnsw_cache=None -> load-and-discard) so each pod's cache stays
-            # bounded to its shard. Owned repos use the server default cache.
-            _cache_kwargs = (
-                {} if self._owns_for_cache(repository_alias) else {"hnsw_cache": None}
-            )
             search_response = search_service.search_repository_path(
                 repo_path=repo_path,
                 search_request=search_request,
                 precomputed_query_vector=precomputed_query_vector,
-                **_cache_kwargs,
             )
 
             # Convert search results to QueryResult objects
@@ -1698,6 +1794,8 @@ class SemanticQueryManager:
         exclude_path: Optional[str] = None,
         accuracy: Optional[str] = None,
         provider_name: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """
         Search a single repository using an explicitly named embedding provider.
@@ -1736,6 +1834,8 @@ class SemanticQueryManager:
             exclude_language=exclude_language,
             exclude_path=exclude_path,
             accuracy=accuracy,
+            # Story #1108 (S4): per-request cache bypass
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
         search_response = search_service.search_repository_path_with_provider(
             repo_path=repo_path,
@@ -2083,9 +2183,6 @@ class SemanticQueryManager:
         time_range: Optional[str],
         time_range_all: bool = False,
         at_commit: Optional[str] = None,
-        include_removed: bool = False,
-        show_evolution: bool = False,
-        evolution_limit: Optional[int] = None,
         language: Optional[str] = None,
         exclude_language: Optional[str] = None,
         path_filter: Optional[str] = None,
@@ -2093,6 +2190,16 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
+        # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+        temporal_embedder: Optional[str] = None,
+        # Bug #1298: out-param for the embedder-specific "no indexed
+        # collections" warning produced by the fusion dispatch layer.
+        # Caller passes a single-element list; populated in place so the
+        # specific message survives instead of being re-derived generically
+        # by the caller. Per-request, no shared state.
+        _temporal_warning_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2109,9 +2216,6 @@ class SemanticQueryManager:
             min_score: Minimum similarity score
             time_range: Time range filter (YYYY-MM-DD..YYYY-MM-DD)
             at_commit: Query at specific commit
-            include_removed: Include removed files
-            show_evolution: Show evolution timeline
-            evolution_limit: Limit evolution entries
             language: Filter by language
             exclude_language: Exclude language
             path_filter: Path filter pattern
@@ -2138,8 +2242,13 @@ class SemanticQueryManager:
             # Create vector store (Story #526: pass server cache)
             from ..app import _server_hnsw_cache
 
+            from ..services.memory_governor import get_memory_governor
+
             backend = BackendFactory.create(
-                config=config, project_root=repo_path, hnsw_cache=_server_hnsw_cache
+                config=config,
+                project_root=repo_path,
+                hnsw_cache=_server_hnsw_cache,
+                memory_governor=get_memory_governor(),
             )
             vector_store = backend.get_vector_store_client()
             index_path = repo_path / ".code-indexer" / "index"
@@ -2174,16 +2283,17 @@ class SemanticQueryManager:
                 limit=limit,
                 time_range=time_range_tuple,
                 file_path_filter=path_filter,
-                show_evolution=show_evolution,
                 at_commit=at_commit,
-                include_removed=include_removed,
                 language=language,
                 exclude_language=exclude_language,
-                evolution_limit=evolution_limit,
                 exclude_path=exclude_path,
                 diff_types=diff_types_list,
                 author=author,
                 chunk_type=chunk_type,
+                # Story #1108 (S4): forward per-request cache bypass flag
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=temporal_embedder,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully
@@ -2196,6 +2306,12 @@ class SemanticQueryManager:
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-009"),
                 )
+                # Bug #1298: preserve the embedder-specific warning (e.g.
+                # "Temporal embedder 'X' has no indexed collections") for the
+                # caller instead of letting it die here -- the caller would
+                # otherwise re-derive a generic message with no embedder name.
+                if _temporal_warning_out is not None:
+                    _temporal_warning_out.append(temporal_results.warning)
                 return []
 
             # Convert temporal results to QueryResult objects
@@ -2226,21 +2342,6 @@ class SemanticQueryManager:
                     ),
                     "diff_type": temporal_result.temporal_context.get("diff_type"),
                 }
-
-                # Add is_removed flag if applicable
-                if (
-                    include_removed
-                    and temporal_result.metadata.get("diff_type") == "deleted"
-                ):
-                    temporal_context["is_removed"] = True
-
-                # Add evolution data if requested (Acceptance Criterion 5 & 6)
-                if show_evolution and "evolution" in temporal_result.temporal_context:
-                    evolution_data = temporal_result.temporal_context["evolution"]
-                    # Apply user-controlled evolution_limit (NO arbitrary max)
-                    if evolution_limit and len(evolution_data) > evolution_limit:
-                        evolution_data = evolution_data[:evolution_limit]
-                    temporal_context["evolution"] = evolution_data
 
                 # Create QueryResult with both metadata and temporal_context
                 # (Story #503 - MCP/REST API parity with CLI)
@@ -2335,43 +2436,34 @@ class SemanticQueryManager:
             )
 
         try:
-            # Cached, writer-free FTS read (lazy imports avoid startup overhead).
-            from ..cache import get_global_fts_cache
-            from ..cache.fts_search import cached_fts_search
+            # Import TantivyIndexManager (lazy import to avoid startup overhead)
+            from ...services.tantivy_index_manager import TantivyIndexManager
+            from ...services.path_pattern_matcher import parse_exclude_patterns
+
+            # Initialize Tantivy manager
+            tantivy_manager = TantivyIndexManager(fts_index_dir)
+            tantivy_manager.open_for_search()
 
             # Handle fuzzy flag
             effective_edit_distance = edit_distance
             if fuzzy and edit_distance == 0:
                 effective_edit_distance = 1
 
-            # C6 shard cache-admission: only cache FTS indexes this node owns
-            # (mirrors the HNSW hnsw_cache gate). Fails open -> caches in solo
-            # mode / on any ownership error.
-            fts_cache = (
-                get_global_fts_cache()
-                if self._owns_for_cache(repository_alias)
-                else None
-            )
+            # Split comma-separated exclude_path into independent patterns (bug #1095)
+            exclude_paths_list = parse_exclude_patterns(exclude_path) or None
 
-            # No per-query Tantivy writer lock; safe on immutable/NFS
-            # .versioned snapshots. Repeated queries reuse one open index.
-            fts_raw_results = cached_fts_search(
-                fts_index_dir,
-                {
-                    "query_text": query_text,
-                    "case_sensitive": case_sensitive,
-                    "edit_distance": effective_edit_distance,
-                    "snippet_lines": snippet_lines,
-                    "limit": limit,
-                    "language_filter": language,
-                    "path_filter": path_filter,
-                    "exclude_languages": (
-                        [exclude_language] if exclude_language else None
-                    ),
-                    "exclude_paths": [exclude_path] if exclude_path else None,
-                    "use_regex": regex,
-                },
-                fts_cache=fts_cache,
+            # Execute FTS query
+            fts_raw_results = tantivy_manager.search(
+                query_text=query_text,
+                case_sensitive=case_sensitive,
+                edit_distance=effective_edit_distance,
+                snippet_lines=snippet_lines,
+                limit=limit,
+                language_filter=language,
+                path_filter=path_filter,
+                exclude_languages=[exclude_language] if exclude_language else None,
+                exclude_paths=exclude_paths_list,
+                use_regex=regex,
             )
 
             # Convert FTS results to QueryResult objects

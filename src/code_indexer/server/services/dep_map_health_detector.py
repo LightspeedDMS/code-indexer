@@ -47,7 +47,10 @@ REQUIRED_SECTIONS = [
 # Anomaly types that escalate to critical status
 CRITICAL_ANOMALY_TYPES = {"missing_domain_file", "zero_char_domain"}
 
-# Anomaly types that require Claude CLI to fix (Phase 1 repair)
+# Anomaly types that are repairable (used for the health detector's
+# "repairable" count). frontmatter_json_mismatch is repairable, but for
+# FREE via Phase 3.5's deterministic frontmatter sync -- NOT via Phase 1
+# Claude CLI re-analysis. See PHASE1_REANALYSIS_ANOMALY_TYPES below.
 REPAIRABLE_ANOMALY_TYPES = {
     "missing_domain_file",
     "zero_char_domain",
@@ -57,6 +60,17 @@ REPAIRABLE_ANOMALY_TYPES = {
     "frontmatter_json_mismatch",
     "uncovered_repo",
     "stale_participating_repo",
+}
+
+# Anomaly types that require Claude CLI re-analysis (Phase 1 repair).
+# Derived from REPAIRABLE_ANOMALY_TYPES minus frontmatter_json_mismatch,
+# which Phase 3.5 (_sync_frontmatter_repos) fixes deterministically and for
+# free -- routing it through Phase 1 would waste an expensive Claude CLI
+# call re-analyzing a domain that has nothing wrong with its content
+# (Bug #1259). Computed from REPAIRABLE_ANOMALY_TYPES so the two sets
+# cannot drift out of sync.
+PHASE1_REANALYSIS_ANOMALY_TYPES = REPAIRABLE_ANOMALY_TYPES - {
+    "frontmatter_json_mismatch"
 }
 
 

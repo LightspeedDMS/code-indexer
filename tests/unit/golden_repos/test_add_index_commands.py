@@ -92,14 +92,28 @@ def registered_manager(manager, repo_path):
     from datetime import datetime, timezone
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
+    created_at = datetime.now(timezone.utc).isoformat()
     repo = GoldenRepo(
         alias="test-repo",
         repo_url="git@github.com:org/test-repo.git",
         clone_path=str(repo_path),
         default_branch="main",
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=created_at,
     )
     manager.golden_repos["test-repo"] = repo
+    # Bug #1316: add_indexes_to_golden_repo's background_worker now resolves
+    # `repo` authoritatively via _resolve_golden_repo_authoritative, which
+    # unconditionally reads the real SQLite backend -- so the repo must
+    # also be persisted there, not just in the in-memory cache above.
+    manager._sqlite_backend.add_repo(
+        alias="test-repo",
+        repo_url="git@github.com:org/test-repo.git",
+        default_branch="main",
+        clone_path=str(repo_path),
+        created_at=created_at,
+        enable_temporal=False,
+        temporal_options=None,
+    )
 
     # background_job_manager is an externally-set field (not initialized in __init__).
     # Inject a mock so add_index_to_golden_repo can call submit_job.
@@ -305,7 +319,11 @@ class TestAddIndexTemporalCommand:
         Call add_index_to_golden_repo with index_type='temporal' and capture
         the cidx index commands that are issued.
         """
-        registered_manager.golden_repos["test-repo"].temporal_options = temporal_options
+        # Bug #1316: add_indexes_to_golden_repo's background_worker now reads
+        # temporal_options authoritatively from the SQLite backend, not the
+        # in-memory cache -- persist via the real production method (which
+        # updates both) instead of mutating the cached object directly.
+        registered_manager.save_temporal_options("test-repo", temporal_options)
 
         captured_cmds = []
 
@@ -595,7 +613,11 @@ class TestTemporalVectorExistenceCheck:
         temporal_options=None,
     ):
         """Call add_index_to_golden_repo with temporal index_type and capture commands."""
-        registered_manager.golden_repos["test-repo"].temporal_options = temporal_options
+        # Bug #1316: add_indexes_to_golden_repo's background_worker now reads
+        # temporal_options authoritatively from the SQLite backend, not the
+        # in-memory cache -- persist via the real production method (which
+        # updates both) instead of mutating the cached object directly.
+        registered_manager.save_temporal_options("test-repo", temporal_options)
         captured_cmds = []
 
         def fake_submit_job(operation_type, func, **kwargs):

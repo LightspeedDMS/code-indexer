@@ -79,20 +79,36 @@ class ActivatedReaperScheduler:
     # Manual trigger
     # ------------------------------------------------------------------
 
-    def trigger_now(self) -> str:
+    def trigger_now(self) -> Optional[str]:
         """
         Submit a reap cycle job immediately, independent of the cadence timer.
 
         Returns:
-            job_id returned by background_job_manager.submit_job().
+            job_id returned by background_job_manager.submit_job(), or None when
+            another worker already claimed the reap cycle (DuplicateJobError).
+            A None return is benign and expected in multi-worker deployments (Bug #1184).
         """
-        job_id: str = self._background_job_manager.submit_job(
-            "reap_activated_repos",
-            self._service.run_reap_cycle,
-            submitter_username="system",
-            is_admin=True,
-            repo_alias="server",
+        from code_indexer.server.repositories.background_jobs import (
+            DuplicateJobError,
         )
+
+        try:
+            job_id: str = self._background_job_manager.submit_job(
+                "reap_activated_repos",
+                self._service.run_reap_cycle,
+                submitter_username="system",
+                is_admin=True,
+                repo_alias="server",
+            )
+        except DuplicateJobError:
+            # Another worker already claimed this reap cycle — skip silently.
+            # This is expected and benign under multi-worker deployments (Bug #1184).
+            logger.debug(
+                "ActivatedReaperScheduler: reap_activated_repos already claimed "
+                "by another worker; skipping"
+            )
+            return None
+
         logger.info(
             "ActivatedReaperScheduler: triggered reap cycle (job_id=%s)", job_id
         )

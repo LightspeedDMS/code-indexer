@@ -143,8 +143,12 @@ class TestExecuteMethodIntegration:
                                 executor, "ensure_ripgrep"
                             ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = True
-
-                                result = executor.execute()
+                                with patch.object(
+                                    executor,
+                                    "_ensure_rust_toolchain",
+                                    return_value=True,
+                                ):
+                                    result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -171,8 +175,12 @@ class TestExecuteMethodIntegration:
                                 executor, "ensure_ripgrep"
                             ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = False  # ripgrep fails
-
-                                result = executor.execute()
+                                with patch.object(
+                                    executor,
+                                    "_ensure_rust_toolchain",
+                                    return_value=True,
+                                ):
+                                    result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -203,8 +211,12 @@ class TestExecuteMethodIntegration:
                                 executor, "ensure_ripgrep"
                             ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = True
-
-                                result = executor.execute()
+                                with patch.object(
+                                    executor,
+                                    "_ensure_rust_toolchain",
+                                    return_value=True,
+                                ):
+                                    result = executor.execute()
 
         # Verify ripgrep success was logged at INFO level
         assert any(
@@ -236,8 +248,12 @@ class TestExecuteMethodIntegration:
                                 executor, "ensure_ripgrep"
                             ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = False
-
-                                result = executor.execute()
+                                with patch.object(
+                                    executor,
+                                    "_ensure_rust_toolchain",
+                                    return_value=True,
+                                ):
+                                    result = executor.execute()
 
         # Verify ripgrep failure was logged at ERROR level with error code
         assert any(

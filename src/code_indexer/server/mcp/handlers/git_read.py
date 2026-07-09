@@ -1,14 +1,14 @@
 """Read-only git handler functions for CIDX MCP server.
 
 Covers: git_file_history, git_log, git_show_commit, git_file_at_revision,
-git_diff (both older handle_git_diff and newer git_diff), git_blame,
-git_search_commits, git_search_diffs, git_status, git_fetch,
-git_branch_list, git_conflict_status.
+git_diff, git_blame, git_search_commits, git_search_diffs, git_status,
+git_fetch, git_branch_list, git_conflict_status.
 
-The older handle_git_* variants are still referenced by omni handlers
-(_omni_git_log, _omni_git_search_commits) and must be included here.
-The newer git_diff / git_log variants overwrite the HANDLER_REGISTRY entries
-for those keys (matching the order in the original _legacy.py).
+The older handle_git_log variant is still referenced by the omni handler
+(_omni_git_log) and must be included here.  The newer git_diff / git_log
+variants overwrite the HANDLER_REGISTRY entries for those keys (matching
+the order in the original _legacy.py).  handle_git_diff was removed in
+Bug #1081 — only git_diff (the live paginated variant) remains.
 
 Shared helpers that remain in _legacy.py and are accessed via _get_legacy():
   _resolve_git_repo_path, _resolve_repo_path, _is_git_repo,
@@ -116,6 +116,8 @@ def _compute_file_history_fetch_limit(
 
 def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_history tool - get commit history for a file."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -129,6 +131,26 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: path"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
+
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
         if error_msg is not None:
@@ -297,6 +319,25 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
+
     try:
         # Resolve repository path, checking for .git directory existence
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -358,58 +399,21 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "rerank_time_ms": 0,
             }
 
-        # Story #35: Build full log result for potential caching
-        full_log_data = {
-            "commits": commits,
-            "total_count": result.total_count,
-        }
-
-        # Story #35: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
-
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
-
-        # Serialize log result to JSON for token counting and caching
-        log_json = json_module.dumps(full_log_data)
-
-        if payload_cache is not None and log_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=log_json,
-                content_type="log",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
+        # Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+        # retired for git_log.  All requested commits are always returned in full; the
+        # byte-cut preview/cache_handle pattern has no navigable continuation axis for
+        # clients and so is incoherent.  has_more/total_pages remain False/0.
         return _mcp_response(
             {
                 "success": True,
                 "commits": commits,
                 "total_count": result.total_count,
-                # Story #35: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
+                "cache_handle": None,
+                "truncated": False,
+                "total_tokens": 0,
+                "preview_tokens": 0,
+                "total_pages": 0,
+                "has_more": False,
                 # Story #660: Reranking telemetry
                 "query_metadata": {
                     "reranker_used": _rerank_meta["reranker_used"],
@@ -428,6 +432,8 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_show_commit tool - get detailed commit information."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -443,6 +449,25 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: commit_hash"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -509,6 +534,8 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_at_revision tool - get file contents at specific revision."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -529,6 +556,25 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: revision"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -564,150 +610,94 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_diff tool - get diff between revisions.
+# Bug #1008: line count above which blame output is cached and preview-truncated
+BLAME_TRUNCATION_LINE_THRESHOLD = 200
 
-    Story #34: When diff exceeds git_diff_max_tokens, stores full diff in
-    PayloadCache and returns cache_handle for paginated retrieval.
+# Canonical zero-value truncation metadata — shared between small-response and fallback paths
+_BLAME_TRUNC_ZERO: dict = {
+    "cache_handle": None,
+    "truncated": False,
+    "total_tokens": 0,
+    "preview_tokens": 0,
+    "total_pages": 0,
+    "has_more": False,
+}
+
+
+def _validate_git_blame_line_args(start_line: Any, end_line: Any) -> Optional[str]:
+    """Validate handler-level start_line/end_line inputs.
+
+    Returns an error string describing the first violation found, or None if valid.
+    Provides fast MCP error responses before the service layer is invoked.
     """
-    from code_indexer.server.mcp.handlers import _utils as _handler_utils
+    if start_line is not None:
+        if not isinstance(start_line, int):
+            return f"start_line must be an integer, got {type(start_line).__name__}"
+        if start_line < 1:
+            return f"start_line must be >= 1, got {start_line}"
+    if end_line is not None:
+        if not isinstance(end_line, int):
+            return f"end_line must be an integer, got {type(end_line).__name__}"
+        if end_line < 1:
+            return f"end_line must be >= 1, got {end_line}"
+    if start_line is not None and end_line is not None and end_line < start_line:
+        return f"end_line ({end_line}) must be >= start_line ({start_line})"
+    return None
 
-    leg = _get_legacy()
-    _resolve_git_repo_path = leg._resolve_git_repo_path
 
-    repository_alias = args.get("repository_alias")
-    from_revision = args.get("from_revision")
-
-    # Validate required parameters
-    if not repository_alias:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: repository_alias"}
-        )
-    if not from_revision:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: from_revision"}
-        )
-
-    try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
-        if error_msg is not None:
-            return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
-
-        # Create service and execute query
-        from code_indexer.global_repos.git_operations import GitOperationsService
-
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_diff(
-            from_revision=from_revision,
-            to_revision=args.get("to_revision"),
-            path=args.get("path"),
-            context_lines=args.get("context_lines", 3),
-            stat_only=args.get("stat_only", False),
-        )
-
-        # Convert dataclasses to dicts for JSON serialization
-        files = [
-            {
-                "path": f.path,
-                "old_path": f.old_path,
-                "status": f.status,
-                "insertions": f.insertions,
-                "deletions": f.deletions,
-                "hunks": [
-                    {
-                        "old_start": h.old_start,
-                        "old_count": h.old_count,
-                        "new_start": h.new_start,
-                        "new_count": h.new_count,
-                        "content": h.content,
-                    }
-                    for h in f.hunks
-                ],
-            }
-            for f in result.files
-        ]
-
-        # Story #34: Build full diff result for potential caching
-        full_diff_data = {
-            "from_revision": result.from_revision,
-            "to_revision": result.to_revision,
-            "files": files,
-            "total_insertions": result.total_insertions,
-            "total_deletions": result.total_deletions,
-            "stat_summary": result.stat_summary,
+def _serialize_blame_lines(blame_lines: list) -> List[dict]:
+    """Convert blame dataclass lines to JSON-serializable dicts."""
+    return [
+        {
+            "line_number": bl.line_number,
+            "commit_hash": bl.commit_hash,
+            "short_hash": bl.short_hash,
+            "author_name": bl.author_name,
+            "author_email": bl.author_email,
+            "author_date": bl.author_date,
+            "original_line_number": bl.original_line_number,
+            "content": bl.content,
         }
+        for bl in blame_lines
+    ]
 
-        # Story #34: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
 
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
+def _build_git_blame_response(
+    result: Any, lines: List[dict], total_lines: int, handler_utils: Any
+) -> dict:
+    """Build the success response dict for git_blame.
 
-        # Serialize diff result to JSON for token counting and caching
-        diff_json = json_module.dumps(full_diff_data)
+    Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+    retired for git_blame.  All requested blame lines are returned in full; the
+    byte-cut preview/cache_handle pattern has no navigable continuation axis and is
+    incoherent.  The BLAME_TRUNCATION_LINE_THRESHOLD branch is removed — all responses
+    use _BLAME_TRUNC_ZERO (cache_handle=None, truncated=False, has_more=False).
+    """
+    response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
 
-        if payload_cache is not None and diff_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=diff_json,
-                content_type="diff",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
-        return _mcp_response(
-            {
-                "success": True,
-                "from_revision": result.from_revision,
-                "to_revision": result.to_revision,
-                "files": files,
-                "total_insertions": result.total_insertions,
-                "total_deletions": result.total_deletions,
-                "stat_summary": result.stat_summary,
-                # Story #34: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error in git_diff: {e}", extra={"correlation_id": get_correlation_id()}
-        )
-        return _mcp_response({"success": False, "error": str(e)})
+    return {
+        "success": True,
+        "path": result.path,
+        "revision": result.revision,
+        "lines": response_lines,
+        "unique_commits": result.unique_commits,
+        "total_lines": total_lines,
+        **trunc_meta,
+    }
 
 
 def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_blame tool - get line-by-line blame annotations."""
-    leg = _get_legacy()
-    _resolve_git_repo_path = leg._resolve_git_repo_path
+    """Handler for git_blame tool - get line-by-line blame annotations.
+
+    Bug #1008: Handles BlameErrorResult (timeout) and truncates large responses.
+    """
+    from code_indexer.server.mcp.handlers import _utils as _handler_utils
 
     repository_alias = args.get("repository_alias")
     path = args.get("path")
+    start_line = args.get("start_line")
+    end_line = args.get("end_line")
 
-    # Validate required parameters
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
@@ -716,49 +706,55 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: path"}
         )
+    line_err = _validate_git_blame_line_args(start_line, end_line)
+    if line_err:
+        return _mcp_response({"success": False, "error": line_err})
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _get_legacy()._resolve_git_repo_path(
+            repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
+        assert repo_path is not None
 
-        # Create service and execute query
-        from code_indexer.global_repos.git_operations import GitOperationsService
+        from code_indexer.global_repos.git_operations import (
+            BlameErrorResult,
+            GitOperationsService,
+        )
 
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_blame(
+        result = GitOperationsService(Path(repo_path)).get_blame(
             path=path,
             revision=args.get("revision"),
-            start_line=args.get("start_line"),
-            end_line=args.get("end_line"),
+            start_line=start_line,
+            end_line=end_line,
         )
 
-        # Convert dataclasses to dicts for JSON serialization
-        lines = [
-            {
-                "line_number": line.line_number,
-                "commit_hash": line.commit_hash,
-                "short_hash": line.short_hash,
-                "author_name": line.author_name,
-                "author_email": line.author_email,
-                "author_date": line.author_date,
-                "original_line_number": line.original_line_number,
-                "content": line.content,
-            }
-            for line in result.lines
-        ]
+        if isinstance(result, BlameErrorResult):
+            return _mcp_response({"success": False, "error": result.error})
 
-        return _mcp_response(
-            {
-                "success": True,
-                "path": result.path,
-                "revision": result.revision,
-                "lines": lines,
-                "unique_commits": result.unique_commits,
-            }
-        )
+        lines = _serialize_blame_lines(result.lines)
+        payload = _build_git_blame_response(result, lines, len(lines), _handler_utils)
+        return _mcp_response(payload)
 
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
@@ -880,6 +876,8 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_commits tool - search commit messages."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -901,6 +899,25 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: query"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -978,6 +995,8 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1003,6 +1022,25 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "error": "Missing required parameter: search_string or search_pattern",
             }
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -1089,6 +1127,8 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_status tool - get repository working tree status."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1097,6 +1137,25 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1137,11 +1196,32 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_fetch tool - fetch refs from remote."""
+    from . import _utils
+
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Bug #639: Call fetch_from_remote wrapper to trigger migration if needed
@@ -1180,6 +1260,8 @@ def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_list tool - list all branches."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1188,6 +1270,25 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1228,6 +1329,8 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_conflict_status tool - get detailed merge conflict status."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1236,6 +1339,25 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1276,12 +1398,14 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Newer git_diff / git_log variants — these overwrite the HANDLER_REGISTRY
 # entries for "git_diff" and "git_log" (same ordering as original _legacy.py).
-# The older handle_git_diff / handle_git_log remain reachable for omni helpers.
+# The older handle_git_log remains reachable for omni helpers.
 # ---------------------------------------------------------------------------
 
 
 def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_diff tool - get diff of working tree changes with pagination."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1290,6 +1414,25 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1365,6 +1508,8 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_log tool - get commit history with pagination."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1373,6 +1518,25 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1478,7 +1642,6 @@ def _register(registry: dict) -> None:
     registry["git_log"] = handle_git_log
     registry["git_show_commit"] = handle_git_show_commit
     registry["git_file_at_revision"] = handle_git_file_at_revision
-    registry["git_diff"] = handle_git_diff
     registry["git_blame"] = handle_git_blame
     registry["git_file_history"] = handle_git_file_history
     registry["git_search_commits"] = handle_git_search_commits

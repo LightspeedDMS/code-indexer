@@ -236,6 +236,6 @@ class TestGetTemporalIndexStatus:
 
                 # Assert - Verify get_repository was called with correct signature
                 mock_manager.get_repository.assert_called_once_with(
-                    username, repo_alias
+                    username, repo_alias, touch=False
                 )
                 assert result["format"] == "none"
