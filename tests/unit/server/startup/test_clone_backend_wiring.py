@@ -539,6 +539,416 @@ class TestGoldenReposSymlinkPlacementCheck:
 
 
 # ---------------------------------------------------------------------------
+# Bug #1337 Gap 1: daemon_storage_path derivation from NFS mount source
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveDaemonStoragePathFromMount:
+    """NFS-client nodes never see the co-located daemon config (Bug #1320
+    Part B auto-detect only works on the daemon HOST), so daemon_storage_path
+    stays empty and CowDaemonBackend._translate_to_daemon_path hard-raises
+    once any path resolves under mount_point.
+    _derive_daemon_storage_path_from_mount is a last-resort runtime fallback:
+    derive the export path from the mount source of mount_point (findmnt,
+    falling back to /proc/mounts).
+    """
+
+    def test_returns_export_path_from_findmnt_nfs_source(self):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
+            return_value="192.0.2.10:/home/jsbattig/cow-storage",
+        ):
+            result = _derive_daemon_storage_path_from_mount("/mnt/cow-storage")
+
+        assert result == "/home/jsbattig/cow-storage"
+
+    def test_falls_back_to_proc_mounts_when_findmnt_unavailable(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        mounts_file = tmp_path / "proc_mounts_fixture"
+        mounts_file.write_text(
+            "192.0.2.10:/home/jsbattig/cow-storage /mnt/cow-storage nfs4 rw 0 0\n"
+        )
+
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
+            return_value=None,
+        ):
+            result = _derive_daemon_storage_path_from_mount(
+                "/mnt/cow-storage", mounts_file=str(mounts_file)
+            )
+
+        assert result == "/home/jsbattig/cow-storage"
+
+    def test_returns_none_when_mount_point_is_local_not_nfs(self):
+        """Daemon host: mount_point resolves to local XFS -- findmnt SOURCE
+        has no ':' (e.g. '/dev/sdb1') -- nothing to derive, existing
+        daemon-host resolution (co-located config) stands."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
+            return_value="/dev/sdb1",
+        ):
+            result = _derive_daemon_storage_path_from_mount("/mnt/cow-storage")
+
+        assert result is None
+
+    def test_returns_export_path_from_bracketed_ipv6_source(self):
+        """A bracketed IPv6 NFS source (e.g. '[fe80::1]:/export') contains
+        colons INSIDE the host portion -- naive partition(":") on the first
+        colon would wrongly split at the first colon inside the brackets
+        (yielding ':1]:/export' instead of '/export'). The export path must
+        be derived from the first '/', which is unambiguous for hostname,
+        IPv4, and bracketed-IPv6 sources alike (none of those host forms
+        contain '/')."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
+            return_value="[fe80::1]:/home/jsbattig/cow-storage",
+        ):
+            result = _derive_daemon_storage_path_from_mount("/mnt/cow-storage")
+
+        assert result == "/home/jsbattig/cow-storage"
+
+    def test_returns_none_when_no_source_found_anywhere(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        empty_mounts = tmp_path / "empty_mounts"
+        empty_mounts.write_text("")
+
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
+            return_value=None,
+        ):
+            result = _derive_daemon_storage_path_from_mount(
+                "/mnt/cow-storage", mounts_file=str(empty_mounts)
+            )
+
+        assert result is None
+
+    def test_returns_none_for_empty_mount_point(self):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _derive_daemon_storage_path_from_mount,
+        )
+
+        assert _derive_daemon_storage_path_from_mount("") is None
+
+
+class TestResolveEffectiveCowDaemonConfig:
+    """_resolve_effective_cow_daemon_config runs the Gap 1 fallback
+    derivation ONLY when daemon_storage_path is empty; a pre-existing value
+    (from --cow-daemon-storage-path / env / co-located daemon config, all
+    already baked into config.json by the shell installer) always wins.
+    """
+
+    def test_does_not_call_derive_when_daemon_storage_path_already_set(self):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _resolve_effective_cow_daemon_config,
+        )
+
+        cow_cfg = CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="key",
+            mount_point="/mnt/cow-storage",
+            daemon_storage_path="/srv/already-set",
+        )
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring."
+            "_derive_daemon_storage_path_from_mount"
+        ) as mock_derive:
+            result = _resolve_effective_cow_daemon_config(cow_cfg)
+
+        mock_derive.assert_not_called()
+        assert result.daemon_storage_path == "/srv/already-set"
+
+    def test_fills_in_daemon_storage_path_when_empty_and_derivable(self):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _resolve_effective_cow_daemon_config,
+        )
+
+        cow_cfg = CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="key",
+            mount_point="/mnt/cow-storage",
+        )
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring."
+            "_derive_daemon_storage_path_from_mount",
+            return_value="/home/jsbattig/cow-storage",
+        ):
+            result = _resolve_effective_cow_daemon_config(cow_cfg)
+
+        assert result.daemon_storage_path == "/home/jsbattig/cow-storage"
+        # Original config object must be untouched (no in-place mutation).
+        assert cow_cfg.daemon_storage_path is None
+
+    def test_returns_config_unchanged_when_derivation_yields_none(self):
+        """Daemon host (local XFS, no NFS source): derivation returns None,
+        cow_cfg is returned as-is with daemon_storage_path still empty."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _resolve_effective_cow_daemon_config,
+        )
+
+        cow_cfg = CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="key",
+            mount_point="/mnt/cow-storage",
+        )
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring."
+            "_derive_daemon_storage_path_from_mount",
+            return_value=None,
+        ):
+            result = _resolve_effective_cow_daemon_config(cow_cfg)
+
+        assert result is cow_cfg
+        assert result.daemon_storage_path is None
+
+
+class TestBuildSnapshotManagerDerivesDaemonStoragePath:
+    """Integration: build_snapshot_manager wires the Gap 1 derivation in so a
+    freshly-provisioned NFS-client node self-configures with no operator
+    action, and CowDaemonBackend can translate paths under mount_point.
+    """
+
+    def test_cow_daemon_backend_gets_derived_daemon_storage_path(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_cow_daemon_config(mount_point=str(tmp_path))
+        assert cfg.cow_daemon.daemon_storage_path is None
+
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ),
+            patch("code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"),
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring."
+                "_derive_daemon_storage_path_from_mount",
+                return_value="/home/jsbattig/cow-storage",
+            ),
+        ):
+            manager = build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        assert (
+            manager._clone_backend._daemon_storage_path == "/home/jsbattig/cow-storage"
+        )
+
+    def test_cow_daemon_backend_keeps_configured_daemon_storage_path(self, tmp_path):
+        """When cow_daemon.daemon_storage_path is already configured, the
+        Gap 1 derivation must never override it."""
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_cow_daemon_config(mount_point=str(tmp_path))
+        cfg.cow_daemon.daemon_storage_path = "/srv/configured-value"
+
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ),
+            patch("code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"),
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring."
+                "_derive_daemon_storage_path_from_mount"
+            ) as mock_derive,
+        ):
+            manager = build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        mock_derive.assert_not_called()
+        assert manager._clone_backend._daemon_storage_path == "/srv/configured-value"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1337 Gap 2: activated-repos symlink placement validation (parallel
+# check to golden-repos)
+# ---------------------------------------------------------------------------
+
+
+class TestActivatedReposSymlinkPlacementCheck:
+    """Mirrors TestGoldenReposSymlinkPlacementCheck for activated_repos_dir.
+
+    Per-user activation reflink-clones INTO activated_repos_dir (Bug #1052),
+    which must ALSO be a symlink into the CoW storage so the reflink DEST
+    resolves on the CoW XFS -- same requirement as golden_repos_dir.
+    """
+
+    def test_passes_when_symlink_resolves_under_mount_point(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_activated_repos_symlink_placement,
+        )
+
+        mount_point = tmp_path / "mnt-cow-storage"
+        (mount_point / "activated-repos").mkdir(parents=True)
+
+        activated_repos_dir = tmp_path / "data" / "activated-repos"
+        activated_repos_dir.parent.mkdir(parents=True)
+        activated_repos_dir.symlink_to(mount_point / "activated-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(mount_point)
+        cow_cfg.daemon_storage_path = None
+
+        # Must not raise.
+        _check_activated_repos_symlink_placement(str(activated_repos_dir), cow_cfg)
+
+    def test_passes_when_symlink_resolves_under_daemon_storage_path(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_activated_repos_symlink_placement,
+        )
+
+        daemon_storage_path = tmp_path / "srv-cow-xfs"
+        (daemon_storage_path / "activated-repos").mkdir(parents=True)
+
+        activated_repos_dir = tmp_path / "data" / "activated-repos"
+        activated_repos_dir.parent.mkdir(parents=True)
+        activated_repos_dir.symlink_to(daemon_storage_path / "activated-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(tmp_path / "mnt-cow-storage")
+        cow_cfg.daemon_storage_path = str(daemon_storage_path)
+
+        # Must not raise.
+        _check_activated_repos_symlink_placement(str(activated_repos_dir), cow_cfg)
+
+    def test_warns_when_activated_repos_dir_is_plain_directory(self, tmp_path, caplog):
+        import logging
+
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_activated_repos_symlink_placement,
+        )
+
+        activated_repos_dir = tmp_path / "data" / "activated-repos"
+        activated_repos_dir.mkdir(parents=True)
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(tmp_path / "mnt-cow-storage")
+        cow_cfg.daemon_storage_path = str(tmp_path / "srv-cow-xfs")
+
+        with caplog.at_level(logging.WARNING):
+            # Must NOT raise.
+            _check_activated_repos_symlink_placement(str(activated_repos_dir), cow_cfg)
+
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "Expected a WARNING to be logged"
+        combined = " ".join(r.getMessage() for r in warning_records)
+        assert "Bug #1337" in combined
+        assert "activated-repos" in combined
+        assert "mv " in combined and "ln -s" in combined
+
+    def test_dangling_symlink_logs_warning_and_does_not_raise(self, tmp_path, caplog):
+        import logging
+
+        from code_indexer.server.startup.clone_backend_wiring import (
+            _check_activated_repos_symlink_placement,
+        )
+
+        mount_point = tmp_path / "mnt-cow-storage"  # never created -> dangling
+        activated_repos_dir = tmp_path / "data" / "activated-repos"
+        activated_repos_dir.parent.mkdir(parents=True)
+        activated_repos_dir.symlink_to(mount_point / "activated-repos")
+
+        cow_cfg = MagicMock()
+        cow_cfg.mount_point = str(mount_point)
+        cow_cfg.daemon_storage_path = None
+
+        with caplog.at_level(logging.WARNING):
+            # Must NOT raise.
+            _check_activated_repos_symlink_placement(str(activated_repos_dir), cow_cfg)
+
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+class TestBuildSnapshotManagerActivatedReposParam:
+    """build_snapshot_manager gains an optional activated_repos_dir param
+    (default None, backward compatible) that triggers the Gap 2 check only
+    for cow-daemon; local/ontap paths never call it.
+    """
+
+    def test_default_none_skips_activated_repos_check(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_cow_daemon_config(mount_point=str(tmp_path))
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ),
+            patch("code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"),
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring."
+                "_check_activated_repos_symlink_placement"
+            ) as mock_check,
+        ):
+            build_snapshot_manager(cfg, versioned_base=str(tmp_path))
+
+        mock_check.assert_not_called()
+
+    def test_calls_activated_repos_check_when_path_provided(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        activated_repos_dir = str(tmp_path / "activated-repos")
+        cfg = _make_cow_daemon_config(mount_point=str(tmp_path))
+        with (
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring._check_daemon_health"
+            ),
+            patch("code_indexer.server.startup.clone_backend_wiring._check_nfs_mount"),
+            patch(
+                "code_indexer.server.startup.clone_backend_wiring."
+                "_check_activated_repos_symlink_placement"
+            ) as mock_check,
+        ):
+            build_snapshot_manager(
+                cfg,
+                versioned_base=str(tmp_path),
+                activated_repos_dir=activated_repos_dir,
+            )
+
+        mock_check.assert_called_once()
+        args = mock_check.call_args[0]
+        assert args[0] == activated_repos_dir
+
+    def test_local_backend_never_calls_activated_repos_check(self, tmp_path):
+        from code_indexer.server.startup.clone_backend_wiring import (
+            build_snapshot_manager,
+        )
+
+        cfg = _make_local_config()
+        with patch(
+            "code_indexer.server.startup.clone_backend_wiring."
+            "_check_activated_repos_symlink_placement"
+        ) as mock_check:
+            build_snapshot_manager(
+                cfg,
+                versioned_base=str(tmp_path),
+                activated_repos_dir=str(tmp_path / "activated-repos"),
+            )
+
+        mock_check.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # ontap backend
 # ---------------------------------------------------------------------------
 

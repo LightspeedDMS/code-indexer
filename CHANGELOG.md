@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.33.0] - 2026-07-09
+
+### Fixed
+
+- **Fresh cow-daemon cluster provisioning is now correct (#1337 completion).** A cluster node's `daemon_storage_path` is derived at startup from the NFS mount source of `mount_point` (`findmnt` / `/proc/mounts`; the export path after the host prefix, robust to hostname / IPv4 / bracketed-IPv6 forms) when it is empty — so NFS-client nodes self-configure (the co-located daemon config file only exists on the CoW host). The installer now provisions `activated-repos` as a node-aware symlink into the CoW storage (like `golden-repos`), so per-user reflink activation's DESTINATION also resolves on the CoW XFS. Startup placement validation is generalized to WARN (never disable `snapshot_manager`) for both `golden-repos` and `activated-repos`. No migration logic; the solo/local path (`clone_backend != cow-daemon`, i.e. production) is byte-for-byte unchanged. Together with the earlier v11.31.0/v11.32.0 work, per-user activation now works end-to-end on a cow-daemon cluster.
+- **Typed `OrphanedRepoError` replaces brittle error-message string matching (#1338).** #1336 detected orphaned golden aliases by matching raised error-message substrings across module boundaries, so a reworded message would silently re-break orphan-skip. A dedicated `OrphanedRepoError(ValueError)` is now raised only at the two orphaned-clone source sites (missing clone for a registered alias) and caught by type at both skip sites; other `ValueError`s (empty alias, bad path, real Claude/git failures) still propagate and fail the job. Message-drift-proof tests drive the real invoker/updater.
+- **Missing `wiki_article_views` SQLite migration (#1340).** Removing a golden repo logged an ERROR (`no such table: wiki_article_views`) on SQLite nodes where no wiki page had ever been viewed — the startup SQLite init created the other wiki tables but not this one (it was created eagerly for PostgreSQL, lazily for SQLite on first wiki route). An idempotent `CREATE TABLE IF NOT EXISTS` is now part of `DatabaseSchema.initialize_database` (additive, backward compatible, repairs existing DBs), so golden-repo removal no longer errors.
+
 ## [11.32.0] - 2026-07-09
 
 ### Fixed
