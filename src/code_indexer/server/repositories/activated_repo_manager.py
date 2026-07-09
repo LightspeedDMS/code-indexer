@@ -191,6 +191,37 @@ class ActivatedRepoManager:
             "ActivatedRepoManager: using shared storage at %s",
             self.activated_repos_dir,
         )
+        self._warn_if_activated_storage_not_shared(shared_dir)
+
+    def _warn_if_activated_storage_not_shared(self, shared_dir: str) -> None:
+        """Warn loudly when activated-repos is NOT on the same shared volume as
+        golden-repos in cluster mode.
+
+        Cluster mode runs multiple pods behind a load balancer. Activation writes
+        a per-user working tree to ``activated-repos``; if that directory is on a
+        pod-local filesystem (e.g. only ``golden-repos`` was mounted on the shared
+        RWX/NFS volume, leaving its ``activated-repos`` sibling on local disk),
+        then a repo activated on one pod is invisible to the others -- browse,
+        list-files, branch and file-content reads 404 on ~(N-1)/N of requests.
+        Detect the split by comparing the backing device of the two sibling
+        directories and surface it, since it otherwise manifests only as opaque,
+        intermittent 404s. Best-effort: any stat failure is ignored.
+        """
+        golden = Path(shared_dir) / "golden-repos"
+        try:
+            if not golden.exists():
+                return
+            if os.stat(self.activated_repos_dir).st_dev != os.stat(golden).st_dev:
+                self.logger.warning(
+                    "ActivatedRepoManager: activated-repos (%s) is on a different "
+                    "filesystem than golden-repos (%s). In a multi-pod cluster a "
+                    "repo activated on one pod will 404 on the others. Mount "
+                    "activated-repos on the same shared RWX volume as golden-repos.",
+                    self.activated_repos_dir,
+                    str(golden),
+                )
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Dual-mode metadata helpers (Bug #587)
