@@ -485,6 +485,35 @@ class RefreshScheduler:
     CLONE_TIMEOUT_SECONDS: int = 300  # 5 minutes
 
     # ------------------------------------------------------------------
+    # Bug #1341: Exponential backoff for sustained fetch failures.
+    #
+    # A repo is NEVER removed from scheduling and NEVER reaches a
+    # terminal/quarantine state -- every failure just pushes the next
+    # attempt further into the future (via registry.update_next_refresh),
+    # capped so it is always retried eventually, just less often while
+    # broken. This directly fixes the #1341 complaint of retrying (and
+    # re-escalating to re-clone) every single cycle forever.
+    #
+    # TRANSIENT/CORRUPTION errors keep today's immediate-retry cadence
+    # (and re-clone escalation) for the first MAX_TRANSIENT_FAILURES
+    # failures -- these are expected to recover on their own. Only once
+    # sustained past that threshold does backoff engage, capped at the
+    # same interval as RECLONE_COOLDOWN_SECONDS so fetch retries and
+    # re-clone attempts settle at the same cadence.
+    TRANSIENT_BACKOFF_BASE_SECONDS: int = 60  # 1 minute
+    TRANSIENT_BACKOFF_CAP_SECONDS: int = 3600  # 1 hour
+
+    # PERMANENT errors (access revoked / repo deleted -- GitLab/GitHub
+    # "not found or no permission") are NOT expected to recover quickly, so
+    # backoff engages from the very first failure and caps much longer.
+    # Re-clone is never attempted for a permanent error (see
+    # _handle_fetch_error): re-cloning an inaccessible/nonexistent repo
+    # cannot possibly succeed and would only waste a subprocess + network
+    # round trip.
+    PERMANENT_BACKOFF_BASE_SECONDS: int = 300  # 5 minutes
+    PERMANENT_BACKOFF_CAP_SECONDS: int = 21600  # 6 hours
+
+    # ------------------------------------------------------------------
     # Story #284: Back-propagating jitter for staggered refresh scheduling
     # ------------------------------------------------------------------
 
@@ -595,6 +624,165 @@ class RefreshScheduler:
         """Reset the consecutive fetch failure counter for an alias."""
         self._fetch_failure_counts[alias_name] = 0
 
+    @staticmethod
+    def _is_backoff_log_milestone(count: int) -> bool:
+        """
+        Return True when count is a power-of-two milestone (1, 2, 4, 8, 16, ...).
+
+        Bug #1341 log-throttle: sustained fetch failures are ERROR-logged
+        only at these milestones instead of on every single cycle, so a
+        persistently broken upstream cannot flood the log (bounded to
+        O(log N) ERROR lines over N consecutive failures) while the
+        failure still surfaces periodically.
+        """
+        return count > 0 and (count & (count - 1)) == 0
+
+    def _compute_backoff_seconds(
+        self, category: str, consecutive_failures: int
+    ) -> Optional[int]:
+        """
+        Compute the backoff delay (seconds) before the next scheduled attempt
+        for a sustained fetch failure (Bug #1341), or None when the normal
+        refresh-interval cadence applies unchanged (immediate retry).
+
+        PERMANENT errors back off from the first failure (base
+        PERMANENT_BACKOFF_BASE_SECONDS, doubling per failure, capped at
+        PERMANENT_BACKOFF_CAP_SECONDS). TRANSIENT errors keep immediate
+        retry for the first MAX_TRANSIENT_FAILURES-1 failures, then back
+        off too (base TRANSIENT_BACKOFF_BASE_SECONDS, doubling, capped at
+        TRANSIENT_BACKOFF_CAP_SECONDS). CORRUPTION/unknown are unaffected
+        (returns None) -- out of scope for #1341.
+        """
+        if category == "permanent":
+            exponent = max(0, consecutive_failures - 1)
+            # int ** int is typed Any in typeshed (negative exponents yield
+            # float) -- exponent is always >= 0 here, so int(...) is safe
+            # and satisfies the declared Optional[int] return type.
+            return int(
+                min(
+                    self.PERMANENT_BACKOFF_BASE_SECONDS * (2**exponent),
+                    self.PERMANENT_BACKOFF_CAP_SECONDS,
+                )
+            )
+
+        if (
+            category == "transient"
+            and consecutive_failures >= self.MAX_TRANSIENT_FAILURES
+        ):
+            exponent = consecutive_failures - self.MAX_TRANSIENT_FAILURES
+            return int(
+                min(
+                    self.TRANSIENT_BACKOFF_BASE_SECONDS * (2**exponent),
+                    self.TRANSIENT_BACKOFF_CAP_SECONDS,
+                )
+            )
+
+        return None
+
+    def _log_permanent_fetch_failure(
+        self, alias_name: str, count: int, error: "GitFetchError"
+    ) -> None:
+        """Log a PERMANENT-classified fetch failure, milestone-throttled (Bug #1341)."""
+        if self._is_backoff_log_milestone(count):
+            logger.error(
+                "Repo %s fetch failing with a PERMANENT error (consecutive=%d): "
+                "%s -- will keep retrying at a growing backoff (capped at "
+                "%ds) but will not recover without operator action: verify "
+                "the upstream repository still exists and that credentials/"
+                "access rights are valid.",
+                alias_name,
+                count,
+                error.stderr.strip(),
+                self.PERMANENT_BACKOFF_CAP_SECONDS,
+            )
+        else:
+            logger.debug(
+                "Repo %s still failing with a PERMANENT fetch error "
+                "(consecutive=%d, ERROR log throttled until next milestone)",
+                alias_name,
+                count,
+            )
+
+    def _decide_non_permanent_reclone(
+        self, alias_name: str, error: "GitFetchError", count: int, in_cooldown: bool
+    ) -> bool:
+        """
+        Decide whether a TRANSIENT/CORRUPTION fetch error should trigger a
+        re-clone attempt, logging appropriately (milestone-throttled ERROR
+        once escalated). Pre-existing decision logic, unchanged by #1341.
+        """
+        if in_cooldown:
+            logger.warning(
+                f"Fetch failed for {alias_name} (category={error.category}, "
+                f"consecutive={count}), but re-clone cooldown is active — skipping"
+            )
+            return False
+
+        if error.category == "corruption":
+            logger.error(
+                f"Repo {alias_name} has corrupted git objects, initiating auto re-clone"
+            )
+            return True
+
+        if count >= self.MAX_TRANSIENT_FAILURES:
+            relative = count - self.MAX_TRANSIENT_FAILURES + 1
+            if self._is_backoff_log_milestone(relative):
+                logger.error(
+                    f"Repo {alias_name} has {count} consecutive transient fetch failures, "
+                    "escalating to auto re-clone"
+                )
+            else:
+                logger.debug(
+                    f"Repo {alias_name} still has {count} consecutive transient "
+                    "fetch failures (ERROR log throttled until next milestone)"
+                )
+            return True
+
+        logger.warning(
+            f"Transient fetch failure #{count} for {alias_name} "
+            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+        )
+        return False
+
+    def _handle_non_permanent_fetch_error(
+        self,
+        alias_name: str,
+        repo_url: str,
+        master_path: str,
+        error: "GitFetchError",
+        count: int,
+    ) -> None:
+        """
+        Handle TRANSIENT/CORRUPTION fetch errors -- pre-existing behavior,
+        unchanged by Bug #1341 (expected to recover via retry/re-clone).
+        """
+        now = time.monotonic()
+        cooldown_until = self._reclone_cooldowns.get(alias_name, 0.0)
+        in_cooldown = now < cooldown_until
+
+        should_reclone = self._decide_non_permanent_reclone(
+            alias_name, error, count, in_cooldown
+        )
+        if should_reclone:
+            # Set cooldown before attempting — prevents retry storms even if
+            # the attempt raises an exception.
+            self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
+            self._attempt_reclone(alias_name, repo_url, master_path)
+
+    def _apply_fetch_backoff(self, alias_name: str, category: str, count: int) -> None:
+        """Push next_refresh out by the computed backoff, if any (Bug #1341)."""
+        backoff_seconds = self._compute_backoff_seconds(category, count)
+        if backoff_seconds is None:
+            return
+        try:
+            self.registry.update_next_refresh(alias_name, time.time() + backoff_seconds)
+        except Exception as exc:
+            logger.warning(
+                "Bug #1341: failed to persist backoff next_refresh for %s: %s",
+                alias_name,
+                exc,
+            )
+
     def _handle_fetch_error(
         self,
         alias_name: str,
@@ -605,10 +793,18 @@ class RefreshScheduler:
         """
         Handle a GitFetchError from has_changes().
 
-        Increments the consecutive failure counter for the alias, then decides
-        whether to trigger re-clone based on error category and counter value,
-        respecting the cooldown guard rail.  Always raises RuntimeError so
-        _execute_refresh propagates the failure.
+        Bug #1341: a repo is NEVER removed from scheduling and NEVER reaches
+        a terminal/quarantine state, no matter how the error classifies.
+        PERMANENT-classified errors never trigger re-clone (see
+        _log_permanent_fetch_failure) but the fetch itself IS still retried,
+        just at a growing backoff (_compute_backoff_seconds /
+        _apply_fetch_backoff) pushed onto the alias's next_refresh, so it is
+        always retried eventually. TRANSIENT/CORRUPTION errors keep the
+        pre-existing immediate-retry + re-clone-escalation behavior
+        completely unchanged (_handle_non_permanent_fetch_error); backoff
+        also engages for transient only once sustained past the escalation
+        threshold. ERROR-level logging is milestone-throttled, fixing the
+        original #1341 log-flood complaint.
 
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
@@ -622,38 +818,14 @@ class RefreshScheduler:
         count = self._fetch_failure_counts.get(alias_name, 0) + 1
         self._fetch_failure_counts[alias_name] = count
 
-        now = time.monotonic()
-        cooldown_until = self._reclone_cooldowns.get(alias_name, 0.0)
-        in_cooldown = now < cooldown_until
-
-        should_reclone = False
-        if in_cooldown:
-            logger.warning(
-                f"Fetch failed for {alias_name} (category={error.category}, "
-                f"consecutive={count}), but re-clone cooldown is active — skipping"
-            )
-        elif error.category == "corruption":
-            logger.error(
-                f"Repo {alias_name} has corrupted git objects, initiating auto re-clone"
-            )
-            should_reclone = True
-        elif count >= self.MAX_TRANSIENT_FAILURES:
-            logger.error(
-                f"Repo {alias_name} has {count} consecutive transient fetch failures, "
-                "escalating to auto re-clone"
-            )
-            should_reclone = True
+        if error.category == "permanent":
+            self._log_permanent_fetch_failure(alias_name, count, error)
         else:
-            logger.warning(
-                f"Transient fetch failure #{count} for {alias_name} "
-                f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+            self._handle_non_permanent_fetch_error(
+                alias_name, repo_url, master_path, error, count
             )
 
-        if should_reclone:
-            # Set cooldown before attempting — prevents retry storms even if
-            # the attempt raises an exception.
-            self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
-            self._attempt_reclone(alias_name, repo_url, master_path)
+        self._apply_fetch_backoff(alias_name, error.category, count)
 
         raise RuntimeError(
             f"Fetch failed for {alias_name} (category={error.category}): {error.stderr}"
