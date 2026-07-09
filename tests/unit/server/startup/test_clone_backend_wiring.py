@@ -415,9 +415,15 @@ class TestGoldenReposSymlinkPlacementCheck:
         # Must not raise.
         _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
 
-    def test_raises_when_golden_repos_dir_is_plain_directory(self, tmp_path):
+    def test_warns_when_golden_repos_dir_is_plain_directory(self, tmp_path, caplog):
         """Plain directory (never a symlink) whose realpath is not under
-        mount_point or daemon_storage_path -- fail loud."""
+        mount_point or daemon_storage_path -- staging regression fix: this is
+        now a non-fatal WARNING (not a raise), so snapshot_manager stays
+        functional. Per-user activation will still fail at translate time
+        until the golden-repos symlink migration is done -- the warning
+        carries the actionable mv + ln -s remediation text."""
+        import logging
+
         from code_indexer.server.startup.clone_backend_wiring import (
             _check_golden_repos_symlink_placement,
         )
@@ -429,8 +435,15 @@ class TestGoldenReposSymlinkPlacementCheck:
         cow_cfg.mount_point = str(tmp_path / "mnt-cow-storage")
         cow_cfg.daemon_storage_path = str(tmp_path / "srv-cow-xfs")
 
-        with pytest.raises(RuntimeError, match="Bug #1337"):
+        with caplog.at_level(logging.WARNING):
+            # Must NOT raise.
             _check_golden_repos_symlink_placement(str(golden_repos_dir), cow_cfg)
+
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "Expected a WARNING to be logged"
+        combined = " ".join(r.getMessage() for r in warning_records)
+        assert "Bug #1337" in combined
+        assert "mv " in combined and "ln -s" in combined
 
     def test_dangling_symlink_logs_warning_and_does_not_raise(self, tmp_path, caplog):
         """Symlink present but target unresolvable (mount/CoW host down) ->
@@ -456,9 +469,17 @@ class TestGoldenReposSymlinkPlacementCheck:
 
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
-    def test_build_snapshot_manager_raises_for_plain_golden_repos_dir(self, tmp_path):
-        """Integration: build_snapshot_manager propagates the loud failure for
-        a plain (never-symlinked) golden-repos dir under cow-daemon."""
+    def test_build_snapshot_manager_does_not_raise_for_plain_golden_repos_dir(
+        self, tmp_path, caplog
+    ):
+        """Integration (staging regression fix): build_snapshot_manager does
+        NOT raise for a plain (never-symlinked) golden-repos dir under
+        cow-daemon -- it logs a WARNING and still returns a working
+        VersionedSnapshotManager with a constructed CloneBackend. Per-user
+        activation will fail later at translate time (the pre-existing
+        #1337 symptom, surfaced by the warning), but nothing NEW breaks."""
+        import logging
+
         from code_indexer.server.startup.clone_backend_wiring import (
             build_snapshot_manager,
         )
@@ -478,8 +499,15 @@ class TestGoldenReposSymlinkPlacementCheck:
             mock_health.return_value = None
             mock_nfs.return_value = None
 
-            with pytest.raises(RuntimeError, match="Bug #1337"):
-                build_snapshot_manager(cfg, versioned_base=str(golden_repos_dir))
+            with caplog.at_level(logging.WARNING):
+                manager = build_snapshot_manager(
+                    cfg, versioned_base=str(golden_repos_dir)
+                )
+
+        assert isinstance(manager, VersionedSnapshotManager)
+        assert isinstance(manager._clone_backend, CowDaemonBackend)
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("Bug #1337" in r.getMessage() for r in warning_records)
 
     def test_build_snapshot_manager_does_not_raise_for_dangling_symlink(self, tmp_path):
         """Integration: a dangling golden-repos symlink degrades to a WARNING;
