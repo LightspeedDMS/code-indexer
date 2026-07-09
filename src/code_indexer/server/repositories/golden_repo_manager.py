@@ -314,6 +314,44 @@ class GoldenRepoManager:
         self.golden_repos[alias] = repo
         return repo
 
+    def _resolve_golden_repo_authoritative(self, alias: str) -> Optional["GoldenRepo"]:
+        """
+        Resolve a golden repo's CURRENT authoritative state directly from the
+        shared backend, bypassing the per-worker cache HIT path (Bug #1316).
+
+        `_resolve_golden_repo` is cache-first with reload-on-miss (Bug #1314):
+        correct for presence checks and immutable-field reads (clone_path), but
+        a cache HIT can serve a field value (e.g. default_branch,
+        temporal_options) that a DIFFERENT worker/node has since mutated in the
+        shared backend. Mutation-path decisions whose OUTCOME depends on such a
+        field (change_branch's "already on branch" check;
+        add_indexes_to_golden_repo's temporal_options used to build the index
+        command) MUST call this method instead, so a cross-node mutation is
+        visible immediately without a worker restart. The per-worker cache is
+        refreshed with the fresh row (or evicted if the row is gone) so
+        subsequent cache-first reads (clone_path, presence) stay consistent.
+
+        Args:
+            alias: Repository alias.
+
+        Returns:
+            Freshly-read GoldenRepo if it still exists in the shared backend,
+            else None (also evicts any stale cache entry for this alias).
+        """
+        # Anti-duplication: get_golden_repo() already performs the identical
+        # unconditional self._sqlite_backend.get_repo(alias) -> GoldenRepo(...)
+        # read (it is the long-standing public "source of truth" accessor
+        # used throughout the codebase, e.g. activated_repo_manager.py,
+        # mcp/handlers/delegation.py). Delegate to it rather than duplicating
+        # the fetch-and-construct logic; this method's only added value is
+        # the cache-refresh/eviction side effect below.
+        repo = self.get_golden_repo(alias)
+        if repo is None:
+            self.golden_repos.pop(alias, None)
+            return None
+        self.golden_repos[alias] = repo
+        return repo
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -2973,7 +3011,11 @@ class GoldenRepoManager:
 
         # Bug #1314: resolve via shared backend on a local cache miss so a
         # repo registered by ANOTHER worker/node is found here too.
-        golden_repo = self._resolve_golden_repo(alias)
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" short-circuit
+        # below depends on default_branch, which another worker/node may
+        # have already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
         if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
         if target_branch == golden_repo.default_branch:
@@ -3075,7 +3117,7 @@ class GoldenRepoManager:
             self._sqlite_backend.invalidate_description_refresh_tracking(alias)
             self._sqlite_backend.invalidate_dependency_map_tracking(alias)
             with self._operation_lock:
-                old = self.golden_repos[alias]
+                old = golden_repo
                 self.golden_repos[alias] = GoldenRepo(
                     alias=old.alias,
                     repo_url=old.repo_url,
@@ -3132,7 +3174,11 @@ class GoldenRepoManager:
         # Bug #1314: resolve via shared backend on a local cache miss so a
         # repo registered by ANOTHER worker/node is found here too (this is
         # the manager-level entry point behind refresh_golden_repo).
-        golden_repo = self._resolve_golden_repo(alias)
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" outcome below
+        # depends on default_branch, which another worker/node may have
+        # already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
         if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
         if target_branch == golden_repo.default_branch:
@@ -3239,8 +3285,20 @@ class GoldenRepoManager:
                     )
 
             try:
-                # Get repository details
-                repo = self.golden_repos[alias]
+                # Get repository details.
+                # Bug #1316: resolve AUTHORITATIVELY (unconditional shared-
+                # backend read), not via the raw per-worker cache -- this
+                # worker's cache may hold a STALE temporal_options value
+                # even though ANOTHER node has since saved fresh options via
+                # save_temporal_options(). Reading the stale cache here would
+                # build the temporal index command (max_commits, since_date,
+                # diff_context, all_branches) from the wrong values.
+                repo = self._resolve_golden_repo_authoritative(alias)
+                if repo is None:
+                    raise GoldenRepoError(
+                        f"Golden repository '{alias}' was removed before "
+                        "indexing could start"
+                    )
                 # Use canonical path resolution (base clone, not versioned snapshot)
                 repo_path = self.get_actual_repo_path(alias)
 

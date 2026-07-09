@@ -161,6 +161,10 @@ Consequence for any path-keyed cache: do NOT assume the query-path string is imm
 
 Alias JSON `target_path` is authoritative for global repos. Use `GoldenRepoManager.get_actual_repo_path(alias)` for golden/activated. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
 
+### Golden-Repo Mutation-Path Authoritative Read (Bug #1316)
+
+`_resolve_golden_repo` (cache-first, reload-on-miss, Bug #1314) is correct for presence checks and immutable-field reads (`clone_path`), but a cache HIT can still serve a field value that a DIFFERENT worker/node has since mutated in the shared backend. `change_branch` / `change_branch_async` and `add_indexes_to_golden_repo`'s temporal-index command builder now resolve via `_resolve_golden_repo_authoritative` (`server/repositories/golden_repo_manager.py`) -- an unconditional `self._sqlite_backend.get_repo(alias)` read, bypassing the cache-HIT path -- because their OUTCOME depends on a mutable field (`default_branch`, `temporal_options`) another node can change. This fixes two symptoms: a false "already on branch" no-op / redundant reindex job submission when another node already applied the branch change, and building a `cidx index --index-commits` command from stale `max_commits`/`since_date`/`diff_context`/`all_branches` after another node saved fresh options via `save_temporal_options`. `get_actual_repo_path` and `get_golden_repo_indexes` were audited and need no change -- both read only `clone_path`/`alias`, which are immutable per row after creation.
+
 ### Golden Repo Registry-Orphan Guard + Reconcile (Bug #1317)
 
 A "registry-orphan" is a `golden_repos` row (PostgreSQL `golden_repos_metadata` in cluster mode, SQLite in solo mode) with no corresponding on-disk clone and/or no alias pointer file. Staging observed 7 such rows (`uvicorn`, `flask`, `fastapi`, `httpx`, `pydantic`, `rich`, `starlette`) each returning `"Golden repository 'X' not found on filesystem"` -- distinct from Bug #1315 (missing alias pointer but clone present, fixed via `index_path` fallback). Two mechanisms close this gap:

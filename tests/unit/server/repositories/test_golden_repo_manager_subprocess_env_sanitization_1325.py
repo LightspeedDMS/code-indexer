@@ -62,6 +62,23 @@ def _make_add_indexes_manager(tmp_path, temporal_options=None):
     manager.get_actual_repo_path = Mock(return_value=str(repo_path))
     manager._sqlite_backend = Mock()
     manager._sqlite_backend.update_enable_temporal = Mock(return_value=True)
+    # Bug #1316: add_indexes_to_golden_repo's background_worker now resolves
+    # `repo` via _resolve_golden_repo_authoritative, which unconditionally
+    # calls _sqlite_backend.get_repo(alias) -- configure it to mirror the
+    # golden_repo Mock above so GoldenRepo(**repo_data) succeeds.
+    manager._sqlite_backend.get_repo = Mock(
+        return_value={
+            "alias": golden_repo.alias,
+            "repo_url": "https://example.com/test-repo.git",
+            "default_branch": "main",
+            "clone_path": golden_repo.clone_path,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "enable_temporal": golden_repo.enable_temporal,
+            "temporal_options": golden_repo.temporal_options,
+            "category_id": None,
+            "category_auto_assigned": False,
+        }
+    )
     manager._global_repos_backend = Mock()
 
     captured_workers = []
