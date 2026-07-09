@@ -13,7 +13,26 @@ Usage:
     )
 """
 
+import re
 from typing import Any, Dict
+
+# Matches the userinfo (``user:pass@`` / ``oauth2:TOKEN@`` / ``TOKEN@``) between a
+# URL scheme separator and the host, so embedded credentials can be stripped
+# before a repo URL is serialized into an API response or log line.
+_URL_CREDENTIALS_RE = re.compile(r"(://)[^/@\s]+@")
+
+
+def mask_url_credentials(url: Any) -> Any:
+    """Strip embedded credentials from a git/HTTP URL for safe exposure.
+
+    ``https://oauth2:glpat-XXXX@gitlab.com/org/repo.git`` ->
+    ``https://***@gitlab.com/org/repo.git``. Non-string input, credential-free
+    URLs, and scheme-only forms (e.g. ``local://alias``) are returned unchanged.
+    Idempotent: masking an already-masked URL is a no-op.
+    """
+    if not isinstance(url, str):
+        return url
+    return _URL_CREDENTIALS_RE.sub(r"\1***@", url)
 
 
 # Sensitive field names that should be redacted in logs
