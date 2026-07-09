@@ -536,6 +536,15 @@ def _make_cow_config(timeout_seconds: int = 30):
         mount_point="/mnt/nfs/cidx",
         poll_interval_seconds=1,
         timeout_seconds=timeout_seconds,
+        # Bug #1320: daemon_storage_path defaults to the SAME value as mount_point.
+        # This is a genuine no-op deployment shape (daemon storage co-located with
+        # the CIDX-visible mount, no cross-host NFS remap needed), so translation
+        # is an identity map on paths under mount_point -- keeping this shared
+        # fixture's HTTP-mechanics tests (POST body, sanitization, polling, auth,
+        # error handling) unaffected by path translation. Tests that specifically
+        # exercise translation/no-translation semantics construct their own
+        # CowDaemonConfig with an explicit daemon_storage_path (including None).
+        daemon_storage_path="/mnt/nfs/cidx",
     )
 
 
@@ -594,13 +603,13 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src/repo", "ns", "v_123")
+            backend.create_clone("/mnt/nfs/cidx/src/repo", "ns", "v_123")
 
         mock_req.post.assert_called_once()
         call_kwargs = mock_req.post.call_args
         assert "/api/v1/clones" in call_kwargs[0][0]
         body = call_kwargs[1]["json"]
-        assert body["source_path"] == "/src/repo"
+        assert body["source_path"] == "/mnt/nfs/cidx/src/repo"
         # Canonical dest: {mount}/.versioned/{ns}/{name}
         assert body["dest_path"] == "/mnt/nfs/cidx/.versioned/ns/v_123"
         # daemon identity derived from dest parent/name (ns, v_123)
@@ -617,7 +626,7 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=done_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            result = backend.create_clone("/src", "myns", "v_777")
+            result = backend.create_clone("/mnt/nfs/cidx/src", "myns", "v_777")
 
         assert result == "/mnt/nfs/cidx/.versioned/myns/v_777"
 
@@ -629,7 +638,7 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src", "ns", "v_1")
+            backend.create_clone("/mnt/nfs/cidx/src", "ns", "v_1")
 
         headers = mock_req.post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
@@ -647,7 +656,7 @@ class TestCowDaemonBackendCreateClone:
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             with patch("time.sleep"):
-                result = backend.create_clone("/src", "ns", "v_99")
+                result = backend.create_clone("/mnt/nfs/cidx/src", "ns", "v_99")
 
         assert mock_req.get.call_count == 3
         assert result == "/mnt/nfs/cidx/.versioned/ns/v_99"
@@ -661,7 +670,7 @@ class TestCowDaemonBackendCreateClone:
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             with pytest.raises(RuntimeError, match="disk full"):
-                backend.create_clone("/src", "ns", "clone")
+                backend.create_clone("/mnt/nfs/cidx/src", "ns", "clone")
 
     def test_create_clone_raises_timeout_error_when_job_stalls(self):
         """create_clone raises TimeoutError when job does not complete in time."""
@@ -672,7 +681,7 @@ class TestCowDaemonBackendCreateClone:
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             with pytest.raises(TimeoutError, match="slow-job"):
-                backend.create_clone("/src", "ns", "clone")
+                backend.create_clone("/mnt/nfs/cidx/src", "ns", "clone")
 
     def test_create_clone_sanitizes_namespace_with_dots(self):
         """Bug #1084: dotted alias sanitized (dots->underscores) in the canonical dest."""
@@ -682,7 +691,9 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            result = backend.create_clone("/src/repo", "alias.with.dots", "v_123")
+            result = backend.create_clone(
+                "/mnt/nfs/cidx/src/repo", "alias.with.dots", "v_123"
+            )
 
         body = mock_req.post.call_args[1]["json"]
         # Canonical dest carries the sanitized namespace under .versioned/.
@@ -699,7 +710,7 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src/repo", "ns", "v_1.2.3")
+            backend.create_clone("/mnt/nfs/cidx/src/repo", "ns", "v_1.2.3")
 
         body = mock_req.post.call_args[1]["json"]
         assert body["dest_path"] == "/mnt/nfs/cidx/.versioned/ns/v_1_2_3"
@@ -1226,7 +1237,9 @@ class TestCowDaemonBackendCreateCloneAtPath:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone_at_path("/src/repo", "/mnt/nfs/cidx/myns/myclone")
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/repo", "/mnt/nfs/cidx/myns/myclone"
+            )
 
         mock_req.post.assert_called_once()
         url = mock_req.post.call_args[0][0]
@@ -1241,7 +1254,7 @@ class TestCowDaemonBackendCreateCloneAtPath:
         dest = "/mnt/nfs/cidx/myns/myclone"
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone_at_path("/src/repo", dest)
+            backend.create_clone_at_path("/mnt/nfs/cidx/src/repo", dest)
 
         body = mock_req.post.call_args[1]["json"]
         assert body["dest_path"] == dest
@@ -1254,10 +1267,12 @@ class TestCowDaemonBackendCreateCloneAtPath:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone_at_path("/src/myrepo", "/mnt/nfs/cidx/ns/cl")
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/myrepo", "/mnt/nfs/cidx/ns/cl"
+            )
 
         body = mock_req.post.call_args[1]["json"]
-        assert body["source_path"] == "/src/myrepo"
+        assert body["source_path"] == "/mnt/nfs/cidx/src/myrepo"
 
     def test_create_clone_at_path_sanitizes_namespace_from_dest_path(self):
         """create_clone_at_path derives namespace from dest_path parent directory, sanitized."""
@@ -1269,7 +1284,7 @@ class TestCowDaemonBackendCreateCloneAtPath:
         # dest_path parent name contains dots — must be sanitized
         with patch.dict(sys.modules, {"requests": mock_req}):
             backend.create_clone_at_path(
-                "/src/repo",
+                "/mnt/nfs/cidx/src/repo",
                 "/mnt/nfs/cidx/seba.battig/myclone",
             )
 
@@ -1285,7 +1300,7 @@ class TestCowDaemonBackendCreateCloneAtPath:
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             backend.create_clone_at_path(
-                "/src/repo",
+                "/mnt/nfs/cidx/src/repo",
                 "/mnt/nfs/cidx/ns/my.clone.v1",
             )
 
@@ -1303,7 +1318,7 @@ class TestCowDaemonBackendCreateCloneAtPath:
         dest = "/mnt/nfs/cidx/myns/myclone"
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            result = backend.create_clone_at_path("/src/repo", dest)
+            result = backend.create_clone_at_path("/mnt/nfs/cidx/src/repo", dest)
 
         assert result == dest
 
@@ -1315,7 +1330,9 @@ class TestCowDaemonBackendCreateCloneAtPath:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone_at_path("/src/repo", "/mnt/nfs/cidx/ns/cl")
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/repo", "/mnt/nfs/cidx/ns/cl"
+            )
 
         headers = mock_req.post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
@@ -1404,9 +1421,15 @@ class TestCowDaemonBackendPathTranslation:
             == "/home/jsbattig/cow-storage/golden-repos/myrepo/.versioned/ns/v_123"
         )
 
-    def test_create_clone_at_path_no_translation_when_daemon_storage_path_unset(self):
-        """Backward compat: when daemon_storage_path is None, paths pass through unchanged."""
-        backend = _make_cow_backend()  # no daemon_storage_path
+    def test_create_clone_at_path_identity_translation_when_daemon_storage_path_equals_mount_point(
+        self,
+    ):
+        """Bug #1320: when daemon_storage_path equals mount_point (co-located, no cross-host
+        NFS separation -- the shared _make_cow_backend() fixture default), translation is an
+        identity map: paths under mount_point pass through unchanged. The distinct "unset
+        daemon_storage_path + translation required -> raises" scenario is covered by
+        TestCowDaemonBackendTranslateToDaemonPathGuard."""
+        backend = _make_cow_backend()  # daemon_storage_path == mount_point (identity)
 
         post_resp = _make_response(202, {"job_id": "job-notr"})
         poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
@@ -1434,6 +1457,79 @@ class TestCowDaemonBackendPathTranslation:
                 "/elsewhere/golden-repos/src",
                 "/elsewhere/golden-repos/dst",
             )
+
+
+class TestCowDaemonBackendTranslateToDaemonPathGuard:
+    """Bug #1320: _translate_to_daemon_path must fail loud, not silently pass through
+    an untranslatable path, when translation is genuinely required but daemon_storage_path
+    is not configured (root cause of the production HTTP 400 PATH_NOT_ALLOWED failure).
+    """
+
+    def _make_backend(self, *, mount_point: str, daemon_storage_path):
+        from dataclasses import replace
+
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        config = replace(
+            _make_cow_config(),
+            mount_point=mount_point,
+            daemon_storage_path=daemon_storage_path,
+        )
+        return CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
+
+    def test_raises_when_daemon_storage_path_unset_and_path_under_mount_point(self):
+        """daemon_storage_path=None + path under mount_point => translation IS required
+        but impossible => must raise a clear, actionable configuration error (not silently
+        pass through the untranslatable mount-point path, which the daemon rejects with
+        HTTP 400 PATH_NOT_ALLOWED)."""
+        backend = self._make_backend(
+            mount_point="/mnt/cow-storage", daemon_storage_path=None
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            backend._translate_to_daemon_path("/mnt/cow-storage/.versioned/ns/v_123")
+
+        message = str(exc_info.value)
+        assert "daemon_storage_path" in message
+        assert "not configured" in message
+        assert "/mnt/cow-storage/.versioned/ns/v_123" in message
+        assert "/mnt/cow-storage" in message
+
+    def test_no_op_when_mount_point_unset(self):
+        """Genuine no-op: mount_point itself unset (no CoW daemon mount context at all)
+        => passthrough unchanged, no raise."""
+        backend = self._make_backend(mount_point="", daemon_storage_path=None)
+
+        result = backend._translate_to_daemon_path("/some/arbitrary/path")
+
+        assert result == "/some/arbitrary/path"
+
+    def test_no_op_when_path_not_under_mount_point(self):
+        """Genuine no-op: path is not under mount_point at all (not a CoW-managed path)
+        => passthrough unchanged, no raise, even though daemon_storage_path is unset."""
+        backend = self._make_backend(
+            mount_point="/mnt/cow-storage", daemon_storage_path=None
+        )
+
+        result = backend._translate_to_daemon_path("/src/some-other-repo")
+
+        assert result == "/src/some-other-repo"
+
+    def test_no_op_when_daemon_storage_path_configured_correctly(self):
+        """Sanity: with daemon_storage_path properly configured, translation succeeds
+        (no raise) — the guard only fires on the unconfigured case."""
+        backend = self._make_backend(
+            mount_point="/mnt/cow-storage",
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+
+        result = backend._translate_to_daemon_path(
+            "/mnt/cow-storage/.versioned/ns/v_123"
+        )
+
+        assert result == "/home/jsbattig/cow-storage/.versioned/ns/v_123"
 
 
 class TestCloneBackendFactoryMissingConfig:

@@ -20,14 +20,24 @@ class TestMigration033Exists:
         assert (sql_dir / "033_temporal_metadata.sql").exists()
 
     def test_is_the_next_migration_after_032(self):
+        """033 must exist and immediately follow 032 in the sorted sequence.
+
+        Deliberately NOT asserting 33 is the global max: this test only
+        verifies 033's own position relative to 032, so it stays valid
+        regardless of how many migrations are added after it (e.g. 034+).
+        Hardcoding "33 is the last migration" was the landmine that broke
+        this test the moment a legitimate later migration was added.
+        """
         sql_dir = _migrations_sql_dir()
         numbers = sorted(
             int(p.name.split("_", 1)[0])
             for p in sql_dir.glob("*.sql")
             if p.name[:3].isdigit()
         )
-        assert numbers[-1] == 33
-        assert numbers[-2] == 32
+        assert 33 in numbers
+        idx_33 = numbers.index(33)
+        assert idx_33 > 0, "033 must have a predecessor in the sorted sequence"
+        assert numbers[idx_33 - 1] == 32
 
 
 class TestMigration033Content:

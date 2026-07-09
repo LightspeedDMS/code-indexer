@@ -364,11 +364,18 @@ class CowDaemonBackend:
            paths via NFS mount are rejected as "not under storage_path".
         2. For true XFS reflink, the daemon's cp must use its local-XFS paths on both sides.
 
-        When daemon_storage_path is empty (not configured), returns cidx_path unchanged (backward compat).
+        When daemon_storage_path is empty (not configured):
+        - If mount_point is also unset, or cidx_path does not resolve under mount_point,
+          translation is a genuine no-op (nothing to translate) -- returns cidx_path unchanged.
+        - If cidx_path DOES resolve under mount_point, translation IS required (the daemon
+          only accepts paths under its own local storage root) but impossible without a
+          configured daemon_storage_path. Bug #1320: silently returning the untranslatable
+          mount-point path here caused the CoW daemon to reject it with HTTP 400
+          PATH_NOT_ALLOWED at publish time. Raise a clear, actionable configuration error
+          instead of silently passing through a path the daemon is guaranteed to reject.
+
         Raises ValueError if cidx_path is not under mount_point (caller must use a path within the mount).
         """
-        if not self._daemon_storage_path:
-            return cidx_path
         # Bug #1046: resolve symlinks before path-prefix check, and accept
         # paths under EITHER mount_point or daemon_storage_path.
         #
@@ -383,15 +390,28 @@ class CowDaemonBackend:
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
         resolved = os.path.realpath(cidx_path)
+        path_under_mount_point = self._mount_point and (
+            resolved.startswith(self._mount_point + "/")
+            or resolved == self._mount_point
+        )
+
+        if not self._daemon_storage_path:
+            if path_under_mount_point:
+                raise ValueError(
+                    f"CoW daemon_storage_path is not configured; cannot translate "
+                    f"'{cidx_path}' (resolved '{resolved}') under mount_point "
+                    f"'{self._mount_point}' to a daemon-local path. Set "
+                    f"cow_daemon.daemon_storage_path in config.json to the CoW "
+                    f"daemon's local storage root."
+                )
+            return cidx_path
+
         if (
             resolved.startswith(self._daemon_storage_path + "/")
             or resolved == self._daemon_storage_path
         ):
             return resolved
-        if (
-            resolved.startswith(self._mount_point + "/")
-            or resolved == self._mount_point
-        ):
+        if path_under_mount_point:
             return self._daemon_storage_path + resolved[len(self._mount_point) :]
         raise ValueError(
             f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' "

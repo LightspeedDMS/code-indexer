@@ -68,12 +68,22 @@ POSTGRES_DSN=""
 CLONE_BACKEND="local"
 COW_DAEMON_URL=""
 COW_DAEMON_API_KEY=""
+COW_DAEMON_STORAGE_PATH=""
 NFS_SERVER=""
 NFS_EXPORT=""
 NFS_MOUNT="/mnt/cow-storage"
 COW_LOCAL_BIND=false
 WORKERS=1
 AUTO_UPDATE_BRANCH=""
+
+# Bug #1320 Part B: fixed, documented installation location of the co-located
+# CoW Storage Daemon's own config file. Used ONLY to auto-detect
+# cow_daemon.daemon_storage_path (the daemon's `base_path` field) on the
+# daemon-HOST node when neither --cow-daemon-storage-path nor
+# CIDX_COW_DAEMON_STORAGE_PATH is given. Overridable via env var for testing
+# only (mirrors the auto-updater's COW_DAEMON_HOST_CONFIG_PATH constant and
+# this script's own SYSTEMD_UNIT_DIR-style fixed-path idiom).
+COW_DAEMON_HOST_CONFIG_PATH="${CIDX_COW_DAEMON_HOST_CONFIG_PATH:-/etc/cow-storage-daemon/config.json}"
 
 DRY_RUN=false
 CLUSTER_MODE=false
@@ -142,6 +152,17 @@ cluster.node_id):
   --clone-backend NAME         local|cow-daemon (default: local)
   --cow-daemon-url URL         CoW daemon REST base URL (required if cow-daemon)
   --cow-daemon-api-key KEY     CoW daemon bearer token (required if cow-daemon)
+  --cow-daemon-storage-path PATH
+                                cow_daemon.daemon_storage_path bootstrap value
+                                (the CoW daemon's own local storage root, e.g.
+                                where its XFS filesystem lives on the daemon
+                                host -- used to translate CIDX paths for
+                                reflink). Resolution order: this flag, then
+                                CIDX_COW_DAEMON_STORAGE_PATH env var, then
+                                auto-detect from a co-located CoW daemon
+                                config's base_path field (only present on the
+                                daemon-HOST node). Never hardcoded/guessed --
+                                left unset (with a WARNING) if none resolve.
   --nfs-server IP              NFS server for the shared CoW mount (not
                                 required when --cow-local-bind is set)
   --nfs-export PATH            NFS export path (also doubles as the local
@@ -176,6 +197,7 @@ parse_args() {
             --clone-backend) CLONE_BACKEND="$2"; shift 2 ;;
             --cow-daemon-url) COW_DAEMON_URL="$2"; shift 2 ;;
             --cow-daemon-api-key) COW_DAEMON_API_KEY="$2"; shift 2 ;;
+            --cow-daemon-storage-path) COW_DAEMON_STORAGE_PATH="$2"; shift 2 ;;
             --nfs-server) NFS_SERVER="$2"; shift 2 ;;
             --nfs-export) NFS_EXPORT="$2"; shift 2 ;;
             --nfs-mount) NFS_MOUNT="$2"; shift 2 ;;
@@ -213,6 +235,47 @@ resolve_defaults() {
     if [[ -z "${AUTO_UPDATE_BRANCH}" ]]; then
         AUTO_UPDATE_BRANCH="${BRANCH}"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Step: resolve cow_daemon.daemon_storage_path (Bug #1320 Part B)
+#
+# Priority order (never hardcoded, never guessed):
+#   1. --cow-daemon-storage-path flag (already populates COW_DAEMON_STORAGE_PATH)
+#   2. CIDX_COW_DAEMON_STORAGE_PATH env var
+#   3. Auto-detect: co-located CoW daemon config `base_path` field at the
+#      fixed, documented install location COW_DAEMON_HOST_CONFIG_PATH (true
+#      only on the daemon-HOST node; requires jq)
+#   4. Neither resolves -> leave COW_DAEMON_STORAGE_PATH empty; write_config
+#      omits the field entirely (never writes null/empty).
+#
+# Only meaningful for --clone-backend cow-daemon; callers should gate the
+# call accordingly (mirrors validate_args' cow-daemon-only requirements).
+# ---------------------------------------------------------------------------
+
+resolve_cow_daemon_storage_path() {
+    if [[ -n "${COW_DAEMON_STORAGE_PATH}" ]]; then
+        info "cow_daemon.daemon_storage_path: using --cow-daemon-storage-path (${COW_DAEMON_STORAGE_PATH})"
+        return 0
+    fi
+
+    if [[ -n "${CIDX_COW_DAEMON_STORAGE_PATH:-}" ]]; then
+        COW_DAEMON_STORAGE_PATH="${CIDX_COW_DAEMON_STORAGE_PATH}"
+        info "cow_daemon.daemon_storage_path: using CIDX_COW_DAEMON_STORAGE_PATH env var (${COW_DAEMON_STORAGE_PATH})"
+        return 0
+    fi
+
+    if [[ -r "${COW_DAEMON_HOST_CONFIG_PATH}" ]] && command -v jq >/dev/null 2>&1; then
+        local detected
+        detected="$(jq -r '.base_path // empty' "${COW_DAEMON_HOST_CONFIG_PATH}" 2>/dev/null || true)"
+        if [[ -n "${detected}" ]]; then
+            COW_DAEMON_STORAGE_PATH="${detected}"
+            info "cow_daemon.daemon_storage_path: auto-detected from ${COW_DAEMON_HOST_CONFIG_PATH} (${COW_DAEMON_STORAGE_PATH})"
+            return 0
+        fi
+    fi
+
+    warn "cow_daemon.daemon_storage_path could not be resolved (no --cow-daemon-storage-path/CIDX_COW_DAEMON_STORAGE_PATH, no readable ${COW_DAEMON_HOST_CONFIG_PATH}). Leaving unset -- CowDaemonBackend will fail loud on path translation if this node ever needs it."
 }
 
 # ---------------------------------------------------------------------------
@@ -682,6 +745,25 @@ JSONEOF
                 }
             }'
         )"
+
+        # Bug #1320 Part B: cow_daemon.daemon_storage_path is VALUE-AWARE
+        # idempotent -- never clobber a pre-existing valid value (even if a
+        # different value would be freshly resolved this run), and never
+        # write a null/empty field when nothing resolves.
+        local existing_daemon_storage_path
+        existing_daemon_storage_path="$(echo "${existing_config}" | jq -r '.cow_daemon.daemon_storage_path // empty' 2>/dev/null || true)"
+
+        local effective_daemon_storage_path="${existing_daemon_storage_path}"
+        if [[ -z "${effective_daemon_storage_path}" && -n "${COW_DAEMON_STORAGE_PATH}" ]]; then
+            effective_daemon_storage_path="${COW_DAEMON_STORAGE_PATH}"
+        fi
+
+        if [[ -n "${effective_daemon_storage_path}" ]]; then
+            new_config="$(echo "${new_config}" | jq \
+                --arg storage_path "${effective_daemon_storage_path}" \
+                '.cow_daemon.daemon_storage_path = $storage_path'
+            )"
+        fi
     fi
 
     if [[ "${DRY_RUN}" == "true" ]]; then
@@ -959,6 +1041,7 @@ EOF
 EOF
         if [[ "${CLONE_BACKEND}" == "cow-daemon" ]]; then
             echo "  CoW Daemon     : ${COW_DAEMON_URL}"
+            echo "  Storage path   : ${COW_DAEMON_STORAGE_PATH:-(unset)}"
             if [[ "${COW_LOCAL_BIND}" == "true" ]]; then
                 echo "  Local Bind     : ${NFS_EXPORT} -> ${NFS_MOUNT}"
             else
@@ -1011,6 +1094,13 @@ main() {
         fi
         test_postgres_connectivity
         run_migrations
+    fi
+
+    # Bug #1320 Part B: resolve cow_daemon.daemon_storage_path before writing
+    # config.json (after install_system_packages so jq is available for the
+    # co-located daemon-config auto-detect step).
+    if [[ "${CLONE_BACKEND}" == "cow-daemon" ]]; then
+        resolve_cow_daemon_storage_path
     fi
 
     write_config

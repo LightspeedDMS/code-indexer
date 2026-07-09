@@ -54,6 +54,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     secret_key = services["secret_key"]
     # SCIPAuditRepository with backend support (may be None on legacy startup)
     scip_audit_repository = services.get("scip_audit_repository")
+    # BackendRegistry (may be None in solo/SQLite mode). Its .connection_pool
+    # is the shared PG pool -- already created by initialize_services() (PG
+    # migrations + StorageFactory.create_backends() both run there, well
+    # ahead of this function), so it is available here at app-wiring time.
+    backend_registry = services.get("backend_registry")
 
     # Create FastAPI app with metadata and lifespan
     app = FastAPI(
@@ -97,6 +102,63 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     )
 
     app.add_middleware(CorrelationBridgeMiddleware)
+
+    # Request admission control / backpressure. Added last so it is the OUTERMOST
+    # middleware -- it sheds excess load with 429 + Retry-After before any
+    # downstream processing. Opt-in; only wired when enabled so there is zero
+    # overhead by default.
+    _admission_cfg = server_config.admission_control_config
+    if _admission_cfg is not None and (
+        _admission_cfg.enabled or _admission_cfg.per_consumer_enabled
+    ):
+        from code_indexer.server.middleware.admission_control import (
+            AdmissionControlMiddleware,
+            AdmissionController,
+            PerConsumerRateLimiter,
+        )
+
+        _controller = (
+            AdmissionController(
+                max_inflight=_admission_cfg.max_inflight_requests,
+                retry_after_seconds=_admission_cfg.retry_after_seconds,
+            )
+            if _admission_cfg.enabled
+            else None
+        )
+        _rate_limiter = (
+            PerConsumerRateLimiter(
+                capacity=_admission_cfg.per_consumer_burst,
+                refill_per_second=_admission_cfg.per_consumer_refill_per_second,
+                cleanup_seconds=_admission_cfg.per_consumer_cleanup_seconds,
+            )
+            if _admission_cfg.per_consumer_enabled
+            else None
+        )
+        # Cluster-shared enforcement: attach the PG pool (when present) so
+        # ALL workers/nodes consume from the SAME row in
+        # consumer_rate_limit_state instead of independent per-process
+        # buckets. Solo/SQLite mode has no pool -- per-process is correct
+        # there (there is only one process).
+        if (
+            _rate_limiter is not None
+            and backend_registry is not None
+            and backend_registry.connection_pool is not None
+        ):
+            _rate_limiter.set_connection_pool(backend_registry.connection_pool)
+        app.add_middleware(
+            AdmissionControlMiddleware,
+            controller=_controller,
+            rate_limiter=_rate_limiter,
+        )
+        logging.getLogger(__name__).info(
+            "Admission control ENABLED: global_cap=%s (max_inflight=%d/worker), "
+            "per_consumer=%s (burst=%d, %.1f req/s)",
+            _admission_cfg.enabled,
+            _admission_cfg.max_inflight_requests,
+            _admission_cfg.per_consumer_enabled,
+            _admission_cfg.per_consumer_burst,
+            _admission_cfg.per_consumer_refill_per_second,
+        )
 
     # Add exception handlers for validation errors that FastAPI catches before middleware
     @app.exception_handler(RequestValidationError)

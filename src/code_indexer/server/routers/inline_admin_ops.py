@@ -464,8 +464,15 @@ def register_admin_ops_routes(
 
                 # Read temporal_options here — golden_repo_manager is accessible in the
                 # route handler but NOT inside background job workers (Story #641).
+                # Bug #1316: resolve via get_golden_repo() (authoritative shared-
+                # backend read), NOT the raw per-worker `golden_repos` cache dict.
+                # That cache can be stale (another worker/node saved fresh
+                # temporal_options after this worker cached the repo) or simply
+                # miss (repo registered on another node) -- either way, reading
+                # the raw dict here silently used the WRONG options (stale) or
+                # NO options (miss) to build the temporal index command.
                 _temporal_opts: dict = {}
-                _repo_meta = golden_repo_manager.golden_repos.get(alias)
+                _repo_meta = golden_repo_manager.get_golden_repo(alias)
                 if _repo_meta and getattr(_repo_meta, "temporal_options", None):
                     _temporal_opts = _repo_meta.temporal_options
 

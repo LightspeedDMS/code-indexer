@@ -314,6 +314,44 @@ class GoldenRepoManager:
         self.golden_repos[alias] = repo
         return repo
 
+    def _resolve_golden_repo_authoritative(self, alias: str) -> Optional["GoldenRepo"]:
+        """
+        Resolve a golden repo's CURRENT authoritative state directly from the
+        shared backend, bypassing the per-worker cache HIT path (Bug #1316).
+
+        `_resolve_golden_repo` is cache-first with reload-on-miss (Bug #1314):
+        correct for presence checks and immutable-field reads (clone_path), but
+        a cache HIT can serve a field value (e.g. default_branch,
+        temporal_options) that a DIFFERENT worker/node has since mutated in the
+        shared backend. Mutation-path decisions whose OUTCOME depends on such a
+        field (change_branch's "already on branch" check;
+        add_indexes_to_golden_repo's temporal_options used to build the index
+        command) MUST call this method instead, so a cross-node mutation is
+        visible immediately without a worker restart. The per-worker cache is
+        refreshed with the fresh row (or evicted if the row is gone) so
+        subsequent cache-first reads (clone_path, presence) stay consistent.
+
+        Args:
+            alias: Repository alias.
+
+        Returns:
+            Freshly-read GoldenRepo if it still exists in the shared backend,
+            else None (also evicts any stale cache entry for this alias).
+        """
+        # Anti-duplication: get_golden_repo() already performs the identical
+        # unconditional self._sqlite_backend.get_repo(alias) -> GoldenRepo(...)
+        # read (it is the long-standing public "source of truth" accessor
+        # used throughout the codebase, e.g. activated_repo_manager.py,
+        # mcp/handlers/delegation.py). Delegate to it rather than duplicating
+        # the fetch-and-construct logic; this method's only added value is
+        # the cache-refresh/eviction side effect below.
+        repo = self.get_golden_repo(alias)
+        if repo is None:
+            self.golden_repos.pop(alias, None)
+            return None
+        self.golden_repos[alias] = repo
+        return repo
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -489,8 +527,20 @@ class GoldenRepoManager:
                             f"Category auto-assignment failed for '{alias}': {e}"
                         )
 
-                # Automatic global activation (AC1 from Story #521)
-                # This is a non-blocking post-registration step (AC4)
+                # Automatic global activation (AC1 from Story #521).
+                #
+                # Bug #1317: a "successfully-provisioned" GLOBAL repo MUST
+                # always have its alias pointer file written. This used to
+                # be a non-blocking, best-effort step (AC4) that on failure
+                # just logged an error and left the golden_repos row
+                # committed with no pointer -- a registry-orphan-in-waiting
+                # that forced every future query onto the #1315
+                # index_path fallback as steady state instead of a rare
+                # safety net. Activation failure now rolls back the row
+                # (both the in-memory cache and the shared SQLite/PG
+                # backend) and re-raises as GitOperationError, which the
+                # outer except clause below cleans up the orphaned clone
+                # directory for -- registration is all-or-nothing.
                 try:
                     from code_indexer.global_repos.global_activation import (
                         GlobalActivator,
@@ -508,13 +558,39 @@ class GoldenRepoManager:
                         f"Golden repository '{alias}' automatically activated globally as '{alias}-global'"
                     )
                 except Exception as activation_error:
-                    # Log error but don't fail the golden repo registration (AC4)
                     logging.error(
-                        f"Global activation failed for '{alias}': {activation_error}. "
-                        f"Golden repository is registered but not globally accessible. "
-                        f"Manual global activation can be retried later."
+                        f"Bug #1317: global activation failed for '{alias}': "
+                        f"{activation_error}. Rolling back registration so "
+                        f"the golden repo is never left without its alias "
+                        f"pointer."
                     )
-                    # Continue with successful registration response
+                    self.golden_repos.pop(alias, None)
+                    try:
+                        self._sqlite_backend.remove_repo(alias)
+                    except Exception as rollback_error:
+                        # The clone directory is removed unconditionally by
+                        # the outer `except GitOperationError` cleanup below
+                        # regardless of whether THIS rollback succeeds, so a
+                        # row that survives this failure resolves as
+                        # clone-absent -- it is covered by the
+                        # golden_repo_reconciler orphan-removal pass (not
+                        # its pointer-repair pass, since there is no clone
+                        # to repoint), unless the reconciler's circuit-
+                        # breaker trips because an implausible fraction of
+                        # repos are absent at once (see
+                        # golden_repo_reconciler.py).
+                        logging.error(
+                            f"Bug #1317: failed to roll back golden_repos "
+                            f"row for '{alias}' after activation failure: "
+                            f"{rollback_error}. The clone directory is "
+                            f"still being removed; this row will resolve "
+                            f"as clone-absent and is covered by the "
+                            f"registry reconcile sweep's orphan-removal "
+                            f"pass."
+                        )
+                    raise GitOperationError(
+                        f"Global activation failed for '{alias}': {activation_error}"
+                    ) from activation_error
 
                 # Lifecycle hook: Create .md file in cidx-meta (Story #538)
                 try:
@@ -1009,42 +1085,58 @@ class GoldenRepoManager:
                         f"Failed to find activated repos for cascade deletion: {e}"
                     )
 
-            # Get repository info before removal
-            golden_repo = self.golden_repos[alias]
-
-            # Perform cleanup BEFORE removing from memory
-            # Use canonical path resolution to handle versioned structure repos
+            # Bug #1317 -- provisioning atomicity guard (removal side):
+            # resolve the on-disk path BEFORE touching the registry. A
+            # GoldenRepoNotFoundError here just means "nothing to clean up
+            # on disk" -- it must never block removing the row (that IS the
+            # registry-orphan cleanup case).
             try:
-                actual_path = self.get_actual_repo_path(alias)
-                cleanup_successful = self._cleanup_repository_files(actual_path)
+                actual_path: Optional[str] = self.get_actual_repo_path(alias)
+                repo_exists_on_disk = True
             except GoldenRepoNotFoundError:
-                # If repository doesn't exist on filesystem, nothing to clean up
-                # This can happen in test scenarios or if repo was manually deleted
                 logging.info(
-                    f"Repository '{alias}' not found on filesystem during removal - skipping cleanup"
+                    f"Repository '{alias}' not found on filesystem during "
+                    f"removal - registry row will still be removed."
                 )
-                cleanup_successful = True
-            except GitOperationError as cleanup_error:
-                # Critical cleanup failures should prevent deletion
-                logging.error(
-                    f"Critical cleanup failure prevents repository deletion: {cleanup_error}"
-                )
-                raise  # Re-raise to prevent deletion
+                actual_path = None
+                repo_exists_on_disk = False
 
-            # Only remove from storage after cleanup is complete
-            del self.golden_repos[alias]
-
+            # Bug #1317: remove the registry row BEFORE deleting any on-disk
+            # files. The old order deleted files first and removed the row
+            # only afterwards -- if that row removal then failed (a
+            # transient DB/connectivity error), the "rollback" only restored
+            # the PER-WORKER in-memory dict (useless in a multi-worker /
+            # cluster deployment -- see the cluster-aware-state invariant)
+            # while the files were already gone forever, producing exactly
+            # the registry-orphan this bug is about: a golden_repos row
+            # with no corresponding clone. Removing the row first means a
+            # failure here aborts with NOTHING destroyed (row + files both
+            # still present, consistent); only after the row is confirmed
+            # gone do we touch the filesystem, so a later filesystem-cleanup
+            # failure can only ever leave a harmless orphan CLONE (files
+            # with no row), never a registry-orphan.
             try:
                 self._sqlite_backend.remove_repo(alias)
-            except Exception as save_error:
-                # If SQLite delete fails, rollback the in-memory deletion
+            except Exception as removal_error:
                 logging.error(
-                    f"Failed to remove from SQLite after deletion, rolling back: {save_error}"
+                    f"Failed to remove golden repo '{alias}' from registry: "
+                    f"{removal_error}. No files were deleted; the "
+                    f"repository remains registered and intact."
                 )
-                self.golden_repos[alias] = golden_repo  # Restore repository
                 raise GitOperationError(
-                    f"Repository deletion rollback due to SQLite removal failure: {save_error}"
+                    f"Repository deletion aborted: failed to remove "
+                    f"'{alias}' from registry: {removal_error}"
                 )
+
+            del self.golden_repos[alias]
+
+            # Filesystem cleanup happens only now, after the registry row is
+            # confirmed removed.
+            if repo_exists_on_disk:
+                assert actual_path is not None
+                cleanup_successful = self._cleanup_repository_files(actual_path)
+            else:
+                cleanup_successful = True
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
@@ -2919,7 +3011,11 @@ class GoldenRepoManager:
 
         # Bug #1314: resolve via shared backend on a local cache miss so a
         # repo registered by ANOTHER worker/node is found here too.
-        golden_repo = self._resolve_golden_repo(alias)
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" short-circuit
+        # below depends on default_branch, which another worker/node may
+        # have already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
         if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
         if target_branch == golden_repo.default_branch:
@@ -3021,7 +3117,7 @@ class GoldenRepoManager:
             self._sqlite_backend.invalidate_description_refresh_tracking(alias)
             self._sqlite_backend.invalidate_dependency_map_tracking(alias)
             with self._operation_lock:
-                old = self.golden_repos[alias]
+                old = golden_repo
                 self.golden_repos[alias] = GoldenRepo(
                     alias=old.alias,
                     repo_url=old.repo_url,
@@ -3078,7 +3174,11 @@ class GoldenRepoManager:
         # Bug #1314: resolve via shared backend on a local cache miss so a
         # repo registered by ANOTHER worker/node is found here too (this is
         # the manager-level entry point behind refresh_golden_repo).
-        golden_repo = self._resolve_golden_repo(alias)
+        # Bug #1316: use the AUTHORITATIVE (unconditional shared-backend)
+        # read, not cache-first -- the "already on branch" outcome below
+        # depends on default_branch, which another worker/node may have
+        # already mutated even though THIS worker's cache is a HIT.
+        golden_repo = self._resolve_golden_repo_authoritative(alias)
         if golden_repo is None:
             raise GoldenRepoNotFoundError(f"Golden repository '{alias}' not found")
         if target_branch == golden_repo.default_branch:
@@ -3185,8 +3285,20 @@ class GoldenRepoManager:
                     )
 
             try:
-                # Get repository details
-                repo = self.golden_repos[alias]
+                # Get repository details.
+                # Bug #1316: resolve AUTHORITATIVELY (unconditional shared-
+                # backend read), not via the raw per-worker cache -- this
+                # worker's cache may hold a STALE temporal_options value
+                # even though ANOTHER node has since saved fresh options via
+                # save_temporal_options(). Reading the stale cache here would
+                # build the temporal index command (max_commits, since_date,
+                # diff_context, all_branches) from the wrong values.
+                repo = self._resolve_golden_repo_authoritative(alias)
+                if repo is None:
+                    raise GoldenRepoError(
+                        f"Golden repository '{alias}' was removed before "
+                        "indexing could start"
+                    )
                 # Use canonical path resolution (base clone, not versioned snapshot)
                 repo_path = self.get_actual_repo_path(alias)
 

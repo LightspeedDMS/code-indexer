@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.services.branch_service import BranchService
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
@@ -569,6 +570,11 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         confirm = _confirmation_response(result, "Branch deletion")
         if confirm is not None:
             return confirm
+        # Bug: branch cache invalidation -- the deletion actually happened
+        # (past the confirmation gate), so the cached listing for this repo
+        # is now stale. Invalidate immediately rather than waiting out the
+        # cache TTL.
+        BranchService.invalidate(repo_path)
         return _mcp_response(result)
     except ValueError as e:
         return _new_confirmation_token("git_branch_delete", e)
@@ -624,6 +630,10 @@ def git_branch_switch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Map current_branch to branch_name for consistent API (original _legacy.py L5533)
         if "current_branch" in result and "branch_name" not in result:
             result["branch_name"] = result["current_branch"]
+        # Bug: branch cache invalidation -- switching changes which branch is
+        # "current" in the cached listing. Invalidate immediately rather than
+        # waiting out the cache TTL.
+        BranchService.invalidate(repo_path)
         _invalidate_wiki_cache(repository_alias, "git_branch_switch")
         return _mcp_response(result)
     except GitCommandError as e:
@@ -667,6 +677,10 @@ def git_branch_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Map created_branch to branch_name for consistent API (original _legacy.py L5467)
         if "created_branch" in result and "branch_name" not in result:
             result["branch_name"] = result["created_branch"]
+        # Bug: branch cache invalidation -- a new branch was added to the
+        # cached listing. Invalidate immediately rather than waiting out the
+        # cache TTL.
+        BranchService.invalidate(repo_path)
         return _mcp_response(result)
     except GitCommandError as e:
         return _handle_write_error("git_branch_create", _ERR_BRANCH_CREATE, e)

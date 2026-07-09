@@ -296,12 +296,27 @@ class TestPathDChangeBranchProgressCallback:
             manager.activated_repo_manager = MagicMock()
 
             # Register a fake repo so change_branch_async doesn't raise
+            created_at = datetime.now(timezone.utc).isoformat()
+            clone_path = str(Path(tmpdir) / "golden-repos" / "test-alias")
             manager.golden_repos["test-alias"] = GoldenRepo(
                 alias="test-alias",
                 repo_url="https://github.com/example/test.git",
                 default_branch="main",
-                clone_path=str(Path(tmpdir) / "golden-repos" / "test-alias"),
-                created_at=datetime.now(timezone.utc).isoformat(),
+                clone_path=clone_path,
+                created_at=created_at,
+            )
+            # Bug #1316: change_branch_async now resolves authoritatively via
+            # _resolve_golden_repo_authoritative, which unconditionally reads
+            # the real SQLite backend -- so the repo must also be persisted
+            # there, not just in the in-memory cache above.
+            manager._sqlite_backend.add_repo(
+                alias="test-alias",
+                repo_url="https://github.com/example/test.git",
+                default_branch="main",
+                clone_path=clone_path,
+                created_at=created_at,
+                enable_temporal=False,
+                temporal_options=None,
             )
 
             manager.change_branch_async(
@@ -367,12 +382,14 @@ class TestPathDChangeBranchCoarseProgress:
             manager.activated_repo_manager = MagicMock()
 
             # Register a fake repo with different branch so change_branch proceeds
+            created_at = datetime.now(timezone.utc).isoformat()
+            clone_path = str(Path(tmpdir) / "golden-repos" / "test-alias")
             manager.golden_repos["test-alias"] = GoldenRepo(
                 alias="test-alias",
                 repo_url="https://github.com/example/test.git",
                 default_branch="main",
-                clone_path=str(Path(tmpdir) / "golden-repos" / "test-alias"),
-                created_at=datetime.now(timezone.utc).isoformat(),
+                clone_path=clone_path,
+                created_at=created_at,
             )
 
             # Patch out all sub-operations so we can verify just the progress markers
@@ -384,6 +401,21 @@ class TestPathDChangeBranchCoarseProgress:
             manager._cb_hnsw_branch_cleanup = MagicMock()
             manager._cb_swap_alias = MagicMock()
             manager._sqlite_backend = MagicMock()
+            # Bug #1316: change_branch now resolves authoritatively via
+            # _resolve_golden_repo_authoritative, which unconditionally calls
+            # _sqlite_backend.get_repo(alias) -- configure it to mirror the
+            # pre-registered cache entry above.
+            manager._sqlite_backend.get_repo.return_value = {
+                "alias": "test-alias",
+                "repo_url": "https://github.com/example/test.git",
+                "default_branch": "main",
+                "clone_path": clone_path,
+                "created_at": created_at,
+                "enable_temporal": False,
+                "temporal_options": None,
+                "category_id": None,
+                "category_auto_assigned": False,
+            }
             manager._sqlite_backend.update_default_branch = MagicMock()
             manager._sqlite_backend.invalidate_description_refresh_tracking = (
                 MagicMock()

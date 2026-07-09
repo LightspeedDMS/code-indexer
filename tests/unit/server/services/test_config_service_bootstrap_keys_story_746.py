@@ -87,6 +87,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "nfs_visibility_timeout_seconds",  # Bug #1084 staging follow-up — runtime NFS visibility deadline
             "research_session_retention_days",  # Bug #1085 — runtime research GC retention
             "query_embedding_cache_config",  # Story #1105 — runtime Web UI cache config
+            "admission_control_config",  # runtime; read from merged config at app wiring
             "search_event_log_retention_days",  # Issue #1159 — runtime Web UI setting
             "export_retention_days",  # Story #1160 — runtime Web UI export retention
             # Story #1197: four launch keys moved from BOOTSTRAP_KEYS to runtime

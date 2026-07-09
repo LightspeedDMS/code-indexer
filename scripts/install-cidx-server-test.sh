@@ -192,6 +192,175 @@ test_config_cow_daemon_backend_shape() {
 run_test "write_config (cow-daemon backend) produces clone_backend + cow_daemon fields" \
     test_config_cow_daemon_backend_shape
 
+# ===========================================================================
+# Group C.1: Bug #1320 Part B - cow_daemon.daemon_storage_path
+# ===========================================================================
+
+test_config_cow_daemon_storage_path_written_when_resolved() {
+    local tmpdir cfg output
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+
+    output="$(run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        COW_DAEMON_STORAGE_PATH='/srv/cow-xfs-root'
+        NFS_MOUNT='/mnt/cow-storage'
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+        cat '${cfg}'
+    ")"
+
+    rm -rf "${tmpdir}"
+
+    echo "${output}" | grep -q '"daemon_storage_path": "/srv/cow-xfs-root"'
+}
+run_test "write_config emits cow_daemon.daemon_storage_path when COW_DAEMON_STORAGE_PATH is resolved" \
+    test_config_cow_daemon_storage_path_written_when_resolved
+
+test_config_cow_daemon_storage_path_omitted_when_unresolved() {
+    local tmpdir cfg output
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+
+    output="$(run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        COW_DAEMON_STORAGE_PATH=''
+        NFS_MOUNT='/mnt/cow-storage'
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+        cat '${cfg}'
+    ")"
+
+    rm -rf "${tmpdir}"
+
+    # Field must be OMITTED entirely (never written as null or empty string).
+    ! echo "${output}" | grep -q "daemon_storage_path"
+}
+run_test "write_config omits daemon_storage_path (not null) when nothing resolves" \
+    test_config_cow_daemon_storage_path_omitted_when_unresolved
+
+test_config_cow_daemon_storage_path_not_clobbered_on_rerun() {
+    local tmpdir cfg output
+    tmpdir="$(mktemp -d)"
+    cfg="${tmpdir}/config.json"
+    cat > "${cfg}" <<JSONEOF
+{"clone_backend": "cow-daemon", "cow_daemon": {"daemon_url": "http://203.0.113.10:8081", "mount_point": "/mnt/cow-storage", "daemon_storage_path": "/srv/original-value"}}
+JSONEOF
+
+    output="$(run_sourced "
+        CLUSTER_MODE=true
+        NODE_ID='staging'
+        POSTGRES_DSN='postgresql://user:pass@host/db'
+        CLONE_BACKEND='cow-daemon'
+        COW_DAEMON_URL='http://203.0.113.10:8081'
+        COW_DAEMON_API_KEY='test-api-key-not-real'
+        COW_DAEMON_STORAGE_PATH='/srv/some-other-value'
+        NFS_MOUNT='/mnt/cow-storage'
+        PORT=8000
+        WORKERS=1
+        DATA_DIR='${tmpdir}'
+        CONFIG_FILE='${cfg}'
+        DRY_RUN=false
+        write_config
+        cat '${cfg}'
+    ")"
+
+    rm -rf "${tmpdir}"
+
+    echo "${output}" | grep -q '"daemon_storage_path": "/srv/original-value"' \
+        && ! echo "${output}" | grep -q "/srv/some-other-value"
+}
+run_test "write_config never clobbers a pre-existing daemon_storage_path with a different resolved value" \
+    test_config_cow_daemon_storage_path_not_clobbered_on_rerun
+
+test_resolve_storage_path_prefers_explicit_var() {
+    local output
+    output="$(run_sourced '
+        COW_DAEMON_STORAGE_PATH="/from/flag"
+        unset CIDX_COW_DAEMON_STORAGE_PATH
+        resolve_cow_daemon_storage_path
+        echo "RESULT=${COW_DAEMON_STORAGE_PATH}"
+    ')"
+    echo "${output}" | grep -q '^RESULT=/from/flag$'
+}
+run_test "resolve_cow_daemon_storage_path prefers the explicit --cow-daemon-storage-path value" \
+    test_resolve_storage_path_prefers_explicit_var
+
+test_resolve_storage_path_uses_env_var_when_flag_absent() {
+    local output
+    output="$(run_sourced '
+        COW_DAEMON_STORAGE_PATH=""
+        export CIDX_COW_DAEMON_STORAGE_PATH="/from/env"
+        resolve_cow_daemon_storage_path
+        echo "RESULT=${COW_DAEMON_STORAGE_PATH}"
+    ')"
+    echo "${output}" | grep -q '^RESULT=/from/env$'
+}
+run_test "resolve_cow_daemon_storage_path falls back to CIDX_COW_DAEMON_STORAGE_PATH env var" \
+    test_resolve_storage_path_uses_env_var_when_flag_absent
+
+test_resolve_storage_path_auto_detects_from_co_located_daemon_config() {
+    local tmpdir daemon_cfg output
+    tmpdir="$(mktemp -d)"
+    daemon_cfg="${tmpdir}/cow-storage-daemon-config.json"
+    echo '{"base_path": "/srv/auto-detected-xfs"}' > "${daemon_cfg}"
+
+    output="$(run_sourced "
+        COW_DAEMON_STORAGE_PATH=''
+        unset CIDX_COW_DAEMON_STORAGE_PATH
+        COW_DAEMON_HOST_CONFIG_PATH='${daemon_cfg}'
+        resolve_cow_daemon_storage_path
+        echo \"RESULT=\${COW_DAEMON_STORAGE_PATH}\"
+    ")"
+
+    rm -rf "${tmpdir}"
+
+    echo "${output}" | grep -q '^RESULT=/srv/auto-detected-xfs$'
+}
+run_test "resolve_cow_daemon_storage_path auto-detects base_path from co-located CoW daemon config" \
+    test_resolve_storage_path_auto_detects_from_co_located_daemon_config
+
+test_resolve_storage_path_leaves_unset_and_warns_when_no_source() {
+    local output exit_code
+    output="$(run_sourced '
+        COW_DAEMON_STORAGE_PATH=""
+        unset CIDX_COW_DAEMON_STORAGE_PATH
+        COW_DAEMON_HOST_CONFIG_PATH="/nonexistent-daemon-config-for-test.json"
+        resolve_cow_daemon_storage_path
+        echo "RESULT=[${COW_DAEMON_STORAGE_PATH}]"
+    ')" && exit_code=0 || exit_code=$?
+    [[ ${exit_code} -eq 0 ]] \
+        && echo "${output}" | grep -q '^RESULT=\[\]$' \
+        && echo "${output}" | grep -qi "could not be resolved"
+}
+run_test "resolve_cow_daemon_storage_path leaves the value unset and warns when no source resolves" \
+    test_resolve_storage_path_leaves_unset_and_warns_when_no_source
+
+test_help_documents_cow_daemon_storage_path() {
+    local output exit_code
+    output="$(bash "${INSTALL_SCRIPT}" --help 2>&1)" && exit_code=0 || exit_code=$?
+    [[ ${exit_code} -eq 0 ]] && echo "${output}" | grep -q -- "--cow-daemon-storage-path"
+}
+run_test "--help documents --cow-daemon-storage-path" test_help_documents_cow_daemon_storage_path
+
 test_config_merge_preserves_existing_key() {
     local tmpdir cfg output
     tmpdir="$(mktemp -d)"

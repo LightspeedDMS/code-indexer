@@ -1979,6 +1979,39 @@ def make_lifespan(
                 except Exception as _eoe:
                     logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
 
+            # Bug #1317: reconcile golden_repos registry-orphans (rows with
+            # no on-disk clone -- can arise from a provisioning failure that
+            # predates the atomicity guard, a manually-deleted clone
+            # directory, or a lost NFS/CoW volume). Mirrors the
+            # fail_orphaned_jobs / reconcile_orphaned_exports pattern:
+            # fail-soft, log the count, never block startup. Correct on
+            # both SQLite (solo) and PostgreSQL (cluster) since
+            # list_golden_repos() always queries the shared backend.
+            if golden_repo_manager is not None:
+                try:
+                    from code_indexer.server.services.golden_repo_reconciler import (
+                        reconcile_golden_repo_registry,
+                    )
+
+                    _reconcile_result = reconcile_golden_repo_registry(
+                        golden_repo_manager
+                    )
+                    if _reconcile_result.orphans_found:
+                        logger.info(
+                            "Startup: Bug #1317 reconcile found %d golden-repo "
+                            "registry-orphan(s) (%d removal(s) submitted, %d "
+                            "failed to submit): %s",
+                            len(_reconcile_result.orphans_found),
+                            len(_reconcile_result.orphans_removed),
+                            len(_reconcile_result.orphans_failed),
+                            _reconcile_result.orphans_found,
+                        )
+                except Exception as _gre:
+                    logger.warning(
+                        "Startup: golden-repo registry-orphan reconcile failed: %s",
+                        _gre,
+                    )
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,

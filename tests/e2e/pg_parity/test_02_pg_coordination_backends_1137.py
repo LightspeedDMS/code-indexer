@@ -79,6 +79,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import httpx
+import pyotp
 import pytest
 
 from tests.e2e.helpers import (
@@ -164,6 +165,12 @@ _CSRF_RE = re.compile(
     r"|"
     r'<input[^>]*value=["\']([^"\']+)["\'][^>]*name=["\']csrf_token["\']'
 )
+
+# TOTP manual-entry-key scraper for /admin/mfa/setup (Bug #1324 elevation
+# retry).  Mirrors tests/e2e/cli_remote/test_10_elevation_maintenance_1132.py's
+# _MK_RE -- the established pattern for enrolling admin TOTP via the web
+# session front door.
+_MK_RE = re.compile(r"<div class='mk'>([^<]+)</div>")
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +290,75 @@ def _fetch_csrf(client: httpx.Client, path: str) -> str:
     return match.group(1) or match.group(2) or ""
 
 
+def _elevation_error_code(resp: httpx.Response) -> Any:
+    """Return the ``detail.error`` code from a 403 response, or None.
+
+    ``require_elevation()`` (src/code_indexer/server/auth/dependencies.py)
+    raises HTTPException(403, detail={"error": "totp_setup_required" |
+    "elevation_required", ...}); FastAPI serialises HTTPException as JSON
+    regardless of the route's declared response_class.
+    """
+    if resp.status_code != 403:
+        return None
+    try:
+        detail = resp.json().get("detail", {})
+    except ValueError:
+        return None
+    return detail.get("error") if isinstance(detail, dict) else None
+
+
+def _obtain_elevation(web: httpx.Client, admin_user: str) -> None:
+    """Satisfy a TOTP step-up elevation gate on the current web session.
+
+    Bug #1324: ``POST /admin/config/{section}`` is guarded by
+    ``Depends(dependencies.require_elevation())``.  Reuses the exact
+    enrol + elevate primitives from
+    tests/e2e/cli_remote/test_10_elevation_maintenance_1132.py
+    (``_enroll_admin_totp`` / ``web.post("/auth/elevate", ...)``): scrape the
+    manual-entry key from ``/admin/mfa/setup``, verify it to enrol, then open
+    an elevation window with the current TOTP code.  Bounded, no loops.
+    """
+    setup_page = web.get("/admin/mfa/setup")
+    assert setup_page.status_code == 200, (
+        f"/admin/mfa/setup expected 200, got {setup_page.status_code}: "
+        f"{setup_page.text[:200]}"
+    )
+    mk_match = _MK_RE.search(setup_page.text)
+    assert mk_match, f"No '.mk' manual-key div on setup page: {setup_page.text[:300]}"
+    secret = mk_match.group(1).replace(" ", "").strip()
+
+    verify = web.post(
+        "/admin/mfa/verify",
+        data={"totp_code": pyotp.TOTP(secret).now(), "target_user": admin_user},
+    )
+    assert verify.status_code == 200, (
+        f"/admin/mfa/verify expected 200, got {verify.status_code}: {verify.text[:200]}"
+    )
+
+    elevate = web.post("/auth/elevate", json={"totp_code": pyotp.TOTP(secret).now()})
+    assert elevate.status_code == 200, (
+        f"/auth/elevate expected 200, got {elevate.status_code}: {elevate.text[:200]}"
+    )
+
+
 def _enable_dependency_map(server_url: str) -> None:
     """Enable ``dependency_map_enabled`` via the real Web-UI config front door.
 
     Uses a dedicated cookie-bearing httpx.Client (web /login session + CSRF),
     distinct from the JWT bearer used for MCP.  Bounded, no loops.
+
+    Bug #1324: the config write is gated by TOTP step-up elevation
+    (``Depends(dependencies.require_elevation())`` on
+    ``POST /admin/config/{section}``).  When
+    ``elevation_enforcement_enabled`` is False (the default -- see
+    tests/e2e/cli_remote/test_03_admin_users.py / test_04_admin_groups.py),
+    the gate is a passthrough and the first POST succeeds with zero side
+    effects.  Only when the server actually rejects the write with 403
+    ``totp_setup_required`` / ``elevation_required`` do we enrol TOTP and open
+    an elevation window (``_obtain_elevation``), then retry the POST once --
+    this avoids enrolling TOTP on the shared admin account (which would break
+    the plain-password web/JSON logins other Phase 6 fixtures rely on) in the
+    normal case where elevation isn't required at all.
     """
     admin_user = os.environ.get("E2E_ADMIN_USER", "")
     admin_pass = os.environ.get("E2E_ADMIN_PASS", "")
@@ -314,6 +385,16 @@ def _enable_dependency_map(server_url: str) -> None:
             WEB_CONFIG_CLAUDE_CLI,
             data={"dependency_map_enabled": "true", "csrf_token": form_csrf},
         )
+
+        error_code = _elevation_error_code(save)
+        if error_code in ("totp_setup_required", "elevation_required"):
+            _obtain_elevation(web, admin_user)
+            retry_csrf = _fetch_csrf(web, WEB_CONFIG) or form_csrf
+            save = web.post(
+                WEB_CONFIG_CLAUDE_CLI,
+                data={"dependency_map_enabled": "true", "csrf_token": retry_csrf},
+            )
+
         assert save.status_code in (200, 302, 303), (
             f"enable dep-map POST failed: {save.status_code} -- {save.text[:200]}"
         )

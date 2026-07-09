@@ -46,6 +46,18 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Default is the Linux standard /etc/systemd/system.
 SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
 
+# Bug #1320 Part B: fixed, documented installation location of the co-located
+# CoW Storage Daemon's own config file. This is a stable install-location
+# constant (not an environment-specific storage value) — used ONLY to
+# auto-detect cow_daemon.daemon_storage_path (the `base_path` field) on the
+# daemon-HOST node. Overridable via env var for testing only, mirroring the
+# SYSTEMD_UNIT_DIR pattern above.
+COW_DAEMON_HOST_CONFIG_PATH = Path(
+    os.environ.get(
+        "CIDX_COW_DAEMON_HOST_CONFIG_PATH", "/etc/cow-storage-daemon/config.json"
+    )
+)
+
 # Self-restart mechanism constants
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
@@ -3756,6 +3768,21 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 14.6: Bug #1320 Part B - Ensure cow_daemon.daemon_storage_path is
+        # populated on CoW-daemon cluster nodes (non-fatal; leaves unset + logs
+        # when no source resolves, letting Part A's guard fail loud at publish
+        # time instead of silently guessing a value).
+        if not self._ensure_daemon_storage_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-206",
+                    "daemon_storage_path setup failed - "
+                    "CoW-daemon versioned-snapshot publish may fail loud "
+                    "with a path-translation error",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 15: Ensure ~/.local/bin is in PATH in the systemd service unit (non-fatal)
         if not self._ensure_systemd_claude_path():
             logger.warning(
@@ -4813,6 +4840,158 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-167",
                     f"Bug #1052: activated-repos symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _resolve_daemon_storage_path() -> Optional[str]:
+        """Bug #1320 Part B: resolve the CoW daemon's local storage root
+        (base_path) using a fixed priority order. NEVER hardcodes or guesses
+        an environment-specific path — returns None when no source resolves.
+
+        Priority order:
+          1. CIDX_COW_DAEMON_STORAGE_PATH env var (explicit operator override,
+             set by the installer's --cow-daemon-storage-path flag or by the
+             operator directly on the auto-updater's environment).
+          2. Co-located CoW daemon config `base_path` field at
+             COW_DAEMON_HOST_CONFIG_PATH — only present/readable on the
+             daemon-HOST node (the daemon exposes no API reporting its own
+             base_path, so this is the only runtime-derivable source besides
+             the explicit override).
+
+        Returns:
+            The resolved absolute path string, or None if neither source
+            is available/valid.
+        """
+        env_value = os.environ.get("CIDX_COW_DAEMON_STORAGE_PATH", "").strip()
+        if env_value:
+            return env_value
+
+        try:
+            if COW_DAEMON_HOST_CONFIG_PATH.is_file():
+                with open(COW_DAEMON_HOST_CONFIG_PATH) as f:
+                    daemon_config = json.load(f)
+                base_path = daemon_config.get("base_path", "")
+                if isinstance(base_path, str) and base_path.strip():
+                    return base_path.strip()
+        except (OSError, json.JSONDecodeError, AttributeError) as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-203",
+                    "Bug #1320: could not read co-located CoW daemon config "
+                    f"at {COW_DAEMON_HOST_CONFIG_PATH} for daemon_storage_path "
+                    f"auto-detect: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return None
+
+    def _ensure_daemon_storage_path(self) -> bool:
+        """Bug #1320 Part B: idempotently populate cow_daemon.daemon_storage_path
+        in config.json so CowDaemonBackend can translate CIDX paths (mount_point
+        view) to the daemon's local filesystem paths (storage_path view).
+
+        Part A (already shipped) made CowDaemonBackend._translate_to_daemon_path
+        raise a clear ValueError instead of silently emitting an untranslatable
+        NFS path when this field is empty/null. This step is what actually
+        populates the value, using _resolve_daemon_storage_path() (env var,
+        then co-located daemon config — never a hardcoded default).
+
+        VALUE-AWARE idempotent (Bug #1183 style): only writes when the field
+        is currently missing or empty. NEVER overwrites an existing non-empty
+        value, even if a different value would be freshly resolved — an
+        operator or a prior run may have set it deliberately.
+
+        Non-fatal in all handled cases (no-op, write, or unresolved-leave-
+        unset all return True); only an unexpected exception while reading or
+        writing config.json returns False.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+            if config is None:
+                logger.debug(
+                    "Bug #1320: config.json absent — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1320: clone_backend=%r, not cow-daemon — skipping "
+                    "daemon_storage_path setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None:
+                logger.warning(
+                    "Bug #1320: clone_backend=cow-daemon but cow_daemon config "
+                    "missing — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            existing_value = (
+                getattr(cow_cfg, "daemon_storage_path", None) or ""
+            ).strip()
+            if existing_value:
+                logger.debug(
+                    "Bug #1320: cow_daemon.daemon_storage_path already set "
+                    "(%s) — no-op",
+                    existing_value,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            resolved_value = self._resolve_daemon_storage_path()
+            if not resolved_value:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-204",
+                        "Bug #1320: cow_daemon.daemon_storage_path is unset and "
+                        "could not be auto-resolved (no CIDX_COW_DAEMON_STORAGE_PATH "
+                        "env var, no readable co-located CoW daemon config at "
+                        f"{COW_DAEMON_HOST_CONFIG_PATH}) — leaving unset; "
+                        "CowDaemonBackend will fail loud on the next "
+                        "versioned-snapshot publish that needs path translation",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True
+
+            config_path = _cidx_data_dir / "config.json"
+            with open(config_path) as f:
+                config_dict = json.load(f)
+            cow_daemon_dict = config_dict.get("cow_daemon") or {}
+            cow_daemon_dict["daemon_storage_path"] = resolved_value
+            config_dict["cow_daemon"] = cow_daemon_dict
+            _cidx_data_dir.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(config_dict, f, indent=2)
+                f.write("\n")
+
+            logger.info(
+                "Bug #1320: set cow_daemon.daemon_storage_path=%s in config.json",
+                resolved_value,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-205",
+                    f"Bug #1320: daemon_storage_path setup failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

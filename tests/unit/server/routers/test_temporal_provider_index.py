@@ -173,6 +173,10 @@ class TestAddIndexTemporalWithProviders:
 
         mock_grm = MagicMock()
         mock_grm.golden_repos = {"my-repo": mock_repo_meta}
+        # Bug #1316: the route now resolves temporal_options authoritatively
+        # via get_golden_repo(), not the raw golden_repos cache dict above --
+        # configure it to mirror the same repo metadata.
+        mock_grm.get_golden_repo.return_value = mock_repo_meta
 
         with (
             patch(
@@ -201,6 +205,122 @@ class TestAddIndexTemporalWithProviders:
         mock_bgm.submit_job.assert_called_once()
         submitted_kwargs = mock_bgm.submit_job.call_args.kwargs
         assert submitted_kwargs.get("temporal_options") == temporal_opts
+
+
+# ---------------------------------------------------------------------------
+# Bug #1316: per-provider temporal route must resolve temporal_options
+# authoritatively (shared backend), not from the raw per-worker cache.
+# ---------------------------------------------------------------------------
+
+
+class TestBug1316ProviderTemporalOptionsAuthoritativeRead:
+    """POST .../indexes (temporal + providers) must not trust a stale/missing
+    `golden_repo_manager.golden_repos` cache entry for temporal_options."""
+
+    def test_stale_cache_does_not_override_fresh_authoritative_temporal_options(
+        self, admin_test_client
+    ):
+        """Bug #1316: a cross-node temporal_options mutation must be visible.
+
+        `golden_repo_manager.golden_repos["my-repo"]` simulates THIS worker's
+        stale cache (still holding max_commits=100 from before another
+        node/worker saved fresh options). `get_golden_repo()` simulates the
+        shared backend's CURRENT authoritative row (max_commits=999). The
+        route must forward the FRESH options, not the stale cached ones.
+        """
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/indexes", "POST")
+
+        mock_bgm = MagicMock()
+        mock_bgm.submit_job.return_value = "job-temporal-fresh"
+
+        stale_repo_meta = MagicMock(temporal_options={"max_commits": 100})
+        fresh_repo_meta = MagicMock(temporal_options={"max_commits": 999})
+
+        mock_grm = MagicMock()
+        mock_grm.golden_repos = {"my-repo": stale_repo_meta}
+        mock_grm.get_golden_repo.return_value = fresh_repo_meta
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_path",
+                return_value="/some/repo/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_base_clone",
+                return_value=None,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._append_provider_to_config",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._provider_temporal_index_job",
+            ),
+            _patch_closure(handler, "background_job_manager", mock_bgm),
+            _patch_closure(handler, "golden_repo_manager", mock_grm),
+        ):
+            response = admin_test_client.post(
+                "/api/admin/golden-repos/my-repo/indexes",
+                json={"index_types": ["temporal"], "providers": ["voyage-ai"]},
+            )
+
+        assert response.status_code == 202
+        mock_bgm.submit_job.assert_called_once()
+        submitted_kwargs = mock_bgm.submit_job.call_args.kwargs
+        assert submitted_kwargs.get("temporal_options") == {"max_commits": 999}, (
+            "Bug #1316: must forward the FRESH authoritative temporal_options, "
+            f"not the stale per-worker cache. Got: {submitted_kwargs.get('temporal_options')}"
+        )
+
+    def test_cache_miss_still_resolves_temporal_options_via_authoritative_read(
+        self, admin_test_client
+    ):
+        """Bug #1316: a cache MISS (repo registered on another node) must
+        still resolve temporal_options via the shared backend rather than
+        silently submitting an empty options dict."""
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/indexes", "POST")
+
+        mock_bgm = MagicMock()
+        mock_bgm.submit_job.return_value = "job-temporal-miss"
+
+        fresh_repo_meta = MagicMock(temporal_options={"since_date": "2024-01-01"})
+
+        mock_grm = MagicMock()
+        # Cache MISS: alias absent from the raw per-worker dict entirely.
+        mock_grm.golden_repos = {}
+        mock_grm.get_golden_repo.return_value = fresh_repo_meta
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_path",
+                return_value="/some/repo/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_base_clone",
+                return_value=None,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._append_provider_to_config",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._provider_temporal_index_job",
+            ),
+            _patch_closure(handler, "background_job_manager", mock_bgm),
+            _patch_closure(handler, "golden_repo_manager", mock_grm),
+        ):
+            response = admin_test_client.post(
+                "/api/admin/golden-repos/my-repo/indexes",
+                json={"index_types": ["temporal"], "providers": ["voyage-ai"]},
+            )
+
+        assert response.status_code == 202
+        mock_bgm.submit_job.assert_called_once()
+        submitted_kwargs = mock_bgm.submit_job.call_args.kwargs
+        assert submitted_kwargs.get("temporal_options") == {
+            "since_date": "2024-01-01"
+        }, (
+            "Bug #1316: a cache MISS must still resolve temporal_options "
+            f"authoritatively, not emit {{}}. Got: {submitted_kwargs.get('temporal_options')}"
+        )
 
 
 # ---------------------------------------------------------------------------

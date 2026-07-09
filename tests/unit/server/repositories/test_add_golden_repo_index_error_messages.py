@@ -78,6 +78,25 @@ def _make_manager_for_add_index():
         return_value="/fake/data/golden-repos/test-repo"
     )
 
+    # Bug #1316: add_indexes_to_golden_repo's background_worker now resolves
+    # `repo` authoritatively via _resolve_golden_repo_authoritative, which
+    # unconditionally calls _sqlite_backend.get_repo(alias) -- configure it
+    # to mirror the golden_repo Mock above so GoldenRepo(**repo_data) succeeds.
+    manager._sqlite_backend = Mock()
+    manager._sqlite_backend.get_repo = Mock(
+        return_value={
+            "alias": golden_repo.alias,
+            "repo_url": "https://example.com/test-repo.git",
+            "default_branch": "main",
+            "clone_path": golden_repo.clone_path,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "enable_temporal": golden_repo.enable_temporal,
+            "temporal_options": golden_repo.temporal_options,
+            "category_id": None,
+            "category_auto_assigned": False,
+        }
+    )
+
     # background_job_manager: capture submitted func so we can call it directly
     manager.background_job_manager = Mock()
     manager.background_job_manager.submit_job = Mock(return_value="job-123")

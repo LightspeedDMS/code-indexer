@@ -161,6 +161,10 @@ class TestAC1BootstrapKeysRemoved:
                 "log_level",
                 "host",
                 "port",
+                # PR #1332: admission control is opt-in (both gates default
+                # False) and read from the merged config at app-wiring time,
+                # not needed pre-DB -- runtime, not bootstrap.
+                "admission_control_config",
             }
         )
 
