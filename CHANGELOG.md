@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.36.0] - 2026-07-09
+
+### Fixed
+
+- **#1347**: The #1343 warn-only `git status --porcelain` sanity check in `ActivatedRepoManager._clone_with_copy_on_write` no longer false-warns on the expected untracked `.code-indexer/` index directory. Porcelain output includes untracked (`??`) entries, so `?? .code-indexer/` fired a WARNING on every activation and tripped the Phase 3 (server in-process) POST-E2E log-audit gate. The check now filters out untracked lines and warns only on tracked-file drift (which `git restore` could actually discard). Still warn-only; `git restore` is never invoked. No CoW-clone/`checkStat`/`preserve_attrs`/timeout behavior changed.
+
 ## [11.35.0] - 2026-07-09
 
 ### Fixed
