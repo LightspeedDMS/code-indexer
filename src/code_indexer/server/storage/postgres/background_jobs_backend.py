@@ -42,6 +42,14 @@ _UPDATE_JOB_BACKOFF_BASE = 0.05
 
 logger = logging.getLogger(__name__)
 
+# Bug #1344: terminal job statuses. update_job() guards against a stale
+# non-terminal status write (e.g. a delayed cancel_job() persist for a
+# RUNNING job) reverting a row that has already reached one of these
+# statuses via the worker's own terminal write. Tuple (not set/frozenset)
+# for deterministic SQL placeholder ordering. Mirrors the same constant in
+# storage/sqlite_backends.py so both backends enforce the guard identically.
+_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+
 _ALLOWED_JOB_COLUMNS = frozenset(
     {
         "status",
@@ -354,7 +362,12 @@ class BackgroundJobsPostgresBackend:
         return self._row_to_dict(row)
 
     def update_job(
-        self, job_id: str, executing_node: Optional[str] = None, **kwargs: Any
+        self,
+        job_id: str,
+        executing_node: Optional[str] = None,
+        *,
+        guard_terminal_status: bool = False,
+        **kwargs: Any,
     ) -> None:
         """Update arbitrary columns on a background job row.
 
@@ -363,6 +376,15 @@ class BackgroundJobsPostgresBackend:
             executing_node: If provided, adds ``AND executing_node = %s``
                 to the WHERE clause so only the owning node can update
                 ownership-sensitive fields (Bug #542).
+            guard_terminal_status: Bug #1344 opt-in. When True and the new
+                ``status`` kwarg is non-terminal, the UPDATE is guarded with
+                ``AND status NOT IN (<terminal statuses>)`` so a stale
+                non-terminal write cannot revert a row that has already
+                reached a terminal status via a separate, later write.
+                Defaults to False so unrelated callers (e.g. JobTracker's
+                dedup mechanism, which deliberately relies on an
+                unconditional write to surface a real unique-constraint
+                violation -- Bug #1256) are unaffected.
             **kwargs: Column=value pairs to update.
         """
         _JSON_FIELDS = {
@@ -400,6 +422,24 @@ class BackgroundJobsPostgresBackend:
         if executing_node is not None:
             where += " AND executing_node = %s"
             params.append(executing_node)
+
+        # Bug #1344: when the new status being written is itself non-terminal
+        # (e.g. "running"), guard the UPDATE so it cannot clobber a row that
+        # has already reached a terminal status via a separate, later write
+        # (e.g. the worker's own terminal persist racing a stale outside-lock
+        # write from cancel_job()). A terminal new status is always allowed
+        # through unconditionally. Opt-in only (see guard_terminal_status
+        # docstring) -- other callers must keep their prior unconditional
+        # write semantics.
+        new_status = kwargs.get("status")
+        if (
+            guard_terminal_status
+            and new_status is not None
+            and new_status not in _TERMINAL_JOB_STATUSES
+        ):
+            placeholders = ", ".join(["%s"] * len(_TERMINAL_JOB_STATUSES))
+            where += f" AND status NOT IN ({placeholders})"
+            params.extend(_TERMINAL_JOB_STATUSES)
 
         sql = f"UPDATE background_jobs SET {', '.join(updates)} {where}"
 

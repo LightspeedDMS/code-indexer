@@ -2548,6 +2548,14 @@ class DependencyMapTrackingBackend:
         self._conn_manager.close_all()
 
 
+# Bug #1344: terminal job statuses. update_job() guards against a stale
+# non-terminal status write (e.g. a delayed cancel_job() persist for a
+# RUNNING job) reverting a row that has already reached one of these
+# statuses via the worker's own terminal write. Tuple (not set/frozenset)
+# for deterministic SQL placeholder ordering.
+_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+
+
 class BackgroundJobsSqliteBackend:
     """
     SQLite backend for background job management.
@@ -2779,8 +2787,22 @@ class BackgroundJobsSqliteBackend:
             "actor_username": row[24] if len(row) > 24 else None,
         }
 
-    def update_job(self, job_id: str, **kwargs) -> None:
-        """Update job fields. Accepts any field from the background_jobs table."""
+    def update_job(
+        self, job_id: str, *, guard_terminal_status: bool = False, **kwargs
+    ) -> None:
+        """Update job fields. Accepts any field from the background_jobs table.
+
+        Args:
+            guard_terminal_status: Bug #1344 opt-in. When True and the new
+                ``status`` kwarg is non-terminal, the UPDATE is guarded with
+                ``AND status NOT IN (<terminal statuses>)`` so a stale
+                non-terminal write cannot revert a row that has already
+                reached a terminal status via a separate, later write.
+                Defaults to False so unrelated callers (e.g. JobTracker's
+                dedup mechanism, which deliberately relies on an
+                unconditional write to surface a real IntegrityError from
+                ``idx_active_job_per_repo`` -- Bug #1256) are unaffected.
+        """
         json_fields = {
             "result",
             "claude_actions",
@@ -2812,9 +2834,28 @@ class BackgroundJobsSqliteBackend:
 
         params.append(job_id)
 
+        where_clause = "WHERE job_id = ?"
+        # Bug #1344: when the new status being written is itself non-terminal
+        # (e.g. "running"), guard the UPDATE so it cannot clobber a row that
+        # has already reached a terminal status via a separate, later write
+        # (e.g. the worker's own terminal persist racing a stale outside-lock
+        # write from cancel_job()). A terminal new status is always allowed
+        # through unconditionally. Opt-in only (see guard_terminal_status
+        # docstring) -- other callers must keep their prior unconditional
+        # write semantics.
+        new_status = kwargs.get("status")
+        if (
+            guard_terminal_status
+            and new_status is not None
+            and new_status not in _TERMINAL_JOB_STATUSES
+        ):
+            placeholders = ", ".join("?" for _ in _TERMINAL_JOB_STATUSES)
+            where_clause += f" AND status NOT IN ({placeholders})"
+            params.extend(_TERMINAL_JOB_STATUSES)
+
         def operation(conn):
             conn.execute(
-                f"UPDATE background_jobs SET {', '.join(updates)} WHERE job_id = ?",
+                f"UPDATE background_jobs SET {', '.join(updates)} {where_clause}",
                 params,
             )
             return None
