@@ -55,9 +55,11 @@ def _make_capture_ripgrep():
         timeout_seconds,
         multiline=False,
         pcre2=False,
+        candidate_files=None,
     ):
         captured["multiline"] = multiline
         captured["pcre2"] = pcre2
+        captured["candidate_files"] = candidate_files
         return [], 0
 
     return captured, mock_ripgrep
