@@ -92,6 +92,45 @@ class TestBuildQuery:
     def test_exists_false_without_build(self, tmp_path):
         assert _mgr(tmp_path).exists() is False
 
+
+class TestSchemaVersionGuard:
+    """An index whose on-disk schema does not match this build must be reported
+    as absent so the caller full-scans and a rebuild regenerates it -- instead of
+    the query failing on a missing table/column."""
+
+    def _built(self, tmp_path):
+        repo = _repo(tmp_path)
+        mgr = _mgr(tmp_path)
+        mgr.build(repo, file_list=["auth.java"])
+        return mgr
+
+    def test_current_index_exists(self, tmp_path):
+        assert self._built(tmp_path).exists() is True
+
+    def test_wrong_schema_version_is_absent(self, tmp_path):
+        import sqlite3
+
+        mgr = self._built(tmp_path)
+        with sqlite3.connect(mgr.db_path) as conn:
+            conn.execute("UPDATE meta SET value = 999999 WHERE key = 'schema_version'")
+        assert mgr.exists() is False  # version mismatch -> rebuild
+
+    def test_missing_schema_stamp_is_absent(self, tmp_path):
+        import sqlite3
+
+        mgr = self._built(tmp_path)
+        with sqlite3.connect(mgr.db_path) as conn:
+            conn.execute("DELETE FROM meta WHERE key = 'schema_version'")
+        assert mgr.exists() is False  # pre-stamp/old format -> rebuild
+
+    def test_missing_table_is_absent(self, tmp_path):
+        import sqlite3
+
+        mgr = self._built(tmp_path)
+        with sqlite3.connect(mgr.db_path) as conn:
+            conn.execute("DROP TABLE meta")
+        assert mgr.exists() is False  # missing table -> caught -> rebuild
+
     def test_rebuild_is_atomic_and_replaces(self, tmp_path):
         repo = _repo(tmp_path)
         mgr = _mgr(tmp_path)
