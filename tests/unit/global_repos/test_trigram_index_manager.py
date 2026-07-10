@@ -33,21 +33,20 @@ class TestBuildQuery:
         assert n == 3
         assert mgr.exists()
 
-        # "authenticator" trigrams -> only auth.java
-        cands = mgr.query(trigrams("authenticator"))
-        assert cands == ["auth.java"]
+        # Superset guarantee: the file that truly contains the string is always a
+        # candidate (ripgrep does the exact match over the candidates).
+        assert "auth.java" in mgr.query(trigrams("LSAuthenticator"))
+        assert "a/other.py" in mgr.query(trigrams("authenticate"))
+        # a file that clearly lacks the (rare) trigrams is excluded
+        assert "readme.md" not in mgr.query(trigrams("LSAuthenticator"))
 
-        # "authenticate" trigrams -> only other.py
-        cands = mgr.query(trigrams("authenticate"))
-        assert set(cands) == {"a/other.py"}
-
-    def test_query_requires_all_trigrams(self, tmp_path):
+    def test_query_excludes_files_lacking_rare_trigrams(self, tmp_path):
         repo = _repo(tmp_path)
         mgr = _mgr(tmp_path)
         mgr.build(repo, file_list=["auth.java", "a/other.py", "readme.md"])
-        # combine trigrams from two different files -> no single file has both
-        combined = trigrams("authenticator") | trigrams("relevant")
-        assert mgr.query(combined) == []
+        # a distinctive string present in no file -> its rare trigrams post to
+        # nothing, so no indexed file is a candidate
+        assert mgr.query(trigrams("zqxjwkbvfp")) == []
 
     def test_empty_required_returns_none(self, tmp_path):
         repo = _repo(tmp_path)
