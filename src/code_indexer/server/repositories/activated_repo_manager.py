@@ -8,6 +8,9 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.server.utils.cancellable_subprocess import (
+    SubprocessCancelledError,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -60,6 +63,41 @@ class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
 
     pass
+
+
+# Bug #1346: bound on how many __cause__/__context__ links _is_cancellation_chain
+# will follow before giving up. Real chains here are 1-2 deep (ActivatedRepoError
+# wrapping a SubprocessCancelledError); this is a defensive ceiling, not a
+# tuned/expected value.
+_MAX_EXCEPTION_CHAIN_DEPTH = 10
+
+
+def _is_cancellation_chain(exc: BaseException) -> bool:
+    """Bug #1346: detect whether *exc* (or anything it was raised from) is a
+    user-initiated SubprocessCancelledError, as opposed to a genuine failure.
+
+    Both _clone_with_copy_on_write and _run_branch_delta_index re-wrap the
+    original SubprocessCancelledError into an ActivatedRepoError before it
+    reaches _do_activate_repository's outer exception handler -- one path
+    chains explicitly (`raise ... from exc`, setting __cause__), the other
+    implicitly (a bare `raise` inside an `except Exception as e:` block,
+    which Python sets as __context__). This walks both links, bounded to
+    avoid an unbounded loop on a pathological/cyclic chain.
+    """
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while (
+        current is not None
+        and depth < _MAX_EXCEPTION_CHAIN_DEPTH
+        and id(current) not in seen
+    ):
+        if isinstance(current, SubprocessCancelledError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return False
 
 
 class ActivatedRepo(BaseModel):
@@ -1863,11 +1901,33 @@ class ActivatedRepoManager:
                 golden_repo_alias
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
-            success = self._clone_with_copy_on_write(
-                golden_repo_actual_path,
-                activated_repo_path,
-                cancel_check=cancel_check,
-            )
+            try:
+                success = self._clone_with_copy_on_write(
+                    golden_repo_actual_path,
+                    activated_repo_path,
+                    cancel_check=cancel_check,
+                )
+            except ActivatedRepoError:
+                # Bug #1345: a cancel (or any other failure) during the CLONE
+                # phase must not leave an orphaned partial clone directory on
+                # disk, mirroring the reindex-phase cleanup below.  This is a
+                # SECOND, defense-in-depth cleanup attempt:
+                # _clone_with_copy_on_write's own except-Exception handler
+                # already removes activated_repo_path when it is visible to
+                # os.path.exists() at that instant, but a network/NFS-backed
+                # clone backend (e.g. the CoW Storage Daemon) can materialize
+                # the partial directory a beat AFTER that check runs, so it
+                # can still be present when control reaches here.
+                # shutil.rmtree(ignore_errors=True) is idempotent, so retrying
+                # is harmless when the inner cleanup already succeeded.
+                if os.path.exists(activated_repo_path):
+                    self.logger.warning(
+                        f"Removing orphaned clone at '{activated_repo_path}' "
+                        f"after clone-phase failure/cancellation for '{user_alias}'",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                raise
 
             if not success:
                 raise ActivatedRepoError("Failed to clone repository")
@@ -2016,8 +2076,25 @@ class ActivatedRepoManager:
             }
 
         except Exception as e:
-            error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
-            self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # possibly wrapped as an ActivatedRepoError by
+            # _clone_with_copy_on_write / _run_branch_delta_index) is NOT a
+            # genuine failure -- log it at INFO with a "cancelled by user"
+            # framing instead of ERROR, so it does not read as an incident.
+            # Genuine failures keep logging ERROR unchanged.
+            if _is_cancellation_chain(e):
+                error_msg = (
+                    f"Activation of '{user_alias}' for user '{username}' "
+                    f"was cancelled by user: {str(e)}"
+                )
+                self.logger.info(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
+            else:
+                error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
+                self.logger.error(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
 
             # Report failure through progress callback
             if progress_callback:
@@ -3471,6 +3548,18 @@ class ActivatedRepoManager:
                 repo_path, cancel_check=cancel_check
             )
         except RuntimeError as exc:
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # a RuntimeError subclass) is NOT a genuine reindex failure --
+            # log it at INFO with a "cancelled by user" framing instead of
+            # ERROR. Genuine reindex failures keep logging ERROR unchanged.
+            if isinstance(exc, SubprocessCancelledError):
+                cancel_msg = (
+                    f"Branch-delta reindex cancelled by user for '{user_alias}': {exc}"
+                )
+                self.logger.info(
+                    cancel_msg, extra={"correlation_id": get_correlation_id()}
+                )
+                raise ActivatedRepoError(cancel_msg) from exc
             error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
             self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise ActivatedRepoError(error_msg) from exc

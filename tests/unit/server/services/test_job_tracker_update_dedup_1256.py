@@ -227,16 +227,31 @@ class TestIsActiveJobUniqueViolation:
 
 
 class TestRealEndToEndReproduction:
-    def test_update_status_running_raises_real_integrity_error_on_collision(
+    def test_update_status_running_on_terminal_row_is_guarded_not_integrity_error(
         self, tmp_path: Path
     ):
         """
+        Bug #1348 supersedes the original reproduction of this scenario.
+
         Pre-seed job A as the active occupant of the (operation_type,
-        repo_alias) singleton slot. Job B, registered into the tracker's
-        in-memory map with a TERMINAL DB status (so the initial INSERT does
-        not collide), then has update_status(status="running") called on
-        it. This must raise the same real sqlite3.IntegrityError the bug
-        describes because the UPDATE now conflicts with job A's active row.
+        repo_alias) singleton slot. Job B has a TERMINAL DB status
+        ("completed") -- the only way its INSERT would not itself collide
+        with job A's active row, since two rows cannot simultaneously
+        satisfy the idx_active_job_per_repo partial index for the same
+        key. update_status(status="running") is then called on job B,
+        attempting to transition it from "completed" back to "running".
+
+        Before Bug #1348, this raw UPDATE was unconditional and would hit
+        SQLite's unique-index check, raising sqlite3.IntegrityError (the
+        original point of this test: prove is_active_job_unique_violation
+        classifies it correctly). After Bug #1348, _upsert_job's
+        terminal-status guard blocks the write BEFORE it ever reaches
+        SQLite (job B's CURRENT status "completed" is terminal, so the
+        UPDATE's WHERE clause matches zero rows) -- a stale/late attempt
+        to un-terminalize an already-finished job is exactly the hazard
+        Bug #1348 closes. The call must therefore be a silent no-op: no
+        exception, and job B's persisted status must remain "completed"
+        (first-terminal-write-wins, Bug #1258).
         """
         db_path = str(tmp_path / "jobs.db")
         tracker = _make_sqlite_backed_tracker(db_path)
@@ -276,10 +291,22 @@ class TestRealEndToEndReproduction:
         with tracker._lock:
             tracker._active_jobs["job-b"] = job_b
 
-        with pytest.raises(sqlite3.IntegrityError) as exc_info:
-            tracker.update_status("job-b", status="running")
+        # Bug #1348: must NOT raise -- the terminal-status guard makes
+        # this a silent no-op instead of a raw unique-index collision.
+        tracker.update_status("job-b", status="running")
 
-        assert is_active_job_unique_violation(exc_info.value) is True
+        persisted = tracker._backend.get_job("job-b")
+        assert persisted is not None
+        assert persisted["status"] == "completed", (
+            "Bug #1348: update_status(running) on an already-terminal row "
+            "must remain a guarded no-op -- status must never revert from "
+            "'completed' back to 'running'"
+        )
+
+        # job A's unrelated active row must be untouched by this no-op.
+        job_a = tracker._backend.get_job("job-a")
+        assert job_a is not None
+        assert job_a["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
