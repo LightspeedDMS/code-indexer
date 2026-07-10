@@ -775,9 +775,27 @@ def test_corrupt_blob_row_rewritten_via_record_miss():
 # ===========================================================================
 
 
+def _patch_audit_persistence(fake_writer):
+    """Story #1295: patch the audit-persistence path used by
+    _record_audit_metrics -- get_search_embed_event_writer +
+    get_current_correlation_id -- returning (writer_patch, correlation_patch).
+    """
+    from unittest.mock import patch
+
+    writer_patch = patch(
+        "code_indexer.server.services.embedding_cache_audit.get_search_embed_event_writer",
+        return_value=fake_writer,
+    )
+    correlation_patch = patch(
+        "code_indexer.server.services.embedding_cache_audit.get_current_correlation_id",
+        return_value="test-correlation-id",
+    )
+    return writer_patch, correlation_patch
+
+
 def test_record_audit_metrics_partial_overlap_divides_by_max_len():
     """2-of-3 overlap divides by max(3,3)==3, yielding ~0.667 (NOT 2/10==0.2)."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     from code_indexer.server.services.embedding_cache_audit import (
         _record_audit_metrics,
@@ -787,32 +805,31 @@ def test_record_audit_metrics_partial_overlap_divides_by_max_len():
     primary = ["a", "b", "c"]
     second = ["a", "b", "d"]
 
-    captured: list = []
-    fake_metrics = MagicMock()
-    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+    fake_writer = MagicMock()
+    writer_patch, correlation_patch = _patch_audit_persistence(fake_writer)
 
-    with patch(
-        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-        return_value=fake_metrics,
-    ):
+    with writer_patch, correlation_patch:
         _record_audit_metrics(
             primary_candidate_ids=primary,
             second_ids=second,
             provider_name=PROVIDER_VOYAGE,
             mode="on",
+            embed_key="test-embed-key",
         )
 
-    assert captured, "record_audit must have been called"
-    overlap = captured[0]["top10_overlap"]
+    fake_writer.backend.update_audit_by_key.assert_called_once()
+    call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+    overlap = call_kwargs["audit_cosine"]
     expected = 2 / 3  # 0.6666...
     assert abs(overlap - expected) < 1e-9, (
         f"Expected {expected} (2/max(3,3)), got {overlap}"
     )
+    assert call_kwargs["audit_sampled"] is True
 
 
 def test_record_audit_metrics_full_overlap_yields_one():
     """With full overlap (10-of-10), max(10,10)==10 → 10/10 == 1.0."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     from code_indexer.server.services.embedding_cache_audit import (
         _record_audit_metrics,
@@ -821,28 +838,26 @@ def test_record_audit_metrics_full_overlap_yields_one():
     primary = [str(i) for i in range(10)]
     second = [str(i) for i in range(10)]  # full overlap
 
-    captured: list = []
-    fake_metrics = MagicMock()
-    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+    fake_writer = MagicMock()
+    writer_patch, correlation_patch = _patch_audit_persistence(fake_writer)
 
-    with patch(
-        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-        return_value=fake_metrics,
-    ):
+    with writer_patch, correlation_patch:
         _record_audit_metrics(
             primary_candidate_ids=primary,
             second_ids=second,
             provider_name=PROVIDER_VOYAGE,
             mode="shadow",
+            embed_key="test-embed-key",
         )
 
-    assert captured
-    assert abs(captured[0]["top10_overlap"] - 1.0) < 1e-9
+    fake_writer.backend.update_audit_by_key.assert_called_once()
+    call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+    assert abs(call_kwargs["audit_cosine"] - 1.0) < 1e-9
 
 
 def test_record_audit_metrics_disjoint_results_yields_zero():
     """Completely disjoint results → 0/max(3,3)==0 → 0.0."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     from code_indexer.server.services.embedding_cache_audit import (
         _record_audit_metrics,
@@ -851,47 +866,122 @@ def test_record_audit_metrics_disjoint_results_yields_zero():
     primary = ["a", "b", "c"]
     second = ["d", "e", "f"]
 
-    captured: list = []
-    fake_metrics = MagicMock()
-    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+    fake_writer = MagicMock()
+    writer_patch, correlation_patch = _patch_audit_persistence(fake_writer)
 
-    with patch(
-        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-        return_value=fake_metrics,
-    ):
+    with writer_patch, correlation_patch:
         _record_audit_metrics(
             primary_candidate_ids=primary,
             second_ids=second,
             provider_name=PROVIDER_VOYAGE,
             mode="on",
+            embed_key="test-embed-key",
         )
 
-    assert captured
-    assert abs(captured[0]["top10_overlap"] - 0.0) < 1e-9
+    fake_writer.backend.update_audit_by_key.assert_called_once()
+    call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+    assert abs(call_kwargs["audit_cosine"] - 0.0) < 1e-9
 
 
 def test_record_audit_metrics_both_empty_yields_zero():
     """Both lists empty → denom==0 → safe 0.0 (no ZeroDivisionError)."""
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    fake_writer = MagicMock()
+    writer_patch, correlation_patch = _patch_audit_persistence(fake_writer)
+
+    with writer_patch, correlation_patch:
+        _record_audit_metrics(
+            primary_candidate_ids=[],
+            second_ids=[],
+            provider_name=PROVIDER_VOYAGE,
+            mode="shadow",
+            embed_key="test-embed-key",
+        )
+
+    fake_writer.backend.update_audit_by_key.assert_called_once()
+    call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+    assert abs(call_kwargs["audit_cosine"] - 0.0) < 1e-9
+
+
+def test_record_audit_metrics_no_embed_key_skips_persistence():
+    """Story #1295: embed_key=None (default) is a documented no-op -- no
+    writer lookup, no correlation lookup, no update_audit_by_key call."""
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    fake_writer = MagicMock()
+    writer_patch, correlation_patch = _patch_audit_persistence(fake_writer)
+
+    with writer_patch, correlation_patch:
+        _record_audit_metrics(
+            primary_candidate_ids=["a"],
+            second_ids=["a"],
+            provider_name=PROVIDER_VOYAGE,
+            mode="on",
+        )
+
+    fake_writer.backend.update_audit_by_key.assert_not_called()
+
+
+def test_record_audit_metrics_no_correlation_id_skips_persistence():
+    """Story #1295: get_current_correlation_id() returning falsy is a
+    documented no-op -- never fabricates a fresh UUID for an UPDATE (unlike
+    the INSERT-time fallback in emit_embed_event)."""
     from unittest.mock import MagicMock, patch
 
     from code_indexer.server.services.embedding_cache_audit import (
         _record_audit_metrics,
     )
 
-    captured: list = []
-    fake_metrics = MagicMock()
-    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+    fake_writer = MagicMock()
 
-    with patch(
-        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-        return_value=fake_metrics,
+    with (
+        patch(
+            "code_indexer.server.services.embedding_cache_audit.get_search_embed_event_writer",
+            return_value=fake_writer,
+        ),
+        patch(
+            "code_indexer.server.services.embedding_cache_audit.get_current_correlation_id",
+            return_value=None,
+        ),
     ):
         _record_audit_metrics(
-            primary_candidate_ids=[],
-            second_ids=[],
+            primary_candidate_ids=["a"],
+            second_ids=["a"],
             provider_name=PROVIDER_VOYAGE,
-            mode="shadow",
+            mode="on",
+            embed_key="test-embed-key",
         )
 
-    assert captured
-    assert abs(captured[0]["top10_overlap"] - 0.0) < 1e-9
+    fake_writer.backend.update_audit_by_key.assert_not_called()
+
+
+def test_record_audit_metrics_no_writer_skips_persistence():
+    """Story #1295: writer absent (CLI/solo/pre-lifespan) is a documented
+    no-op -- must not raise."""
+    from unittest.mock import patch
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    with patch(
+        "code_indexer.server.services.embedding_cache_audit.get_search_embed_event_writer",
+        return_value=None,
+    ):
+        # Must not raise.
+        _record_audit_metrics(
+            primary_candidate_ids=["a"],
+            second_ids=["a"],
+            provider_name=PROVIDER_VOYAGE,
+            mode="on",
+            embed_key="test-embed-key",
+        )

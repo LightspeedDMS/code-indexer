@@ -40,12 +40,10 @@ def _reset_globals():
     from code_indexer.server.services.config_service import reset_config_service
 
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
     yield
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
 

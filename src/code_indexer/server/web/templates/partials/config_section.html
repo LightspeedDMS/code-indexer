@@ -1510,6 +1510,23 @@ function saveLlmCredsConfig() {
                         </td>
                         <td class="config-note"><small>{{ config.indexing.indexable_extensions | length }} extensions configured</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Temporal Embedders</td>
+                        <td class="config-value">
+                            <span style="word-break: break-all;">{{ config.indexing.temporal_embedders | join(', ') }}</span>
+                        </td>
+                        <td class="config-note"><small>Per-commit contextual embedder adapters used to build temporal shards (e.g. voyage-context-4)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Temporal Active Embedder</td>
+                        <td class="config-value">{{ config.indexing.temporal_active_embedder }}</td>
+                        <td class="config-note"><small>Embedder adapter used for temporal recall by default; must be one of Temporal Embedders</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Temporal Aggregation Chunk Size</td>
+                        <td class="config-value">{{ config.indexing.temporal_aggregation_chunk_chars }}</td>
+                        <td class="config-note"><small>Character size used to chunk each per-commit aggregated document (message + diffs) before embedding</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1544,6 +1561,21 @@ function saveLlmCredsConfig() {
                     Indexable File Extensions
                     <textarea id="indexing-extensions" name="indexable_extensions" rows="4" style="font-family: monospace; font-size: 0.85em;">{{ config.indexing.indexable_extensions | join(', ') }}</textarea>
                     <small>Comma-separated list with leading dots (e.g., .py, .js, .ts). Changes apply to golden repos on next refresh cycle.</small>
+                </label>
+                <label for="indexing-temporal-embedders">
+                    Temporal Embedders
+                    <input type="text" id="indexing-temporal-embedders" name="temporal_embedders" value="{{ config.indexing.temporal_embedders | join(', ') }}">
+                    <small>Comma-separated list of per-commit temporal embedder adapter names (default voyage-context-4).</small>
+                </label>
+                <label for="indexing-temporal-active-embedder">
+                    Temporal Active Embedder
+                    <input type="text" id="indexing-temporal-active-embedder" name="temporal_active_embedder" value="{{ config.indexing.temporal_active_embedder }}">
+                    <small>Must be one of the Temporal Embedders above. Used for temporal recall by default.</small>
+                </label>
+                <label for="indexing-temporal-chunk-chars">
+                    Temporal Aggregation Chunk Size
+                    <input type="number" id="indexing-temporal-chunk-chars" name="temporal_aggregation_chunk_chars" value="{{ config.indexing.temporal_aggregation_chunk_chars }}" min="1">
+                    <small>Character size used to chunk the per-commit aggregated document (message + diffs) before embedding. Default 4096.</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -2687,12 +2719,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Pass 2 Max Turns (Per-Domain)</td>
                         <td class="config-value">{{ config.claude_cli.dependency_map_pass2_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 50 = agentic)</small></td>
+                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 0 = unlimited)</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Delta Max Turns</td>
                         <td class="config-value">{{ config.claude_cli.dependency_map_delta_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 30)</small></td>
+                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 0 = unlimited)</small></td>
                     </tr>
                     <!-- Refinement Settings (Story #359) -->
                     <tr><td colspan="3" style="padding-top: 1em;"><strong>Document Refinement</strong></td></tr>
@@ -2792,13 +2824,13 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="depmap-pass2-turns">
                     Pass 2 Max Turns (Per-Domain)
-                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="5">
-                    <small>Max turns for per-domain source analysis (min: 5, default: 50)</small>
+                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="0">
+                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
                 </label>
                 <label for="depmap-delta-turns">
                     Delta Max Turns
-                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="5">
-                    <small>Max turns for incremental delta analysis (min: 5, default: 30)</small>
+                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="0">
+                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
                 </label>
                 <!-- Refinement Settings (Story #359) -->
                 <label for="refinement-enabled">

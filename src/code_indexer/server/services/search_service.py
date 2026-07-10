@@ -21,6 +21,10 @@ from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.search_embed_event_emit import (
+    emit_embed_error_event,
+    emit_embed_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -503,12 +507,21 @@ class SemanticSearchService:
                     coalesced_query_embedding,
                 )
 
-                query_embedding, _embed_meta = coalesced_query_embedding(
-                    embedding_service,
-                    query,
-                    embedding_purpose="query",
-                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                )
+                # Story #1293 S1b [A6]: a failed LIVE embedding attempt (e.g.
+                # the failover primary provider) is recorded as a durable
+                # outcome=error event BEFORE the exception propagates (the
+                # caller, e.g. execute_failover_query, then falls over to a
+                # secondary provider whose own success emits its own event).
+                try:
+                    query_embedding, _embed_meta = coalesced_query_embedding(
+                        embedding_service,
+                        query,
+                        embedding_purpose="query",
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    )
+                except Exception:
+                    emit_embed_error_event(embedding_service.get_provider_name())
+                    raise
                 # Story #1159 Root Cause 4: write embedding-cache metadata to the
                 # active SearchEventContext so voyage cache fields are recorded.
                 from code_indexer.server.services.search_event_context import (
@@ -525,6 +538,11 @@ class SemanticSearchService:
                         _event_ctx.voyage_cache_hit = _embed_meta.key_found
                         _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
                         _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+                # Story #1293: emit the durable search_embed_event row for this
+                # inline (non-FSV) direct call. No-op when meta isn't yet
+                # classified (Path A coalescer path — Story #1293 S1b) or when
+                # no writer is installed (CLI/solo/pre-lifespan).
+                emit_embed_event(_embed_meta)
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,
@@ -616,7 +634,10 @@ class SemanticSearchService:
         Raises:
             FileNotFoundError: If repository not found in global repositories
         """
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
         from .. import app as app_module
 
         # Get golden_repos_dir from app.state
@@ -640,9 +661,12 @@ class SemanticSearchService:
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
-        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        # Use AliasManager to get current target path (registry path becomes stale after refresh),
+        # falling back to the registry's index_path when the alias pointer is missing (Bug #1315).
         alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repo_id)
+        target_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_id, repo_entry=repo_entry
+        )
 
         if not target_path:
             raise FileNotFoundError(

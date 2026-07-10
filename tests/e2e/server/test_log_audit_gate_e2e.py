@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from tests.e2e.log_audit_gate import (
     filter_new_entries,
+    flush_log_pipeline,
     get_log_watermark,
     query_logs_via_mcp,
     run_log_audit_gate,
@@ -51,25 +52,35 @@ _MUTATION_MARKER = "[LOG_AUDIT_GATE_MUTATION_TEST_1122]"
 
 
 def _flush_sqlite_handler(client: TestClient) -> None:
-    """Flush the in-process SQLiteLogHandler via app.state.
+    """Drain the full in-process logging pipeline via app.state (Phase 3 barrier).
 
-    This is the Phase 3 deterministic-drain barrier (Bug #1078 mitigation).
-    Raises pytest.fail() if the handler is present but flush fails, so the
-    gate never silently under-reports.
+    There are TWO queues between a ``logger.warning()``/``.error()`` call and a
+    row landing in ``logs.db``: (1) the ``async_logging.py`` QueueHandler /
+    DrainableQueueListener (``app.state.log_queue_listener``) that every
+    ``logger.x()`` call enqueues onto and returns from immediately, and (2)
+    ``SQLiteLogHandler``'s own internal write queue (Bug #1078). Flushing only
+    the SQLiteLogHandler (queue #2) while a record is still sitting in queue #1
+    is a false "flushed" signal -- the handler hasn't even seen the record yet.
+    ``flush_log_pipeline()`` (tests/e2e/log_audit_gate.py) closes this race by
+    draining the listener first (which internally also drains every handler it
+    owns, including SQLiteLogHandler), falling back to the handler directly
+    only when the listener isn't installed. See that function's docstring for
+    the full mechanics.
+
+    Raises pytest.fail() if the drain is unavailable or fails, so the gate
+    never silently under-reports.
     """
-    app = client.app  # type: ignore[attr-defined]
-    handler = getattr(getattr(app, "state", None), "sqlite_log_handler", None)
-    if handler is None:
+    try:
+        flush_log_pipeline(client)
+    except AssertionError as exc:
         pytest.fail(
-            "_flush_sqlite_handler: app.state.sqlite_log_handler is None. "
+            f"_flush_sqlite_handler: flush_log_pipeline() precondition failed: {exc}. "
             "The in-process server must be started via the module-level app singleton "
             "before flushing (use log_audit_app_client, not test_client)."
         )
-    try:
-        handler.flush()
     except Exception as exc:
         pytest.fail(
-            f"_flush_sqlite_handler: flush() raised {type(exc).__name__}: {exc}. "
+            f"_flush_sqlite_handler: flush_log_pipeline() raised {type(exc).__name__}: {exc}. "
             "Aborting audit to prevent under-reporting."
         )
 

@@ -56,7 +56,26 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
     "voyage-2": 1024,
     "voyage-code-2": 1536,
     "voyage-law-2": 1024,
+    "voyage-context-4": 1024,
 }
+
+# Story #1290 (AC14): models that MUST embed queries via the contextualized
+# endpoint (POST /v1/contextualizedembeddings, input_type="query") instead of
+# the ordinary /v1/embeddings endpoint. get_embedding() branches on this set
+# so any provider instance pinned to one of these models (e.g. the temporal
+# per-commit voyage-context-4 recall path) transparently reuses the existing
+# governor/cache/lane plumbing (get_provider_name/get_current_model are
+# unaffected — only the outbound HTTP call changes).
+_CONTEXTUAL_QUERY_MODELS = frozenset({"voyage-context-4"})
+
+# Story #1290: contextualized embeddings endpoint used by the per-commit
+# contextual temporal embedder (voyage-context-4). Distinct from
+# VoyageAIConfig.api_endpoint (the ordinary /v1/embeddings endpoint used by
+# regular semantic indexing) — this is a fixed provider URL, not configurable
+# per repo, matching the story's "POST /v1/contextualizedembeddings" anchor.
+CONTEXTUALIZED_EMBEDDINGS_ENDPOINT = (
+    "https://api.voyageai.com/v1/contextualizedembeddings"
+)
 
 
 # Story #1082: the Voyage model-spec YAML is a STATIC package asset (zero drift).
@@ -210,6 +229,23 @@ class VoyageAIClient(EmbeddingProvider):
         except (KeyError, TypeError):
             # Fallback for unknown models
             return 120000  # Conservative default
+
+    def _get_model_context_length(self) -> int:
+        """Get the per-TEXT context length for current model (Story #1290 AC23).
+
+        Distinct from ``_get_model_token_limit()`` (a per-BATCH/request token
+        budget, e.g. 120000): ``context_length`` is the maximum tokens a
+        SINGLE input text may contain -- the correct basis for a per-chunk
+        token cap. Read from voyage_models.yaml; unknown models fall back to
+        the conservative 32000 shared by every model currently in the spec.
+        """
+        try:
+            limit = self.model_specs["voyage_models"][self.config.model][
+                "context_length"
+            ]
+            return int(limit)
+        except (KeyError, TypeError):
+            return 32000  # Conservative default
 
     def _health_probe(self) -> bool:
         """Lightweight connectivity probe for recovery detection (Story #619 HIGH-2).
@@ -426,6 +462,243 @@ class VoyageAIClient(EmbeddingProvider):
         else:
             raise ConnectionError(f"Failed to connect to VoyageAI: {last_exception}")
 
+    def _make_sync_contextualized_request(
+        self,
+        documents: List[List[str]],
+        *,
+        input_type: str,
+        output_dimension: int = 1024,
+        model: Optional[str] = None,
+        retry: bool = True,
+    ) -> Dict[str, Any]:
+        """Make synchronous request to VoyageAI POST /v1/contextualizedembeddings.
+
+        Story #1290: mirrors _make_sync_request's retry/backoff/health-probe
+        structure, targeting the contextualized-embeddings endpoint instead of
+        the ordinary embeddings endpoint. The client MUST NOT re-chunk: each
+        inner list in `documents` is sent as-is (already fixed-size-chunked by
+        the caller with 0% overlap).
+
+        Args:
+            documents: Ordered list of documents; each document is an ordered
+                list of chunk texts sharing context.
+            input_type: "document" (indexing) or "query" (recall).
+            output_dimension: Requested embedding dimensionality.
+            model: Override model name; defaults to self.config.model.
+            retry: See _make_sync_request.
+        """
+        from .provider_health_monitor import ProviderHealthMonitor
+
+        model_name = model or self.config.model
+        payload = {
+            "inputs": documents,
+            "model": model_name,
+            "input_type": input_type,
+            "output_dimension": output_dimension,
+        }
+
+        def _single_attempt() -> Dict[str, Any]:
+            _start = time.time()
+            _timeout = httpx.Timeout(
+                connect=self.config.connect_timeout,
+                read=self.config.timeout,
+                write=self.config.timeout,
+                pool=self.config.timeout,
+            )
+            _headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            _client_ctx = self._http_client_factory.create_sync_client(
+                timeout=_timeout,
+                pooled=True,
+            )
+            with _client_ctx as client:
+                response = client.post(
+                    CONTEXTUALIZED_EMBEDDINGS_ENDPOINT, json=payload, headers=_headers
+                )
+            response.raise_for_status()
+
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError(f"Unexpected response format: {type(result)}")
+
+            latency_ms = (time.time() - _start) * 1000
+            ProviderHealthMonitor.get_instance().record_call(
+                "voyage-ai", latency_ms, success=True
+            )
+            return result
+
+        if not retry:
+            _start_single = time.time()
+            try:
+                return _single_attempt()
+            except Exception:
+                latency_ms = (time.time() - _start_single) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "voyage-ai", latency_ms, success=False
+                )
+                raise
+
+        last_exception: Optional[Exception] = None
+        _start = time.time()
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                _start = time.time()
+                return _single_attempt()
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                if e.response.status_code == 429:
+                    retry_after = e.response.headers.get("retry-after")
+                    wait_time = (
+                        min(float(retry_after), 300.0)
+                        if retry_after
+                        else self.config.retry_delay
+                        * (2**attempt if self.config.exponential_backoff else 1)
+                    )
+                    if attempt < self.config.max_retries:
+                        time.sleep(wait_time)
+                        continue
+                    raise
+                elif e.response.status_code >= 500:
+                    wait_time = self.config.retry_delay * (
+                        2**attempt if self.config.exponential_backoff else 1
+                    )
+                    if attempt < self.config.max_retries:
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    break
+            except Exception as e:
+                last_exception = e
+                if attempt < self.config.max_retries:
+                    time.sleep(self.config.retry_delay)
+                    continue
+                else:
+                    break
+
+        latency_ms = (time.time() - _start) * 1000
+        ProviderHealthMonitor.get_instance().record_call(
+            "voyage-ai", latency_ms, success=False
+        )
+        if isinstance(last_exception, httpx.HTTPStatusError):
+            if last_exception.response.status_code == 401:
+                raise ValueError(
+                    "Invalid VoyageAI API key. Check VOYAGE_API_KEY environment variable."
+                )
+            elif last_exception.response.status_code == 429:
+                raise RuntimeError(
+                    "VoyageAI rate limit exceeded on contextualized embeddings. "
+                    "Try reducing parallel_requests or requests_per_minute."
+                )
+            else:
+                try:
+                    response_text = last_exception.response.text
+                except Exception:
+                    response_text = "Unable to read response"
+                raise RuntimeError(
+                    f"VoyageAI contextualized-embeddings API error "
+                    f"(HTTP {last_exception.response.status_code}): {last_exception}. "
+                    f"Response: {response_text}"
+                )
+        else:
+            raise ConnectionError(
+                f"Failed to connect to VoyageAI contextualized embeddings: {last_exception}"
+            )
+
+    def _validate_contextualized_embeddings(
+        self, embeddings: List[List[float]], expected_dimension: int
+    ) -> None:
+        """Validate contextualized-embedding vectors (dims + NaN/Inf), Story #1290."""
+        for i, emb in enumerate(embeddings):
+            if any(not math.isfinite(v) for v in emb):
+                raise RuntimeError(
+                    f"Contextualized embedding[{i}] contains NaN or Inf values"
+                )
+            if len(emb) != expected_dimension:
+                raise RuntimeError(
+                    f"Contextualized embedding[{i}]: got {len(emb)} dims, "
+                    f"expected {expected_dimension}"
+                )
+
+    def get_contextualized_embeddings(
+        self,
+        documents: List[List[str]],
+        input_type: str,
+        output_dimension: int = 1024,
+        model: Optional[str] = None,
+        *,
+        retry: bool = True,
+    ) -> List[List[List[float]]]:
+        """Embed documents' ordered chunk lists via the contextualized endpoint.
+
+        Story #1290: used by ContextualTemporalEmbedder (voyage-context-4) to
+        embed a per-commit aggregated document's already-chunked (0% overlap)
+        text. Each document's chunks share context within that document; the
+        client performs fixed-size chunking BEFORE this call — the provider
+        MUST NOT re-chunk.
+
+        Args:
+            documents: Ordered list of documents; each document is an ordered
+                list of chunk texts.
+            input_type: "document" (indexing) or "query" (recall).
+            output_dimension: Requested embedding dimensionality (1024 for
+                voyage-context-4 per Story #1290).
+            model: Override model name; defaults to self.config.model.
+            retry: See _make_sync_request.
+
+        Returns:
+            Per-document list of per-chunk embedding vectors, in the same
+            order as `documents`.
+
+        Raises:
+            RuntimeError: If the response's document or per-document chunk
+                count does not match the request (fail-loud, AC21 — no
+                partial/silent index on a contextualized-response mismatch).
+        """
+        if not documents:
+            return []
+
+        result = self._make_sync_contextualized_request(
+            documents,
+            input_type=input_type,
+            output_dimension=output_dimension,
+            model=model,
+            retry=retry,
+        )
+
+        groups = result.get("data", [])
+        if len(groups) != len(documents):
+            raise RuntimeError(
+                f"VoyageAI contextualized embeddings document count mismatch: "
+                f"sent {len(documents)} documents, got {len(groups)} in response."
+            )
+
+        # The API's `index` field is authoritative for group ordering.
+        groups_by_index = {g["index"]: g for g in groups}
+
+        ordered_results: List[List[List[float]]] = []
+        for doc_idx, doc_chunks in enumerate(documents):
+            group = groups_by_index.get(doc_idx)
+            if group is None:
+                raise RuntimeError(
+                    "VoyageAI contextualized embeddings response missing "
+                    f"document index {doc_idx}."
+                )
+            inner = group.get("data", [])
+            if len(inner) != len(doc_chunks):
+                raise RuntimeError(
+                    "VoyageAI contextualized embeddings chunk count mismatch "
+                    f"for document index {doc_idx}: sent {len(doc_chunks)} "
+                    f"chunks, got {len(inner)} in response."
+                )
+            inner_sorted = sorted(inner, key=lambda item: item["index"])
+            embeddings = [list(item["embedding"]) for item in inner_sorted]
+            self._validate_contextualized_embeddings(embeddings, output_dimension)
+            ordered_results.append(embeddings)
+
+        return ordered_results
+
     def get_embedding(
         self,
         text: str,
@@ -437,7 +710,25 @@ class VoyageAIClient(EmbeddingProvider):
         Uses retry=False so that exactly one HTTP attempt is made per
         governor slot acquisition. The execute_with_backoff wrapper in the
         caller handles 429 retries OUTSIDE the governor slot.
+
+        Story #1290 (AC14): when the effective model is a contextual model
+        (voyage-context-4), the query is embedded via the contextualized
+        endpoint with input_type="query" instead of the standard
+        /v1/embeddings endpoint -- required for correct recall against
+        per-commit contextual temporal shards.
         """
+        model_to_use = model or self.config.model
+        if model_to_use in _CONTEXTUAL_QUERY_MODELS:
+            output_dimension = _VOYAGE_MODEL_DIMENSIONS.get(model_to_use, 1024)
+            result = self.get_contextualized_embeddings(
+                [[text]],
+                input_type="query",
+                output_dimension=output_dimension,
+                model=model_to_use,
+                retry=False,
+            )
+            return result[0][0]
+
         # Use get_embeddings_batch internally with single-item array and retry=False
         # so no time.sleep() runs while the governor slot is held (Bug #1078 C2).
         batch_result = self.get_embeddings_batch([text], model, retry=False)
@@ -467,6 +758,32 @@ class VoyageAIClient(EmbeddingProvider):
         """
         if not texts:
             return []
+
+        # Bug (Story #1292, found via real server front-door e2e testing):
+        # the server-side EmbeddingCoalescer calls get_embeddings_batch()
+        # directly for EVERY query (never get_embedding()), so AC14's
+        # contextual-endpoint special-case -- previously present only in
+        # get_embedding() -- never fired for server-mode temporal queries
+        # against voyage-context-4, producing a real HTTP 400 from the plain
+        # /v1/embeddings endpoint (which rejects voyage-context-4). Mirror
+        # the same special-case here for query-purpose batches.
+        model_to_use_for_contextual_check = model or self.config.model
+        if (
+            embedding_purpose == "query"
+            and model_to_use_for_contextual_check in _CONTEXTUAL_QUERY_MODELS
+        ):
+            output_dimension = _VOYAGE_MODEL_DIMENSIONS.get(
+                model_to_use_for_contextual_check, 1024
+            )
+            documents = [[text] for text in texts]
+            contextualized_results = self.get_contextualized_embeddings(
+                documents,
+                input_type="query",
+                output_dimension=output_dimension,
+                model=model_to_use_for_contextual_check,
+                retry=retry,
+            )
+            return [doc_embeddings[0] for doc_embeddings in contextualized_results]
 
         # Get model-specific token limit with 90% safety margin
         model_token_limit = self._get_model_token_limit()

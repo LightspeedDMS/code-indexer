@@ -19,6 +19,7 @@ from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, ca
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
@@ -41,6 +42,7 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     wait_for_nfs_visibility,
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -208,16 +210,16 @@ class RefreshScheduler:
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
 
-        # Use injected registry if provided (testing), otherwise create SQLite backend (production)
-        if registry is not None:
-            self.registry = registry
-        else:
-            # Lazy import to avoid circular dependency (Story #713)
-            from code_indexer.server.utils.registry_factory import (
-                get_server_global_registry,
-            )
-
-            self.registry = get_server_global_registry(str(self.golden_repos_dir))
+        # Registry resolution (Bug #1308): an explicitly injected registry
+        # (testing) is cached immediately. Otherwise resolution is DEFERRED
+        # to the `registry` property below instead of eagerly binding a
+        # per-node SQLite GlobalRegistry here. Eager construction-time
+        # binding split-brained cluster refresh against the shared
+        # PostgreSQL registry that the read/list path already used, because
+        # app.state.backend_registry is not guaranteed to be populated yet
+        # at construction time during server startup.
+        self._registry = registry
+        self._registry_lock = threading.Lock()
 
         # Thread management
         self._running = False
@@ -249,6 +251,91 @@ class RefreshScheduler:
         # since transient counters are ephemeral by nature.
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
+
+    def _get_registry_lock(self) -> threading.Lock:
+        """
+        Return the registry resolution lock, creating it lazily if absent.
+
+        Some tests construct RefreshScheduler via `object.__new__(RefreshScheduler)`
+        / `RefreshScheduler.__new__(...)` to build a lightweight instance without
+        running __init__ (deliberate pattern used across
+        tests/unit/golden_repos/), so `_registry_lock` may not exist as an
+        instance attribute yet. Falling back to getattr()+lazy-create here
+        (instead of assuming __init__ always ran) preserves that pattern while
+        keeping Bug #1308's deferred resolution.
+        """
+        lock = getattr(self, "_registry_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._registry_lock = lock
+        return lock
+
+    @property
+    def registry(self) -> Any:
+        """
+        Lazily resolve the GlobalRegistry / PostgresGlobalRegistryAdapter.
+
+        Bug #1308: mirrors GlobalRepoOperations.registry (shared_operations.py)
+        -- an explicitly injected registry (test double) is returned as-is;
+        otherwise resolution is deferred to first access (not __init__) so
+        app.state.backend_registry is guaranteed to be populated in
+        postgres/cluster mode. Falls back to the per-node SQLite
+        GlobalRegistry in solo/CLI mode (no app.state), preserving existing
+        behavior byte-for-byte. Result is cached after first successful
+        resolution; in postgres mode with backend not yet available, the
+        result is NOT cached so the next access re-checks.
+
+        Uses getattr(self, "_registry", None) rather than assuming __init__
+        ran, so instances built via object.__new__(RefreshScheduler) (a
+        deliberate lightweight-construction pattern used by several existing
+        tests) don't raise AttributeError before _registry is ever set.
+        Likewise, `golden_repos_dir` is read via getattr() rather than direct
+        attribute access: in postgres/cluster mode the resolved backend makes
+        golden_repos_dir irrelevant, so a bare uninitialized instance must
+        still resolve cleanly in that mode. Only when no backend is available
+        AND golden_repos_dir was never set do we raise -- with a clear,
+        explicit RuntimeError instead of the incidental AttributeError that
+        used to leak out of self.golden_repos_dir.
+        """
+        existing = getattr(self, "_registry", None)
+        if existing is not None:
+            return existing
+
+        with self._get_registry_lock():
+            existing = getattr(self, "_registry", None)
+            if existing is not None:
+                return existing
+
+            # Lazy import to avoid circular dependency (Story #713)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_global_registry,
+                resolve_backend_registry_state,
+            )
+
+            backend, postgres_mode_without_backend = resolve_backend_registry_state(
+                caller_name="RefreshScheduler"
+            )
+            golden_repos_dir = getattr(self, "golden_repos_dir", None)
+            if backend is None and golden_repos_dir is None:
+                raise RuntimeError(
+                    "RefreshScheduler.registry accessed before initialization: "
+                    "no golden_repos_dir and no cluster backend available"
+                )
+            resolved = get_server_global_registry(
+                str(golden_repos_dir) if golden_repos_dir is not None else "",
+                backend=backend,
+            )
+
+            if not postgres_mode_without_backend:
+                self._registry = resolved
+
+            return resolved
+
+    @registry.setter
+    def registry(self, value: Any) -> None:
+        """Allow explicit (re-)injection, e.g. by tests that set `.registry` post-construction."""
+        with self._get_registry_lock():
+            self._registry = value
 
     def _is_versioned_snapshot(self, path: str) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
@@ -398,6 +485,35 @@ class RefreshScheduler:
     CLONE_TIMEOUT_SECONDS: int = 300  # 5 minutes
 
     # ------------------------------------------------------------------
+    # Bug #1341: Exponential backoff for sustained fetch failures.
+    #
+    # A repo is NEVER removed from scheduling and NEVER reaches a
+    # terminal/quarantine state -- every failure just pushes the next
+    # attempt further into the future (via registry.update_next_refresh),
+    # capped so it is always retried eventually, just less often while
+    # broken. This directly fixes the #1341 complaint of retrying (and
+    # re-escalating to re-clone) every single cycle forever.
+    #
+    # TRANSIENT/CORRUPTION errors keep today's immediate-retry cadence
+    # (and re-clone escalation) for the first MAX_TRANSIENT_FAILURES
+    # failures -- these are expected to recover on their own. Only once
+    # sustained past that threshold does backoff engage, capped at the
+    # same interval as RECLONE_COOLDOWN_SECONDS so fetch retries and
+    # re-clone attempts settle at the same cadence.
+    TRANSIENT_BACKOFF_BASE_SECONDS: int = 60  # 1 minute
+    TRANSIENT_BACKOFF_CAP_SECONDS: int = 3600  # 1 hour
+
+    # PERMANENT errors (access revoked / repo deleted -- GitLab/GitHub
+    # "not found or no permission") are NOT expected to recover quickly, so
+    # backoff engages from the very first failure and caps much longer.
+    # Re-clone is never attempted for a permanent error (see
+    # _handle_fetch_error): re-cloning an inaccessible/nonexistent repo
+    # cannot possibly succeed and would only waste a subprocess + network
+    # round trip.
+    PERMANENT_BACKOFF_BASE_SECONDS: int = 300  # 5 minutes
+    PERMANENT_BACKOFF_CAP_SECONDS: int = 21600  # 6 hours
+
+    # ------------------------------------------------------------------
     # Story #284: Back-propagating jitter for staggered refresh scheduling
     # ------------------------------------------------------------------
 
@@ -508,6 +624,165 @@ class RefreshScheduler:
         """Reset the consecutive fetch failure counter for an alias."""
         self._fetch_failure_counts[alias_name] = 0
 
+    @staticmethod
+    def _is_backoff_log_milestone(count: int) -> bool:
+        """
+        Return True when count is a power-of-two milestone (1, 2, 4, 8, 16, ...).
+
+        Bug #1341 log-throttle: sustained fetch failures are ERROR-logged
+        only at these milestones instead of on every single cycle, so a
+        persistently broken upstream cannot flood the log (bounded to
+        O(log N) ERROR lines over N consecutive failures) while the
+        failure still surfaces periodically.
+        """
+        return count > 0 and (count & (count - 1)) == 0
+
+    def _compute_backoff_seconds(
+        self, category: str, consecutive_failures: int
+    ) -> Optional[int]:
+        """
+        Compute the backoff delay (seconds) before the next scheduled attempt
+        for a sustained fetch failure (Bug #1341), or None when the normal
+        refresh-interval cadence applies unchanged (immediate retry).
+
+        PERMANENT errors back off from the first failure (base
+        PERMANENT_BACKOFF_BASE_SECONDS, doubling per failure, capped at
+        PERMANENT_BACKOFF_CAP_SECONDS). TRANSIENT errors keep immediate
+        retry for the first MAX_TRANSIENT_FAILURES-1 failures, then back
+        off too (base TRANSIENT_BACKOFF_BASE_SECONDS, doubling, capped at
+        TRANSIENT_BACKOFF_CAP_SECONDS). CORRUPTION/unknown are unaffected
+        (returns None) -- out of scope for #1341.
+        """
+        if category == "permanent":
+            exponent = max(0, consecutive_failures - 1)
+            # int ** int is typed Any in typeshed (negative exponents yield
+            # float) -- exponent is always >= 0 here, so int(...) is safe
+            # and satisfies the declared Optional[int] return type.
+            return int(
+                min(
+                    self.PERMANENT_BACKOFF_BASE_SECONDS * (2**exponent),
+                    self.PERMANENT_BACKOFF_CAP_SECONDS,
+                )
+            )
+
+        if (
+            category == "transient"
+            and consecutive_failures >= self.MAX_TRANSIENT_FAILURES
+        ):
+            exponent = consecutive_failures - self.MAX_TRANSIENT_FAILURES
+            return int(
+                min(
+                    self.TRANSIENT_BACKOFF_BASE_SECONDS * (2**exponent),
+                    self.TRANSIENT_BACKOFF_CAP_SECONDS,
+                )
+            )
+
+        return None
+
+    def _log_permanent_fetch_failure(
+        self, alias_name: str, count: int, error: "GitFetchError"
+    ) -> None:
+        """Log a PERMANENT-classified fetch failure, milestone-throttled (Bug #1341)."""
+        if self._is_backoff_log_milestone(count):
+            logger.error(
+                "Repo %s fetch failing with a PERMANENT error (consecutive=%d): "
+                "%s -- will keep retrying at a growing backoff (capped at "
+                "%ds) but will not recover without operator action: verify "
+                "the upstream repository still exists and that credentials/"
+                "access rights are valid.",
+                alias_name,
+                count,
+                error.stderr.strip(),
+                self.PERMANENT_BACKOFF_CAP_SECONDS,
+            )
+        else:
+            logger.debug(
+                "Repo %s still failing with a PERMANENT fetch error "
+                "(consecutive=%d, ERROR log throttled until next milestone)",
+                alias_name,
+                count,
+            )
+
+    def _decide_non_permanent_reclone(
+        self, alias_name: str, error: "GitFetchError", count: int, in_cooldown: bool
+    ) -> bool:
+        """
+        Decide whether a TRANSIENT/CORRUPTION fetch error should trigger a
+        re-clone attempt, logging appropriately (milestone-throttled ERROR
+        once escalated). Pre-existing decision logic, unchanged by #1341.
+        """
+        if in_cooldown:
+            logger.warning(
+                f"Fetch failed for {alias_name} (category={error.category}, "
+                f"consecutive={count}), but re-clone cooldown is active — skipping"
+            )
+            return False
+
+        if error.category == "corruption":
+            logger.error(
+                f"Repo {alias_name} has corrupted git objects, initiating auto re-clone"
+            )
+            return True
+
+        if count >= self.MAX_TRANSIENT_FAILURES:
+            relative = count - self.MAX_TRANSIENT_FAILURES + 1
+            if self._is_backoff_log_milestone(relative):
+                logger.error(
+                    f"Repo {alias_name} has {count} consecutive transient fetch failures, "
+                    "escalating to auto re-clone"
+                )
+            else:
+                logger.debug(
+                    f"Repo {alias_name} still has {count} consecutive transient "
+                    "fetch failures (ERROR log throttled until next milestone)"
+                )
+            return True
+
+        logger.warning(
+            f"Transient fetch failure #{count} for {alias_name} "
+            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+        )
+        return False
+
+    def _handle_non_permanent_fetch_error(
+        self,
+        alias_name: str,
+        repo_url: str,
+        master_path: str,
+        error: "GitFetchError",
+        count: int,
+    ) -> None:
+        """
+        Handle TRANSIENT/CORRUPTION fetch errors -- pre-existing behavior,
+        unchanged by Bug #1341 (expected to recover via retry/re-clone).
+        """
+        now = time.monotonic()
+        cooldown_until = self._reclone_cooldowns.get(alias_name, 0.0)
+        in_cooldown = now < cooldown_until
+
+        should_reclone = self._decide_non_permanent_reclone(
+            alias_name, error, count, in_cooldown
+        )
+        if should_reclone:
+            # Set cooldown before attempting — prevents retry storms even if
+            # the attempt raises an exception.
+            self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
+            self._attempt_reclone(alias_name, repo_url, master_path)
+
+    def _apply_fetch_backoff(self, alias_name: str, category: str, count: int) -> None:
+        """Push next_refresh out by the computed backoff, if any (Bug #1341)."""
+        backoff_seconds = self._compute_backoff_seconds(category, count)
+        if backoff_seconds is None:
+            return
+        try:
+            self.registry.update_next_refresh(alias_name, time.time() + backoff_seconds)
+        except Exception as exc:
+            logger.warning(
+                "Bug #1341: failed to persist backoff next_refresh for %s: %s",
+                alias_name,
+                exc,
+            )
+
     def _handle_fetch_error(
         self,
         alias_name: str,
@@ -518,10 +793,18 @@ class RefreshScheduler:
         """
         Handle a GitFetchError from has_changes().
 
-        Increments the consecutive failure counter for the alias, then decides
-        whether to trigger re-clone based on error category and counter value,
-        respecting the cooldown guard rail.  Always raises RuntimeError so
-        _execute_refresh propagates the failure.
+        Bug #1341: a repo is NEVER removed from scheduling and NEVER reaches
+        a terminal/quarantine state, no matter how the error classifies.
+        PERMANENT-classified errors never trigger re-clone (see
+        _log_permanent_fetch_failure) but the fetch itself IS still retried,
+        just at a growing backoff (_compute_backoff_seconds /
+        _apply_fetch_backoff) pushed onto the alias's next_refresh, so it is
+        always retried eventually. TRANSIENT/CORRUPTION errors keep the
+        pre-existing immediate-retry + re-clone-escalation behavior
+        completely unchanged (_handle_non_permanent_fetch_error); backoff
+        also engages for transient only once sustained past the escalation
+        threshold. ERROR-level logging is milestone-throttled, fixing the
+        original #1341 log-flood complaint.
 
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
@@ -535,38 +818,14 @@ class RefreshScheduler:
         count = self._fetch_failure_counts.get(alias_name, 0) + 1
         self._fetch_failure_counts[alias_name] = count
 
-        now = time.monotonic()
-        cooldown_until = self._reclone_cooldowns.get(alias_name, 0.0)
-        in_cooldown = now < cooldown_until
-
-        should_reclone = False
-        if in_cooldown:
-            logger.warning(
-                f"Fetch failed for {alias_name} (category={error.category}, "
-                f"consecutive={count}), but re-clone cooldown is active — skipping"
-            )
-        elif error.category == "corruption":
-            logger.error(
-                f"Repo {alias_name} has corrupted git objects, initiating auto re-clone"
-            )
-            should_reclone = True
-        elif count >= self.MAX_TRANSIENT_FAILURES:
-            logger.error(
-                f"Repo {alias_name} has {count} consecutive transient fetch failures, "
-                "escalating to auto re-clone"
-            )
-            should_reclone = True
+        if error.category == "permanent":
+            self._log_permanent_fetch_failure(alias_name, count, error)
         else:
-            logger.warning(
-                f"Transient fetch failure #{count} for {alias_name} "
-                f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+            self._handle_non_permanent_fetch_error(
+                alias_name, repo_url, master_path, error, count
             )
 
-        if should_reclone:
-            # Set cooldown before attempting — prevents retry storms even if
-            # the attempt raises an exception.
-            self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
-            self._attempt_reclone(alias_name, repo_url, master_path)
+        self._apply_fetch_backoff(alias_name, error.category, count)
 
         raise RuntimeError(
             f"Fetch failed for {alias_name} (category={error.category}): {error.stderr}"
@@ -1605,7 +1864,38 @@ class RefreshScheduler:
                                 # Story #236 Fix 2: Always git pull into the master golden repo, never into
                                 # a versioned snapshot. current_target may be a .versioned/ path after first
                                 # refresh, but git pull must always operate on the canonical master.
-                                updater = GitPullUpdater(master_path)
+                                #
+                                # Bug #1336 (hardened by #1338): an orphaned
+                                # golden alias (registry row present, on-disk
+                                # clone directory absent at master_path) makes
+                                # GitPullUpdater's constructor raise the typed
+                                # OrphanedRepoError. Before #1336, that
+                                # exception propagated out of _execute_refresh()
+                                # as a RuntimeError (Bug #84 re-raise), failing
+                                # the whole global_repo_refresh job. Skip
+                                # gracefully instead -- orphan CLEANUP (removing
+                                # the stale registry row) is delegated to the
+                                # #1317 reconciler; this refresh path only
+                                # no-ops here. #1338: caught by TYPE, never by
+                                # message-substring matching.
+                                try:
+                                    updater = GitPullUpdater(master_path)
+                                except OrphanedRepoError as orphan_exc:
+                                    logger.warning(
+                                        "Golden repo %s is orphaned (registry row "
+                                        "present, clone missing at %s): %s; "
+                                        "skipping refresh",
+                                        alias_name,
+                                        master_path,
+                                        orphan_exc,
+                                    )
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": (
+                                            "Orphaned golden repo (clone missing), skipped"
+                                        ),
+                                    }
 
                             # Bug #469 Fix 1: Verify base clone is on expected default_branch before
                             # pulling.  If the clone was switched to a wrong branch by any previous
@@ -2022,21 +2312,44 @@ class RefreshScheduler:
         _popen_stdout: list = []
         _popen_stderr: list = []
 
-        def _run_popen_c(command: list, phase_name: str, error_label: str) -> None:
-            """Run command with Popen progress, re-raising as RuntimeError on failure."""
+        def _run_popen_c(
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
+        ) -> None:
+            """Run command with Popen progress, re-raising as RuntimeError on failure.
+
+            Bug #1313 round-3: env is forwarded to run_with_popen_progress so
+            the temporal (--index-commits) child subprocess can be handed
+            CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
+            temporal call site below. Bug #1325: the semantic/FTS call site
+            now always passes an explicit sanitized env (never relies on this
+            default), so this None default only matters for a hypothetical
+            future caller.
+            """
             _popen_stdout.clear()
             _popen_stderr.clear()
+            # Bug #1313 round-3 regression guard: only pass the env= kwarg
+            # when it is not None, so callers that intentionally pass None
+            # (e.g. temporal in sqlite mode, to stay byte-unchanged) do not
+            # have that None overwritten here -- several pre-existing tests
+            # mock run_with_popen_progress with a strict (non-**kwargs)
+            # signature that does not accept an env kwarg at all.
+            _popen_kwargs: dict = dict(
+                command=command,
+                phase_name=phase_name,
+                allocator=allocator,
+                progress_callback=progress_callback,
+                all_stdout=_popen_stdout,
+                all_stderr=_popen_stderr,
+                cwd=str(source_path),
+                error_label=error_label,
+            )
+            if env is not None:
+                _popen_kwargs["env"] = env
             try:
-                run_with_popen_progress(
-                    command=command,
-                    phase_name=phase_name,
-                    allocator=allocator,
-                    progress_callback=progress_callback,
-                    all_stdout=_popen_stdout,
-                    all_stderr=_popen_stderr,
-                    cwd=str(source_path),
-                    error_label=error_label,
-                )
+                run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
                 error_msg = str(e)
                 # SIGTERM check — returncode -15 is in the error message from popen
@@ -2059,7 +2372,10 @@ class RefreshScheduler:
         # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
         # at DEBUG and never interrupt indexing.
         def _run_popen_c_with_telemetry(
-            command: list, phase_name: str, error_label: str
+            command: list,
+            phase_name: str,
+            error_label: str,
+            env: Optional[dict] = None,
         ) -> None:
             try:
                 from code_indexer.server.services.config_seeding import (
@@ -2072,7 +2388,9 @@ class RefreshScheduler:
                     "Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc
                 )
             try:
-                _run_popen_c(command, phase_name=phase_name, error_label=error_label)
+                _run_popen_c(
+                    command, phase_name=phase_name, error_label=error_label, env=env
+                )
             finally:
                 try:
                     from code_indexer.services.provider_health_bridge import (
@@ -2087,6 +2405,11 @@ class RefreshScheduler:
                     )
 
         # Execute Step 1: cidx index --fts (semantic + FTS, Popen for real progress)
+        # Bug #1325 (code-review follow-up): pass a sanitized env with an
+        # absolutized PYTHONPATH -- otherwise a relative PYTHONPATH inherited
+        # from the server process re-anchors into source_path once the
+        # child's cwd changes, letting a src/-layout package in source_path
+        # shadow an installed cidx dependency.
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
@@ -2094,11 +2417,36 @@ class RefreshScheduler:
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
+            env=build_cidx_subprocess_env(),
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
         # Execute Step 2: temporal indexing (if enabled)
         if temporal_command is not None:
+            # Bug #1313 round-3: in postgres/cluster mode, hand the child
+            # subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR so it installs the
+            # PostgreSQL temporal-metadata backend instead of silently
+            # falling back to SQLite-on-NFS. sqlite/solo mode (or a failed
+            # bootstrap read) yields env=None -- byte-unchanged existing
+            # behavior. ONLY this temporal call site is postgres-aware; the
+            # semantic call above is untouched.
+            #
+            # Bug #1325: when postgres mode DOES produce a temporal env dict,
+            # run it through build_cidx_subprocess_env() too so its PYTHONPATH
+            # (inherited from the server process) is absolutized, while
+            # PRESERVING CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (Bug #1313). sqlite
+            # mode keeps env=None, byte-unchanged.
+            from code_indexer.server.storage.postgres.temporal_child_wiring import (
+                build_temporal_child_env,
+            )
+
+            _temporal_env = build_temporal_child_env(get_config_service().get_config())
+            _temporal_env = (
+                build_cidx_subprocess_env(_temporal_env)
+                if _temporal_env is not None
+                else None
+            )
+
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
@@ -2106,6 +2454,7 @@ class RefreshScheduler:
                 temporal_command,
                 phase_name="temporal",
                 error_label=f"temporal indexing on source for {alias_name}",
+                env=_temporal_env,
             )
             logger.info("cidx index (temporal) on source completed successfully")
 
@@ -2129,6 +2478,7 @@ class RefreshScheduler:
                     capture_output=True,
                     text=True,
                     check=True,
+                    env=build_cidx_subprocess_env(),
                 )
                 logger.info("cidx scip generate on source completed successfully")
                 if progress_callback is not None:
@@ -2277,6 +2627,7 @@ class RefreshScheduler:
                     cwd=str(versioned_path),
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=cidx_fix_timeout,
                     check=True,
                 )
@@ -2410,6 +2761,7 @@ class RefreshScheduler:
                 check=True,
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=60,
             )
             return True
@@ -2689,6 +3041,7 @@ class RefreshScheduler:
                 cwd=str(master_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=60,
                 check=False,
             )

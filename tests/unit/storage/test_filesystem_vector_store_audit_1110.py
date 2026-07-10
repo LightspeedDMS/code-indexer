@@ -133,6 +133,31 @@ def _import_run_deep_fidelity_audit():
     return _run_deep_fidelity_audit
 
 
+_TEST_CORRELATION_ID = "test-correlation-id"
+_TEST_EMBED_KEY = "s:testdigest:test query"
+
+
+def _patch_audit_writer():
+    """Story #1295: mock the audit-persistence path.
+
+    Returns (writer_patch, correlation_patch, fake_writer) so callers can
+    ``with writer_patch, correlation_patch:`` around a ``_run(...)`` call and
+    then assert on ``fake_writer.backend.update_audit_by_key``. Replaces the
+    retiring ``get_query_embedding_cache_metrics``/``record_audit`` mock
+    pattern used before this story's audit re-source.
+    """
+    fake_writer = MagicMock()
+    writer_patch = patch(
+        "code_indexer.server.services.embedding_cache_audit.get_search_embed_event_writer",
+        return_value=fake_writer,
+    )
+    correlation_patch = patch(
+        "code_indexer.server.services.embedding_cache_audit.get_current_correlation_id",
+        return_value=_TEST_CORRELATION_ID,
+    )
+    return writer_patch, correlation_patch, fake_writer
+
+
 # ---------------------------------------------------------------------------
 # 1. Identical second vector -> overlap 1.0, top1_match True
 # ---------------------------------------------------------------------------
@@ -164,11 +189,8 @@ class TestRunDeepFidelityAuditIdentical:
             "live_vec": tiny_hnsw["vecs"][0],  # same as primary (served was live)
         }
 
-        mock_metrics = MagicMock()
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -178,14 +200,15 @@ class TestRunDeepFidelityAuditIdentical:
                 primary_candidate_ids=primary_ids,
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
 
-        mock_metrics.record_audit.assert_called_once()
-        call_kwargs = mock_metrics.record_audit.call_args[1]
-        assert call_kwargs["top10_overlap"] == pytest.approx(1.0)
-        assert call_kwargs["top1_match"] is True
-        assert call_kwargs["provider"] == "voyage-ai"
-        assert call_kwargs["mode"] == "shadow"
+        fake_writer.backend.update_audit_by_key.assert_called_once()
+        call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+        assert call_kwargs["audit_cosine"] == pytest.approx(1.0)
+        assert call_kwargs["audit_sampled"] is True
+        assert call_kwargs["correlation_id"] == _TEST_CORRELATION_ID
+        assert call_kwargs["embed_key"] == _TEST_EMBED_KEY
 
     def test_identical_second_vec_on_mode(self, tiny_hnsw):
         """On mode: primary used cached vec; second search re-embeds via governed_query_embedding.
@@ -210,17 +233,15 @@ class TestRunDeepFidelityAuditIdentical:
         }
 
         fake_provider = MagicMock()
-        mock_metrics = MagicMock()
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
         # governed_query_embedding returns same vector as primary -> identical second search
         with (
             patch(
                 "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
                 return_value=tiny_hnsw["vecs"][0],
             ) as mock_gov,
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-                return_value=mock_metrics,
-            ),
+            writer_patch,
+            correlation_patch,
         ):
             _run(
                 audit_ctx=audit_ctx,
@@ -231,12 +252,12 @@ class TestRunDeepFidelityAuditIdentical:
                 primary_candidate_ids=primary_ids,
                 embedding_provider=fake_provider,
                 query="test query",
+                embed_key=_TEST_EMBED_KEY,
             )
 
         mock_gov.assert_called_once()
-        call_kwargs = mock_metrics.record_audit.call_args[1]
-        assert call_kwargs["top10_overlap"] == pytest.approx(1.0)
-        assert call_kwargs["top1_match"] is True
+        call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+        assert call_kwargs["audit_cosine"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -248,16 +269,29 @@ class TestRunDeepFidelityAuditDifferent:
     """A deliberately different second vector -> overlap < 1.0."""
 
     def test_different_vector_lower_overlap(self, tiny_hnsw):
-        """Shadow mode: cached_blob encodes orthogonal vector -> top-1 differs."""
+        """A primary result SUBSET vs. an exhaustive second search over all 5
+        points -> deterministic overlap < 1.0.
+
+        This tiny fixture has only 5 total points, so a full-k second search
+        always returns all 5 ids regardless of query-vector similarity --
+        set-overlap alone cannot distinguish "similar" from "orthogonal"
+        vectors here (that distinction used to be captured by top1_match,
+        which Story #1295 removed since search_embed_event has no top1-match
+        column). Instead this test truncates the PRIMARY candidate list to a
+        strict subset so the max(len(primary), len(second)) divisor exceeds
+        the intersection size, proving the overlap formula itself (not vector
+        similarity) drives sub-1.0 results.
+        """
         _run = _import_run_deep_fidelity_audit()
         mgr = tiny_hnsw["manager"]
         idx = tiny_hnsw["index"]
         coll = tiny_hnsw["collection_path"]
-        # Primary uses vec[0] (aligned to axis 0)
+        # Primary uses vec[0] (aligned to axis 0); truncate to a 2-id subset.
         primary_vec = np.array(tiny_hnsw["vecs"][0], dtype=np.float32)
         primary_ids, _ = mgr.query(
             index=idx, query_vector=primary_vec, collection_path=coll, k=5, ef=50
         )
+        primary_subset = list(primary_ids[:2])
 
         # cached_blob encodes vec[4] (aligned to axis 4) -> opposite end of space
         audit_ctx: Dict[str, Any] = {
@@ -268,26 +302,25 @@ class TestRunDeepFidelityAuditDifferent:
             "live_vec": tiny_hnsw["vecs"][0],
         }
 
-        mock_metrics = MagicMock()
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
                 hnsw_manager=mgr,
                 collection_path=coll,
                 ef=50,
-                primary_candidate_ids=primary_ids,
+                primary_candidate_ids=primary_subset,
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
 
-        mock_metrics.record_audit.assert_called_once()
-        call_kwargs = mock_metrics.record_audit.call_args[1]
-        # With 5 vectors and orthogonal queries the overlap must be less than 1.0
-        assert call_kwargs["top10_overlap"] < 1.0 or not call_kwargs["top1_match"]
+        fake_writer.backend.update_audit_by_key.assert_called_once()
+        call_kwargs = fake_writer.backend.update_audit_by_key.call_args[1]
+        # second search is exhaustive over all 5 points; primary is a 2-id
+        # subset -> overlap == 2/max(2,5) == 0.4, deterministically < 1.0.
+        assert call_kwargs["audit_cosine"] == pytest.approx(0.4)
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +347,9 @@ class TestRunDeepFidelityAuditFailOpen:
         bad_manager = MagicMock()
         bad_manager.query.side_effect = RuntimeError("simulated HNSW failure")
 
-        mock_metrics = MagicMock()
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
         # Must not raise
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -329,9 +359,10 @@ class TestRunDeepFidelityAuditFailOpen:
                 primary_candidate_ids=["id_0", "id_1"],
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
-        # record_audit must NOT have been called (error swallowed before compute)
-        mock_metrics.record_audit.assert_not_called()
+        # update_audit_by_key must NOT have been called (error swallowed before compute)
+        fake_writer.backend.update_audit_by_key.assert_not_called()
 
     def test_governed_query_embedding_exception_swallowed(self, tiny_hnsw):
         """On-mode: governed_query_embedding raises -> entire audit swallowed."""
@@ -348,16 +379,14 @@ class TestRunDeepFidelityAuditFailOpen:
             "cached_blob": _enc(tiny_hnsw["vecs"][0]),
         }
 
-        mock_metrics = MagicMock()
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
         with (
             patch(
                 "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
                 side_effect=RuntimeError("provider down"),
             ),
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-                return_value=mock_metrics,
-            ),
+            writer_patch,
+            correlation_patch,
         ):
             # Must not raise
             _run(
@@ -369,8 +398,9 @@ class TestRunDeepFidelityAuditFailOpen:
                 primary_candidate_ids=primary_ids,
                 embedding_provider=MagicMock(),
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
-        mock_metrics.record_audit.assert_not_called()
+        fake_writer.backend.update_audit_by_key.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -390,11 +420,8 @@ class TestRunDeepFidelityAuditNoOp:
         # audit_ctx without "sampled"
         audit_ctx: Dict[str, Any] = {}
 
-        mock_metrics = MagicMock()
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -404,9 +431,10 @@ class TestRunDeepFidelityAuditNoOp:
                 primary_candidate_ids=["id_0"],
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
 
-        mock_metrics.record_audit.assert_not_called()
+        fake_writer.backend.update_audit_by_key.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -435,16 +463,10 @@ class TestOnModeReEmbed:
         }
         fake_provider = MagicMock()
 
-        with (
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
-                return_value=tiny_hnsw["vecs"][1],
-            ) as mock_gov,
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-                return_value=MagicMock(),
-            ),
-        ):
+        with patch(
+            "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
+            return_value=tiny_hnsw["vecs"][1],
+        ) as mock_gov:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -489,15 +511,9 @@ class TestShadowModeNoreEmbed:
             "live_vec": tiny_hnsw["vecs"][0],
         }
 
-        with (
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
-            ) as mock_gov,
-            patch(
-                "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-                return_value=MagicMock(),
-            ),
-        ):
+        with patch(
+            "code_indexer.server.services.embedding_cache_audit.governed_query_embedding",
+        ) as mock_gov:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -537,11 +553,8 @@ class TestZeroNormSkip:
             "live_vec": tiny_hnsw["vecs"][0],
         }
 
-        mock_metrics = MagicMock()
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -551,9 +564,10 @@ class TestZeroNormSkip:
                 primary_candidate_ids=primary_ids,
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
 
-        mock_metrics.record_audit.assert_not_called()
+        fake_writer.backend.update_audit_by_key.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +576,7 @@ class TestZeroNormSkip:
 
 
 class TestEmptyResultSkip:
-    """Empty primary_candidate_ids -> audit skipped (record_audit NOT called)."""
+    """Empty primary_candidate_ids -> audit skipped (update_audit_by_key NOT called)."""
 
     def test_empty_primary_ids_skipped(self, tiny_hnsw):
         _run = _import_run_deep_fidelity_audit()
@@ -578,11 +592,8 @@ class TestEmptyResultSkip:
             "live_vec": tiny_hnsw["vecs"][0],
         }
 
-        mock_metrics = MagicMock()
-        with patch(
-            "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
-            return_value=mock_metrics,
-        ):
+        writer_patch, correlation_patch, fake_writer = _patch_audit_writer()
+        with writer_patch, correlation_patch:
             _run(
                 audit_ctx=audit_ctx,
                 hnsw_index=idx,
@@ -592,9 +603,10 @@ class TestEmptyResultSkip:
                 primary_candidate_ids=[],  # empty!
                 embedding_provider=None,
                 query="test",
+                embed_key=_TEST_EMBED_KEY,
             )
 
-        mock_metrics.record_audit.assert_not_called()
+        fake_writer.backend.update_audit_by_key.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

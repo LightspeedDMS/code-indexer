@@ -445,6 +445,114 @@ class TestNodeId:
 
 
 # ---------------------------------------------------------------------------
+# get_hit_rate_counts — request-denominated hit/request counts (Issue #1257)
+# ---------------------------------------------------------------------------
+
+
+class TestGetHitRateCounts:
+    """Regression tests for Issue #1257.
+
+    The dashboard "On-Mode Hit Rate" card was OPERATION-denominated (one
+    increment per cache operation, which can be >1 per request on some
+    paths e.g. MCP activated-repo search), while search_event_log analytics
+    are REQUEST-denominated (exactly one row per user request). This caused
+    the two numbers to diverge on any path performing more than one on-mode
+    embedding operation per request.
+
+    get_hit_rate_counts(mode) must count REQUESTS (rows), not operations:
+    a single row where BOTH providers recorded an "on"-mode hit must count
+    as exactly ONE request and ONE hit — never two.
+    """
+
+    def test_single_provider_on_mode_hit_counts_as_one_request_one_hit(
+        self, sqlite_backend
+    ):
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True)]
+        )
+
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 1, "requests": 1}
+
+    def test_single_provider_on_mode_miss_counts_as_one_request_zero_hits(
+        self, sqlite_backend
+    ):
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=False)]
+        )
+
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 0, "requests": 1}
+
+    def test_two_providers_on_mode_same_request_counts_as_one_request_one_hit(
+        self, sqlite_backend
+    ):
+        """The core #1257 reproduction: a single request that performs TWO
+        on-mode embedding operations (voyage AND cohere, both hits) must be
+        counted as ONE request with ONE hit -- never as two operations.
+        This is the exact divergence the issue reports on the MCP
+        activated-repo path (>1 on-mode op per request vs 1 log row/request).
+        """
+        sqlite_backend.insert_batch(
+            [
+                _record(
+                    voyage_cache_mode="on",
+                    voyage_cache_hit=True,
+                    cohere_cache_mode="on",
+                    cohere_cache_hit=True,
+                )
+            ]
+        )
+
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 1, "requests": 1}, (
+            "A single request with 2 on-mode operations must count as 1 "
+            f"request / 1 hit, not inflate the operation count. Got: {counts}"
+        )
+
+    def test_mixed_modes_only_on_mode_rows_counted(self, sqlite_backend):
+        """Rows in shadow mode must not pollute the "on" mode counts, and
+        vice versa."""
+        sqlite_backend.insert_batch(
+            [
+                _record(voyage_cache_mode="on", voyage_cache_hit=True),
+                _record(voyage_cache_mode="on", voyage_cache_hit=False),
+                _record(voyage_cache_mode="shadow", voyage_cache_hit=True),
+            ]
+        )
+
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 1, "requests": 2}
+
+        shadow_counts = sqlite_backend.get_hit_rate_counts("shadow")
+        assert shadow_counts == {"hits": 1, "requests": 1}
+
+    def test_one_provider_on_other_provider_shadow_still_counts_request(
+        self, sqlite_backend
+    ):
+        """A request where voyage is 'on' (hit) but cohere is 'shadow' must
+        still count as one on-mode request with one on-mode hit — the
+        cohere column must not suppress or double the count."""
+        sqlite_backend.insert_batch(
+            [
+                _record(
+                    voyage_cache_mode="on",
+                    voyage_cache_hit=True,
+                    cohere_cache_mode="shadow",
+                    cohere_cache_hit=True,
+                )
+            ]
+        )
+
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 1, "requests": 1}
+
+    def test_no_rows_returns_zero_zero(self, sqlite_backend):
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 0, "requests": 0}
+
+
+# ---------------------------------------------------------------------------
 # PostgreSQL backend tests (skipped when PG unavailable)
 # ---------------------------------------------------------------------------
 
@@ -567,3 +675,51 @@ class TestSearchEventLogPostgresBackend:
 
         _, total = backend.query(username=username)
         assert total == 5
+
+    def test_get_hit_rate_counts_two_providers_one_request(self, pg_sel_backend):
+        """Issue #1257: a single request with 2 on-mode operations (voyage +
+        cohere, both hits) must count as 1 request / 1 hit in PostgreSQL too.
+
+        Uses a unique username to isolate this test's rows from any other
+        concurrent data in the shared table (get_hit_rate_counts aggregates
+        the whole table, so we can only assert deltas here by using a
+        temporary marker: a mode string namespaced with the unique username
+        substring is NOT possible since mode is a real enum value, so instead
+        we assert on a known BASELINE-plus-delta by reading counts before and
+        after the insert).
+        """
+        backend, username = pg_sel_backend
+        before = backend.get_hit_rate_counts("on")
+        backend.insert_batch(
+            [
+                _record(
+                    username=username,
+                    voyage_cache_mode="on",
+                    voyage_cache_hit=True,
+                    cohere_cache_mode="on",
+                    cohere_cache_hit=True,
+                )
+            ]
+        )
+        after = backend.get_hit_rate_counts("on")
+
+        assert after["requests"] == before["requests"] + 1, (
+            "A single request with 2 on-mode operations must add exactly 1 "
+            f"to the request count. before={before}, after={after}"
+        )
+        assert after["hits"] == before["hits"] + 1, (
+            "A single request with 2 on-mode hits must add exactly 1 to the "
+            f"hit count, not 2. before={before}, after={after}"
+        )
+
+    def test_get_hit_rate_counts_miss_does_not_increment_hits(self, pg_sel_backend):
+        """A recorded on-mode MISS increments requests but not hits."""
+        backend, username = pg_sel_backend
+        before = backend.get_hit_rate_counts("on")
+        backend.insert_batch(
+            [_record(username=username, voyage_cache_mode="on", voyage_cache_hit=False)]
+        )
+        after = backend.get_hit_rate_counts("on")
+
+        assert after["requests"] == before["requests"] + 1
+        assert after["hits"] == before["hits"]

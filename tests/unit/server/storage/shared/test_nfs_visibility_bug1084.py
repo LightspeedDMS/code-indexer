@@ -233,6 +233,9 @@ def _make_cow_backend(visibility_waiter=None):
         mount_point="/mnt/nfs/cidx",
         poll_interval_seconds=1,
         timeout_seconds=30,
+        # Bug #1320: co-located (identity) translation -- this suite tests the
+        # NFS visibility barrier, not path translation.
+        daemon_storage_path="/mnt/nfs/cidx",
     )
     return CowDaemonBackend(config=config, visibility_waiter=visibility_waiter)
 
@@ -317,6 +320,9 @@ class TestCowDaemonBackendVisibilityBarrier:
             mount_point=str(mount),
             poll_interval_seconds=1,
             timeout_seconds=30,
+            # Bug #1320: co-located (identity) translation -- this test verifies
+            # the real NFS visibility wait, not path translation.
+            daemon_storage_path=str(mount),
         )
         backend = CowDaemonBackend(config=config)
 

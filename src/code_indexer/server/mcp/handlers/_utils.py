@@ -21,6 +21,7 @@ from code_indexer.server import app as app_module
 from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.constants import is_internal_meta_repo
 
 logger = logging.getLogger(__name__)
 
@@ -912,7 +913,6 @@ def _is_temporal_query(params: Dict[str, Any]) -> bool:
         "time_range",
         "time_range_all",
         "at_commit",
-        "include_removed",
         "chunk_type",
         "diff_type",
         "author",
@@ -1063,7 +1063,7 @@ def _enforce_repo_count_cap(aliases: List[str]) -> "Optional[CapBreach]":
 
 
 def _expand_wildcard_patterns(
-    patterns: List[str], user: "User"
+    patterns: List[str], user: "User", search_mode: str = "semantic"
 ) -> "Union[List[str], CapBreach]":
     """Expand wildcard patterns to matching repository aliases.
 
@@ -1074,9 +1074,23 @@ def _expand_wildcard_patterns(
     Bug #881 Phase 3: Returns CapBreach if a wildcard pattern matched more
     aliases than omni_wildcard_expansion_cap. Literal patterns bypass the cap.
 
+    Bug #1287 Defect B: when search_mode requires an FTS index ("fts" or
+    "hybrid"), matches produced by WILDCARD expansion exclude the internal
+    cidx-meta* bookkeeping repos (see is_internal_meta_repo) -- they are
+    never FTS-indexed by design and otherwise produce benign-but-noisy
+    per-repo WARNING/ERROR log lines on every such fan-out. This exclusion
+    applies ONLY to wildcard-matched aliases; an explicit LITERAL alias
+    (e.g. repository_alias=["cidx-meta-global"]) is untouched and still
+    fails loud downstream, mirroring the semantics in
+    semantic_query_manager.py's implicit fan-out. The default search_mode
+    ("semantic") keeps existing callers (e.g. _omni_regex_search) and
+    semantic/memory search over cidx-meta unaffected.
+
     Args:
         patterns: List of repo patterns (may include wildcards like '*-global')
         user: The authenticated user requesting the expansion.
+        search_mode: The effective search mode ("semantic", "fts", "hybrid",
+            "regex", ...). Only "fts"/"hybrid" trigger the meta-repo exclusion.
 
     Returns:
         Expanded list of unique repository aliases, or CapBreach on cap breach.
@@ -1114,6 +1128,11 @@ def _expand_wildcard_patterns(
         if _has_wildcard(pattern):
             spec = pathspec.PathSpec.from_lines("gitwildmatch", [pattern])
             matches = [repo for repo in available_repos if spec.match_file(repo)]
+            if search_mode in ("fts", "hybrid"):
+                # Bug #1287 Defect B (finding 2): exclude the internal
+                # cidx-meta* bookkeeping repo(s) from FTS/hybrid wildcard
+                # fan-out -- they have no FTS index by design.
+                matches = [repo for repo in matches if not is_internal_meta_repo(repo)]
             if matches:
                 # Bug #881 Phase 1: promoted from DEBUG to INFO
                 logger.info(

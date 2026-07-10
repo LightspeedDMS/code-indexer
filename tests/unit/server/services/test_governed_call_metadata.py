@@ -215,18 +215,14 @@ class TestCoalescedQueryEmbeddingReturnType:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="d" * 10,
                 ):
                     with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="d" * 10,
+                        "code_indexer.server.services.governed_call.governed_query_embedding",
+                        return_value=[9.0],
                     ):
-                        with patch(
-                            "code_indexer.server.services.governed_call.governed_query_embedding",
-                            return_value=[9.0],
-                        ):
-                            result = self._call(provider)
+                        result = self._call(provider)
 
         assert isinstance(result, tuple)
         _, meta = result
@@ -252,20 +248,14 @@ class TestCoalescedQueryEmbeddingReturnType:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="d" * 10,
                 ):
                     with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="d" * 10,
+                        "code_indexer.server.services.governed_call.governed_query_embedding",
+                        return_value=[10.0, 11.0],
                     ):
-                        with patch(
-                            "code_indexer.server.services.governed_call.governed_query_embedding",
-                            return_value=[10.0, 11.0],
-                        ):
-                            result = self._call(
-                                provider, no_embedding_cache_shortcut=True
-                            )
+                        result = self._call(provider, no_embedding_cache_shortcut=True)
 
         assert isinstance(result, tuple)
         vec, meta = result
@@ -365,26 +355,22 @@ class TestAuditCtxNotRemoved:
                 return_value=mock_cache,
             ):
                 with patch(
-                    "code_indexer.server.services.governed_call.get_query_embedding_cache_metrics",
-                    return_value=None,
+                    "code_indexer.server.services.governed_call._digest_for_provider",
+                    return_value="digest-x",
                 ):
                     with patch(
-                        "code_indexer.server.services.governed_call._digest_for_provider",
-                        return_value="digest-x",
+                        "code_indexer.server.services.governed_call._audit_sample_rate_for",
+                        return_value=1.0,  # 100% sampling so audit always fires
                     ):
                         with patch(
-                            "code_indexer.server.services.governed_call._audit_sample_rate_for",
-                            return_value=1.0,  # 100% sampling so audit always fires
+                            "code_indexer.server.services.governed_call.random.random",
+                            return_value=0.0,  # always below rate
                         ):
-                            with patch(
-                                "code_indexer.server.services.governed_call.random.random",
-                                return_value=0.0,  # always below rate
-                            ):
-                                result = coalesced_query_embedding(
-                                    provider,
-                                    "query",
-                                    audit_ctx=audit_ctx,
-                                )
+                            result = coalesced_query_embedding(
+                                provider,
+                                "query",
+                                audit_ctx=audit_ctx,
+                            )
 
         assert isinstance(result, tuple)
         # audit_ctx should have been populated by _serve_with_cache

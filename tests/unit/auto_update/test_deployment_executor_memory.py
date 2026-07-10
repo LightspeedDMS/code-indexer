@@ -15,7 +15,10 @@ Both methods follow the _ensure_sudoers_restart() pattern:
 from unittest.mock import MagicMock, patch, call
 import pytest
 
-from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import (
+    DeploymentExecutor,
+    SYSTEMD_OP_TIMEOUT_SECONDS,
+)
 
 
 @pytest.fixture
@@ -92,9 +95,10 @@ class TestEnsureMemoryOvercommit:
         # First call: read current value
         assert mock_run.call_args_list[0] == call(
             ["sysctl", "-n", "vm.overcommit_memory"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Second call: write config file via sudo tee
         assert mock_run.call_args_list[1] == call(
@@ -102,14 +106,15 @@ class TestEnsureMemoryOvercommit:
             input="vm.overcommit_memory = 1\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Third call: apply immediately via sysctl -p
         assert mock_run.call_args_list[2] == call(
             ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
 
     def test_memory_overcommit_write_failure(self, executor, caplog):
@@ -228,44 +233,50 @@ class TestEnsureSwapFile:
         # Call 0: swapon --show
         assert calls[0] == call(
             ["swapon", "--show", "--noheadings"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 1: fallocate
         assert calls[1] == call(
             ["sudo", "fallocate", "-l", "4G", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 2: chmod 600
         assert calls[2] == call(
             ["sudo", "chmod", "600", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 3: mkswap
         assert calls[3] == call(
             ["sudo", "mkswap", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 4: swapon
         assert calls[4] == call(
             ["sudo", "swapon", "/swapfile"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 5: cat /etc/fstab
         assert calls[5] == call(
             ["cat", "/etc/fstab"],
+            input=None,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
         # Call 6: tee -a /etc/fstab
         assert calls[6] == call(
@@ -273,13 +284,14 @@ class TestEnsureSwapFile:
             input="/swapfile none swap sw 0 0\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
         )
 
     def test_swap_fallocate_failure(self, executor, caplog):
         """
         When fallocate returns non-zero,
-        the method must log DEPLOY-GENERAL-093 and return False.
+        the method must log DEPLOY-GENERAL-093 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -291,16 +303,19 @@ class TestEnsureSwapFile:
                 ),  # fallocate fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-093" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-093" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_chmod_failure(self, executor, caplog):
         """
         When chmod returns non-zero,
-        the method must log DEPLOY-GENERAL-094 and return False.
+        the method must log DEPLOY-GENERAL-094 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -311,16 +326,19 @@ class TestEnsureSwapFile:
                 make_proc(returncode=1, stderr="chmod: cannot access"),  # chmod fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-094" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-094" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_mkswap_failure(self, executor, caplog):
         """
         When mkswap returns non-zero,
-        the method must log DEPLOY-GENERAL-095 and return False.
+        the method must log DEPLOY-GENERAL-095 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -332,16 +350,19 @@ class TestEnsureSwapFile:
                 make_proc(returncode=1, stderr="mkswap: error"),  # mkswap fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-095" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-095" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_swapon_failure(self, executor, caplog):
         """
         When swapon /swapfile returns non-zero,
-        the method must log DEPLOY-GENERAL-096 and return False.
+        the method must log DEPLOY-GENERAL-096 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -356,11 +377,13 @@ class TestEnsureSwapFile:
                 ),  # swapon fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-096" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-096" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_fstab_already_contains_entry(self, executor, caplog):
         """
@@ -437,18 +460,21 @@ class TestEnsureSwapFile:
     def test_swap_exception_handling(self, executor, caplog):
         """
         When subprocess.run raises an unexpected exception,
-        the method must log DEPLOY-GENERAL-098 and return False.
+        the method must log DEPLOY-GENERAL-098 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
         with patch(
             "subprocess.run", side_effect=RuntimeError("Unexpected system error")
         ):
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-098" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-098" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
 
 # ---------------------------------------------------------------------------

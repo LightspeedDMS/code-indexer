@@ -7,6 +7,7 @@ In cluster mode, token state is stored in PostgreSQL for cross-node consistency.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple, Callable
@@ -19,6 +20,19 @@ except ImportError:  # psycopg not installed (e.g. CLI-only mode)
 logger = logging.getLogger(__name__)
 
 _TOKEN_COST = 1.0  # Token units consumed per request
+
+# Table/column identifiers are constructor-supplied constants (never derived
+# from request data), but are still validated against a strict identifier
+# pattern before being embedded into SQL via f-string -- psycopg %s
+# placeholders cannot parameterize identifiers, and this closes off any
+# possibility of SQL injection through a future caller mistake.
+_VALID_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _validate_sql_identifier(name: str, *, what: str) -> str:
+    if not _VALID_SQL_IDENTIFIER_RE.match(name):
+        raise ValueError(f"Invalid {what}: {name!r}")
+    return name
 
 
 class TokenBucket:
@@ -67,7 +81,15 @@ class TokenBucket:
 
 
 class TokenBucketManager:
-    """Manages per-username token buckets with thread-safe access and cleanup."""
+    """Manages per-username token buckets with thread-safe access and cleanup.
+
+    ``table_name``/``key_column`` default to the original auth login-limiter
+    schema (``token_bucket_state``/``username``) for zero-regression backward
+    compatibility. A second instance MAY point at a dedicated table (e.g. the
+    admission-control per-consumer limiter uses ``consumer_rate_limit_state``/
+    ``consumer_key``) so hashed, non-identity keys never share storage with
+    real usernames.
+    """
 
     def __init__(
         self,
@@ -75,6 +97,8 @@ class TokenBucketManager:
         refill_rate: float = 1 / 6.0,
         cleanup_seconds: int = 3600,
         time_fn: Callable[[], float] = time.monotonic,
+        table_name: str = "token_bucket_state",
+        key_column: str = "username",
     ) -> None:
         self.capacity = capacity
         self.refill_rate = refill_rate
@@ -84,69 +108,109 @@ class TokenBucketManager:
         self._buckets: Dict[str, TokenBucket] = {}
         self._last_access: Dict[str, float] = {}
         self._pool: Optional[Any] = None
+        self._table_name = _validate_sql_identifier(table_name, what="table_name")
+        self._key_column = _validate_sql_identifier(key_column, what="key_column")
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
 
-        When set, consume() and refund() use the token_bucket_state PG table
-        instead of in-memory dicts, enabling cross-node rate limiting.
+        When set, consume() and refund() use the configured PG table (see
+        ``table_name``/``key_column``) instead of in-memory dicts, enabling
+        cross-node rate limiting.
         """
         self._pool = pool
         logger.info(
-            "TokenBucketManager: using PostgreSQL connection pool (cluster mode)"
+            "TokenBucketManager: using PostgreSQL connection pool (cluster mode, "
+            "table=%s)",
+            self._table_name,
         )
 
     def _pg_ensure_row(self, conn: Any, username: str, now: float) -> None:
         """Insert row with full capacity on first access. No-op if row exists."""
         conn.execute(
-            "INSERT INTO token_bucket_state (username, tokens, last_refill, last_access) "
+            f"INSERT INTO {self._table_name} "
+            f"({self._key_column}, tokens, last_refill, last_access) "
             "VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (username) DO NOTHING",
+            f"ON CONFLICT ({self._key_column}) DO NOTHING",
             (username, float(self.capacity), now, now),
         )
         conn.commit()
 
     def _pg_consume(self, username: str) -> Tuple[bool, float]:
-        """PG consume: ensure row, refill, decrement by _TOKEN_COST if available.
+        """PG consume: ensure row, then atomically refill-and-decrement in a
+        single conditional UPDATE (Bug #1334) -- no SELECT-then-UPDATE race
+        window.
+
+        PostgreSQL's row-level MVCC locking for a single-table UPDATE whose
+        SET/WHERE expressions reference only the row's own ``tokens``/
+        ``last_refill`` columns guarantees those expressions are (re-)
+        evaluated against the latest committed tuple for any transaction
+        that must wait on the row lock (EvalPlanQual re-check under READ
+        COMMITTED): two concurrent callers on the same key can never both
+        observe "sufficient tokens" and both decrement -- the loser's
+        UPDATE re-evaluates its WHERE clause against the winner's
+        already-committed (decremented) value. ``cur.rowcount`` reports
+        whether the WHERE clause matched: 1 => allowed and decremented
+        atomically; 0 => insufficient tokens even after refill => denied.
+        No ``RETURNING`` clause is needed since only the allow/deny outcome
+        is consumed. The inline refill expression
+        ``LEAST(capacity, tokens + GREATEST(0, now - last_refill) *
+        refill_rate)`` mirrors ``TokenBucket._refill()``'s Python arithmetic
+        exactly (elapsed-time refill, capacity clamp).
 
         Called under self._lock. Returns (allowed, retry_after_seconds).
         """
         assert self._pool is not None
         now = time.time()
+        capacity = float(self.capacity)
+        refilled_expr = "LEAST(%s, tokens + GREATEST(0, %s - last_refill) * %s)"
         with self._pool.connection() as conn:
             self._pg_ensure_row(conn, username, now)
+            cur = conn.execute(
+                f"UPDATE {self._table_name} "
+                f"SET tokens = {refilled_expr} - %s, "
+                "last_refill = %s, last_access = %s "
+                f"WHERE {self._key_column} = %s "
+                f"AND {refilled_expr} >= %s",
+                (
+                    capacity,
+                    now,
+                    self.refill_rate,
+                    _TOKEN_COST,
+                    now,
+                    now,
+                    username,
+                    capacity,
+                    now,
+                    self.refill_rate,
+                    _TOKEN_COST,
+                ),
+            )
+            conn.commit()
+            if cur.rowcount == 1:
+                return True, 0.0
+
+            # Denied: the atomic UPDATE above already made the decision (its
+            # WHERE clause matched zero rows). This read is advisory only --
+            # it computes a Retry-After hint and cannot reopen the race
+            # window, since no decision is made from it.
             cursor_kwargs: dict = {}
             if _psycopg_tuple_row is not None:
                 cursor_kwargs["row_factory"] = _psycopg_tuple_row
-            with conn.cursor(**cursor_kwargs) as cur:
-                cur.execute(
-                    "SELECT tokens, last_refill FROM token_bucket_state WHERE username = %s",
+            with conn.cursor(**cursor_kwargs) as read_cur:
+                read_cur.execute(
+                    f"SELECT tokens, last_refill FROM {self._table_name} "
+                    f"WHERE {self._key_column} = %s",
                     (username,),
                 )
-                row = cur.fetchone()
-            if row is None:
-                tokens, last_refill = float(self.capacity), now
+                current = read_cur.fetchone()
+            if current is None:
+                tokens_now = 0.0
             else:
-                tokens, last_refill = row[0], row[1]
-            elapsed = max(0.0, now - last_refill)
-            tokens = min(float(self.capacity), tokens + elapsed * self.refill_rate)
-            if tokens >= _TOKEN_COST:
-                conn.execute(
-                    "UPDATE token_bucket_state "
-                    "SET tokens = %s, last_refill = %s, last_access = %s "
-                    "WHERE username = %s",
-                    (tokens - _TOKEN_COST, now, now, username),
-                )
-                conn.commit()
-                return True, 0.0
-            conn.execute(
-                "UPDATE token_bucket_state "
-                "SET tokens = %s, last_refill = %s, last_access = %s "
-                "WHERE username = %s",
-                (tokens, now, now, username),
-            )
-            conn.commit()
-            needed = max(0.0, _TOKEN_COST - tokens)
+                tokens_stored, last_refill_stored = current[0], current[1]
+                elapsed = max(0.0, now - last_refill_stored)
+                tokens_now = min(capacity, tokens_stored + elapsed * self.refill_rate)
+            needed = max(0.0, _TOKEN_COST - tokens_now)
             retry_after = (
                 needed / self.refill_rate if self.refill_rate > 0 else float("inf")
             )
@@ -162,9 +226,9 @@ class TokenBucketManager:
         with self._pool.connection() as conn:
             self._pg_ensure_row(conn, username, now)
             conn.execute(
-                "UPDATE token_bucket_state "
+                f"UPDATE {self._table_name} "
                 "SET tokens = LEAST(%s, tokens + %s), last_access = %s "
-                "WHERE username = %s",
+                f"WHERE {self._key_column} = %s",
                 (float(self.capacity), _TOKEN_COST, now, username),
             )
             conn.commit()

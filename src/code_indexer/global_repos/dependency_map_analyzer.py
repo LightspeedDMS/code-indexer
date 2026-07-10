@@ -836,10 +836,15 @@ Document ONLY verified, factual dependencies and relationships found in source c
         )
 
         prompt = f"# Domain Analysis: {domain_name}\n\n"
-        prompt += "## CRITICAL INSTRUCTION: WRITE YOUR ANALYSIS FIRST\n\n"
-        prompt += "You MUST write your complete domain analysis output BEFORE doing any MCP searches.\n"
+        prompt += "## ANALYSIS GROUNDING\n\n"
         prompt += "Your primary source material is the Pass 1 evidence and repository descriptions below.\n"
-        prompt += "MCP searches are OPTIONAL and limited to AT MOST 5 calls for verification only.\n\n"
+        prompt += (
+            "The `search_code` MCP tool is MANDATORY and available throughout this "
+            "analysis, with no limit on the number of calls. Use it for discovery of "
+            "cross-repo references and integration points, not merely to confirm what "
+            "you already wrote -- the domains with the most repos need the most "
+            "cross-repo searching, not the least.\n\n"
+        )
         prompt += "**NOTE**: The `cidx-meta` directory is the system metadata registry, not a source code repository. Ignore it during analysis.\n\n"
 
         prompt += f"**Domain Description**: {domain.get('description', 'N/A')}\n\n"
@@ -923,16 +928,6 @@ Document ONLY verified, factual dependencies and relationships found in source c
         prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
         prompt += "Read the full analysis methodology, evidence requirements, granularity guidelines,\n"
         prompt += "and output constraints from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
-
-        # OPTIONAL verification searches at the end
-        prompt += "## OPTIONAL: MCP Verification Searches (max 5 calls)\n\n"
-        prompt += "After writing your analysis, you MAY use the `search_code` MCP tool for verification.\n"
-        prompt += (
-            "Limit: AT MOST 5 search_code calls total. Do NOT explore extensively.\n"
-        )
-        prompt += (
-            "These searches are for CONFIRMING what you wrote, not for discovery.\n\n"
-        )
 
         prompt += "## PROHIBITED Content\n\n"
         prompt += "See `cidx-meta/dependency-map/_analysis_guidelines.md` for the full list of\n"
@@ -1109,14 +1104,9 @@ Rules:
             "- Keep each section to 3-8 sentences. Shorter is better if precise.\n"
         )
         prompt += (
-            "- Do NOT reproduce source code, JSON schemas, or directory listings\n\n"
+            "- Do NOT reproduce source code, JSON schemas, or directory listings\n"
         )
-        prompt += "## Output Budget\n\n"
-        prompt += "Your analysis MUST be between 3,000 and 10,000 characters.\n"
-        prompt += (
-            "If you find yourself writing more, you are including too much detail.\n"
-        )
-        prompt += "Focus on WHAT connects repos, not HOW the internals work.\n\n"
+        prompt += "- Focus on WHAT connects repos, not HOW the internals work\n\n"
         prompt += "## OUTPUT TEMPLATE (fill in each section)\n\n"
         prompt += "Your output MUST follow this exact structure:\n\n"
         prompt += f"# Domain Analysis: {domain_name}\n\n"
@@ -3528,13 +3518,47 @@ Rules:
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
         # calling _invoke_claude_cli directly.
+        #
+        # Bug #1323: the dispatcher migration bypassed the shared verification
+        # semaphore that _invoke_claude_cli acquires before its own subprocess.run.
+        # Mirror _invoke_claude_cli's exact max-concurrency resolution (lines
+        # ~2747-2763) so both call sites initialize/read the SAME process-wide
+        # singleton via _get_verification_semaphore -- never a second, independent
+        # semaphore.
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            _max_concurrent = (
+                get_config_service()
+                .get_config()
+                .claude_integration_config.max_concurrent_claude_cli
+            )
+        except (ImportError, AttributeError):
+            # ImportError  : server package not installed (CLI-only context).
+            # AttributeError: config object structure differs (non-server context).
+            # Both cases are expected non-server deployments; use the schema default.
+            _max_concurrent = _DEFAULT_MAX_CONCURRENT_CLAUDE_CLI
+            logger.debug(
+                "_run_verification_attempt: config service unavailable; "
+                "using max_concurrent=%d",
+                _max_concurrent,
+            )
+        _sem = _get_verification_semaphore(_max_concurrent)
+
         dispatcher = self._get_cached_dispatcher("_cached_verification_dispatcher")
-        result = dispatcher.dispatch(
-            flow="dependency_map_verification",
-            cwd=str(self.golden_repos_root),
-            prompt=prompt,
-            timeout=config.fact_check_timeout_seconds,
-        )
+        _sem.acquire()
+        try:
+            result = dispatcher.dispatch(
+                flow="dependency_map_verification",
+                cwd=str(self.golden_repos_root),
+                prompt=prompt,
+                timeout=config.fact_check_timeout_seconds,
+            )
+        finally:
+            # Release before any non-CLI cleanup (postcondition file read below),
+            # matching how _invoke_claude_cli releases before its own cleanup.
+            _sem.release()
+
         if not result.success:
             logger.warning(
                 "invoke_verification_pass: dispatcher reported failure: %s",

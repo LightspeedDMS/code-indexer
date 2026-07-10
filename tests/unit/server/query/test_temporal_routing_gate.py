@@ -172,7 +172,6 @@ class TestGate1SearchSingleRepositoryRouting:
                 time_range=None,
                 time_range_all=False,
                 at_commit=None,
-                show_evolution=False,
                 **extra_kwargs,
             )
 
@@ -220,7 +219,6 @@ class TestGate1SearchSingleRepositoryRouting:
                 time_range=None,
                 time_range_all=False,
                 at_commit=None,
-                show_evolution=False,
                 **extra_kwargs,
             )
 
@@ -371,7 +369,6 @@ class TestGate3TemporalRoutingWithDualProviders:
                 time_range=None,
                 time_range_all=False,
                 at_commit=None,
-                show_evolution=False,
                 **extra_kwargs,
             )
 
@@ -413,7 +410,6 @@ class TestGate3TemporalRoutingWithDualProviders:
                 time_range=None,
                 time_range_all=False,
                 at_commit=None,
-                show_evolution=False,
                 # No temporal params
             )
 

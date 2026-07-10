@@ -8,6 +8,7 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
 import os
@@ -95,6 +96,14 @@ class ActivatedRepoManager:
     # Git operation timeout constants (Story #636)
     GIT_COMMAND_TIMEOUT = 30  # seconds for general git commands
     GIT_FETCH_TIMEOUT = 60  # seconds for git fetch operations
+
+    # Bug #1285: fallback CoW clone timeout (seconds) used only when
+    # golden_repo_manager.resource_config is unavailable. Kept in sync with
+    # ServerResourceConfig.cow_clone_timeout (1 hour, sized for very large
+    # repos e.g. evolution ~1M files, phoenix 40GB). Real deployments always
+    # have resource_config wired, so this is defense-in-depth, never the
+    # primary source of truth.
+    _COW_CLONE_TIMEOUT_DEFAULT: int = 3600  # 1 hour
 
     def __init__(
         self,
@@ -1793,6 +1802,7 @@ class ActivatedRepoManager:
         branch_name: str,
         user_alias: str,
         progress_callback: Optional[Callable[[int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Perform actual repository activation (called by background job).
@@ -1803,6 +1813,14 @@ class ActivatedRepoManager:
             branch_name: Branch to activate
             user_alias: User's alias for the repo
             progress_callback: Optional callback for progress updates (0-100)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. This parameter
+                is signature-injected by BackgroundJobManager._execute_job
+                (mirroring progress_callback) and threaded into the clone
+                step (_clone_with_copy_on_write) and the branch-delta
+                reindex step (_run_branch_delta_index) so a cancelled
+                activation kills its long-running subprocess promptly
+                instead of blocking to completion.
 
         Returns:
             Result dictionary with success status and message
@@ -1846,7 +1864,9 @@ class ActivatedRepoManager:
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
             success = self._clone_with_copy_on_write(
-                golden_repo_actual_path, activated_repo_path
+                golden_repo_actual_path,
+                activated_repo_path,
+                cancel_check=cancel_check,
             )
 
             if not success:
@@ -1941,7 +1961,11 @@ class ActivatedRepoManager:
             if branch_name != golden_repo.default_branch:
                 update_progress(88, f"Reindexing branch '{branch_name}' (branch-delta)")
                 try:
-                    self._run_branch_delta_index(activated_repo_path, user_alias)
+                    self._run_branch_delta_index(
+                        activated_repo_path,
+                        user_alias,
+                        cancel_check=cancel_check,
+                    )
                 except ActivatedRepoError:
                     # Bug #1203 MEDIUM 2: reindex failed BEFORE metadata was written.
                     # Remove the orphaned CoW clone so a failed activation does not
@@ -2602,6 +2626,7 @@ class ActivatedRepoManager:
                 cwd=str(repo_path),
                 capture_output=True,
                 text=True,
+                env=build_cidx_subprocess_env(),
                 timeout=30,
             )
 
@@ -2757,7 +2782,12 @@ class ActivatedRepoManager:
 
         return leaks
 
-    def _clone_with_copy_on_write(self, source_path: str, dest_path: str) -> bool:
+    def _clone_with_copy_on_write(
+        self,
+        source_path: str,
+        dest_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         """
         Clone repository using copy-on-write to preserve all files including .code-indexer/.
 
@@ -2766,16 +2796,31 @@ class ActivatedRepoManager:
         - CoW clone copies EVERYTHING including indexes
         - Ensures search works immediately without manual indexing
 
-        Post-clone workflow (from claude-server CowCloneOperationsService.cs):
-        1. cp --reflink=auto -r (CoW clone - copies .code-indexer/)
-        2. git update-index --refresh (fix timestamp mismatches)
-        3. git restore . (undo timestamp changes)
-        4. cidx fix-config --force (update paths in cloned config)
-        5. Configure git structure (remotes, fetch)
+        Post-clone workflow (from claude-server CowCloneOperationsService.cs,
+        refined by Bug #1343):
+        1. cp --reflink=auto -a (CoW clone, mtimes preserved - copies .code-indexer/)
+        2. git config core.checkStat minimal (mtime+size only; a reflink copy
+           always allocates a new inode/ctime, which git's DEFAULT checkStat
+           would treat as stat-dirty and re-hash the whole tree)
+        3. git update-index --refresh (O(1) stat pass, not a re-hash, given 1+2)
+        4. git status --porcelain sanity check (logs a WARNING, never restores
+           -- a byte-identical clone is already clean; blindly running
+           `git restore .` would silently discard genuinely different content)
+        5. cidx fix-config --force (update paths in cloned config)
+        6. Configure git structure (remotes, fetch)
 
         Args:
             source_path: Source repository path (golden repository)
             dest_path: Destination repository path (activated repository)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the clone backend so a cancelled activation kills the CoW
+                clone (local `cp` process group or remote CoW daemon job)
+                promptly instead of blocking to completion. On cancellation
+                the backend raises SubprocessCancelledError, which the
+                existing except-Exception handler below treats like any
+                other clone failure -- cleaning up the partial dest_path
+                before re-raising as ActivatedRepoError.
 
         Returns:
             True if cloning succeeded
@@ -2795,11 +2840,27 @@ class ActivatedRepoManager:
                     "ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. "
                     "Story #1034 Commit 4 requires clone_backend injection."
                 )
+            # Bug #1285: a fixed 120s wall-clock kill on the CoW clone
+            # subprocess terminated legitimately long clones of large golden
+            # repos (e.g. a repo with a populated .code-indexer/ index
+            # containing hundreds of thousands of files). Drive the deadline
+            # from the same resource_config.cow_clone_timeout knob
+            # GoldenRepoManager already uses for its own CoW operations
+            # (default 3600s / 1 hour, sized for very large repos e.g.
+            # evolution ~1M files, phoenix 40GB) instead of a fixed low
+            # literal.
+            rc = getattr(self.golden_repo_manager, "resource_config", None)
+            clone_timeout = (
+                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+                if rc is not None
+                else self._COW_CLONE_TIMEOUT_DEFAULT
+            )
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
-                preserve_attrs=False,
-                timeout=120,
+                preserve_attrs=True,
+                timeout=clone_timeout,
+                cancel_check=cancel_check,
             )
 
             self.logger.info(
@@ -2882,6 +2943,30 @@ class ActivatedRepoManager:
             # Step 3: Fix git status for CoW cloned files (only if git repo)
             git_dir = os.path.join(dest_path, ".git")
             if os.path.exists(git_dir):
+                # Bug #1343: `cp --reflink` ALWAYS allocates a new inode (and
+                # ctime) for every copied file, even with preserve_attrs=True
+                # (mtime preserved). Git's DEFAULT core.checkStat compares
+                # inode/ctime/dev/uid/gid in addition to mtime+size, so the
+                # inode change alone stat-invalidates the copied .git/index
+                # and forces update-index/status to open+hash every tracked
+                # file. core.checkStat=minimal (mtime+size only) is the
+                # decisive lever -- set it BEFORE the refresh below AND
+                # before _configure_git_structure's `git status` (persisted
+                # in dest_path/.git/config, read by both call sites).
+                checkstat_result = subprocess.run(
+                    ["git", "config", "--local", "core.checkStat", "minimal"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if checkstat_result.returncode != 0:
+                    self.logger.warning(
+                        "git config core.checkStat=minimal failed (non-fatal): "
+                        f"{checkstat_result.stderr}"
+                    )
+
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
                 self.logger.info(
                     "Running git update-index --refresh to fix CoW clone timestamps"
@@ -2899,22 +2984,46 @@ class ActivatedRepoManager:
                         f"git update-index --refresh failed (non-fatal): {result.stderr}"
                     )
 
-                # Step 2b: Run git restore . to clean up any remaining modified files
-                self.logger.info(
-                    "Running git restore . to clean up CoW clone timestamp changes"
-                )
-                result = subprocess.run(
-                    ["git", "restore", "."],
+                # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
+                # unconditionally to "clean up" CoW clone timestamp changes.
+                # That was compensating for stat-noise caused by the OLD
+                # default core.checkStat flagging inode/ctime churn as a
+                # modification even when content was byte-identical. Now that
+                # core.checkStat=minimal + preserve_attrs=True make the
+                # refresh above a pure stat pass, a byte-identical clone is
+                # already clean and there is nothing to restore. Blindly
+                # calling `git restore .` unconditionally would SILENTLY
+                # DISCARD any genuinely different content -- a real content
+                # difference immediately after a CoW clone would be abnormal,
+                # so surface it with a WARNING instead of destroying it.
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
                     timeout=60,
                 )
 
-                if result.returncode != 0:
-                    self.logger.warning(
-                        f"git restore . failed (non-fatal): {result.stderr}"
-                    )
+                if status_result.returncode == 0:
+                    # Bug #1347: `git status --porcelain` always reports the
+                    # untracked `.code-indexer/` index directory (`??` lines)
+                    # after every activation -- that is expected, normal
+                    # state, not a sign of trouble. `git restore` only ever
+                    # affects TRACKED files, so an untracked entry was never
+                    # at risk of being discarded. Filter out untracked (`??`)
+                    # lines and warn ONLY on genuine tracked-change lines.
+                    tracked_lines = [
+                        line
+                        for line in status_result.stdout.splitlines()
+                        if line.strip() and not line.startswith("??")
+                    ]
+                    if tracked_lines:
+                        self.logger.warning(
+                            "git status reports unexpected TRACKED changes "
+                            "after CoW clone refresh; NOT running git "
+                            "restore (would discard content): "
+                            + "; ".join(tracked_lines)
+                        )
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
             code_indexer_dir = os.path.join(dest_path, ".code-indexer")
@@ -2927,6 +3036,7 @@ class ActivatedRepoManager:
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
+                    env=build_cidx_subprocess_env(),
                     timeout=60,
                 )
 
@@ -2942,6 +3052,17 @@ class ActivatedRepoManager:
             return True
 
         except subprocess.TimeoutExpired:
+            # Bug #1285 follow-up: a timed-out CoW clone must not leak the
+            # partial dest_path directory (measured 15-21GB per timed-out
+            # activation in production, ~99GB total orphaned). Path is
+            # trusted for the same reason as the generic Exception branch
+            # below: dest_path is the caller-supplied destination for
+            # cp --reflink=auto, computed with no user-controlled traversal,
+            # and the clone never completed so no metadata row was
+            # committed — the deactivation rename-to-trash pattern does not
+            # apply here either.
+            if os.path.exists(dest_path):
+                shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(
                 f"Clone operation timed out: {source_path} -> {dest_path}"
             )
@@ -3300,7 +3421,12 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
-    def _run_branch_delta_index(self, repo_path: str, user_alias: str) -> None:
+    def _run_branch_delta_index(
+        self,
+        repo_path: str,
+        user_alias: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
 
@@ -3316,6 +3442,13 @@ class ActivatedRepoManager:
         Args:
             repo_path: Filesystem path of the activated repository clone.
             user_alias: User's alias for the repository.
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the index manager so a cancelled activation/switch/sync
+                kills the `cidx index` branch-delta reindex subprocess
+                promptly instead of blocking to completion. A cancellation
+                surfaces here as a RuntimeError (same as any other reindex
+                failure), so the except clause below is unchanged.
 
         Raises:
             ActivatedRepoError: If indexing fails (correctness-first: the
@@ -3334,7 +3467,9 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
-            self._index_manager.run_branch_delta_index(repo_path)
+            self._index_manager.run_branch_delta_index(
+                repo_path, cancel_check=cancel_check
+            )
         except RuntimeError as exc:
             error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
             self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})

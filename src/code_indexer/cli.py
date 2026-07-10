@@ -2858,6 +2858,14 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     help="Reconcile disk files with database and index missing files + timestamp-based changes",
 )
 @click.option(
+    "--reconcile-embedder",
+    "reconcile_embedder",
+    multiple=True,
+    help="Scope --reconcile to specific temporal embedder(s) (e.g. --reconcile-embedder "
+    "embed-v4.0). Requires --reconcile --index-commits. Can be specified multiple "
+    "times. Omit to reconcile EVERY embedder configured in temporal.embedders.",
+)
+@click.option(
     "--batch-size", "-b", default=50, help="Batch size for processing (default: 50)"
 )
 @click.option(
@@ -2934,6 +2942,7 @@ def index(
     ctx,
     clear: bool,
     reconcile: bool,
+    reconcile_embedder: tuple,
     batch_size: int,
     files_count_to_process: Optional[int],
     detect_deletions: bool,
@@ -3190,7 +3199,54 @@ def index(
                 )
 
         # Handle --index-commits flag (standalone mode only - daemon delegates above)
+        # Bug #1313 round-3: the CIDX_TEMPORAL_PG_BOOTSTRAP_DIR contract below
+        # lives in THIS standalone branch specifically because golden-repo
+        # clones are always `cidx init`'d WITHOUT --daemon (see
+        # golden_repo_manager.py / refresh_scheduler.py), so --index-commits
+        # always takes the standalone path here -- it never delegates to a
+        # daemon for golden/global repos. If that invariant ever changes, a
+        # daemon-delegation path would ALSO need this bootstrap wiring.
         if index_commits:
+            # Bug #1313 round-3 (Codex round-3 finding): the server's
+            # lifespan process installs the PostgreSQL temporal-metadata
+            # factory only in ITS OWN process. Cluster temporal indexing
+            # actually runs in THIS child subprocess, spawned via Popen by
+            # the server -- which never called
+            # set_temporal_metadata_backend_factory, so it silently used the
+            # SQLite backend and recreated temporal_metadata.db on the
+            # NFS-backed golden-repos mount (the exact bottleneck Bug #1313
+            # fixes). CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (set by the parent ONLY
+            # in postgres/cluster mode -- see temporal_child_wiring.py) tells
+            # this child to install the real PostgreSQL backend before
+            # constructing any TemporalMetadataStore. Absence means today's
+            # SQLite behavior (CLI/solo byte-unchanged).
+            _temporal_pg_pool = None
+            _temporal_pg_bootstrap_dir = os.environ.get(
+                "CIDX_TEMPORAL_PG_BOOTSTRAP_DIR"
+            )
+            if _temporal_pg_bootstrap_dir:
+                # Lazy import: server/psycopg machinery is only touched when
+                # this env var is actually present (cluster-mode child),
+                # never for CLI/solo -- preserves the ~329ms import budget.
+                from .server.storage.postgres.temporal_child_wiring import (
+                    install_postgres_temporal_backend_from_bootstrap,
+                )
+
+                try:
+                    _temporal_pg_pool = (
+                        install_postgres_temporal_backend_from_bootstrap(
+                            _temporal_pg_bootstrap_dir
+                        )
+                    )
+                except Exception as _pg_bootstrap_exc:
+                    console.print(
+                        f"❌ PostgreSQL temporal metadata backend is required "
+                        f"in cluster mode but could not be initialized: "
+                        f"{_pg_bootstrap_exc}",
+                        style="red",
+                    )
+                    sys.exit(1)
+
             try:
                 # Lazy import temporal indexing components
                 from .services.temporal.temporal_indexer import TemporalIndexer
@@ -3239,12 +3295,34 @@ def index(
                 # is not found and last_commit = None -> full git log with no limit.
                 migrate_legacy_temporal_collection(index_dir, config)
 
-                # Initialize temporal indexer with provider-aware collection name
+                # Initialize temporal indexer with provider-aware collection name.
+                # Story #1290 (E2E-discovered bug): the actual collection_name MUST
+                # be derived from config.temporal.active_embedder (the per-commit
+                # embedder registry), NOT resolve_temporal_collection_from_config()
+                # (the regular semantic-search provider/model scheme) -- those two
+                # names diverge whenever the active_embedder differs from the
+                # regular embedding_provider/model (the common case). Using the
+                # wrong scheme means this bookkeeping collection_name never
+                # matches the real per-commit quarterly shard the indexer writes
+                # to; AC19/20 blank-out then hard-deletes the mismatched
+                # legacy-named directory (no v2 marker) on the NEXT run, and the
+                # "no commits to reconcile" early-return path's
+                # end_indexing(collection_name=self.collection_name) call fails
+                # with "Collection does not exist".
+                #
+                # resolve_temporal_collection_from_config(config) is still called
+                # (result intentionally unused) solely to preserve the Bug #642
+                # migration-ordering invariant its dedicated regression test
+                # asserts (migrate must run before ANY collection-name resolve).
                 from code_indexer.services.temporal.temporal_collection_naming import (
                     resolve_temporal_collection_from_config,
+                    resolve_temporal_collection_name,
                 )
 
-                _temporal_coll_name = resolve_temporal_collection_from_config(config)
+                resolve_temporal_collection_from_config(config)
+                _temporal_coll_name = resolve_temporal_collection_name(
+                    config.temporal.active_embedder
+                )
                 temporal_indexer = TemporalIndexer(
                     config_manager, vector_store, collection_name=_temporal_coll_name
                 )
@@ -3448,6 +3526,9 @@ def index(
                         progress_callback, 0, _num_temporal_providers
                     ),
                     reconcile=reconcile,
+                    embedder_scope=list(reconcile_embedder)
+                    if reconcile_embedder
+                    else None,
                 )
 
                 # Stop Rich Live display before showing results
@@ -3481,76 +3562,18 @@ def index(
 
                 temporal_indexer.close()
 
-                # Multi-provider temporal loop (Story #640): index remaining providers.
-                from .services.embedding_factory import EmbeddingProviderFactory as _EPF
-                from .services.temporal.temporal_collection_naming import (
-                    resolve_temporal_collection_from_config as _resolve_temporal_coll,
-                )
-
-                _primary_provider = config.embedding_provider
-                _all_temporal_providers = _EPF.get_configured_providers(config)
-                _extra_temporal_providers = [
-                    p for p in _all_temporal_providers if p != _primary_provider
-                ]
-                for _extra_idx, _extra_provider in enumerate(_extra_temporal_providers):
-                    console.print(
-                        f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
-                        style="cyan",
-                    )
-                    _orig_provider = config.embedding_provider
-                    _extra_temporal_indexer = None
-                    _extra_indexing_result = None
-                    try:
-                        # Health check before indexing (audit fix A1)
-                        _extra_embedding = _EPF.create(
-                            config, provider_name=_extra_provider
-                        )
-                        if not _extra_embedding.health_check():
-                            console.print(
-                                f"⚠️  {_extra_provider} health check failed — skipping temporal",
-                                style="yellow",
-                            )
-                            continue
-
-                        config.embedding_provider = _extra_provider  # type: ignore[assignment]
-                        config_manager._config = config
-                        _extra_coll_name = _resolve_temporal_coll(config)
-                        _extra_temporal_indexer = TemporalIndexer(
-                            config_manager,
-                            vector_store,
-                            collection_name=_extra_coll_name,
-                        )
-                        # Bug #1205: start a fresh display for this provider so
-                        # progress renders during index_commits (Option B fix).
-                        rich_live_manager.start_bottom_display()
-                        _extra_indexing_result = _extra_temporal_indexer.index_commits(
-                            all_branches=all_branches,
-                            max_commits=max_commits,
-                            since_date=since_date,
-                            progress_callback=_make_offset_callback(
-                                progress_callback,
-                                0,
-                                1,
-                            ),
-                            reconcile=reconcile,
-                        )
-                    finally:
-                        # Bug #1205: stop the display before printing the completion
-                        # line so a bare console.print does not interleave with an
-                        # active Rich Live display.  Placed in finally so the display
-                        # is always torn down even if index_commits raises.
-                        rich_live_manager.stop_display()
-                        if _extra_temporal_indexer is not None:
-                            _extra_temporal_indexer.close()
-                        config.embedding_provider = _orig_provider  # type: ignore[assignment]
-                        config_manager._config = config
-                        if _extra_indexing_result is not None:
-                            console.print(
-                                f"✅ {_extra_provider}: "
-                                f"{_extra_indexing_result.total_commits} commits",
-                                style="green",
-                            )
-
+                # Story #1291: TemporalIndexer.index_commits() (above) already
+                # builds shard sets for EVERY embedder configured in
+                # config.temporal.embedders in this ONE call -- see
+                # index_commits()'s per-embedder loop (AC1/AC4/AC5/AC10). A
+                # leftover "additional-temporal-embedder loop" used to run
+                # here (Story #1290) and call index_commits() a SECOND time
+                # per extra embedder; that double-run promoted the next
+                # configured embedder to ACTIVE and crashed AC4's
+                # WARN-and-continue-GREEN contract whenever that embedder was
+                # unavailable (code review finding on Story #1291). Do NOT
+                # reintroduce a per-embedder CLI loop -- the single call above
+                # is the complete, correct behavior.
                 sys.exit(0)
 
             except Exception as e:
@@ -3585,6 +3608,19 @@ def index(
                 ):  # Always show stack trace for debugging
                     console.print(traceback.format_exc())
                 sys.exit(1)
+            finally:
+                # Bug #1313 round-3: undo this process's PG temporal wiring
+                # regardless of success (sys.exit(0) above) or failure
+                # (sys.exit(1) above) -- SystemExit still runs finally
+                # blocks. No-op when the bootstrap env var was absent
+                # (_temporal_pg_pool stays None -- CLI/solo path untouched).
+                if _temporal_pg_pool is not None:
+                    from .storage.temporal_metadata_backend_registry import (
+                        clear_temporal_metadata_backend_factory,
+                    )
+
+                    clear_temporal_metadata_backend_factory()
+                    _temporal_pg_pool.close()
 
     # Handle --rebuild-fts-index flag (early exit path)
     if rebuild_fts_index:
@@ -4933,6 +4969,15 @@ def _annotate_staleness(
     help="Filter by chunk type: commit_message (commit descriptions) or commit_diff (code changes). Requires --time-range or --time-range-all.",
 )
 @click.option(
+    "--temporal-embedder",
+    type=str,
+    default=None,
+    help="Explicit temporal embedder override (e.g. 'embed-v4.0'). Omit to use "
+    "temporal.active_embedder. An override naming an embedder with no indexed "
+    "collections returns an empty/typed result -- it never silently falls "
+    "back to active_embedder (requires --time-range or --time-range-all).",
+)
+@click.option(
     "--repo",
     type=str,
     help="Query a global repository by alias (e.g., 'my-repo-global'). Allows querying registered global repos from any directory.",
@@ -5006,6 +5051,7 @@ def query(
     diff_types: tuple,
     author: Optional[str],
     chunk_type: Optional[str],
+    temporal_embedder: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
     rerank_query: Optional[str],
@@ -5315,6 +5361,7 @@ def query(
                             accuracy=accuracy,
                             chunk_type=chunk_type,
                             quiet=quiet,
+                            temporal_embedder=temporal_embedder,
                         )
                         sys.exit(exit_code)
                     else:
@@ -5478,6 +5525,7 @@ def query(
                 diff_types=list(diff_types) if diff_types else None,
                 author=author,
                 chunk_type=chunk_type,
+                temporal_embedder=temporal_embedder,
             )
 
             # Story #905: Apply unified rerank funnel to temporal results.
@@ -11059,12 +11107,19 @@ def server_list_indexes(ctx, alias: str, json_output: bool):
 
 
 @server_group.command("install-auto-update")
+@click.option(
+    "--branch",
+    default="master",
+    show_default=True,
+    help="Git branch for the auto-updater to track (CIDX_AUTO_UPDATE_BRANCH).",
+)
 @click.pass_context
-def server_install_auto_update(ctx):
+def server_install_auto_update(ctx, branch):
     """Install and enable auto-update service for CIDX server.
 
     Installs systemd service and timer that automatically deploys
-    updates when changes are pushed to the master branch.
+    updates when changes are pushed to the tracked branch (--branch,
+    default: master).
     """
     try:
         import subprocess
@@ -11110,6 +11165,7 @@ def server_install_auto_update(ctx):
         service_content = service_template.read_text()
         service_content = service_content.replace("{USER}", current_user)
         service_content = service_content.replace("{REPO_PATH}", repo_path)
+        service_content = service_content.replace("{BRANCH}", branch)
 
         # Write substituted service file to temp location
         with tempfile.NamedTemporaryFile(

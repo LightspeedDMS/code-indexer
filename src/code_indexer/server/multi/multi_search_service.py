@@ -12,6 +12,7 @@ Implements:
 - AC7: Actionable Error Messages (timeout recommendations)
 """
 
+import contextvars
 import logging
 import subprocess
 import tempfile
@@ -204,11 +205,19 @@ class MultiSearchService:
         repo_results: Dict[str, List[Dict[str, Any]]] = {}
         errors: Dict[str, str] = {}
 
-        # Submit all search tasks
-        future_to_repo = {
-            self.thread_executor.submit(search_func, repo_id, request): repo_id
-            for repo_id in request.repositories
-        }
+        # Submit all search tasks. Story #1293 S1b [A2]: copy the calling
+        # thread's context (correlation_id, etc.) per repo so it propagates
+        # into the worker thread -- ContextVars do NOT cross a bare
+        # ThreadPoolExecutor.submit() boundary (Python 3.9). Mirrors the
+        # identical contextvars.copy_context() pattern already used by
+        # semantic_query_manager.py's "parallel" strategy dispatch.
+        future_to_repo = {}
+        for repo_id in request.repositories:
+            _ctx = contextvars.copy_context()
+            future = self.thread_executor.submit(
+                _ctx.run, search_func, repo_id, request
+            )
+            future_to_repo[future] = repo_id
 
         # Collect results as they complete
         for future in as_completed(future_to_repo):
@@ -565,6 +574,8 @@ class MultiSearchService:
                 file_path_filter=request.path_filter,
                 # Story #1108 (S4): forward per-request cache bypass flag
                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                # Story #1291 AC7/AC8: forward explicit embedder override
+                temporal_embedder=request.temporal_embedder,
             )
 
             # If no temporal index found, raise to match original behavior
@@ -744,7 +755,10 @@ class MultiSearchService:
             FileNotFoundError: If repository not found in global repositories
         """
         from code_indexer.server import app as app_module
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
 
         # Get golden_repos_dir from server configuration
         golden_repos_dir = _get_golden_repos_dir()
@@ -760,9 +774,13 @@ class MultiSearchService:
                 f"Repository '{repo_id}' not found in global repositories"
             )
 
-        # Use AliasManager to get current target path (registry path becomes stale after refresh)
+        # Use AliasManager to get current target path (registry path becomes stale
+        # after refresh operations). Bug #1315: fall back to the registry's own
+        # index_path when the alias pointer file is missing/unreadable.
         alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repo_id)
+        target_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_id, repo_entry=repo_entry
+        )
 
         if not target_path:
             raise FileNotFoundError(

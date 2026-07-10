@@ -27,6 +27,7 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     GitOperationError,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from src.code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.mark.e2e
@@ -55,6 +56,10 @@ class TestActivatedRepoManager:
         golden_repos_dict = {"test-repo": golden_repo}
         mock.golden_repos = golden_repos_dict
         mock.get_golden_repo.side_effect = lambda alias: golden_repos_dict.get(alias)
+        # Bug #1285: _clone_with_copy_on_write reads resource_config.cow_clone_timeout
+        # as a real int. Use the real dataclass (not a bare MagicMock attribute)
+        # so call-arg assertions exercise the actual config-driven value.
+        mock.resource_config = ServerResourceConfig()
         return mock
 
     @pytest.fixture
@@ -338,12 +343,15 @@ class TestActivatedRepoManager:
 
         assert result is True
 
-        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4)
+        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4).
+        # Bug #1285: timeout is now driven by resource_config.cow_clone_timeout
+        # (ServerResourceConfig default 3600s), not a hardcoded 120.
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             golden_path,
             activated_path,
-            preserve_attrs=False,
-            timeout=120,
+            preserve_attrs=True,
+            timeout=3600,
+            cancel_check=None,
         )
 
         # Verify git operations still run after the clone (no cp subprocess for clone)
@@ -385,12 +393,15 @@ class TestActivatedRepoManager:
 
         assert result is True
 
-        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4)
+        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4).
+        # Bug #1285: timeout is now driven by resource_config.cow_clone_timeout
+        # (ServerResourceConfig default 3600s), not a hardcoded 120.
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             golden_path,
             activated_path,
-            preserve_attrs=False,
-            timeout=120,
+            preserve_attrs=True,
+            timeout=3600,
+            cancel_check=None,
         )
 
         # For non-git repos, no cp subprocess (backend handles the clone)
@@ -758,6 +769,9 @@ class TestCloneWithCopyOnWriteUsesBackend:
         golden_repos_dict = {"test-repo": golden_repo}
         mock.golden_repos = golden_repos_dict
         mock.get_golden_repo.side_effect = lambda alias: golden_repos_dict.get(alias)
+        # Bug #1285: use the real dataclass so the config-driven timeout
+        # value in call-arg assertions reflects actual production wiring.
+        mock.resource_config = ServerResourceConfig()
         return mock
 
     @pytest.fixture
@@ -790,7 +804,7 @@ class TestCloneWithCopyOnWriteUsesBackend:
         """
         Story #1034 Commit 4: when clone_backend is injected, _clone_with_copy_on_write
         must call clone_backend.create_clone_at_path(source_path, dest_path,
-        preserve_attrs=False, timeout=<timeout>) instead of subprocess.run for cp.
+        preserve_attrs=True, timeout=<timeout>, cancel_check=None) instead of subprocess.run for cp.
         """
         source_path = temp_data_dir + "/source-repo"
         dest_path = temp_data_dir + "/dest-repo"
@@ -799,11 +813,14 @@ class TestCloneWithCopyOnWriteUsesBackend:
         with patch("subprocess.run") as mock_subprocess:
             manager_with_backend._clone_with_copy_on_write(source_path, dest_path)
 
+        # Bug #1285: timeout is now driven by resource_config.cow_clone_timeout
+        # (ServerResourceConfig default 3600s), not a hardcoded 120.
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             source_path,
             dest_path,
-            preserve_attrs=False,
-            timeout=120,
+            preserve_attrs=True,
+            timeout=3600,
+            cancel_check=None,
         )
         # Direct subprocess.run for cp must NOT be called (backend handles it)
         cp_calls = [

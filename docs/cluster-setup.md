@@ -55,6 +55,8 @@ Golden repositories (source code clones) must be accessible at the same filesyst
 192.168.60.23:/path/to/export /mnt/cow-storage nfs4 soft,timeo=30,retrans=3,_netdev 0 0
 ```
 
+**Exception -- the golden-repos mount**: When using the CoW Storage Daemon, the golden-repos directory itself is a separate NFS mount that MUST use `vers=3,nolock,hard` (NFSv3, not NFSv4, and `hard` not `soft`). Git's `index-pack` step during golden-repo indexing mmaps its pack and index files and fails on an NFSv4 mount and on a `soft` mount. This is a deliberate difference from the clone mount above; apply `hard` specifically to the golden-repos mount. See [Golden Repository Shared Storage (CoW Daemon Dev Clusters)](#golden-repository-shared-storage-cow-daemon-dev-clusters) below for the full configuration and rationale.
+
 ---
 
 ## Fresh Cluster Setup from Scratch
@@ -111,6 +113,7 @@ What the script does:
 4. Creates `~/.cidx-server/data/golden-repos/`, `~/.cidx-server/logs/`, `~/.cidx-server/locks/`
 5. Creates a default `~/.cidx-server/config.json` with `storage_mode: "sqlite"` if none exists
 6. Creates, enables, and starts the `cidx-server` systemd service
+7. Installs and enables the `cidx-auto-update.service` and `cidx-auto-update.timer` units, tracking `--branch` (default `master`) -- see [Auto-Update Service](#auto-update-service)
 
 Verify the installation completes without errors:
 
@@ -329,6 +332,8 @@ Stop the server after installation to configure it before it starts:
 sudo systemctl stop cidx-server
 ```
 
+The installer also provisions the `cidx-auto-update` units on this node; set `--branch` to the branch this cluster tracks (for example `staging`) so the new node does not silently deploy a different branch than its peers -- see [Auto-Update Service](#auto-update-service).
+
 ### Step 2: Configure config.json
 
 Edit `~/.cidx-server/config.json` with the same `postgres_dsn` as the other nodes, but a unique `node_id`:
@@ -370,6 +375,8 @@ Without this, the load balancer health checks will fail and the node will not re
 ### Step 3: Mount Shared Storage
 
 Mount the NFS volume containing golden repositories at the same path as the other nodes, for example `/home/cidx/.cidx-server/data/golden-repos`. The exact mount path depends on your infrastructure; it must match the `target_path` and `clone_path` values stored in the PostgreSQL `global_repos` and `golden_repos_metadata` tables.
+
+For a CoW Storage Daemon dev cluster, the golden-repos directory is a separate NFSv3 mount with specific options (`vers=3,nolock,hard`) and the daemon host uses a bind mount instead. Configure it per [Golden Repository Shared Storage (CoW Daemon Dev Clusters)](#golden-repository-shared-storage-cow-daemon-dev-clusters) -- do not skip the mount options, or golden repos will not be cross-node visible.
 
 ### Step 4: Start the Server
 
@@ -423,6 +430,171 @@ The dashboard displays per node:
 The carousel shows one card per distinct `node_id` in the latest snapshots. In a three-node cluster, three cards rotate through.
 
 The node role (`scheduler` vs `worker`) is shown on the heartbeat panel, populated from the `cluster_nodes.role` column. The node running the scheduler (the leader) shows `scheduler`; all others show `worker`.
+
+---
+
+## Golden Repository Shared Storage (CoW Daemon Dev Clusters)
+
+When a development cluster uses the CoW Storage Daemon (see [CoW Storage Setup Guide](cow-storage-setup.md)) as its shared backend, golden repositories require handling that is easy to get wrong. The configuration below was verified live while debugging a three-node cluster. Follow it exactly.
+
+### Golden Repos Must Live on the Shared Mount
+
+The server derives the golden-repos directory as `<server_dir>/data/golden-repos`: `golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"` (`src/code_indexer/server/startup/lifespan.py:134`). This subpath is hard-coded. It is NOT independently configurable -- there is no config field to relocate it. On startup the server also runs an NFS atomic-create self-check against the `cidx-meta` subdirectory of this path (`run_nfs_atomic_create_self_check(Path(golden_repos_dir) / "cidx-meta")`, `lifespan.py:1386`), so the path must be a functioning shared filesystem.
+
+Therefore, on EVERY cluster node, `~/.cidx-server/data/golden-repos` MUST resolve to the shared cow-storage storage, never per-node local disk.
+
+- Daemon host (the node that runs cow-storage-daemon): bind-mount a `golden-repos` subdirectory of the daemon `base_path` onto the golden-repos path. A node cannot NFS-mount from itself, so it uses a bind mount.
+
+```bash
+sudo mkdir -p ~/.cidx-server/data/golden-repos
+sudo mount --bind /srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
+# Persist in fstab
+echo '/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  none  bind  0  0' | sudo tee -a /etc/fstab
+```
+
+- Every other node: NFS-mount that same daemon-side `golden-repos` subdirectory at the same path (mount options below).
+
+Failure mode if this stays on local disk: golden repos are only queryable on the node that indexed them. A query that HAProxy routes to any other node returns 0 results, because that node's local `golden-repos` directory does not contain the index. The repos are not cross-node visible.
+
+### NFS Mount Options (NFSv3, nolock, hard)
+
+Mount the golden-repos subdirectory with NFSv3 and client-side locking -- NOT NFSv4:
+
+```bash
+sudo mount -t nfs -o vers=3,nolock,hard,_netdev \
+  <daemon-host>:/srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
+# Persist in fstab
+echo '<daemon-host>:/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  nfs  vers=3,nolock,hard,_netdev  0  0' | sudo tee -a /etc/fstab
+```
+
+Why NFSv3 with `nolock`, not NFSv4: mounting golden-repos over NFSv4 (`nfs4` / `vers=4.x`) causes `git index-pack` to fail during golden-repo clone+index with `fatal: write error: Bad file descriptor` followed by `fatal: fetch-pack: invalid index-pack output`. This is NFSv4 locking plus mmap semantics interacting badly with git's pack writing. NFSv3 with `nolock` (client-side locking, equivalent to `local_lock=all`) avoids it. Reproduced and fixed live.
+
+Why `hard`, not `soft`: a `soft` mount returns an I/O error on a transient timeout, which surfaces as SIGBUS on the mmap'd pack/index files git touches during indexing. `hard` blocks and retries instead, which is what git's mmap path requires here. This is a deliberate exception to the general clone-mount guidance in the [Shared Storage](#shared-storage) prerequisite (which recommends `soft` for `/mnt/cow-storage` to prevent D-state hangs in background jobs). Apply `hard` specifically to the golden-repos mount.
+
+### NFS Export Must Be async (Dev)
+
+On the daemon host, export the cow-storage directory with `async`, not `sync`, for dev clusters:
+
+```
+/home/<user>/cow-storage  <subnet>/24(rw,async,no_subtree_check,no_root_squash)
+```
+
+Why: `sync` forces a server-side commit on every write, making golden-repo indexing pathologically slow (measured ~65x slower). `async` acknowledges writes before they reach stable storage. This is acceptable for dev-only installs, where the single cow-storage host is already a documented single point of failure (see below). Do not use `async` where write durability matters.
+
+### Topology and Single Point of Failure
+
+In this dev model the cow-storage-daemon runs on ONE node and acts as the shared disk -- an ONTAP-like emulator for development. CoW clone operations go through the daemon's REST API; the resulting storage is consumed by the other nodes over NFS. Both golden repos and cow-daemon clones live on this single shared disk. If the cow-storage host goes down, the cluster loses its shared storage and is effectively down. This single point of failure is by design and acceptable for development installs only.
+
+### Known Limitation: Temporal Indexing over NFS
+
+Per-commit dual-embedder TEMPORAL indexing (Epic #1289) over the NFS golden-repos mount is latency-bound: it performs many small HNSW quarterly-shard writes, and over NFS this is currently slow enough that a temporal-index job can exceed the background `JobReconciliationService` `max_execution_time` and be reaped/failed.
+
+Regular SEMANTIC golden-repo indexing over NFS works correctly and is cross-node-queryable. Temporal-on-NFS performance is an open issue. Until it is optimized, run temporal indexing on local storage or raise the job timeout.
+
+---
+
+## Auto-Update Service
+
+Each node keeps itself current by pulling and redeploying the tracked git branch on a timer. Understanding the topology matters because the application server does NOT update itself -- a separate systemd unit does, and if that unit is missing the node silently never advances.
+
+### Two-Service Topology (WHY it is split)
+
+There are two distinct systemd units per node, with separate responsibilities:
+
+- `cidx-server.service` -- the long-running application server. It only SIGNALS that it wants to be restarted (it writes a restart-signal file and advances a `launch_restart_generation` target). It never pulls, builds, or restarts itself.
+- `cidx-auto-update.service` -- a `Type=oneshot` unit that runs as the install user with `PrivateTmp=yes`. It is what actually fetches, installs, and restarts the application. It is fired by `cidx-auto-update.timer` every 60 seconds (`OnUnitActiveSec=60`).
+
+The split exists so that an in-place code update can restart the server cleanly from an outside process, rather than a process trying to replace its own running image.
+
+Failure mode if the auto-update units are absent (for example on a node installed before the units were provisioned): the node never self-updates, and `cidx-server` logs a line like the following indefinitely, because its requested restart generation is never applied:
+
+```
+launch_restart_generation target > applied ... check cidx-auto-update service status
+```
+
+That log line is the primary symptom of a node that is missing (or has a stopped) auto-update timer.
+
+### What Each Fire Does
+
+`cidx-auto-update.service` runs `python3 -m code_indexer.server.auto_update.run_once`. It reads the branch to track from the `CIDX_AUTO_UPDATE_BRANCH` environment variable set in the service unit; if that variable is unset it defaults to `master`.
+
+On each fire it performs:
+
+1. `git fetch` of the tracked branch. If the remote tip equals the local checkout, it does nothing and exits.
+2. If the remote tip differs, it runs a deployment: `git pull`, then build/install (hnswlib submodule, `pip install`, ripgrep, Rust toolchain if missing, pace-maker, Claude CLI), then systemd/config hardening (`MALLOC_ARENA_MAX`, the sudoers self-restart rule, memory overcommit, swap), then restart `cidx-server`.
+3. If the update changed the updater's OWN code, the service self-restarts mid-deploy: it writes a pending-redeploy marker, re-executes, and resumes so the deploy always finishes running the new code.
+
+The FIRST deploy on a fresh node is heavy -- it compiles hnswlib and installs the Rust toolchain -- and can take several minutes. Subsequent deploys (no toolchain build) are fast.
+
+### How the Installer Provisions It (v11.21.0+)
+
+`scripts/install-cidx-server.sh` installs and enables BOTH units. It renders `cidx-auto-update.service` from the shipped template at `src/code_indexer/server/auto_update/templates/cidx-auto-update.service`, substituting the install user, the repository path, and the branch. The same template backs both the installer and the CLI retrofit command below, so the unit text is never duplicated.
+
+Two flags control the branch:
+
+- `--branch` -- the git branch to install and, by default, the branch the auto-updater tracks.
+- `--auto-update-branch` -- overrides the auto-update branch independently. When omitted it defaults to whatever `--branch` is.
+
+CRITICAL: a staging node MUST be installed with the branch set to `staging`, otherwise the auto-updater tracks `master` and the node will silently deploy production code. Set it explicitly:
+
+```bash
+bash scripts/install-cidx-server.sh \
+  --branch staging \
+  --voyage-key <voyage-api-key> \
+  --port 8090
+```
+
+To track a different branch than the one checked out (rare), add `--auto-update-branch <branch>`.
+
+### Retrofitting an Existing Node
+
+A node installed before the installer provisioned these units has `cidx-server.service` but no `cidx-auto-update` units, and shows the `launch_restart_generation target > applied` symptom above. To retrofit it, run the shipped CLI command on that node (available as of v11.21.0):
+
+```bash
+cidx server install-auto-update --branch staging
+```
+
+This renders the service template (substituting the install user, repository path, and branch), installs both `cidx-auto-update.service` and `cidx-auto-update.timer` into `/etc/systemd/system/`, runs `systemctl daemon-reload`, and enables and starts the timer. Use `--branch master` for a production node.
+
+Before retrofitting, confirm the repository checkout is already ON the branch you intend to track -- the auto-updater pulls that branch into the existing checkout.
+
+### Operate and Troubleshoot
+
+Check that the timer is active and see when it next fires:
+
+```bash
+systemctl status cidx-auto-update.timer
+systemctl list-timers cidx-auto-update.timer
+```
+
+Watch deploys as they happen:
+
+```bash
+journalctl -u cidx-auto-update -f
+```
+
+Verify which branch a node is tracking (look for `CIDX_AUTO_UPDATE_BRANCH`):
+
+```bash
+systemctl show cidx-auto-update.service -p Environment
+```
+
+Confirm the version actually applied after a deploy:
+
+```bash
+cidx --version
+```
+
+Expected log lines that are NOT errors:
+
+- `Failed with result 'signal'` during a deploy that changed the updater itself. This is the self-restart seam (the service re-execs to finish the deploy on the new code), not a failure.
+- `Failed to enter maintenance mode: 401`. This benign warning appears when no admin token is available; the deploy proceeds anyway.
+
+### Robustness Note (v11.21.0)
+
+A heavy first deploy (compiling hnswlib, installing Rust) is CPU-bound and transiently starves systemd and sudo, because `pam_systemd` blocks while PID 1 is busy. This is worsened if a `hard` NFS mount points at an unreachable node, since operations on that mount hang. To keep the systemd control-plane steps (daemon-reload, `systemctl restart`, the sudoers edits) from being silently skipped under that pressure, the deployment executor uses a 120-second per-attempt timeout with bounded retry on those operations (`SYSTEMD_OP_TIMEOUT_SECONDS`, `_run_systemd_op_with_retry` in `deployment_executor.py`).
+
+This interacts with the single-point-of-failure note in [Topology and Single Point of Failure](#topology-and-single-point-of-failure) above: if the CoW/NFS host node is down, `hard` NFS mounts on the other nodes hang, which can stall systemd operations there and delay or fail an in-progress deploy on every node. Restore the CoW/NFS host before expecting auto-updates to complete cluster-wide.
 
 ---
 

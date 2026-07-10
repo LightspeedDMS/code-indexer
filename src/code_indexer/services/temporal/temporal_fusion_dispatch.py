@@ -1,29 +1,24 @@
 """Temporal fusion dispatch — shared query execution across all paths (Story #634).
 
-Routes temporal queries through parallel multi-provider execution with
-RRF fusion, timeout handling, and single-provider fallback.
+Story #1291: recall resolves to EXACTLY ONE embedder's shard set per query
+(RRF-fused only across that embedder's own quarterly shards) -- there is no
+longer a cross-embedder parallel-fan-out-and-fuse path (AC9 forbids mixing
+providers in a single ranked result set).
 Used by CLI, server (semantic_query_manager), multi_search_service, and daemon.
 """
 
 import logging
-from concurrent.futures import (
-    Future,
-    ThreadPoolExecutor,
-    TimeoutError as FuturesTimeoutError,
-    as_completed,
-)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .temporal_fusion import (
     TEMPORAL_OVERFETCH_MULTIPLIER,
-    fuse_rrf_multi,
     make_temporal_dedup_key,
+    merge_shards_by_score,
 )
 from .temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
-    get_model_name_for_provider,
 )
 from .temporal_health import (
     filter_healthy_temporal_providers,
@@ -32,7 +27,39 @@ from .temporal_health import (
 )
 from ..path_pattern_matcher import parse_exclude_patterns
 
+# Story #1293 (Epic #1288) S1b [A5]: guarded module-level imports (same
+# lazy-import-safe pattern as storage/filesystem_vector_store.py) so the CLI
+# startup import budget is unaffected in stripped/CLI-only environments while
+# still being real, patchable module attributes for the up-front compute-once
+# reuse-seam embed call in execute_temporal_query_with_fusion.
+try:
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+except ImportError:  # pragma: no cover
+    coalesced_query_embedding = None  # type: ignore[assignment]
+
+try:
+    from code_indexer.server.services.search_embed_event_emit import (
+        emit_embed_event,
+    )
+except ImportError:  # pragma: no cover
+    emit_embed_event = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+
+class TemporalEmbedderUnavailableError(RuntimeError):
+    """Raised when a registered TemporalEmbedder adapter has no query-capable
+    client (e.g. StandardTemporalEmbedder with no Cohere API key configured).
+
+    Code review Finding 3 (Story #1291): _build_query_provider_for_embedder
+    must fail loud with this typed error instead of returning a bare None --
+    a None provider would otherwise propagate into TemporalSearchService and
+    only surface as an opaque AttributeError deep inside query_temporal()
+    (Messi #13 anti-silent-failure).
+    """
+
 
 TEMPORAL_QUERY_TIMEOUT_SECONDS = 15
 
@@ -67,22 +94,31 @@ def execute_temporal_query_with_fusion(
     limit: int,
     time_range: Optional[Tuple[str, str]] = None,
     file_path_filter: Optional[str] = None,
-    show_evolution: bool = False,
     provider_filter: Optional[str] = None,
     # Server params (Story #640, audit fix B2)
     at_commit: Optional[str] = None,
-    include_removed: Optional[bool] = None,
     language: Optional[str] = None,
     exclude_language: Optional[str] = None,
-    evolution_limit: Optional[int] = None,
     exclude_path: Optional[str] = None,
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
     # Story #1108: per-request cache bypass flag
     no_embedding_cache_shortcut: bool = False,
+    # Story #1291 AC7/AC8: explicit embedder override for recall selection.
+    temporal_embedder: Optional[str] = None,
 ) -> Any:
-    """Execute temporal query with multi-provider fusion.
+    """Execute a temporal query against EXACTLY ONE embedder's collections.
+
+    Story #1291 (AC7/AC8/AC9): recall selects a SINGLE embedder's shard set
+    per query -- an omitted `temporal_embedder` uses
+    `config.temporal.active_embedder`; an explicit `temporal_embedder`
+    selects THAT embedder and NEVER falls back to active_embedder (an
+    explicit target with zero indexed collections returns an empty, typed
+    "not indexed for embedder X" result). Cross-embedder RRF fusion is
+    structurally impossible: discovery below returns at most one provider
+    group, and a defensive invariant check below fails loud if that
+    contract is ever violated.
 
     Args:
         config: CIDX Config object
@@ -92,30 +128,50 @@ def execute_temporal_query_with_fusion(
         limit: Max results to return
         time_range: Optional time range filter as (start_date, end_date) tuple
         file_path_filter: Optional file path filter
-        show_evolution: Whether to show file evolution timeline
         provider_filter: Optional specific provider to query (bypasses fusion)
-        at_commit: Query at specific commit (server param, resolved by caller)
-        include_removed: Include removed files (server param, converted to diff_types by caller)
+        at_commit: Query at specific commit hash or ref (Bug #1301: resolved +
+            VALIDATED here via resolve_commit_timestamp -- an unresolvable
+            ref raises ValueError; the resolved timestamp scopes results to
+            commits AT or BEFORE it)
         language: Filter by language (server param)
         exclude_language: Exclude language (server param)
-        evolution_limit: Limit evolution entries (server param, applied by caller)
         exclude_path: Exclude path pattern (server param)
         chunk_type: Filter by chunk type (e.g. 'function', 'class', 'commit_diff')
+        temporal_embedder: Optional explicit embedder name override (AC7/AC8).
 
     Returns:
-        TemporalSearchResults with fused results
+        TemporalSearchResults for the resolved embedder's collections (RRF
+        fused ONLY across that embedder's own quarterly shards).
     """
-    from .temporal_search_service import TemporalSearchResults
+    from .temporal_search_service import (
+        TemporalSearchResults,
+        resolve_commit_timestamp,
+    )
 
     # Auto-migrate legacy collection if present (Story #629, wired by audit fix F2)
     from .temporal_migration import migrate_legacy_temporal_collection
 
     migrate_legacy_temporal_collection(index_path, config)
 
+    # Bug #1301: resolve + VALIDATE at_commit ONCE, up front, before any shard
+    # is queried. This must happen here (not inside TemporalSearchService,
+    # which is invoked per-shard inside _query_shards_raw's try/except) so an
+    # unresolvable ref/hash raises ValueError immediately instead of being
+    # swallowed as a per-shard warning (which would silently return empty
+    # results with no error -- the exact silent no-op this bug fixes).
+    at_commit_ts: Optional[int] = None
+    if at_commit:
+        at_commit_ts = resolve_commit_timestamp(vector_store.project_root, at_commit)
+
     # C1/C2 fix (Story #1171): use shard-pruning discovery that calls get_overlapping_shards
-    # so only shards overlapping time_range are queried.
+    # so only shards overlapping time_range are queried. Story #1291: discovery
+    # resolves to AT MOST ONE embedder (the override or active_embedder).
     provider_groups_raw = _discover_provider_shards_with_pruning(
-        config, index_path, time_range, provider_filter
+        config,
+        index_path,
+        time_range,
+        provider_filter,
+        temporal_embedder=temporal_embedder,
     )
 
     # Health-gate: filter out unhealthy shards per provider
@@ -126,132 +182,34 @@ def execute_temporal_query_with_fusion(
         if healthy_shards:
             provider_groups.append((base_name, healthy_shards))
 
+    # AC9 (defensive invariant, Messi #15): discovery must NEVER resolve to
+    # more than one embedder -- cross-embedder fusion is forbidden. This is
+    # a fail-loud guard, not a happy-path branch: it should be unreachable
+    # given _discover_provider_shards_with_pruning's contract.
+    if len(provider_groups) > 1:
+        raise RuntimeError(
+            "Internal invariant violation: temporal query resolved to "
+            f"{len(provider_groups)} embedder(s) "
+            f"({[base for base, _ in provider_groups]}) -- cross-embedder "
+            f"fusion is forbidden (Story #1291 AC9)."
+        )
+
     if not provider_groups:
-        logger.warning("No temporal indexes available for query")
-        return TemporalSearchResults(
-            results=[],
-            query=query_text,
-            filter_type="time_range" if time_range else "none",
-            filter_value=time_range,
-            warning=(
-                "No temporal indexes available. "
-                "Run cidx index --index-commits to create temporal indexes."
-            ),
-        )
-
-    if len(provider_groups) == 1:
-        # Single provider: query its shards sequentially, merge with RRF
-        base_name, shards = provider_groups[0]
-        results_by_shard = _query_shards_raw(
-            config,
-            vector_store,
-            shards,
-            query_text,
-            limit * _effective_overfetch_multiplier(vector_store),
-            time_range,
-            file_path_filter,
-            language=language,
-            exclude_language=exclude_language,
-            exclude_path=exclude_path,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-        )
-        if not results_by_shard:
-            return TemporalSearchResults(
-                results=[],
-                query=query_text,
-                filter_type="time_range" if time_range else "none",
-                filter_value=time_range,
-            )
-        fused = fuse_rrf_multi(
-            results_by_provider=results_by_shard,
-            dedup_key=make_temporal_dedup_key,
-            limit=limit,
-        )
-        return TemporalSearchResults(
-            results=fused,
-            query=query_text,
-            filter_type="time_range" if time_range else "none",
-            filter_value=time_range,
-            total_found=len(fused),
-        )
-
-    # Multiple providers: providers run in parallel, each provider's shards are
-    # queried sequentially within the provider. Single RRF pass over ALL shard
-    # results from ALL providers (H1 fix: eliminates double-RRF).
-    all_results_by_shard: Dict[str, list] = {}
-    warnings_multi: List[str] = []
-    failed_providers: List[str] = []
-
-    def _run_provider(base_name: str, shards: List[str]) -> Dict[str, list]:
-        return _query_shards_raw(
-            config,
-            vector_store,
-            shards,
-            query_text,
-            limit * _effective_overfetch_multiplier(vector_store),
-            time_range,
-            file_path_filter,
-            language=language,
-            exclude_language=exclude_language,
-            exclude_path=exclude_path,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-        )
-
-    from .temporal_collection_naming import collection_display_name
-
-    executor = ThreadPoolExecutor(max_workers=len(provider_groups))
-    try:
-        future_to_base: Dict[Future, str] = {
-            executor.submit(_run_provider, base_name, shards): base_name
-            for base_name, shards in provider_groups
-        }
-        try:
-            for future in as_completed(
-                future_to_base, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
-            ):
-                base_name = future_to_base[future]
-                try:
-                    per_shard = future.result()
-                    all_results_by_shard.update(per_shard)
-                    record_temporal_success(base_name, _UNKNOWN_LATENCY_MS)
-                except Exception as e:
-                    record_temporal_failure(base_name, _UNKNOWN_LATENCY_MS)
-                    failed_providers.append(base_name)
-                    display = collection_display_name(base_name)
-                    logger.warning("Temporal provider %s failed: %s", display, e)
-                    warnings_multi.append(f"Provider {display} failed: {e}")
-        except FuturesTimeoutError:
-            for future, base_name in future_to_base.items():
-                if not future.done():
-                    future.cancel()
-                    record_temporal_failure(base_name, _UNKNOWN_LATENCY_MS)
-                    failed_providers.append(base_name)
-                    display = collection_display_name(base_name)
-                    logger.warning(
-                        "Temporal provider %s timed out after %ss",
-                        display,
-                        TEMPORAL_QUERY_TIMEOUT_SECONDS,
-                    )
-                    warnings_multi.append(
-                        f"Provider {display} timed out after "
-                        f"{TEMPORAL_QUERY_TIMEOUT_SECONDS}s"
-                    )
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    if not all_results_by_shard:
-        if failed_providers:
+        if temporal_embedder:
+            # AC8: an EXPLICIT override with no v2 collections is a typed
+            # "not indexed for this embedder" result -- NEVER a silent
+            # redirect to active_embedder.
             warning_msg = (
-                "; ".join(warnings_multi) if warnings_multi else "All providers failed"
+                f"Temporal embedder '{temporal_embedder}' has no indexed "
+                f"collections. Run cidx index --index-commits with "
+                f"temporal.embedders including '{temporal_embedder}' first."
             )
         else:
-            warning_msg = None
+            warning_msg = (
+                "No temporal indexes available. "
+                "Run cidx index --index-commits to create temporal indexes."
+            )
+        logger.warning(warning_msg)
         return TemporalSearchResults(
             results=[],
             query=query_text,
@@ -260,19 +218,105 @@ def execute_temporal_query_with_fusion(
             warning=warning_msg,
         )
 
-    fused = fuse_rrf_multi(
-        results_by_provider=all_results_by_shard,
+    # Exactly one provider: query its (own) shards sequentially, then merge
+    # ACROSS THAT EMBEDDER'S OWN quarterly shards only (never another
+    # embedder's). Quarterly shards are a DISJOINT partition (a commit
+    # lives in exactly one shard) -- RRF's reciprocal-rank scheme is the
+    # wrong operator for disjoint partitions (Bug #1299): it ranks by each
+    # shard's own LOCAL rank position, not true cross-shard relevance.
+    # merge_shards_by_score preserves the TRUE cosine score across shards.
+    base_name, shards = provider_groups[0]
+
+    # Story #1293 S1b [A5]: compute-once reuse seam. Without this, each
+    # sequential shard query below re-embeds the SAME query text through the
+    # SAME embedder (base_name is resolved to at most one embedder) -- 1 miss
+    # + (N-1) phantom warm hits within a single request. Compute the
+    # embedding ONCE here (mirrors omni's _compute_shared_query_vector),
+    # emit exactly one search_embed_event row, then pass the vector down so
+    # every shard skips embedding entirely. Fail-open: an up-front embed
+    # failure falls back EXPLICITLY to per-shard embedding (never a silent
+    # drop of the query -- Messi #2 anti-fallback / #13 anti-silent-failure).
+    precomputed_query_vector: Optional[List[float]] = None
+    if coalesced_query_embedding is not None:
+        try:
+            # Bug #1321: base_name is the COLLECTION base name (e.g.
+            # 'code-indexer-temporal-voyage_context_4'), NOT the real
+            # embedder MODEL name ('voyage-context-4'). Passing it straight
+            # to _build_query_provider_for_embedder made it construct a
+            # VoyageAIClient whose .model was the collection name, which the
+            # tokenizer loader then tried to resolve as a HuggingFace repo
+            # ('voyageai/code-indexer-temporal-voyage_context_4') -- a 401 on
+            # every temporal query. _create_embedding_provider_for_collection
+            # is the SAME reverse-mapping helper already used by the
+            # per-shard path (_query_single_provider) to correctly resolve a
+            # collection name back to its configured embedder model name.
+            _reuse_provider = _create_embedding_provider_for_collection(
+                config, base_name
+            )
+            precomputed_query_vector, _temporal_embed_meta = coalesced_query_embedding(
+                _reuse_provider,
+                query_text,
+                embedding_purpose="query",
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            )
+            if emit_embed_event is not None:
+                emit_embed_event(_temporal_embed_meta)
+        except Exception as _reuse_exc:  # noqa: BLE001
+            logger.warning(
+                "temporal reuse seam: up-front embed failed for embedder "
+                "'%s' (%s) -- falling back to per-shard embedding",
+                base_name,
+                _reuse_exc,
+            )
+            precomputed_query_vector = None
+
+    results_by_shard = _query_shards_raw(
+        config,
+        vector_store,
+        shards,
+        query_text,
+        limit * _effective_overfetch_multiplier(vector_store),
+        time_range,
+        file_path_filter,
+        language=language,
+        exclude_language=exclude_language,
+        exclude_path=exclude_path,
+        diff_types=diff_types,
+        author=author,
+        chunk_type=chunk_type,
+        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        at_commit_ts=at_commit_ts,
+        precomputed_query_vector=precomputed_query_vector,
+    )
+    if not results_by_shard:
+        return TemporalSearchResults(
+            results=[],
+            query=query_text,
+            filter_type="time_range" if time_range else "none",
+            filter_value=time_range,
+        )
+    merged = merge_shards_by_score(
+        results_by_provider=results_by_shard,
         dedup_key=make_temporal_dedup_key,
         limit=limit,
     )
-    warning_str = "; ".join(warnings_multi) if warnings_multi else None
+    # Bug #1299 (multi-shard half): the top-`limit` subset was just selected
+    # by TRUE relevance (score) above. Re-sort ONLY that selected subset
+    # reverse-chronologically for display (newest to oldest, like git log)
+    # -- mirrors the identical Phase 3 pattern in
+    # TemporalSearchService.query_temporal so display order is consistent
+    # whether a query resolves to one shard or several.
+    merged = sorted(
+        merged,
+        key=lambda r: r.temporal_context.get("commit_timestamp", 0),
+        reverse=True,
+    )
     return TemporalSearchResults(
-        results=fused,
+        results=merged,
         query=query_text,
         filter_type="time_range" if time_range else "none",
         filter_value=time_range,
-        total_found=len(fused),
-        warning=warning_str,
+        total_found=len(merged),
     )
 
 
@@ -281,19 +325,26 @@ def _discover_provider_shards_with_pruning(
     index_path: Path,
     time_range: Optional[Tuple[str, str]],
     provider_filter: Optional[str] = None,
+    temporal_embedder: Optional[str] = None,
 ) -> List[Tuple[str, List[str]]]:
-    """Discover per-provider overlapping shards, pruned to the query's time_range.
+    """Discover the SINGLE resolved embedder's overlapping shards (AC7/AC8/AC9).
 
-    For each configured embedding provider, calls get_overlapping_shards() to
-    find only shard directories whose date range overlaps [time_range start, time_range end].
-    Legacy monolithic collections are included when they exist on disk (AC4).
+    Story #1291: resolves to AT MOST ONE embedder -- `temporal_embedder`
+    when explicitly given (NEVER falling back to active_embedder even if
+    that embedder has no shards), otherwise `config.temporal.active_embedder`
+    only. This is a hard change from Story #1290's behavior of iterating
+    the FULL `config.temporal.embedders` list (which allowed cross-embedder
+    RRF fusion downstream) -- AC9 forbids that outright.
+
+    Calls get_overlapping_shards() to find only shard directories whose date
+    range overlaps [time_range start, time_range end]. Legacy monolithic
+    collections are included when they exist on disk (AC4).
 
     Returns:
-        List of (provider_base_name, [shard_names_in_ascending_chrono_order]).
-        Providers with no overlapping shards are excluded.
+        List of AT MOST ONE (embedder_base_name, [shard_names]) tuple. Empty
+        list when the resolved embedder has no overlapping shards.
     """
     from datetime import datetime, timezone
-    from ..embedding_factory import EmbeddingProviderFactory
     from .temporal_collection_naming import (
         get_overlapping_shards,
         sanitize_model_name as _sanitize,
@@ -320,36 +371,37 @@ def _discover_provider_shards_with_pruning(
             else datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         )
 
-    configured = EmbeddingProviderFactory.get_configured_providers(config)
-    result: List[Tuple[str, List[str]]] = []
+    if temporal_embedder:
+        # AC8: explicit override -- ONLY this embedder, no fallback.
+        resolved_embedder: Optional[str] = temporal_embedder
+    else:
+        # AC7: omitted override -- active_embedder ONLY (never the full
+        # config.temporal.embedders set -- that would allow cross-embedder
+        # fusion downstream, forbidden by AC9).
+        _active = getattr(config.temporal, "active_embedder", None)
+        resolved_embedder = _active if isinstance(_active, str) and _active else None
 
-    for provider_name in configured:
-        if provider_filter and provider_filter not in provider_name:
-            continue
-        try:
-            model_name = get_model_name_for_provider(provider_name, config)
-        except ValueError:
-            logger.debug("Skipping provider %s (unknown model)", provider_name)
-            continue
+    if not resolved_embedder:
+        return []
 
-        shards = get_overlapping_shards(model_name, index_path, dt_start, dt_end)
-        if shards:
-            base_name = f"{TEMPORAL_COLLECTION_PREFIX}{_sanitize(model_name)}"
-            # Log each shard at DEBUG, distinguishing sharded vs legacy (C2 call site)
-            for shard in shards:
-                if is_sharded_temporal_collection(shard):
-                    logger.debug(
-                        "Provider %s: including shard %s", provider_name, shard
-                    )
-                else:
-                    logger.debug(
-                        "Provider %s: including legacy collection %s",
-                        provider_name,
-                        shard,
-                    )
-            result.append((base_name, shards))
+    if provider_filter and provider_filter not in resolved_embedder:
+        return []
 
-    return result
+    shards = get_overlapping_shards(resolved_embedder, index_path, dt_start, dt_end)
+    if not shards:
+        return []
+
+    base_name = f"{TEMPORAL_COLLECTION_PREFIX}{_sanitize(resolved_embedder)}"
+    for shard in shards:
+        if is_sharded_temporal_collection(shard):
+            logger.debug("Embedder %s: including shard %s", resolved_embedder, shard)
+        else:
+            logger.debug(
+                "Embedder %s: including legacy collection %s",
+                resolved_embedder,
+                shard,
+            )
+    return [(base_name, shards)]
 
 
 def _query_shards_raw(
@@ -367,6 +419,8 @@ def _query_shards_raw(
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
     no_embedding_cache_shortcut: bool = False,
+    at_commit_ts: Optional[int] = None,
+    precomputed_query_vector: Optional[List[float]] = None,
 ) -> Dict[str, list]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
@@ -405,6 +459,8 @@ def _query_shards_raw(
                 author=author,
                 chunk_type=chunk_type,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                at_commit_ts=at_commit_ts,
+                precomputed_query_vector=precomputed_query_vector,
             )
             if result.results:
                 results_by_shard[collection_display_name(shard_name)] = result.results
@@ -475,6 +531,13 @@ def _query_single_provider(
     chunk_type: Optional[str] = None,
     # Story #1108: per-request cache bypass flag
     no_embedding_cache_shortcut: bool = False,
+    # Bug #1301: pre-resolved at_commit UNIX timestamp (resolved once by the
+    # caller via resolve_commit_timestamp -- never re-resolved per shard).
+    at_commit_ts: Optional[int] = None,
+    # Story #1293 S1b [A5]: pre-computed query embedding (compute-once reuse
+    # seam across sequential shards of the SAME embedder). Forwarded verbatim
+    # to TemporalSearchService.query_temporal.
+    precomputed_query_vector: Optional[List[float]] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -511,6 +574,8 @@ def _query_single_provider(
             author=author,
             chunk_type=chunk_type,
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            at_commit_ts=at_commit_ts,
+            precomputed_query_vector=precomputed_query_vector,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:
@@ -528,50 +593,109 @@ def _query_single_provider(
     return results
 
 
+def _build_query_provider_for_embedder(config: Any, embedder_name: str) -> Any:
+    """Construct a QUERY-capable embedding provider pinned to `embedder_name`.
+
+    Story #1291: resolves via the SAME TemporalEmbedder registry used by the
+    INDEXING side (create_embedder), returning the adapter's already-pinned
+    internal client -- a VoyageAIClient for ContextualTemporalEmbedder, a
+    CohereEmbeddingProvider for StandardTemporalEmbedder. This is a drop-in
+    EmbeddingProvider for the existing FilesystemVectorStore.search() /
+    coalesced_query_embedding() plumbing (governor, cache, lane). Only
+    voyage_ai.py's get_embedding() routes voyage-context-4 through the
+    contextualized endpoint internally (AC14); Cohere has no equivalent
+    special-casing (embed-v4.0 uses the ordinary embed endpoint for both
+    indexing and query).
+
+    Registry-based resolution generalizes to any FUTURE registered adapter
+    automatically -- no per-embedder-family string matching. The legacy
+    Voyage-only construction is kept as a fallback ONLY for a name that
+    is not (or no longer) registered in the TemporalEmbedder registry.
+    """
+    from .embedders.contextual import ContextualTemporalEmbedder
+    from .embedders.registry import create_embedder as _create_temporal_embedder
+    from .embedders.standard import StandardTemporalEmbedder
+
+    try:
+        adapter = _create_temporal_embedder(embedder_name, config)
+    except KeyError:
+        adapter = None
+
+    if isinstance(adapter, (ContextualTemporalEmbedder, StandardTemporalEmbedder)):
+        if adapter._client is None:
+            raise TemporalEmbedderUnavailableError(
+                f"Temporal embedder '{embedder_name}' is registered but has "
+                f"no query-capable client (missing credentials) -- cannot "
+                f"build a query provider for it."
+            )
+        return adapter._client
+
+    if not embedder_name.startswith("cohere"):
+        from ...config import VoyageAIConfig
+        from ...services.voyage_ai import VoyageAIClient
+
+        base_voyage_config = getattr(config, "voyage_ai", None)
+        if base_voyage_config is not None:
+            voyage_config = base_voyage_config.model_copy(
+                update={"model": embedder_name}
+            )
+        else:
+            voyage_config = VoyageAIConfig(model=embedder_name)
+        return VoyageAIClient(voyage_config)
+
+    raise ValueError(
+        f"Unsupported temporal embedder '{embedder_name}' -- no query-side "
+        f"provider constructor registered for this embedder family."
+    )
+
+
 def _create_embedding_provider_for_collection(config: Any, collection_name: str) -> Any:
     """Create the correct embedding provider for a temporal collection.
 
-    Reverse-maps the collection name to the provider name by matching the
-    model slug against each configured provider. Falls back to the primary
-    provider for legacy collections or unknown slugs.
+    Story #1290: reverse-maps the collection slug against
+    `config.temporal.embedders` (the per-commit embedder adapter registry),
+    NOT the regular semantic-search provider/model. Falls back to
+    `config.temporal.active_embedder` for legacy collections or unknown
+    slugs.
 
     Args:
         config: CIDX Config object
-        collection_name: Temporal collection name, e.g. 'code-indexer-temporal-voyage_code_3'
+        collection_name: Temporal collection name, e.g.
+            'code-indexer-temporal-voyage_context_4'
 
     Returns:
-        Configured EmbeddingProvider instance for the matching provider
+        Configured EmbeddingProvider instance pinned to the matching
+        temporal embedder's model.
     """
-    from ..embedding_factory import EmbeddingProviderFactory
-
     import re as _re
 
     slug = ""
     if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
         slug = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
-        # Strip quarterly shard suffix -YYYYQN before matching provider slug
+        # Strip quarterly shard suffix -YYYYQN before matching embedder slug
         slug = _re.sub(r"-\d{4}Q[1-4]$", "", slug)
 
-    configured = EmbeddingProviderFactory.get_configured_providers(config)
-    for provider_name in configured:
-        try:
-            model_name = get_model_name_for_provider(provider_name, config)
-            model_slug = sanitize_model_name(model_name)
-            if model_slug == slug:
-                return EmbeddingProviderFactory.create(
-                    config, provider_name=provider_name
-                )
-        except (KeyError, ValueError) as e:
-            logger.debug(
-                "Skipping provider %s while resolving collection: %s", provider_name, e
-            )
-            continue
+    embedders = list(getattr(config.temporal, "embedders", []) or [])
+    for embedder_name in embedders:
+        if sanitize_model_name(embedder_name) == slug:
+            return _build_query_provider_for_embedder(config, embedder_name)
 
+    fallback_embedder = getattr(config.temporal, "active_embedder", None)
     logger.warning(
-        "Could not determine provider for collection '%s', using primary provider",
+        "Could not match collection '%s' to a configured temporal embedder "
+        "(%s); falling back to active_embedder '%s'",
         collection_name,
+        embedders,
+        fallback_embedder,
     )
-    return EmbeddingProviderFactory.create(config)
+    if fallback_embedder:
+        return _build_query_provider_for_embedder(config, fallback_embedder)
+
+    raise ValueError(
+        f"Could not resolve an embedding provider for temporal collection "
+        f"'{collection_name}': no matching entry in config.temporal.embedders "
+        f"and no active_embedder configured."
+    )
 
 
 def _make_config_manager(config: Any) -> Any:

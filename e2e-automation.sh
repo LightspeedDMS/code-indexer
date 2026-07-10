@@ -660,8 +660,30 @@ CONFIG_EOF
 # ---------------------------------------------------------------------------
 start_pg_server() {
     _yellow "  Starting PG-backed uvicorn on ${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}..."
+    # Bug #1324 (reopened): ConfigService's first-boot PG runtime-config seed
+    # (_seed_runtime_to_pg -> _backfill_launch_keys_from_execstart) re-reads
+    # config.json from disk to decide whether host/port/workers were explicit
+    # operator intent -- but by that point an earlier, unconditional SQLite
+    # runtime-DB bootstrap step has already stripped those now-runtime-only
+    # keys out of config.json (Story #1197 moved them out of BOOTSTRAP_KEYS),
+    # so the check always sees them as "absent" and gap-fills from whatever
+    # REAL systemd cidx-server.service unit happens to be installed on the
+    # host (e.g. a dev box's own production-style install bound to
+    # 0.0.0.0:8000) instead of the actual 127.0.0.1 bind address of this
+    # throwaway test server. That wrong host value then makes
+    # should_use_secure_cookies() mark the web-session cookie Secure=True even
+    # though the server is plain-HTTP-only on 127.0.0.1, so httpx (and any
+    # real browser) refuses to resend it and every freshly-created session
+    # looks unauthenticated on the very next request (this exact failure mode
+    # was empirically reproduced end-to-end). SYSTEMD_UNIT_DIR is the
+    # product's own pre-existing "configurable for testing" override
+    # (deployment_executor.py) -- pointing it at a directory that never
+    # contains a cidx-server.service unit makes this ephemeral Phase 6 server
+    # immune to whatever systemd units exist on the host, so the gap-fill
+    # correctly falls back to the ServerConfig default of 127.0.0.1 instead.
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_SERVER_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
+    SYSTEMD_UNIT_DIR="$E2E_PG_SERVER_DATA_DIR/no-systemd-units" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
             --host "$E2E_PG_SERVER_HOST" \

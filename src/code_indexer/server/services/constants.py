@@ -19,6 +19,28 @@ DEFAULT_GROUP_USERS = "users"
 # cidx-meta is always accessible to all groups
 CIDX_META_REPO = "cidx-meta"
 
+# cidx-meta-global is the globally-activated form of the internal cidx-meta
+# bookkeeping repo (see CIDX_META_REPO above).
+CIDX_META_REPO_GLOBAL = "cidx-meta-global"
+
+# Anchored set of internal meta-repo aliases -- the ONLY authority for
+# is_internal_meta_repo() below.
+_INTERNAL_META_REPO_ALIASES = frozenset({CIDX_META_REPO, CIDX_META_REPO_GLOBAL})
+
+
+def is_internal_meta_repo(alias: str) -> bool:
+    """Return True only for the exact internal cidx-meta bookkeeping repo alias.
+
+    Bug #1287 Defect B (code-reviewer finding 1): this is an ANCHORED / EXACT
+    match against {"cidx-meta", "cidx-meta-global"} -- NEVER a prefix or
+    substring check. A prefix check such as ``alias.startswith("cidx-meta")``
+    over-matches legitimate user repos whose real name merely starts with the
+    same characters (e.g. "cidx-metadata-global" or
+    "cidx-meta-analytics-global"), silently dropping them from search fan-out.
+    """
+    return alias in _INTERNAL_META_REPO_ALIASES
+
+
 # =============================================================================
 # Story #3 Phase 2: P2 Configuration Validation Limits (AC12-AC26)
 # =============================================================================

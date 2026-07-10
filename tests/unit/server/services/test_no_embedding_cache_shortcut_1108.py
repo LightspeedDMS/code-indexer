@@ -1085,10 +1085,14 @@ class TestValueFlowTemporalDispatch:
         )
 
     def test_multi_provider_forwards_flag(self, monkeypatch, tmp_path):
-        """no_embedding_cache_shortcut=True must reach query_temporal for all providers
-        in the multi-provider parallel path of execute_temporal_query_with_fusion.
+        """no_embedding_cache_shortcut=True must reach query_temporal for the
+        resolved provider in execute_temporal_query_with_fusion.
 
         Migrated from _query_multi_provider_fusion (deleted, Story #1171 C3).
+        Story #1291 AC9 removed the multi-provider parallel fan-out path
+        entirely (discovery now resolves to AT MOST ONE embedder, since
+        cross-embedder fusion is forbidden) -- this test now exercises the
+        single-provider path, which is the only path that exists post-#1291.
         """
         import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
         from code_indexer.services.temporal.temporal_search_service import (
@@ -1123,15 +1127,14 @@ class TestValueFlowTemporalDispatch:
             lambda config: _FakeConfigManager(),
         )
 
-        # Two provider groups to trigger the multi-provider parallel path.
-        two_providers = [
+        # Story #1291 AC9: discovery resolves to AT MOST ONE provider group.
+        one_provider = [
             ("temporal-voyage-code-3", ["temporal-voyage-code-3"]),
-            ("temporal-cohere-embed-v4.0", ["temporal-cohere-embed-v4.0"]),
         ]
         monkeypatch.setattr(
             dispatch_mod,
             "_discover_provider_shards_with_pruning",
-            lambda *a, **kw: two_providers,
+            lambda *a, **kw: one_provider,
         )
         monkeypatch.setattr(
             dispatch_mod,
@@ -1161,10 +1164,11 @@ class TestValueFlowTemporalDispatch:
             no_embedding_cache_shortcut=True,
         )
 
-        assert captured, "_spy_query_temporal was never called in multi-provider path."
+        assert captured, "_spy_query_temporal was never called."
         assert all(v is True for v in captured), (
-            f"no_embedding_cache_shortcut=True must reach query_temporal for ALL providers "
-            f"in execute_temporal_query_with_fusion, but captured: {captured}"
+            f"no_embedding_cache_shortcut=True must reach query_temporal for the "
+            f"resolved provider in execute_temporal_query_with_fusion, but "
+            f"captured: {captured}"
         )
 
 

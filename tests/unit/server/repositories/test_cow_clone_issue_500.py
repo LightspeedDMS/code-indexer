@@ -18,6 +18,7 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.mark.e2e
@@ -132,6 +133,18 @@ def authenticate_user(username, password):
         mock.get_actual_repo_path = MagicMock(
             return_value=str(golden_repo_with_indexes)
         )
+        # Mock get_golden_repo() -- _do_activate_repository looks the golden
+        # repo up via this method (not the .golden_repos dict directly). Left
+        # unmocked, it auto-generates a fresh MagicMock whose default_branch
+        # is itself a MagicMock, making `branch_name != golden_repo.default_branch`
+        # always True and triggering a spurious checkout against a
+        # nonexistent origin/master.
+        mock.get_golden_repo = MagicMock(return_value=golden_repo)
+        # Avoid MagicMock auto-attribute leaking a Mock into
+        # resource_config.cow_clone_timeout (used as a subprocess timeout=
+        # value) -- force the real code path to fall back to the numeric
+        # _COW_CLONE_TIMEOUT_DEFAULT.
+        mock.resource_config = None
         return mock
 
     @pytest.fixture
@@ -150,6 +163,7 @@ def authenticate_user(username, password):
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     def test_cow_clone_copies_code_indexer_directory(

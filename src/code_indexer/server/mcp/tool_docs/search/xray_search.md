@@ -147,7 +147,7 @@ Minimal working example -- find all function definitions in Python files:
   "include_patterns": ["*.py"],
   "max_results": 5,
   "await_seconds": 10,
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: truncate_snippet(&f.text, 80),\n        });\n    }\n    findings\n}"
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: truncate_snippet(&f.text(), 80),\n        });\n    }\n    findings\n}"
 }
 ```
 
@@ -201,7 +201,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         findings.push(EvalFinding {
             pattern: "function_def".to_string(),
             line: f.start_line,
-            snippet: f.text.chars().take(80).collect(),
+            snippet: f.text().chars().take(80).collect(),
         });
     }
     findings
@@ -329,7 +329,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
            findings.push(EvalFinding {
                pattern: "function_def".to_string(),
                line: f.start_line,
-               snippet: f.text.chars().take(80).collect(),
+               snippet: f.text().chars().take(80).collect(),
            });
        }
        findings
@@ -827,7 +827,7 @@ List stored patterns using standard cidx-meta browsing tools:
 {
   "repository_alias": "backend-global",
   "pattern": "def ",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: f.text.chars().take(80).collect(),\n        });\n    }\n    findings\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: f.text().chars().take(80).collect(),\n        });\n    }\n    findings\n}",
   "search_target": "content",
   "include_patterns": ["*.py"]
 }

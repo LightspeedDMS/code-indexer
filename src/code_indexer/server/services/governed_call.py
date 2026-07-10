@@ -32,6 +32,9 @@ from code_indexer.server.services.coalescer_registry import (
     get_coalescer_registry,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.embed_event_decision_table import (
+    decide_role_and_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,29 @@ class EmbeddingCacheMetadata:
     key_found: Optional[bool] = None
     cache_mode: Optional[str] = None
     provider_latency_ms: Optional[int] = None
+
+    # Story #1293 (Epic #1288): enriched fields driving the shared
+    # emit_embed_event() helper (Algorithm 3). All default to None.
+    # provider/model/config_digest: identify which provider config served
+    #   this call.
+    # outcome/role/live_batch_id: the Story #1293 (path x outcome) ->
+    #   (role, live_batch_id) decision table result (see
+    #   embed_event_decision_table.py). Populated deterministically by
+    #   governed_call.py's own Path B (no-coalescer) constructions in S1a;
+    #   Path A (coalescer.submit()) constructions stay None until Story
+    #   #1293 S1b wires the owner/joiner distinction (embedding_coalescer.py).
+    # embed_key/long_key: the cache key used for this call (and whether it
+    #   exceeded the 256-char normalized-query cap).
+    # shadow_cosine: populated by shadow-mode audit comparisons (future).
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    config_digest: Optional[str] = None
+    outcome: Optional[str] = None
+    role: Optional[str] = None
+    live_batch_id: Optional[str] = None
+    embed_key: Optional[str] = None
+    long_key: Optional[bool] = None
+    shadow_cosine: Optional[float] = None
 
 
 # Seconds to wait for a governor slot — shared across all 4 embedding sites.
@@ -92,38 +118,6 @@ def clear_query_embedding_cache() -> None:
     """Clear the process-level cache (lifespan shutdown / test isolation)."""
     global _query_embedding_cache
     _query_embedding_cache = None
-
-
-# ---------------------------------------------------------------------------
-# Story #1109 (S5): process-level QueryEmbeddingCacheMetrics accessor
-# ---------------------------------------------------------------------------
-# The metrics object is wired by lifespan startup (server mode + telemetry
-# enabled only).  CLI / daemon paths never set it so the accessor returns None
-# there — same "absent = explicit documented branch" pattern as the cache
-# accessor above.
-
-_query_embedding_cache_metrics: Any = None
-
-
-def get_query_embedding_cache_metrics() -> Any:
-    """Return the process-level QueryEmbeddingCacheMetrics, or None.
-
-    None on CLI / pre-lifespan / telemetry-disabled — coalesced_query_embedding
-    passes None to _serve_with_cache which is a documented no-op branch.
-    """
-    return _query_embedding_cache_metrics
-
-
-def set_query_embedding_cache_metrics(metrics: Any) -> None:
-    """Install the process-level cache metrics (called once in lifespan startup)."""
-    global _query_embedding_cache_metrics
-    _query_embedding_cache_metrics = metrics
-
-
-def clear_query_embedding_cache_metrics() -> None:
-    """Clear the process-level cache metrics (lifespan shutdown / test isolation)."""
-    global _query_embedding_cache_metrics
-    _query_embedding_cache_metrics = None
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +327,6 @@ def _serve_with_cache(
     qualifier: Any,
     live_fn: Callable[[], List[float]],
     *,
-    metrics: Optional[Any] = None,
     audit_ctx: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[float], EmbeddingCacheMetadata]:
     """Apply the Story #1105 cache policy for one embedding request.
@@ -347,11 +340,13 @@ def _serve_with_cache(
 
     All cache operations are fail-open (the service swallows DB errors).
 
-    Story #1109 (S5): accepts optional `metrics` (QueryEmbeddingCacheMetrics).
-      - hit/miss counters are recorded with {"mode": <mode>, "provider": <provider>}.
-      - shadow_cosine is recorded ONLY in shadow mode when a prior cached blob exists.
-      - provider error in shadow: miss metric recorded, no cosine, error re-raised.
-      - metrics=None (default) preserves all existing caller behaviour unchanged.
+    Story #1295 (Epic #1288 final): the `metrics` (QueryEmbeddingCacheMetrics)
+    parameter that used to live here was deleted -- hit/miss/shadow_cosine
+    push-recording is retired. The durable record of every decision made in
+    this function already flows through the caller's EmbeddingCacheMetadata ->
+    emit_embed_event() (Story #1293) into search_embed_event; OTEL is now
+    re-sourced from that table (embedding_cache_otel_metrics.py), so no
+    parallel in-memory tally is needed here.
 
     Story #1110 (S6): accepts optional `audit_ctx` (Dict[str, Any]).
       - On a cache HIT (on-mode or shadow-mode), if audit_ctx is not None and the
@@ -371,7 +366,6 @@ def _serve_with_cache(
             from build_key(text) (Story #1149).
         qualifier: CacheQualifier named-tuple.
         live_fn: Zero-arg callable that produces the live embedding vector.
-        metrics: Optional QueryEmbeddingCacheMetrics; no-op when None.
         audit_ctx: Optional mutable dict; populated on sampled HITs. Default None.
 
     Returns:
@@ -413,8 +407,6 @@ def _serve_with_cache(
                     provider_name,
                 )
                 cache.record_hit(cache_key, qualifier)
-                if metrics is not None:
-                    metrics.record_hit(mode=mode, provider=provider_name)
                 # Story #1110 (S6): populate audit_ctx on sampled on-mode HITs.
                 if audit_ctx is not None:
                     try:
@@ -430,8 +422,16 @@ def _serve_with_cache(
                             "_serve_with_cache: audit_ctx population failed (on-mode): %s",
                             exc,
                         )
+                _outcome, _role = decide_role_and_outcome(
+                    cache_hit=True, cache_mode=mode
+                )
                 return decoded_vec, EmbeddingCacheMetadata(
-                    key_found=True, cache_mode=mode
+                    key_found=True,
+                    cache_mode=mode,
+                    provider=provider_name,
+                    embed_key=cache_key,
+                    outcome=_outcome,
+                    role=_role,
                 )
 
         # MISS (or corrupt blob treated as MISS)
@@ -443,21 +443,20 @@ def _serve_with_cache(
         live_vec: List[float] = live_fn()
         _latency_ms = int((time.monotonic() - _t0) * 1000)
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
-        if metrics is not None:
-            metrics.record_miss(mode=mode, provider=provider_name)
+        _outcome, _role = decide_role_and_outcome(cache_hit=False, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
-            key_found=False, cache_mode=mode, provider_latency_ms=_latency_ms
+            key_found=False,
+            cache_mode=mode,
+            provider_latency_ms=_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome=_outcome,
+            role=_role,
         )
 
     # shadow (or any unrecognised mode treated as shadow per cache.mode_for default)
-    # AC5: wrap live_fn() so provider errors record a miss metric then re-raise.
     _t0_shadow = time.monotonic()
-    try:
-        live_vec = live_fn()
-    except Exception:
-        if metrics is not None:
-            metrics.record_miss(mode=mode, provider=provider_name)
-        raise
+    live_vec = live_fn()
     _shadow_latency_ms = int((time.monotonic() - _t0_shadow) * 1000)
 
     shadow_blob: Optional[bytes] = cache.lookup(cache_key, qualifier)
@@ -467,10 +466,6 @@ def _serve_with_cache(
             provider_name,
         )
         cache.record_hit(cache_key, qualifier)
-        if metrics is not None:
-            metrics.record_hit(mode=mode, provider=provider_name)
-            # AC2: record cosine ONLY in shadow + prior-cached
-            metrics.record_shadow_cosine(cached_blob=shadow_blob, live_vec=live_vec)
         # Story #1110 (S6): populate audit_ctx on sampled shadow HITs.
         if audit_ctx is not None:
             try:
@@ -486,8 +481,15 @@ def _serve_with_cache(
                     "_serve_with_cache: audit_ctx population failed (shadow-mode): %s",
                     exc,
                 )
+        _outcome, _role = decide_role_and_outcome(cache_hit=True, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
-            key_found=True, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+            key_found=True,
+            cache_mode=mode,
+            provider_latency_ms=_shadow_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome=_outcome,
+            role=_role,
         )
     else:
         logger.debug(
@@ -495,10 +497,15 @@ def _serve_with_cache(
             provider_name,
         )
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
-        if metrics is not None:
-            metrics.record_miss(mode=mode, provider=provider_name)
+        _outcome, _role = decide_role_and_outcome(cache_hit=False, cache_mode=mode)
         return live_vec, EmbeddingCacheMetadata(
-            key_found=False, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+            key_found=False,
+            cache_mode=mode,
+            provider_latency_ms=_shadow_latency_ms,
+            provider=provider_name,
+            embed_key=cache_key,
+            outcome=_outcome,
+            role=_role,
         )
 
 
@@ -585,11 +592,6 @@ def coalesced_query_embedding(
                     "for %s -> live (long_key)",
                     provider_name,
                 )
-                _metrics = get_query_embedding_cache_metrics()
-                mode_str: str = cache.mode_for(provider_name)
-                if _metrics is not None:
-                    _metrics.record_miss(mode=mode_str, provider=provider_name)
-                    _metrics.record_long_key(provider=provider_name)
                 cache = None  # fall through to _compute_live
 
     # ------------------------------------------------------------------
@@ -659,7 +661,13 @@ def coalesced_query_embedding(
         logger.debug(
             "coalesced_query_embedding: no coalescer, no cache -> direct governed call"
         )
-        return _direct_live(), EmbeddingCacheMetadata()
+        _outcome, _role = decide_role_and_outcome(cache_hit=None, cache_mode=None)
+        return _direct_live(), EmbeddingCacheMetadata(
+            provider=provider.get_provider_name(),
+            config_digest=_digest_for_provider(provider),
+            outcome=_outcome,
+            role=_role,
+        )
 
     # Cache active, no coalescer: _serve_with_cache with governed_query_embedding
     # as the live_fn (bypass handled before the _serve_with_cache call).
@@ -670,7 +678,16 @@ def coalesced_query_embedding(
         live_vec: List[float] = _direct_live()
         # cache, cache_key_opt, qualifier are always set here (cache is not None)
         cache.record_miss_or_shadow(cache_key_opt, cache.qualifier(provider), live_vec)  # type: ignore[arg-type]
-        return live_vec, EmbeddingCacheMetadata(key_found=False)
+        _outcome, _role = decide_role_and_outcome(
+            cache_hit=None, cache_mode=None, bypass=True
+        )
+        return live_vec, EmbeddingCacheMetadata(
+            key_found=False,
+            provider=provider.get_provider_name(),
+            embed_key=cache_key_opt,
+            outcome=_outcome,
+            role=_role,
+        )
 
     logger.debug(
         "coalesced_query_embedding: no coalescer, cache active -> _serve_with_cache (Path B)"
@@ -681,6 +698,5 @@ def coalesced_query_embedding(
         cache_key_opt,  # type: ignore[arg-type]
         cache.qualifier(provider),
         _direct_live,
-        metrics=get_query_embedding_cache_metrics(),
         audit_ctx=audit_ctx,
     )

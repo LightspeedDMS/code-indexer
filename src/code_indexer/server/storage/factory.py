@@ -112,6 +112,11 @@ class BackendRegistry:
     # Bug #545: Dedicated critical pool for heartbeat/leader/reconciliation.
     # Separated from general pool to prevent starvation under load.
     critical_connection_pool: Optional[Any] = field(default=None)
+    # Story #1293: Query-embedding decision event backend — SQLite in solo
+    # mode, PostgreSQL in cluster mode so all nodes share one
+    # search_embed_event table (the phantom-free cache-metrics source of
+    # truth).
+    search_embed_event: Any = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +207,9 @@ class StorageFactory:
         from code_indexer.server.services.query_analytics_export_service import (
             QueryAnalyticsExportSqliteBackend,
         )
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventSqliteBackend,
+        )
 
         # Main database: all backends except groups/audit share the same DB.
         db_path = str(Path(data_dir) / "cidx_server.db")
@@ -249,6 +257,7 @@ class StorageFactory:
             ),
             search_event_log=SearchEventLogSqliteBackend(db_path=db_path),
             query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
+            search_embed_event=SearchEmbedEventSqliteBackend(db_path=db_path),
         )
 
     # ------------------------------------------------------------------
@@ -359,6 +368,9 @@ class StorageFactory:
         from code_indexer.server.services.query_analytics_export_service import (
             QueryAnalyticsExportPostgresBackend,
         )
+        from code_indexer.server.services.search_embed_event_writer import (
+            SearchEmbedEventPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -412,6 +424,7 @@ class StorageFactory:
             query_embedding_cache=QueryEmbeddingCachePostgresBackend(pool),
             search_event_log=SearchEventLogPostgresBackend(pool),
             query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
+            search_embed_event=SearchEmbedEventPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

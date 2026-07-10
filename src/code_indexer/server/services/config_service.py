@@ -75,9 +75,13 @@ class ElevationManagerProtocol(Protocol):
 #
 # Story #1197: host, port, workers, log_level are moved to runtime config so
 # they can be shared cluster-wide via the runtime DB row.  They are removed
-# from BOOTSTRAP_KEYS here.  TRANSITION_PRESERVE_KEYS (below) ensures they
-# survive both the first-boot strip and every subsequent save_config() call
-# during the one-release transition window (Story 6 removes both guards).
+# from BOOTSTRAP_KEYS here.  Story #1197 also kept a one-release transition
+# allow-list (TRANSITION_PRESERVE_KEYS) so the four keys survived the
+# first-boot strip and every subsequent save_config() call, giving old nodes
+# in a rolling upgrade a config.json fallback.  Story #1196 (next-release
+# cleanup) has removed that allow-list entirely -- the operator confirmed all
+# cluster nodes are on the new release, so the runtime DB / launch.json /
+# applied_launch.json are now the sole source for these four settings.
 BOOTSTRAP_KEYS = frozenset(
     {
         "server_dir",
@@ -104,24 +108,6 @@ BOOTSTRAP_KEYS = frozenset(
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
-# Story #1197 AC3 / AC6: Transition allow-list for the one-release window.
-#
-# Although host/port/workers/log_level are now runtime keys (removed from
-# BOOTSTRAP_KEYS), old nodes in a rolling-upgrade cluster still read them
-# from config.json.  Two mechanisms keep the copies in config.json this
-# release:
-#   AC3  — _strip_config_file_to_bootstrap() preserves TRANSITION_PRESERVE_KEYS
-#           so the first-boot strip does not delete them.
-#   AC6  — save_config() explicitly writes the four values into config.json
-#           on every save so a normal settings-save does not drop them either.
-#
-# Story 6 (next release) REMOVES both guards: the allow-list is deleted and
-# save_config() stops including the four keys — the file copies disappear once
-# all nodes have been upgraded and the runtime row is the sole source of truth.
-TRANSITION_PRESERVE_KEYS: frozenset = frozenset(
-    {"workers", "log_level", "host", "port"}
-)
-
 CONFIG_KEY_RUNTIME = "runtime"
 UPDATER_WEB_UI = "web-ui"
 UPDATER_SEED = "config-seed"
@@ -192,6 +178,12 @@ class ConfigService:
         # DEBUG follow-ups instead of logging a fresh traceback every tick.
         # Shared across both try/except blocks in start_config_reload's poll loop.
         self._db_throttle = DbOutageThrottle(service_name="ConfigService")
+        # Bug #1335: memoized raw config.json snapshot captured the FIRST time
+        # _backfill_launch_keys_from_execstart runs -- i.e. BEFORE
+        # _strip_config_file_to_bootstrap has ever had a chance to strip
+        # host/port/workers off disk within this process. None means "not
+        # captured yet"; a captured value is a dict (possibly empty).
+        self._bootstrap_launch_keys_snapshot: Optional[Dict[str, Any]] = None
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -713,6 +705,22 @@ class ConfigService:
                     config.indexing_config.temporal_parallel_requests
                     if config.indexing_config is not None
                     else None
+                ),
+                # Story #1290: per-commit temporal embedder config display wiring
+                "temporal_embedders": (
+                    config.indexing_config.temporal_embedders
+                    if config.indexing_config is not None
+                    else ["voyage-context-4"]
+                ),
+                "temporal_active_embedder": (
+                    config.indexing_config.temporal_active_embedder
+                    if config.indexing_config is not None
+                    else "voyage-context-4"
+                ),
+                "temporal_aggregation_chunk_chars": (
+                    config.indexing_config.temporal_aggregation_chunk_chars
+                    if config.indexing_config is not None
+                    else 4096
                 ),
             },
             # Story #323 - Wiki metadata fields configuration
@@ -1406,9 +1414,9 @@ class ConfigService:
         elif key == "dependency_map_pass1_max_turns":
             claude_config.dependency_map_pass1_max_turns = max(0, int(value))
         elif key == "dependency_map_pass2_max_turns":
-            claude_config.dependency_map_pass2_max_turns = max(5, int(value))
+            claude_config.dependency_map_pass2_max_turns = max(0, int(value))
         elif key == "dependency_map_delta_max_turns":
-            claude_config.dependency_map_delta_max_turns = max(5, int(value))
+            claude_config.dependency_map_delta_max_turns = max(0, int(value))
         elif key == "refinement_enabled":
             claude_config.refinement_enabled = value in ["true", True, "True"]
         elif key == "refinement_interval_hours":
@@ -2195,6 +2203,64 @@ class ConfigService:
             )
             return
 
+        # Story #1290: per-commit temporal embedder registry (Web UI Config
+        # Screen exposure of TemporalConfig.embedders/active_embedder/
+        # aggregation_chunk_chars -- seeded into repo config.json by
+        # config_seeding.py, no environment variables).
+        if key == "temporal_embedders":
+            if isinstance(value, list):
+                embedders = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                embedders = [v.strip() for v in str(value).split(",") if v.strip()]
+            if not embedders:
+                raise ValueError("temporal_embedders must not be empty")
+            indexing.temporal_embedders = embedders
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_embedders to %s",
+                indexing.temporal_embedders,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_active_embedder":
+            active = str(value).strip()
+            if not active:
+                raise ValueError("temporal_active_embedder must not be empty")
+            if active not in indexing.temporal_embedders:
+                raise ValueError(
+                    f"temporal_active_embedder {active!r} must be a member of "
+                    f"temporal_embedders {indexing.temporal_embedders!r}"
+                )
+            indexing.temporal_active_embedder = active
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_active_embedder to %s",
+                indexing.temporal_active_embedder,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key == "temporal_aggregation_chunk_chars":
+            try:
+                chars = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a valid integer"
+                )
+            if chars <= 0:
+                raise ValueError(
+                    "temporal_aggregation_chunk_chars must be a positive integer"
+                )
+            indexing.temporal_aggregation_chunk_chars = chars
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_aggregation_chunk_chars to %d",
+                indexing.temporal_aggregation_chunk_chars,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
         if key != "indexable_extensions":
             raise ValueError(f"Unknown indexing setting: {key}")
 
@@ -2409,6 +2475,46 @@ class ConfigService:
             )
         return 0
 
+    def _capture_bootstrap_launch_keys_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return (and memoize) config.json's raw content as it was BEFORE any
+        first-boot stripping (Bug #1335).
+
+        _backfill_launch_keys_from_execstart is invoked up to twice in a
+        single first-boot sequence: once from initialize_runtime_db while
+        config.json still holds the operator's explicit launch keys, and
+        again later from _seed_runtime_to_pg -- by which time
+        _strip_config_file_to_bootstrap has ALREADY removed those keys from
+        disk. Re-reading config.json on that second call would always see
+        the keys as "absent" and wrongly gap-fill them from an unrelated
+        systemd unit's ExecStart flags (the #1324 symptom).
+
+        Memoizing the FIRST read on this ConfigService instance -- which
+        always precedes any strip within one process's lifetime, since both
+        callers read config.json (directly or via this snapshot) before
+        _strip_config_file_to_bootstrap ever runs -- preserves the true
+        bootstrap intent for every later call.
+
+        Returns None if config.json could not be read (missing/corrupt) on
+        the first attempt; callers must skip the gap-fill entirely in that
+        case, matching the pre-#1335 error-handling behavior.
+        """
+        if self._bootstrap_launch_keys_snapshot is not None:
+            return self._bootstrap_launch_keys_snapshot
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            raw_config = (
+                json.loads(config_path.read_text()) if config_path.exists() else {}
+            )
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
+                exc,
+            )
+            return None
+        self._bootstrap_launch_keys_snapshot = raw_config
+        return raw_config
+
     def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
         """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
 
@@ -2420,21 +2526,18 @@ class ConfigService:
           2. key absent from config.json → fill from live ExecStart when available.
           3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
 
+        Bug #1335: "present in config.json" is answered from the memoized
+        bootstrap snapshot (_capture_bootstrap_launch_keys_snapshot), NOT a
+        fresh disk read -- a prior _strip_config_file_to_bootstrap() call in
+        this same process may have already removed these keys from disk,
+        which must not be misread as "operator never set them."
+
         Mutates the passed config object AND self._config so that the subsequent
         _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
         (which re-reads via get_config()) both see the corrected values.
         """
-        raw_config: dict = {}
-        try:
-            config_path = Path(self.config_manager.config_file_path)
-            if config_path.exists():
-                raw_config = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "ConfigService: unable to read raw config.json for ExecStart "
-                "backfill at first-boot seed; skipping gap-fill: %s",
-                exc,
-            )
+        raw_config = self._capture_bootstrap_launch_keys_snapshot()
+        if raw_config is None:
             return
 
         execstart = read_execstart_flags()
@@ -2846,23 +2949,20 @@ class ConfigService:
     def _strip_config_file_to_bootstrap(self) -> None:
         """Strip config.json to bootstrap-only keys, backing up original.
 
-        Story #1197 AC3: the effective strip set is
-            (all keys) − BOOTSTRAP_KEYS − TRANSITION_PRESERVE_KEYS
-        so the four launch keys (host/port/workers/log_level) survive in
-        config.json for one transition release even though they are no longer
-        in BOOTSTRAP_KEYS.  Story 6 removes TRANSITION_PRESERVE_KEYS.
+        Story #1196 (next-release cleanup): the Story #1197 AC3 transition
+        allow-list (TRANSITION_PRESERVE_KEYS) has been removed, so the strip
+        set is once again simply (all keys) − BOOTSTRAP_KEYS.  The four launch
+        keys (host/port/workers/log_level) no longer survive this strip -- the
+        runtime DB / launch.json / applied_launch.json are the sole source now
+        that all cluster nodes are confirmed on the new release.
         """
         import shutil
 
         config = self.get_config()
         full_dict = asdict(config)
 
-        # Keys to keep in config.json: bootstrap keys + transition-preserved keys.
-        # AC3: TRANSITION_PRESERVE_KEYS narrows the strip (does not disable it).
-        keys_to_keep = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
-
-        # Check if already stripped (nothing left to strip beyond the keep set)
-        non_kept = [k for k in full_dict if k not in keys_to_keep]
+        # Check if already stripped (nothing left to strip beyond bootstrap keys)
+        non_kept = [k for k in full_dict if k not in BOOTSTRAP_KEYS]
         if not non_kept:
             return
 
@@ -2874,15 +2974,12 @@ class ConfigService:
             shutil.copy2(self.config_manager.config_file_path, str(backup_file))
             logger.info("ConfigService: backed up config.json to %s", backup_file)
 
-        # Write bootstrap keys + transition-preserved keys.
-        kept_dict = {k: v for k, v in full_dict.items() if k in keys_to_keep}
+        # Write bootstrap keys only.
+        kept_dict = {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
         self.config_manager.save_config_dict(kept_dict)
         logger.info(
-            "ConfigService: stripped config.json to %d keys "
-            "(%d bootstrap + %d transition-preserved)",
+            "ConfigService: stripped config.json to %d bootstrap keys",
             len(kept_dict),
-            len(BOOTSTRAP_KEYS & set(kept_dict)),
-            len(TRANSITION_PRESERVE_KEYS & set(kept_dict)),
         )
 
     def _save_runtime_to_sqlite(self, runtime_dict: dict) -> None:
@@ -2991,36 +3088,16 @@ class ConfigService:
         new_config = self.config_manager._dict_to_server_config(full_dict)
         self._config = new_config  # Atomic reference swap
 
-    @staticmethod
-    def _extract_bootstrap_dict_with_transition(config: "ServerConfig") -> dict:
-        """Extract bootstrap dict PLUS TRANSITION_PRESERVE_KEYS for config.json writes.
-
-        Story #1197 AC6 (MAJOR-5): _extract_bootstrap_dict() only includes
-        BOOTSTRAP_KEYS.  Once the four launch keys are removed from BOOTSTRAP_KEYS
-        a plain _extract_bootstrap_dict() write would silently drop them from
-        config.json on every settings-save, breaking old-node fallback reads
-        during rolling upgrades.
-
-        This method adds TRANSITION_PRESERVE_KEYS values so both the PG and
-        SQLite save paths write all four keys into config.json on every save.
-
-        Story 6 (next release) removes this method and reverts both callers to
-        plain _extract_bootstrap_dict() once all nodes are upgraded.
-        """
-        full_dict = asdict(config)
-        keys_to_write = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
-        return {k: v for k, v in full_dict.items() if k in keys_to_write}
-
     def save_config(self, config: ServerConfig) -> None:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.
 
         Priority: PG pool > SQLite > full file (legacy).
 
-        Story #1197 AC6 (MAJOR-5): config.json writes use
-        _extract_bootstrap_dict_with_transition() so the four launch keys
-        (host/port/workers/log_level) are retained in config.json for one
-        transition release even though they are now runtime keys.
-        Story 6 reverts to plain _extract_bootstrap_dict().
+        Story #1196 (next-release cleanup): the Story #1197 AC6 transition
+        write-path inclusion (_extract_bootstrap_dict_with_transition) has been
+        removed -- config.json writes use plain _extract_bootstrap_dict() again,
+        so the four launch keys (host/port/workers/log_level) are no longer
+        written to config.json on a settings-save.
         """
         runtime_dict = self._extract_runtime_dict(config)
 
@@ -3032,11 +3109,11 @@ class ConfigService:
 
         if self._pool is not None:
             self._save_runtime_to_pg(config)
-            file_dict = self._extract_bootstrap_dict_with_transition(config)
+            file_dict = self._extract_bootstrap_dict(config)
             self.config_manager.save_config_dict(file_dict)
         elif self._sqlite_db_path is not None:
             self._save_runtime_to_sqlite(runtime_dict)
-            file_dict = self._extract_bootstrap_dict_with_transition(config)
+            file_dict = self._extract_bootstrap_dict(config)
             self.config_manager.save_config_dict(file_dict)
         else:
             self.config_manager.save_config(config)

@@ -68,6 +68,81 @@ def parse_date_range(date_range: str) -> Tuple[str, str]:
     return start_date, end_date
 
 
+def resolve_commit_timestamp(project_root: Path, ref: str) -> int:
+    """Resolve a git ref/commit hash to its commit's UNIX timestamp (Bug #1301).
+
+    Implements `at_commit` point-in-time scoping: the caller uses the
+    returned timestamp as an upper bound on `commit_timestamp`, the exact
+    same mechanism `time_range`'s upper bound already uses (see
+    `query_temporal`'s `at_commit_ts` parameter). This function performs
+    the VALIDATION half of the fix -- a ref/hash that cannot be resolved
+    to a real commit in this repository raises ValueError instead of being
+    silently accepted (Bug #1301: previously a bogus `at_commit` returned
+    HTTP 200 with the full unfiltered result set).
+
+    Args:
+        project_root: Repository working directory (subprocess cwd)
+        ref: Commit hash (full or abbreviated) or git ref/branch name
+
+    Returns:
+        The resolved commit's UNIX timestamp (seconds), as reported by
+        `git show -s --format=%ct`.
+
+    Raises:
+        ValueError: If `ref` cannot be resolved to a commit in this
+            repository (non-existent hash/ref, git failure, timeout).
+    """
+    try:
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(f"at_commit '{ref}' could not be resolved: {exc}") from exc
+
+    resolved_hash = rev_parse.stdout.strip()
+    if rev_parse.returncode != 0 or not resolved_hash:
+        raise ValueError(
+            f"at_commit '{ref}' does not resolve to a commit in this repository"
+        )
+
+    try:
+        show_ts = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", resolved_hash],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but its commit "
+            f"timestamp could not be read: {exc}"
+        ) from exc
+
+    ts_text = show_ts.stdout.strip()
+    if show_ts.returncode != 0 or not ts_text:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but its commit "
+            f"timestamp could not be read"
+        )
+
+    try:
+        return int(ts_text)
+    except ValueError as exc:
+        raise ValueError(
+            f"at_commit '{ref}' resolved to {resolved_hash} but returned a "
+            f"non-numeric commit timestamp {ts_text!r}"
+        ) from exc
+
+
 @dataclass
 class TemporalSearchResult:
     """Single temporal search result with temporal context."""
@@ -130,16 +205,27 @@ class TemporalSearchService:
     def _get_file_path_from_payload(
         self, payload: Dict[str, Any], default: str = "unknown"
     ) -> str:
-        """Get file path from payload, checking both 'path' and 'file_path' fields.
+        """Get file path from payload, checking 'path', 'file_path', and
+        'primary_path' fields.
+
+        Story #1290: per-commit aggregated payloads no longer carry 'path'
+        or 'file_path' (only 'paths'/'primary_path' — a chunk can span
+        multiple files), so 'primary_path' is checked as a further fallback.
+        Legacy 'path'/'file_path' precedence is unchanged for backward
+        compatibility with any pre-hard-cut payload still on disk.
 
         Args:
             payload: Payload dictionary from vector search result
-            default: Default value if neither field exists
+            default: Default value if none of the fields exist
 
         Returns:
-            File path string, preferring 'path' over 'file_path'
+            File path string, preferring 'path' > 'file_path' > 'primary_path'
         """
-        return str(payload.get("path") or payload.get("file_path", default))
+        return str(
+            payload.get("path")
+            or payload.get("file_path")
+            or payload.get("primary_path", default)
+        )
 
     def has_temporal_index(self) -> bool:
         """Check if temporal index exists.
@@ -190,6 +276,52 @@ class TemporalSearchService:
             return 10  # Large limits: lower headroom
         else:
             return 5  # Very large limits: minimal headroom
+
+    def _reconstruct_full_commit_message(self, commit_hash: str) -> Optional[str]:
+        """Reconstruct the FULL commit message via git (Story #1290 AC11).
+
+        Used when the dedup-by-commit winner (top_chunk) is a non-head
+        chunk, whose payload commit_message is "" (AC5) -- the caller needs
+        the real message, not a silent guess.
+
+        Returns:
+            The full commit message (stripped) on success, or None on ANY
+            failure (missing hash, non-zero exit, timeout, shallow clone,
+            unreachable hash) -- callers MUST treat None as "reconstruction
+            failed" and explicitly flag the result as degraded rather than
+            silently substituting a capped copy.
+        """
+        if not commit_hash:
+            return None
+        try:
+            result_proc = subprocess.run(
+                ["git", "show", "-s", "--format=%B", commit_hash],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "Full commit message reconstruction failed for %s: %s",
+                commit_hash[:8],
+                exc,
+            )
+            return None
+
+        if result_proc.returncode != 0:
+            logger.warning(
+                "git show failed reconstructing message for %s (exit %d): %s",
+                commit_hash[:8],
+                result_proc.returncode,
+                (result_proc.stderr or "")[:200],
+            )
+            return None
+
+        message = result_proc.stdout.strip()
+        return message if message else None
 
     def _reconstruct_temporal_content(self, metadata: Dict[str, Any]) -> str:
         """Reconstruct content from git for added/deleted files.
@@ -272,6 +404,8 @@ class TemporalSearchService:
         exclude_path: Optional[List[str]] = None,
         chunk_type: Optional[str] = None,
         no_embedding_cache_shortcut: bool = False,
+        at_commit_ts: Optional[int] = None,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> TemporalSearchResults:
         """Execute temporal semantic search with time-range filtering.
 
@@ -285,6 +419,20 @@ class TemporalSearchService:
             exclude_language: Exclude language(s) (e.g., ["markdown"])
             path_filter: Filter by path pattern(s) (e.g., ["src/*"])
             exclude_path: Exclude path pattern(s) (e.g., ["*/tests/*"])
+            at_commit_ts: (Bug #1301) Optional pre-resolved UNIX timestamp of
+                the `at_commit` ref (resolved via `resolve_commit_timestamp`
+                by the caller, which also validates the ref). Tightens the
+                commit_timestamp upper bound to
+                min(time_range end, at_commit_ts) -- i.e. scopes results to
+                commits AT or BEFORE the given commit. Never widens the
+                time_range bound.
+            precomputed_query_vector: (Story #1293 S1b A5) Optional
+                pre-computed embedding vector, supplied by
+                execute_temporal_query_with_fusion's compute-once reuse seam
+                when querying multiple sequential shards of the SAME
+                embedder. When set, embedding is skipped entirely (FSV and
+                non-FSV paths alike) -- mirrors the omni fan-out's
+                precomputed_query_vector reuse.
 
         Returns:
             TemporalSearchResults with filtered results
@@ -353,15 +501,17 @@ class TemporalSearchService:
             .replace(hour=23, minute=59, second=59)
             .timestamp()
         )
+        # Bug #1301: at_commit_ts tightens (never widens) the upper bound --
+        # scopes results to commits AT or BEFORE the resolved at_commit ref.
+        if at_commit_ts is not None:
+            end_ts = min(end_ts, at_commit_ts)
         filter_conditions.setdefault("must", []).append(
             {"key": "commit_timestamp", "range": {"gte": start_ts, "lte": end_ts}}
         )
 
-        # Add diff_type filter if specified (Phase 3: Temporal Filter Migration)
-        if diff_types:
-            filter_conditions.setdefault("must", []).append(
-                {"key": "diff_type", "match": {"any": list(diff_types)}}
-            )
+        # Story #1290: diff_type is a legacy per-file-diff concept -- see the
+        # documented no-op note below (kept close to the chunk_type block).
+        # Intentionally NOT added to filter_conditions.
 
         # Add author filter if specified (Phase 3: Temporal Filter Migration)
         if author:
@@ -369,11 +519,27 @@ class TemporalSearchService:
                 {"key": "author_name", "match": {"contains": author.lower()}}
             )
 
-        # Add chunk_type filter if specified (Story #476: Filter commit messages vs commit diffs)
-        if chunk_type:
-            filter_conditions.setdefault("must", []).append(
-                {"key": "type", "match": {"value": chunk_type}}
+        # Story #1290 AC12: canonical chunk_type mapping. Every per-commit
+        # chunk carries `type == "commit_chunk"` -- the OLD per-file-diff
+        # `type` values ("commit_message"/"commit_diff") no longer exist in
+        # the payload, so this is validated and applied as an is_head-based
+        # POST-filter in _filter_by_time_range, not a vector-store payload
+        # match on `type` (which would now match nothing).
+        if chunk_type is not None and chunk_type not in (
+            "commit_message",
+            "commit_diff",
+        ):
+            raise ValueError(
+                f"chunk_type must be 'commit_message' or 'commit_diff', "
+                f"got {chunk_type!r}"
             )
+
+        # Story #1290: diff_type is a legacy per-file-diff concept that no
+        # longer exists on per-commit aggregated payloads (a single chunk can
+        # span multiple files with different diff kinds). Filtering by it is
+        # now a documented no-op -- NOT applied at the vector-store layer
+        # (which would silently zero out every result) and NOT applied as a
+        # post-filter either (see _filter_by_time_range).
 
         # Phase 1: Semantic search (over-fetch for filtering headroom)
         start_time = time.time()
@@ -427,7 +593,10 @@ class TemporalSearchService:
 
         if isinstance(self.vector_store_client, FilesystemVectorStore):
             # Parallel execution: embedding generation + index loading happen concurrently
-            # Always request timing for consistent return type handling
+            # Always request timing for consistent return type handling.
+            # Story #1293 S1b [A5]: when precomputed_query_vector is supplied
+            # (compute-once reuse seam across sequential shards), FSV skips
+            # generate_embedding() entirely and uses the supplied vector.
             search_result = self.vector_store_client.search(
                 query=query,  # Pass query text for parallel embedding
                 embedding_provider=self.embedding_provider,  # Provider for parallel execution
@@ -437,9 +606,20 @@ class TemporalSearchService:
                 return_timing=True,
                 lazy_load=True,  # Enable lazy loading with early exit optimization
                 prefetch_limit=search_limit,  # Use calculated over-fetch limit
+                precomputed_query_vector=precomputed_query_vector,
             )
             # Type: Tuple[List[Dict[str, Any]], Dict[str, Any]] when return_timing=True
             raw_results, _timing_info = search_result  # type: ignore
+        elif precomputed_query_vector is not None:
+            # Story #1293 S1b [A5]: non-FSV backend reuse -- the caller already
+            # computed (and emitted an event for) this vector once; skip the
+            # embedding call and ctx write entirely for this shard.
+            raw_results = self.vector_store_client.search(
+                query_vector=precomputed_query_vector,
+                filter_conditions=filter_conditions,
+                limit=search_limit,
+                collection_name=self.collection_name,
+            )
         else:
             # FilesystemVectorStore: pre-compute embedding (no parallel support yet).
             # Bug #1078: gate through concurrency governor to cap concurrent provider calls.
@@ -517,26 +697,77 @@ class TemporalSearchService:
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
+            at_commit_ts=at_commit_ts,
         )
         filter_time = time.time() - filter_start
 
-        # Phase 3: Sort reverse chronologically (newest to oldest, like git log)
-        # With diff-based indexing, all results are changes - no filtering needed
-        temporal_results = sorted(
-            temporal_results,
+        # Story #1290 AC10: coalesce ALL hits for the same commit BEFORE any
+        # result-limit truncation, then dedup-by-commit (max-scoring chunk as
+        # top_chunk, paths[] unioned across every retained chunk). Operating
+        # on the FULL filtered set (not yet limited) is what guarantees a
+        # commit whose only matching chunk ranks low in the raw retrieval
+        # order still survives into the final results.
+        from .temporal_fusion import dedup_by_commit
+
+        deduped_results = dedup_by_commit(temporal_results)
+
+        # Story #1290 AC11: fail-loud full-message reconstruction. When the
+        # dedup winner (top_chunk) is a non-head chunk, its payload
+        # commit_message is "" (AC5) -- reconstruct the FULL message via git.
+        # On success the full message replaces the empty/capped copy. On
+        # failure the short-capped head-chunk message is used AS AN
+        # EXPLICITLY FLAGGED degraded fallback (message_truncated=True) --
+        # never silently presented as if it were the full message.
+        for result in deduped_results:
+            is_head = bool(result.metadata.get("is_head"))
+            if is_head:
+                result.temporal_context["message_truncated"] = False
+                continue
+
+            commit_hash = result.metadata.get("commit_hash", "")
+            full_message = self._reconstruct_full_commit_message(commit_hash)
+            if full_message is not None:
+                result.temporal_context["commit_message"] = full_message
+                result.temporal_context["message_truncated"] = False
+            else:
+                # Degraded: fall back to the group's short-capped head-chunk
+                # message (stashed by dedup_by_commit as _head_commit_message,
+                # since a non-head chunk's OWN commit_message is always ""
+                # per AC5) and flag it explicitly -- never silently present
+                # this as if it were the full message.
+                result.temporal_context["commit_message"] = result.metadata.get(
+                    "_head_commit_message"
+                ) or result.metadata.get("commit_message", "")
+                result.temporal_context["message_truncated"] = True
+
+        # Phase 3 (Bug #1299): truncate by RELEVANCE (score) first, then
+        # re-sort ONLY the selected top-`limit` subset reverse
+        # chronologically for display (newest to oldest, like git log --
+        # AC13: this is the default order when no rerank is applied).
+        #
+        # Previously this sorted the ENTIRE deduped candidate set by
+        # commit_timestamp and truncated to `limit` afterward, which made
+        # truncation recency-based instead of relevance-based: a
+        # highly-relevant OLDER commit could be dropped in favor of several
+        # weakly-relevant NEWER commits, purely because they were newer.
+        total_found = len(deduped_results)
+        top_results = sorted(
+            deduped_results,
+            key=lambda r: r.score,
+            reverse=True,  # Highest relevance first
+        )[:limit]
+        top_results = sorted(
+            top_results,
             key=lambda r: r.temporal_context.get("commit_timestamp", 0),
-            reverse=True,  # Newest first
+            reverse=True,  # Newest first (display order)
         )
 
-        # Results reverse chronologically sorted (newest first) like git log
-        # No need to sort by score - temporal queries show evolution, not relevance
-
         return TemporalSearchResults(
-            results=temporal_results[:limit],
+            results=top_results,
             query=query,
             filter_type="time_range",
             filter_value=time_range,
-            total_found=len(temporal_results),
+            total_found=total_found,
             performance={
                 "semantic_search_ms": semantic_time * 1000,
                 "temporal_filter_ms": filter_time * 1000,
@@ -628,6 +859,7 @@ class TemporalSearchService:
         diff_types: Optional[List[str]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        at_commit_ts: Optional[int] = None,
     ) -> Tuple[List[TemporalSearchResult], float]:
         """Transform semantic results to TemporalSearchResult objects.
 
@@ -646,6 +878,9 @@ class TemporalSearchService:
             min_score: Minimum similarity score filter
             diff_types: Filter by diff type(s) (post-filter safety layer)
             author: Filter by author name (post-filter safety layer)
+            at_commit_ts: (Bug #1301) Optional pre-resolved at_commit UNIX
+                timestamp; tightens the post-filter upper bound the same way
+                query_temporal() tightens the vector-store filter_conditions.
 
         Returns:
             Tuple of (filtered results, blob_fetch_time_ms)
@@ -700,11 +935,10 @@ class TemporalSearchService:
             if min_score and score < min_score:
                 continue
 
-            # Apply diff_types post-filter (safety layer + test compatibility)
-            if diff_types:
-                result_diff_type = payload.get("diff_type")
-                if result_diff_type not in diff_types:
-                    continue
+            # Story #1290: diff_types is a legacy per-file-diff concept that
+            # no longer has a corresponding payload field on per-commit
+            # chunks -- intentionally NOT filtered (documented no-op; see
+            # query_temporal's filter_conditions comment for the same note).
 
             # Apply author post-filter (safety layer + test compatibility)
             if author:
@@ -712,11 +946,13 @@ class TemporalSearchService:
                 if author.lower() not in result_author.lower():
                     continue
 
-            # Apply chunk_type post-filter (AC3/AC4: Story #476)
-            if chunk_type:
-                result_chunk_type = payload.get("type")
-                if result_chunk_type != chunk_type:
-                    continue
+            # Apply chunk_type post-filter (Story #1290 AC12): the two
+            # canonical values map onto the is_head field -- "commit_message"
+            # keeps ONLY head chunks; "commit_diff" keeps ALL chunks (no
+            # filtering). query_temporal() already validated chunk_type is
+            # one of these two values (or None) before calling this method.
+            if chunk_type == "commit_message" and not payload.get("is_head"):
+                continue
 
             # Apply time range post-filter (safety layer + test compatibility)
             # Time range filtering is also done in vector store, but we apply it here
@@ -731,6 +967,11 @@ class TemporalSearchService:
                     .replace(hour=23, minute=59, second=59)
                     .timestamp()
                 )
+                # Bug #1301: at_commit_ts tightens (never widens) the upper
+                # bound -- mirrors the identical min() applied in
+                # query_temporal()'s vector-store filter_conditions.
+                if at_commit_ts is not None:
+                    end_ts = min(end_ts, at_commit_ts)
 
                 if commit_timestamp < start_ts or commit_timestamp > end_ts:
                     continue

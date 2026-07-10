@@ -84,6 +84,11 @@ class RecordingCohereProvider:
     def _get_texts_per_request(self) -> int:
         return self._texts_per_request_val
 
+    def get_provider_name(self) -> str:
+        """Real CohereEmbeddingProvider implements this; the coalescer's
+        _dispatch() reads it to attribute emitted events (Story #1293)."""
+        return "cohere"
+
     def get_embedding(
         self, text: str, *, embedding_purpose: str = "document"
     ) -> List[float]:
@@ -119,6 +124,11 @@ class RecordingVoyageProvider:
 
     def _get_model_token_limit(self) -> int:
         return self._token_limit
+
+    def get_provider_name(self) -> str:
+        """Real VoyageAIClient implements this; the coalescer's _dispatch()
+        reads it to attribute emitted events (Story #1293)."""
+        return "voyage-ai"
 
     def get_embedding(
         self, text: str, *, embedding_purpose: str = "document"

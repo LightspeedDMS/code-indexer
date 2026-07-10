@@ -13,7 +13,18 @@ After both searches, compute:
   top10_overlap = |primary_topK ∩ second_topK| / max(len(primary_topK), len(second_topK))
   top1_match    = primary_top1 == second_top1
 
-Record via `QueryEmbeddingCacheMetrics.record_audit()`.
+Story #1295 (Epic #1288 final) re-source: the result is persisted via the
+Story #1293 keyed audit UPDATE path -- ``SearchEmbedEventWriter.backend.
+update_audit_by_key(correlation_id, embed_key, audit_sampled, audit_cosine)``
+-- instead of the retiring in-memory ``QueryEmbeddingCacheMetrics.
+record_audit()`` push call. This WIRES the previously-orphaned
+``update_audit_by_key`` (it existed since Story #1293 but had no caller) so
+audit_sampled/audit_cosine actually populate on the durable
+``search_embed_event`` row for a sampled request (resolves follow-up #1306).
+``top1_match`` is no longer computed/persisted: the ``search_embed_event``
+schema has no top1-match column, so there is no DB destination for it
+(explicit removal -- see ``embedding_cache_otel_metrics.py`` module docstring
+for the full instrument-removal rationale).
 
 Fail-open: any exception inside this function is caught and logged at WARNING.
 """
@@ -29,7 +40,12 @@ import numpy as np
 
 from code_indexer.server.services.governed_call import (
     governed_query_embedding,
-    get_query_embedding_cache_metrics,
+)
+from code_indexer.server.services.search_embed_event_emit import (
+    get_search_embed_event_writer,
+)
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,26 +99,64 @@ def _record_audit_metrics(
     second_ids: List[str],
     provider_name: str,
     mode: str,
+    embed_key: Optional[str] = None,
 ) -> None:
-    """Compute top-K overlap + top-1 match and call metrics.record_audit()."""
+    """Compute top-K overlap and stamp it onto the durable event row.
+
+    Story #1295: re-sourced from the retiring QueryEmbeddingCacheMetrics
+    push path onto the Story #1293 keyed audit UPDATE
+    (SearchEmbedEventWriter.backend.update_audit_by_key). ``embed_key`` is the
+    cache key of the ORIGINAL request whose row this audit is stamping --
+    without it there is no row to key the UPDATE against, so the stamp is
+    skipped (documented no-op, never raises).
+    """
     primary_top = primary_candidate_ids[:AUDIT_TOP_K]
     second_top = second_ids[:AUDIT_TOP_K]
     denom = max(len(primary_top), len(second_top))
     top10_overlap = (len(set(primary_top) & set(second_top)) / denom) if denom else 0.0
-    top1_match = bool(
-        primary_candidate_ids
-        and second_ids
-        and primary_candidate_ids[0] == second_ids[0]
+
+    logger.debug(
+        "_record_audit_metrics: provider=%s mode=%s embed_key=%s top10_overlap=%.4f",
+        provider_name,
+        mode,
+        embed_key,
+        top10_overlap,
     )
 
-    metrics = get_query_embedding_cache_metrics()
-    if metrics is not None:
-        metrics.record_audit(
-            top10_overlap=top10_overlap,
-            top1_match=top1_match,
-            provider=provider_name,
-            mode=mode,
+    if embed_key is None:
+        logger.debug(
+            "_record_audit_metrics: no embed_key available -- skipping audit UPDATE"
         )
+        return
+
+    writer = get_search_embed_event_writer()
+    if writer is None:
+        return  # CLI / solo / pre-lifespan -- documented no-op branch
+
+    correlation_id = get_current_correlation_id()
+    if not correlation_id:
+        logger.debug(
+            "_record_audit_metrics: no correlation_id available -- skipping audit UPDATE"
+        )
+        return
+
+    try:
+        # Story #1295 (discovered via the mandatory front-door E2E): the
+        # original decision-event row for THIS SAME request was enqueued via
+        # emit_embed_event() only moments ago and may still be sitting in the
+        # writer's in-memory queue -- the background drain thread only runs
+        # every 5s. Flushing synchronously here guarantees the row is durably
+        # present before the keyed UPDATE runs, closing a real race where
+        # update_audit_by_key silently matched zero rows in production.
+        writer.flush()
+        writer.backend.update_audit_by_key(
+            correlation_id=correlation_id,
+            embed_key=embed_key,
+            audit_sampled=True,
+            audit_cosine=top10_overlap,
+        )
+    except Exception as exc:  # noqa: BLE001 -- audit stamping must never break search
+        logger.warning("_record_audit_metrics: update_audit_by_key failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +174,7 @@ def _run_deep_fidelity_audit(
     primary_candidate_ids: List[str],
     embedding_provider: Any,
     query: str,
+    embed_key: Optional[str] = None,
 ) -> None:
     """Run a deep-fidelity audit comparing cached vs live HNSW result sets.
 
@@ -135,6 +190,10 @@ def _run_deep_fidelity_audit(
         primary_candidate_ids: Candidate IDs from the primary HNSW search.
         embedding_provider: Embedding provider (for on-mode re-embed).
         query: Original query text (for on-mode re-embed).
+        embed_key: Cache key of the original request (from
+            EmbeddingCacheMetadata.embed_key), used to key the durable audit
+            UPDATE (Story #1295). None -> the stamp is skipped (documented
+            no-op in _record_audit_metrics).
 
     Fail-open: any exception is swallowed with WARNING logging.
     """
@@ -195,6 +254,7 @@ def _run_deep_fidelity_audit(
             second_ids=second_ids,
             provider_name=provider_name,
             mode=mode,
+            embed_key=embed_key,
         )
 
     except Exception as exc:  # noqa: BLE001

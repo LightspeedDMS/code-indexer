@@ -10,6 +10,7 @@ Covers:
 from code_indexer.services.temporal.temporal_fusion import (
     fuse_rrf_multi,
     make_temporal_dedup_key,
+    merge_shards_by_score,
     TEMPORAL_OVERFETCH_MULTIPLIER,
     DEFAULT_RRF_K,
 )
@@ -280,3 +281,89 @@ def test_fuse_rrf_multi_sorted_by_fusion_score():
     assert results[0].file_path == "top.py"
     assert results[1].file_path == "mid.py"
     assert results[0].fusion_score >= results[1].fusion_score
+
+
+# ---------------------------------------------------------------------------
+# merge_shards_by_score — Bug #1299 disjoint-shard fusion fix
+#
+# Quarterly shards are a DISJOINT partition of a single embedder's
+# collection (a commit lives in exactly one shard). RRF's reciprocal-rank
+# scheme is the wrong operator here -- it rewards "being first" in
+# whichever shard's list a result appears in, with no relationship to true
+# cross-shard cosine relevance. merge_shards_by_score instead preserves the
+# result's OWN true score across shards.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_shards_by_score_empty_input():
+    """Empty shard dict must return empty list."""
+    result = merge_shards_by_score({}, dedup_key=make_temporal_dedup_key, limit=10)
+    assert result == []
+
+
+def test_merge_shards_by_score_single_shard_attribution():
+    """Single shard: results attributed with shard name, fusion_score == score."""
+    r1 = make_result("a.py", 0, 0.9, commit_hash="c1")
+    r2 = make_result("b.py", 0, 0.7, commit_hash="c2")
+    results = merge_shards_by_score(
+        {"2024Q1": [r1, r2]},
+        dedup_key=make_temporal_dedup_key,
+        limit=10,
+    )
+    assert len(results) == 2
+    for r in results:
+        assert r.source_provider == "2024Q1"
+        assert r.contributing_providers == ["2024Q1"]
+        assert r.fusion_score == r.score
+
+
+def test_merge_shards_by_score_sorted_by_true_score_not_rank():
+    """A higher-cosine result at LOCAL rank 1 in a busy shard must outrank a
+    lower-cosine result at LOCAL rank 0 in a sparse shard -- the exact
+    inversion RRF produces (Bug #1299)."""
+    busy_rank0 = make_result("busyA.py", 0, 0.95, commit_hash="busyA")
+    busy_rank1 = make_result("busyB.py", 0, 0.85, commit_hash="busyB")
+    sparse_rank0 = make_result("sparseA.py", 0, 0.60, commit_hash="sparseA")
+
+    results = merge_shards_by_score(
+        {"2024Q2": [busy_rank0, busy_rank1], "2024Q1": [sparse_rank0]},
+        dedup_key=make_temporal_dedup_key,
+        limit=10,
+    )
+    assert [r.file_path for r in results] == ["busyA.py", "busyB.py", "sparseA.py"]
+    assert results[0].fusion_score == 0.95
+    assert results[1].fusion_score == 0.85
+    assert results[2].fusion_score == 0.60
+
+
+def test_merge_shards_by_score_dedup_collision_keeps_max_score():
+    """A dedup_key collision across shards (e.g. legacy monolithic
+    collection overlapping a new shard) must keep the MAX-scoring
+    instance, never sum or average across shards."""
+    low = make_result("dup.py", 0, 0.4, commit_hash="dup")
+    high = make_result("dup.py", 0, 0.9, commit_hash="dup")
+
+    results = merge_shards_by_score(
+        {"legacy": [low], "2024Q1": [high]},
+        dedup_key=make_temporal_dedup_key,
+        limit=10,
+    )
+    assert len(results) == 1
+    assert results[0].fusion_score == 0.9
+    assert results[0].source_provider == "2024Q1"
+
+
+def test_merge_shards_by_score_respects_limit():
+    """merge_shards_by_score must return at most `limit` results."""
+    provider_results = [
+        make_result(f"file{i}.py", 0, 1.0 - i * 0.05, commit_hash=f"commit{i}")
+        for i in range(20)
+    ]
+    results = merge_shards_by_score(
+        {"2024Q1": provider_results},
+        dedup_key=make_temporal_dedup_key,
+        limit=5,
+    )
+    assert len(results) == 5
+    # Highest-scoring 5 must survive (score-based truncation, not rank).
+    assert [r.file_path for r in results] == [f"file{i}.py" for i in range(5)]

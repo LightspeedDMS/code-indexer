@@ -442,6 +442,108 @@ class TestCanonicalPathResolution:
         )
 
 
+class TestSymlinkedGoldenReposDirBug1337:
+    """Bug #1337: golden_repos_dir is now provisioned as a SYMLINK into the
+    CoW storage tree on cow-daemon clusters (installer/auto-updater fix), not
+    a plain directory. These read-only confirmation tests prove the existing
+    realpath-based security guard in get_actual_repo_path() (comparing
+    against os.path.realpath(self.golden_repos_dir)) stays correct when
+    golden_repos_dir itself is a symlink -- no production code change here.
+    """
+
+    def setup_method(self):
+        """golden_repos_dir is a SYMLINK into a separate fake CoW mount."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.data_dir = os.path.join(self.temp_dir, "cidx-server-data")
+        os.makedirs(self.data_dir, exist_ok=True)
+
+        # The real storage lives under a fake CoW mount, elsewhere entirely.
+        self.mount_target = os.path.join(
+            self.temp_dir, "mnt-cow-storage", "golden-repos"
+        )
+        os.makedirs(self.mount_target, exist_ok=True)
+
+        self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")
+        os.symlink(self.mount_target, self.golden_repos_dir)
+
+        metadata_file = os.path.join(self.golden_repos_dir, "metadata.json")
+        with open(metadata_file, "w") as f:
+            json.dump({}, f)
+
+        self.manager = GoldenRepoManager(data_dir=self.data_dir)
+
+    def teardown_method(self):
+        import shutil
+
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_flat_structure_resolves_through_golden_repos_symlink(self):
+        """A repo physically stored under the symlink's mount target resolves
+        successfully -- the guard does not falsely reject a legitimate path
+        just because golden_repos_dir itself is a symlink."""
+        flat_path = os.path.join(self.golden_repos_dir, "test-repo")
+        os.makedirs(flat_path, exist_ok=True)
+
+        golden_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/user/repo.git",
+            default_branch="main",
+            clone_path=flat_path,
+            created_at="2025-01-01T00:00:00Z",
+        )
+        self.manager.golden_repos["test-repo"] = golden_repo
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
+
+        actual_path = self.manager.get_actual_repo_path("test-repo")
+        assert actual_path == flat_path
+        assert os.path.realpath(actual_path).startswith(self.mount_target)
+
+    def test_path_escaping_mount_target_still_rejected(self):
+        """A clone_path escaping the symlink's mount target (via a nested
+        symlink) is still rejected -- the security guard is not weakened by
+        golden_repos_dir itself being a symlink."""
+        outside_dir = os.path.join(self.temp_dir, "outside")
+        os.makedirs(outside_dir, exist_ok=True)
+
+        symlink_path = os.path.join(self.golden_repos_dir, "symlink-attack")
+        os.symlink(outside_dir, symlink_path)
+
+        golden_repo = GoldenRepo(
+            alias="symlink-attack",
+            repo_url="https://github.com/user/attack.git",
+            default_branch="main",
+            clone_path=symlink_path,
+            created_at="2025-01-01T00:00:00Z",
+        )
+        self.manager.golden_repos["symlink-attack"] = golden_repo
+        self.manager._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            self.manager.get_actual_repo_path("symlink-attack")
+
+        error_msg = str(exc_info.value)
+        assert (
+            "security violation" in error_msg.lower() or "outside" in error_msg.lower()
+        )
+
+
 class TestCanonicalPathIntegrationWithMigration:
     """Integration tests: canonical path resolution with migration code."""
 

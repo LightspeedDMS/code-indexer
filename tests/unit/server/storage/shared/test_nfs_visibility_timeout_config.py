@@ -257,6 +257,9 @@ class TestBackendDefaultWaiterUsesConfiguredTimeout:
             mount_point="/mnt/nfs/cidx",
             poll_interval_seconds=1,
             timeout_seconds=30,
+            # Bug #1320: co-located (identity) translation -- this test verifies
+            # configured-timeout propagation, not path translation.
+            daemon_storage_path="/mnt/nfs/cidx",
         )
         backend = CowDaemonBackend(config=config)  # no injected waiter -> default
 

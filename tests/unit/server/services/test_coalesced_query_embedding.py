@@ -52,6 +52,12 @@ COALESCED_VEC = [9.0, 9.0]
 class _FakeVoyageProvider:
     """Not a Cohere instance -> maps to voyage:embed."""
 
+    def get_provider_name(self) -> str:
+        """Story #1293: real providers always implement this — governed_call.py's
+        no-coalescer/no-cache Path B now reads it to populate
+        EmbeddingCacheMetadata.provider."""
+        return "voyage-ai"
+
 
 class _FakeCohereProvider:
     """Stand-in registered as the cohere isinstance target via patching."""
@@ -227,12 +233,10 @@ def _reset_registry():
 
     clear_coalescer_registry()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     reset_config_service()
     yield
     clear_coalescer_registry()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     reset_config_service()
 
 
@@ -449,14 +453,12 @@ def _reset_singletons_3c():
     ProviderConcurrencyGovernor.reset_instance()
     ProviderHealthMonitor.reset_instance()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
     yield
     ProviderConcurrencyGovernor.reset_instance()
     ProviderHealthMonitor.reset_instance()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
 
@@ -601,33 +603,21 @@ class TestCQEThinShim3c:
     def test_shadow_mode_exactly_one_record_shadow_cosine(
         self, monkeypatch, _reset_singletons_3c
     ):
-        """Shadow mode: exactly ONE record_shadow_cosine; live vector served.
+        """Shadow mode: exactly ONE provider call per key-resolution; live vector served.
 
-        Shadow asymmetry (Story #1147 spec): record_shadow_cosine fires ONCE per
-        key-resolution inside the coalescer (not once per _serve_with_cache call).
+        Story #1295 (Epic #1288 final) migration note: the double-count guard
+        this test used to prove (record_shadow_cosine firing exactly once,
+        not twice from both _serve_with_cache AND the coalescer) tested the
+        retired QueryEmbeddingCacheMetrics push mechanism directly. That
+        mechanism is deleted entirely from BOTH call sites, so a double-count
+        is now architecturally impossible (there is no metrics object left to
+        double-count into). The surviving assertions below (single provider
+        call, correct live vector served) prove the underlying shadow-mode
+        key-resolution behavior is unchanged.
         """
         text = "shadow cosine 3c test query"
         cache, _, _ = _make_real_cache_3c(mode="shadow", pre_seed_text=text)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-
-        shadow_cosine_calls = [0]
-
-        class _SpyMetrics:
-            def record_hit(self, *, mode: str, provider: str) -> None:
-                pass
-
-            def record_miss(self, *, mode: str, provider: str) -> None:
-                pass
-
-            def record_shadow_cosine(
-                self, *, cached_blob: bytes, live_vec: List[float]
-            ) -> None:
-                shadow_cosine_calls[0] += 1
-
-            def record_long_key(self, *, provider: str) -> None:
-                pass
-
-        governed_call.set_query_embedding_cache_metrics(_SpyMetrics())
 
         provider = _FakeVoyageProvider3c()
         _wire_real_coalescer(monkeypatch, provider)
@@ -642,13 +632,6 @@ class TestCQEThinShim3c:
         expected_live = [float(len(text) % 999), 0.0, 0.0]
         assert result == pytest.approx(expected_live, abs=1e-4), (
             f"Shadow mode must serve live vector, got {result}"
-        )
-        # Exactly ONE record_shadow_cosine per key-resolution (not double from
-        # both _serve_with_cache and coalescer's post-dispatch write)
-        assert shadow_cosine_calls[0] == 1, (
-            f"record_shadow_cosine must fire EXACTLY ONCE per key-resolution, "
-            f"got {shadow_cosine_calls[0]}. "
-            "Double-count means _serve_with_cache AND coalescer are both recording."
         )
 
     # ------------------------------------------------------------------

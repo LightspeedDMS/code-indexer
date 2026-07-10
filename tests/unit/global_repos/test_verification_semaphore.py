@@ -281,7 +281,25 @@ class TestSemaphoreConcurrencyCap(TestCase):
 
     @pytest.mark.timeout(360)
     def test_semaphore_caps_concurrent_callers_at_exactly_cap(self) -> None:
-        """With cap=2, exactly 2 threads reach subprocess.run while the 3rd waits."""
+        """With cap=2, exactly 2 threads reach subprocess.run while the 3rd waits.
+
+        Root cause of the #1323 flake (proven via a monkeypatch repro before this
+        fix): the actual semaphore cap enforced by production is read by
+        `_invoke_claude_cli` from the process-wide `get_config_service()` singleton
+        -- NOT from the `config` object this test passes into
+        `invoke_verification_pass()` (that object only supplies
+        `fact_check_timeout_seconds`/`dependency_map_delta_max_turns` here).  Under
+        a full-suite run, another test can leave that global singleton initialized
+        with a different `max_concurrent_claude_cli` (or the machine's real
+        `~/.cidx-server/config.json` can simply differ), silently changing the REAL
+        cap out from under this test and producing the observed peak>cap /
+        peak>num_callers non-determinism.  Patching `get_config_service()` here
+        pins the actually-enforced cap to `cap`, making the assertions below
+        meaningful and hermetic regardless of any other test's global config
+        state.  The semaphore's own locking (`_get_verification_semaphore`) and its
+        acquire/release wrapping of `subprocess.run` are correctly synchronized --
+        this fix targets test isolation, not production code.
+        """
         cap = 2
         num_callers = 3
         config = _make_config(max_concurrent=cap)
@@ -302,21 +320,33 @@ class TestSemaphoreConcurrencyCap(TestCase):
                 active_snapshot[0] = s.active
                 peak_snapshot[0] = s.peak
 
-        _run_concurrent_callers(
-            num_callers=num_callers,
-            analyzer=analyzer,
-            config=config,
-            shared=shared,
-            fake_run=fake_run,
-            cap=cap,
-            completed_count=completed_count,
-            count_lock=count_lock,
-            errors=errors,
-            errors_lock=errors_lock,
-            doc_path_factory=doc_path_factory,
-            doc_path_local=doc_path_local,
-            at_cap_callback=assert_at_cap,
-        )
+        # Pin the REAL concurrency cap that _invoke_claude_cli reads via
+        # get_config_service() to `cap`, eliminating dependence on ambient/global
+        # config-service state left behind by other tests.
+        fake_service_config = MagicMock()
+        fake_service_config.claude_integration_config.max_concurrent_claude_cli = cap
+        fake_config_service = MagicMock()
+        fake_config_service.get_config.return_value = fake_service_config
+
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=fake_config_service,
+        ):
+            _run_concurrent_callers(
+                num_callers=num_callers,
+                analyzer=analyzer,
+                config=config,
+                shared=shared,
+                fake_run=fake_run,
+                cap=cap,
+                completed_count=completed_count,
+                count_lock=count_lock,
+                errors=errors,
+                errors_lock=errors_lock,
+                doc_path_factory=doc_path_factory,
+                doc_path_local=doc_path_local,
+                at_cap_callback=assert_at_cap,
+            )
 
         self.assertEqual(
             active_snapshot[0],

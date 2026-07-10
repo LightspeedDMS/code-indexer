@@ -13,9 +13,11 @@ Verifies two AC3 defects fixed in code review:
 
 Tests use FastAPI TestClient with form-based admin login (matching the pattern
 in test_depmap_running_state_bugs.py) so the handler runs through the full
-request cycle.  set_query_embedding_cache / set_query_embedding_cache_metrics
-install fake objects into the process-global accessors; clear_* restores them
-in teardown so other tests are not polluted.
+request cycle. set_query_embedding_cache installs a fake cache into the
+process-global accessor (Cache Entries card only); clear_* restores it in
+teardown. Every other cache card is now sourced from WindowedCacheMetrics
+(Story #1294) — those tests install a fake `search_embed_event_writer` on
+app.state via `_install_see_writer`/`_windowed_result` instead.
 """
 
 from __future__ import annotations
@@ -53,31 +55,106 @@ class _FakeCache:
         return self._count
 
 
-class _FakeMetrics:
-    """Minimal fake that satisfies snapshot() with known per-mode tallies."""
+# ---------------------------------------------------------------------------
+# Story #1294: fake search_embed_event writer/backend.
+#
+# Shadow Hit Rate, Shadow Cosine (P50/P05/min/histogram), Over-Cap Queries,
+# Provider Embed Calls, Texts Coalesced, Batches Dispatched, Dedup Savings,
+# and Audit stats are now sourced from
+# app.state.search_embed_event_writer.backend.get_windowed_metrics(), NOT
+# from QueryEmbeddingCacheMetrics.snapshot()/CoalescerRegistry.metrics().
+# Tests below that exercise those cards install this fake instead of (or in
+# addition to) the pre-#1294 fakes above.
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        shadow_hits: int = 7,
-        shadow_misses: int = 3,
-        on_hits: int = 5,
-        on_misses: int = 5,
-        shadow_cosine_p50: float = 0.97,
-        audit_total: int = 0,
-        audit_top1_matches: int = 0,
-        audit_overlap_avg: Optional[float] = None,
-    ) -> None:
-        self._snap = {
-            "shadow": {"hits": shadow_hits, "misses": shadow_misses},
-            "on": {"hits": on_hits, "misses": on_misses},
-            "shadow_cosine_p50": shadow_cosine_p50,
-            "audit_total": audit_total,
-            "audit_top1_matches": audit_top1_matches,
-            "audit_overlap_avg": audit_overlap_avg,
-        }
 
-    def snapshot(self) -> dict:
-        return self._snap
+def _windowed_result(
+    *,
+    shadow_hits: int = 0,
+    shadow_misses: int = 0,
+    shadow_cosine_p50: Optional[float] = None,
+    shadow_cosine_p05: Optional[float] = None,
+    shadow_cosine_min: Optional[float] = None,
+    shadow_cosine_histogram: Optional[list] = None,
+    provider_embed_calls: int = 0,
+    texts_coalesced: int = 0,
+    batches: int = 0,
+    dedup: int = 0,
+    long_key: int = 0,
+    audit_count: int = 0,
+    audit_sum: float = 0.0,
+    audit_avg: float = 0.0,
+):
+    from code_indexer.server.services.windowed_cache_metrics import (
+        CacheMetricsAggregate,
+        WindowedCacheMetricsResult,
+        build_cosine_histogram,
+    )
+
+    histogram = (
+        shadow_cosine_histogram
+        if shadow_cosine_histogram is not None
+        else build_cosine_histogram([])
+    )
+    overall = CacheMetricsAggregate(
+        provider_embed_calls=provider_embed_calls,
+        texts_coalesced=texts_coalesced,
+        batches=batches,
+        dedup=dedup,
+        long_key=long_key,
+        audit_count=audit_count,
+        audit_sum=audit_sum,
+        audit_avg=audit_avg,
+        shadow_cosine_histogram=build_cosine_histogram([]),
+    )
+    shadow_agg = CacheMetricsAggregate(
+        hits=shadow_hits,
+        misses=shadow_misses,
+        hit_rate=(
+            shadow_hits / (shadow_hits + shadow_misses)
+            if (shadow_hits + shadow_misses)
+            else 0.0
+        ),
+        shadow_cosine_p50=shadow_cosine_p50,
+        shadow_cosine_p05=shadow_cosine_p05,
+        shadow_cosine_min=shadow_cosine_min,
+        shadow_cosine_histogram=histogram,
+    )
+    return WindowedCacheMetricsResult(
+        overall=overall, by_group={}, by_cache_mode={"shadow": shadow_agg}
+    )
+
+
+class _FakeSeeBackend:
+    def __init__(self, result):
+        self._result = result
+
+    def get_windowed_metrics(self, from_ts, to_ts):
+        return self._result
+
+
+class _FakeSeeWriter:
+    def __init__(self, backend):
+        self.backend = backend
+
+
+_SEE_SENTINEL = object()
+
+
+def _install_see_writer(app, result):
+    original = getattr(app.state, "search_embed_event_writer", _SEE_SENTINEL)
+    app.state.search_embed_event_writer = _FakeSeeWriter(_FakeSeeBackend(result))
+    return original
+
+
+def _restore_see_writer(app, original):
+    if original is _SEE_SENTINEL:
+        try:
+            del app.state.search_embed_event_writer
+        except AttributeError:
+            pass
+    else:
+        app.state.search_embed_event_writer = original
 
 
 # ---------------------------------------------------------------------------
@@ -171,61 +248,64 @@ class TestHandlerUsesRealCacheDataSource:
         assert resp.status_code == 200
         # Should not blow up; should render 0 gracefully
 
-    def test_handler_renders_per_mode_hits(self, client, admin_session_cookie):
-        """Shadow and on-mode hits/misses must appear from the metrics snapshot."""
+    def test_handler_renders_per_mode_hits(self, client, admin_session_cookie, app):
+        """Shadow hit rate must appear, sourced from the windowed result.
+
+        Story #1294: Shadow Hit Rate is now sourced from WindowedCacheMetrics
+        (by_cache_mode["shadow"]), not QueryEmbeddingCacheMetrics.snapshot().
+
+        Note (Issue #1257): On-Mode Hit Rate is deliberately NOT asserted
+        here — it is sourced from search_event_log's get_hit_rate_counts, not
+        from this windowed source (see test_dashboard_on_mode_hit_rate_1257.py
+        for the request-denominated on-mode coverage).
+        """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetrics(
-            shadow_hits=7,
-            shadow_misses=3,
-            on_hits=5,
-            on_misses=5,
-            shadow_cosine_p50=0.97,
-        )
         set_query_embedding_cache(_FakeCache(count=42))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(
+            app, _windowed_result(shadow_hits=7, shadow_misses=3)
+        )
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             html = resp.text
             # 42 total entries
             assert "42" in html, f"Expected '42' in HTML, got:\n{html[:500]}"
-            # shadow hits = 7, shadow requests = 7+3 = 10
-            assert "7" in html, "Expected shadow hits '7' in HTML"
-            assert "10" in html, "Expected shadow requests '10' in HTML"
-            # on hits = 5, on requests = 5+5 = 10
-            assert "5" in html, "Expected on hits '5' in HTML"
+            # shadow hits = 7, shadow requests = 7+3 = 10 -> hit rate 70.0%
+            assert "70.0%" in html, (
+                f"Expected shadow hit rate '70.0%' in HTML, got:\n{html[:500]}"
+            )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
-    def test_handler_renders_cosine_p50(self, client, admin_session_cookie):
-        """Shadow cosine p50 must appear in the rendered HTML."""
+    def test_handler_renders_cosine_p50(self, client, admin_session_cookie, app):
+        """Shadow cosine p50 must appear in the rendered HTML.
+
+        Story #1294: Shadow Cosine P50 is now sourced from
+        WindowedCacheMetrics (search_embed_event), not
+        QueryEmbeddingCacheMetrics.snapshot().
+        """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetrics(shadow_cosine_p50=0.97)
         set_query_embedding_cache(_FakeCache(count=42))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(app, _windowed_result(shadow_cosine_p50=0.97))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             # cosine p50 = 0.97 must appear somewhere in the HTML
-            assert "0.97" in resp.text, (
-                f"Expected cosine p50 '0.97' in HTML, got:\n{resp.text[:500]}"
+            assert "0.9700" in resp.text, (
+                f"Expected cosine p50 '0.9700' in HTML, got:\n{resp.text[:500]}"
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
 
 # ---------------------------------------------------------------------------
@@ -272,23 +352,27 @@ class TestAuditRowsRender:
     """Audit rows appear in the cache-metrics partial when audit_total > 0."""
 
     def test_audit_rows_render_when_audit_total_nonzero(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
-        """When snapshot includes audit_total=20, the partial must render audit stats."""
+        """When the windowed result includes audit_count=20, the partial must
+        render audit stats.
+
+        Story #1294: Audit Samples / Audit Avg Top-10 Overlap are now sourced
+        from WindowedCacheMetrics (search_embed_event.audit_sampled/
+        audit_cosine), not QueryEmbeddingCacheMetrics.snapshot(). The Audit
+        Top-1 Match card is REMOVED — no windowed data source exists for it
+        (search_embed_event has no top1-match column).
+        """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetrics(
-            audit_total=20,
-            audit_top1_matches=15,
-            audit_overlap_avg=0.85,
-        )
         set_query_embedding_cache(_FakeCache(count=42))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(
+            app,
+            _windowed_result(audit_count=20, audit_sum=17.0, audit_avg=0.85),
+        )
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -297,12 +381,9 @@ class TestAuditRowsRender:
             assert "20" in html, (
                 f"Expected audit_total '20' in HTML, got:\n{html[:600]}"
             )
-            # Top-1 match rate = 15/20 * 100 = 75.0% (rendered as a percentage)
-            assert "75.0%" in html, (
-                f"Expected top-1 match rate '75.0%' in HTML, got:\n{html[:600]}"
-            )
-            # Avg overlap = 0.85 -> 85.0% (percentage, consistent with Top-1 Match;
-            # no longer the bare decimal '0.85')
+            # Audit Top-1 Match card is removed (Story #1294 — no data source).
+            assert "Audit Top-1 Match" not in html
+            # Avg overlap = 0.85 -> 85.0% (percentage).
             assert "85.0%" in html, (
                 f"Expected overlap avg '85.0%' in HTML, got:\n{html[:600]}"
             )
@@ -311,7 +392,7 @@ class TestAuditRowsRender:
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
 
 # ---------------------------------------------------------------------------
@@ -337,80 +418,56 @@ def _extract_article_cards(html: str) -> list:
 
 
 class TestNodeIdOnVolatileCards:
-    """Node id appears on the three volatile cards but NOT on Cache Entries.
+    """Story #1294: no cache card carries a per-node label anymore.
 
-    The three volatile cards are Shadow Hit Rate, On-Mode Hit Rate, and
-    Shadow Cosine P50.  Cache Entries is DB-backed and cluster-wide so it
-    must not carry a per-node label.
+    Before Story #1294, Shadow Hit Rate and Shadow Cosine P50 were in-process,
+    per-node tallies and carried a "Node <id>" label. Story #1294 re-sourced
+    them from WindowedCacheMetrics — a durable, windowed, cluster-aggregated
+    read over search_embed_event — so NONE of the cache-metrics cards are
+    per-node anymore (Cache Entries and On-Mode Hit Rate were already
+    cluster-wide). This class now asserts that absence.
     """
 
-    def test_node_id_in_template_context_and_volatile_cards(
+    def test_node_id_absent_from_shadow_and_cosine_cards(
         self, client, admin_session_cookie, app
     ):
-        """node_id is passed to the template and 'Node <id>' appears on each volatile card.
-
-        Verifies template-context presence by injecting a known node id via
-        app.state.node_id and asserting it is reflected in the rendered HTML
-        on all three volatile cards (Shadow Hit Rate, On-Mode Hit Rate,
-        Shadow Cosine P50).
+        """A known node id injected via app.state.node_id must NOT appear on
+        the Shadow Hit Rate or Shadow Cosine P50 cards (both are now
+        windowed/cluster-aggregated, not per-node).
         """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
         test_node_name = "cidx-worker-77"
-        original = getattr(app.state, "node_id", _SENTINEL)
+        original_node = getattr(app.state, "node_id", _SENTINEL)
         app.state.node_id = test_node_name
 
         set_query_embedding_cache(_FakeCache(count=5))
-        set_query_embedding_cache_metrics(
-            _FakeMetrics(
-                shadow_hits=4,
-                shadow_misses=1,
-                on_hits=3,
-                on_misses=2,
-                shadow_cosine_p50=0.99,
-            )
+        original_see = _install_see_writer(
+            app,
+            _windowed_result(shadow_hits=4, shadow_misses=1, shadow_cosine_p50=0.99),
         )
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             html = resp.text
             node_label = f"Node {test_node_name}"
-
-            # Split HTML into per-card chunks; skip index-0 (preamble).
-            cards = _extract_article_cards(html)
-            # cards[1] = Cache Entries, cards[2] = Shadow Hit Rate,
-            # cards[3] = On-Mode Hit Rate, cards[4] = Shadow Cosine P50
-            assert len(cards) >= 5, (
-                f"Expected at least 4 article cards in HTML, got {len(cards) - 1}"
-            )
-            shadow_hit_card = cards[2]
-            on_mode_card = cards[3]
-            cosine_card = cards[4]
-
-            assert node_label in shadow_hit_card, (
-                f"'Node {test_node_name}' missing from Shadow Hit Rate card:\n{shadow_hit_card[:400]}"
-            )
-            assert node_label in on_mode_card, (
-                f"'Node {test_node_name}' missing from On-Mode Hit Rate card:\n{on_mode_card[:400]}"
-            )
-            assert node_label in cosine_card, (
-                f"'Node {test_node_name}' missing from Shadow Cosine P50 card:\n{cosine_card[:400]}"
+            assert node_label not in html, (
+                f"'{node_label}' must NOT appear anywhere in the cache-metrics "
+                f"HTML (Story #1294 made all cards cluster-aggregated):\n{html[:600]}"
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
-            if original is _SENTINEL:
+            _restore_see_writer(app, original_see)
+            if original_node is _SENTINEL:
                 try:
                     del app.state.node_id
                 except AttributeError:
                     pass
             else:
-                app.state.node_id = original
+                app.state.node_id = original_node
 
     def test_node_id_absent_on_cache_entries_card(
         self, client, admin_session_cookie, app
@@ -448,52 +505,10 @@ class TestNodeIdOnVolatileCards:
             else:
                 app.state.node_id = original
 
-    def test_hostname_fallback_when_node_id_not_in_app_state(
-        self, client, admin_session_cookie, app
-    ):
-        """When app.state.node_id is absent, node_id falls back to socket.gethostname()."""
-        import socket
-        from code_indexer.server.services.governed_call import (
-            set_query_embedding_cache,
-            clear_query_embedding_cache,
-        )
-
-        original = getattr(app.state, "node_id", _SENTINEL)
-        if original is not _SENTINEL:
-            try:
-                del app.state.node_id
-            except AttributeError:
-                pass
-
-        set_query_embedding_cache(_FakeCache(count=3))
-        try:
-            resp = client.get("/admin/partials/dashboard-cache-metrics")
-            assert resp.status_code == 200
-            html = resp.text
-            hostname = socket.gethostname()
-            assert f"Node {hostname}" in html, (
-                f"Expected 'Node {hostname}' (hostname fallback) in HTML, got:\n{html[:800]}"
-            )
-        finally:
-            clear_query_embedding_cache()
-            if original is not _SENTINEL:
-                app.state.node_id = original
-
 
 # ---------------------------------------------------------------------------
 # Story #1149 (BLOCKING): long_key counter surfaced through the front door
 # ---------------------------------------------------------------------------
-
-
-class _FakeMetricsWithLongKey(_FakeMetrics):
-    """FakeMetrics that includes long_key in snapshot (Story #1149)."""
-
-    def __init__(self, long_key: int = 0, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._snap["long_key"] = long_key
-
-    def snapshot(self) -> dict:
-        return self._snap
 
 
 class TestLongKeyFrontDoor:
@@ -505,22 +520,23 @@ class TestLongKeyFrontDoor:
     - the rendered dashboard_cache_metrics.html partial contains the long_key value
     """
 
-    def test_handler_puts_long_key_in_namespace(self, client, admin_session_cookie):
-        """When snapshot includes long_key=17, the rendered HTML contains '17'.
+    def test_handler_puts_long_key_in_namespace(
+        self, client, admin_session_cookie, app
+    ):
+        """When the windowed result includes long_key=17, the rendered HTML
+        contains '17'.
 
-        This proves the handler extracts long_key from snapshot() and the template
-        renders it — front-door observable.
+        Story #1294: long_key (Over-Cap Queries) is now sourced from
+        WindowedCacheMetrics.overall.long_key, not
+        QueryEmbeddingCacheMetrics.snapshot()["long_key"].
         """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetricsWithLongKey(long_key=17)
         set_query_embedding_cache(_FakeCache(count=5))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(app, _windowed_result(long_key=17))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -530,10 +546,10 @@ class TestLongKeyFrontDoor:
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
     def test_handler_renders_long_key_zero_when_no_queries_skipped(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
         """When long_key=0 (no over-cap queries), the handler must still render 0
         (or '--') without raising — the field is always present in the namespace.
@@ -541,20 +557,17 @@ class TestLongKeyFrontDoor:
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetricsWithLongKey(long_key=0)
         set_query_embedding_cache(_FakeCache(count=0))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(app, _windowed_result(long_key=0))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             # Must not blow up — long_key=0 is a valid state
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
 
 # ---------------------------------------------------------------------------
@@ -562,50 +575,22 @@ class TestLongKeyFrontDoor:
 # ---------------------------------------------------------------------------
 
 
-class _FakeCoalescerWithCounters:
-    """Minimal fake coalescer exposing the four Story #1146 dedup counters."""
-
-    def __init__(
-        self,
-        texts_coalesced: int = 0,
-        batches_dispatched: int = 0,
-        dedup_savings: int = 0,
-        provider_embed_calls: int = 0,
-    ) -> None:
-        self.texts_coalesced = texts_coalesced
-        self.batches_dispatched = batches_dispatched
-        self.dedup_savings = dedup_savings
-        self.provider_embed_calls = provider_embed_calls
-
-
 class TestCoalescerCountersRender:
-    """Story #1146 anti-orphan: coalescer dedup counters must be rendered in the
-    dashboard cache-metrics partial.
+    """Story #1146 anti-orphan / Story #1294: dedup counters must be rendered
+    in the dashboard cache-metrics partial.
 
-    routes.py already computes coalescer_texts_coalesced, coalescer_batches_dispatched,
-    coalescer_dedup_savings, and coalescer_provider_embed_calls into the cache_metrics
-    namespace — but dashboard_cache_metrics.html previously rendered none of them,
-    making them dead code (Messi #12 anti-orphan violation).
-
-    These tests prove that the four counters appear in the rendered HTML (front-door
-    visible) by installing a fake CoalescerRegistry with known counter values.
+    Originally sourced from the per-node in-memory CoalescerRegistry (Story
+    #1146); Story #1294 re-sourced them from WindowedCacheMetrics.overall
+    (durable, windowed, cluster-aggregated over search_embed_event). These
+    tests now install a fake search_embed_event_writer instead of a fake
+    CoalescerRegistry.
     """
 
     def test_coalescer_provider_embed_calls_rendered(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
         """provider_embed_calls must appear in the rendered dashboard HTML."""
-        from code_indexer.server.services.coalescer_registry import (
-            CoalescerRegistry,
-            set_coalescer_registry,
-            clear_coalescer_registry,
-        )
-
-        fake_coalescer = _FakeCoalescerWithCounters(provider_embed_calls=42)
-        registry = CoalescerRegistry(
-            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
-        )
-        set_coalescer_registry(registry)
+        original = _install_see_writer(app, _windowed_result(provider_embed_calls=42))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -614,21 +599,13 @@ class TestCoalescerCountersRender:
                 f"Expected provider_embed_calls '42' in rendered HTML, got:\n{html[:800]}"
             )
         finally:
-            clear_coalescer_registry()
+            _restore_see_writer(app, original)
 
-    def test_coalescer_texts_coalesced_rendered(self, client, admin_session_cookie):
+    def test_coalescer_texts_coalesced_rendered(
+        self, client, admin_session_cookie, app
+    ):
         """texts_coalesced must appear in the rendered dashboard HTML."""
-        from code_indexer.server.services.coalescer_registry import (
-            CoalescerRegistry,
-            set_coalescer_registry,
-            clear_coalescer_registry,
-        )
-
-        fake_coalescer = _FakeCoalescerWithCounters(texts_coalesced=199)
-        registry = CoalescerRegistry(
-            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
-        )
-        set_coalescer_registry(registry)
+        original = _install_see_writer(app, _windowed_result(texts_coalesced=199))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -637,21 +614,11 @@ class TestCoalescerCountersRender:
                 f"Expected texts_coalesced '199' in rendered HTML, got:\n{html[:800]}"
             )
         finally:
-            clear_coalescer_registry()
+            _restore_see_writer(app, original)
 
-    def test_coalescer_dedup_savings_rendered(self, client, admin_session_cookie):
+    def test_coalescer_dedup_savings_rendered(self, client, admin_session_cookie, app):
         """dedup_savings must appear in the rendered dashboard HTML."""
-        from code_indexer.server.services.coalescer_registry import (
-            CoalescerRegistry,
-            set_coalescer_registry,
-            clear_coalescer_registry,
-        )
-
-        fake_coalescer = _FakeCoalescerWithCounters(dedup_savings=77)
-        registry = CoalescerRegistry(
-            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
-        )
-        set_coalescer_registry(registry)
+        original = _install_see_writer(app, _windowed_result(dedup=77))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -660,21 +627,13 @@ class TestCoalescerCountersRender:
                 f"Expected dedup_savings '77' in rendered HTML, got:\n{html[:800]}"
             )
         finally:
-            clear_coalescer_registry()
+            _restore_see_writer(app, original)
 
-    def test_coalescer_batches_dispatched_rendered(self, client, admin_session_cookie):
+    def test_coalescer_batches_dispatched_rendered(
+        self, client, admin_session_cookie, app
+    ):
         """batches_dispatched must appear in the rendered dashboard HTML."""
-        from code_indexer.server.services.coalescer_registry import (
-            CoalescerRegistry,
-            set_coalescer_registry,
-            clear_coalescer_registry,
-        )
-
-        fake_coalescer = _FakeCoalescerWithCounters(batches_dispatched=13)
-        registry = CoalescerRegistry(
-            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
-        )
-        set_coalescer_registry(registry)
+        original = _install_see_writer(app, _windowed_result(batches=13))
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -683,7 +642,7 @@ class TestCoalescerCountersRender:
                 f"Expected batches_dispatched '13' in rendered HTML, got:\n{html[:800]}"
             )
         finally:
-            clear_coalescer_registry()
+            _restore_see_writer(app, original)
 
 
 # ---------------------------------------------------------------------------
@@ -691,36 +650,28 @@ class TestCoalescerCountersRender:
 # ---------------------------------------------------------------------------
 
 
-class _FakeMetricsWithHistogram(_FakeMetrics):
-    """FakeMetrics that includes a populated shadow_cosine_histogram (Story #1152).
-
-    Provides a histogram with a big bucket near 1.0 and a small lower bucket
-    to exercise the log10-scaling path.  Also provides min/p05/p50 stats.
+def _histogram_with_high_and_low_bucket() -> list:
+    """Sparse 40-bucket histogram: bucket 38 [0.90,0.95) has 500 hits, bucket
+    20 has 1 hit (exercises log10 scaling). All others are 0 (Story #1152).
     """
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        # Build a sparse 40-bucket histogram: bucket 38 [0.90,0.95) has 500
-        # hits, bucket 39 [0.95,1.00) has 1 hit (exercises log10 scaling).
-        # All others are 0.
-        histogram = []
-        for i in range(40):
-            lo = round(-1.0 + i * 0.05, 10)
-            hi = round(-1.0 + (i + 1) * 0.05, 10)
-            if i == 38:
-                histogram.append((lo, hi, 500))
-            elif i == 20:
-                histogram.append((lo, hi, 1))
-            else:
-                histogram.append((lo, hi, 0))
-        self._snap["shadow_cosine_histogram"] = histogram
-        self._snap["shadow_cosine_min"] = 0.03
-        self._snap["shadow_cosine_p05"] = 0.92
-        self._snap["shadow_cosine_p50"] = 0.94
+    histogram = []
+    for i in range(40):
+        lo = round(-1.0 + i * 0.05, 10)
+        hi = round(-1.0 + (i + 1) * 0.05, 10)
+        if i == 38:
+            histogram.append((lo, hi, 500))
+        elif i == 20:
+            histogram.append((lo, hi, 1))
+        else:
+            histogram.append((lo, hi, 0))
+    return histogram
 
 
 class TestPopulatedHistogramRender:
     """Story #1152: populated histogram must render without the | log(10) crash.
+    Story #1294: histogram now comes from WindowedCacheMetrics
+    (by_cache_mode["shadow"].shadow_cosine_histogram), not
+    QueryEmbeddingCacheMetrics.snapshot().
 
     The old template contained:
       {%- set log_len = ((count + 1) | log(10) / ...) -%}
@@ -731,9 +682,10 @@ class TestPopulatedHistogramRender:
     """
 
     def test_populated_histogram_renders_without_crash(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
-        """HTTP 200 (not 500) when the snapshot includes a populated histogram.
+        """HTTP 200 (not 500) when the windowed result includes a populated
+        histogram.
 
         This test FAILS if the template still uses `| log(10)` (Jinja raises
         TemplateAssertionError which FastAPI converts to HTTP 500).
@@ -741,13 +693,18 @@ class TestPopulatedHistogramRender:
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetricsWithHistogram()
         set_query_embedding_cache(_FakeCache(count=10))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_with_high_and_low_bucket(),
+                shadow_cosine_min=0.03,
+                shadow_cosine_p05=0.92,
+                shadow_cosine_p50=0.94,
+            ),
+        )
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200, (
@@ -757,26 +714,31 @@ class TestPopulatedHistogramRender:
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
     def test_populated_histogram_shows_bar_elements_and_stats(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
-        """Rendered HTML must contain bar elements (# chars) + raw counts + P50/min/P05.
+        """Rendered HTML must contain bar elements + raw counts + P50/min/P05.
 
         Asserts the Python-precompute path produces visible chart content and
-        the summary statistics are surfaced from the snapshot.
+        the summary statistics are surfaced from the windowed result.
         """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
-            set_query_embedding_cache_metrics,
-            clear_query_embedding_cache_metrics,
         )
 
-        fake_metrics = _FakeMetricsWithHistogram()
         set_query_embedding_cache(_FakeCache(count=10))
-        set_query_embedding_cache_metrics(fake_metrics)
+        original = _install_see_writer(
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_with_high_and_low_bucket(),
+                shadow_cosine_min=0.03,
+                shadow_cosine_p05=0.92,
+                shadow_cosine_p50=0.94,
+            ),
+        )
         try:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
@@ -789,21 +751,21 @@ class TestPopulatedHistogramRender:
             assert "width:" in html, (
                 f"Expected CSS 'width:' bar fill in rendered histogram, got:\n{html[:800]}"
             )
-            # P50 summary: 0.9400 (from fake_metrics)
+            # P50 summary: 0.9400
             assert "0.9400" in html, (
                 f"Expected P50 '0.9400' in rendered HTML, got:\n{html[:800]}"
             )
-            # Min summary: 0.0300 (from fake_metrics)
+            # Min summary: 0.0300
             assert "0.0300" in html, (
                 f"Expected min '0.0300' in rendered HTML, got:\n{html[:800]}"
             )
-            # P05 summary: 0.9200 (from fake_metrics)
+            # P05 summary: 0.9200
             assert "0.9200" in html, (
                 f"Expected P05 '0.9200' in rendered HTML, got:\n{html[:800]}"
             )
         finally:
             clear_query_embedding_cache()
-            clear_query_embedding_cache_metrics()
+            _restore_see_writer(app, original)
 
 
 # ---------------------------------------------------------------------------
@@ -811,36 +773,22 @@ class TestPopulatedHistogramRender:
 # ---------------------------------------------------------------------------
 
 
-class _FakeMetricsAllZeroBuckets(_FakeMetrics):
-    """FakeMetrics with a histogram where every bucket count is 0 (no samples yet)."""
+def _fetch_cache_metrics_html(client, app, windowed_result, cache_count: int) -> str:
+    """Shared helper: install fake cache+windowed writer, fetch the partial,
+    return HTML.
 
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._snap["shadow_cosine_histogram"] = [
-            (round(-1.0 + i * 0.05, 10), round(-1.0 + (i + 1) * 0.05, 10), 0)
-            for i in range(40)
-        ]
-        self._snap["shadow_cosine_min"] = None
-        self._snap["shadow_cosine_p05"] = None
-        self._snap["shadow_cosine_p50"] = None
-
-
-def _fetch_cache_metrics_html(client, fake_metrics, cache_count: int) -> str:
-    """Shared helper: install fake cache+metrics, fetch the partial, return HTML.
-
-    The shared abstraction that keeps TestCSSBarChartRender test methods DRY —
-    each method calls this directly, so there is no duplicated setup/teardown.
-    Raises AssertionError if the response is not HTTP 200.
+    The shared abstraction that keeps TestCSSBarChartRender/
+    TestCosineChartReverseOrder test methods DRY — each method calls this
+    directly, so there is no duplicated setup/teardown. Raises
+    AssertionError if the response is not HTTP 200.
     """
     from code_indexer.server.services.governed_call import (
         set_query_embedding_cache,
         clear_query_embedding_cache,
-        set_query_embedding_cache_metrics,
-        clear_query_embedding_cache_metrics,
     )
 
     set_query_embedding_cache(_FakeCache(count=cache_count))
-    set_query_embedding_cache_metrics(fake_metrics)
+    original = _install_see_writer(app, windowed_result)
     try:
         resp = client.get("/admin/partials/dashboard-cache-metrics")
         assert resp.status_code == 200, (
@@ -849,7 +797,7 @@ def _fetch_cache_metrics_html(client, fake_metrics, cache_count: int) -> str:
         return str(resp.text)
     finally:
         clear_query_embedding_cache()
-        clear_query_embedding_cache_metrics()
+        _restore_see_writer(app, original)
 
 
 class TestCSSBarChartRender:
@@ -860,11 +808,21 @@ class TestCSSBarChartRender:
     Each test calls _fetch_cache_metrics_html — the shared DRY abstraction.
     """
 
-    def test_css_bars_present_when_populated(self, client, admin_session_cookie):
+    def test_css_bars_present_when_populated(self, client, admin_session_cookie, app):
         """When histogram has non-zero buckets, rendered HTML contains CSS bar
         fills with `width:` style attribute, not `#` ASCII characters.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsWithHistogram(), 10)
+        html = _fetch_cache_metrics_html(
+            client,
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_with_high_and_low_bucket(),
+                shadow_cosine_min=0.03,
+                shadow_cosine_p05=0.92,
+                shadow_cosine_p50=0.94,
+            ),
+            10,
+        )
         assert "width:" in html, (
             f"Expected CSS 'width:' on bar fill elements, got:\n{html[:800]}"
         )
@@ -872,21 +830,31 @@ class TestCSSBarChartRender:
             f"Expected bucket count '500' in rendered HTML, got:\n{html[:800]}"
         )
 
-    def test_empty_state_when_all_zero(self, client, admin_session_cookie):
+    def test_empty_state_when_all_zero(self, client, admin_session_cookie, app):
         """When all histogram bucket counts are 0, render the empty-state message
         instead of 40 empty bar rows.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsAllZeroBuckets(), 0)
+        html = _fetch_cache_metrics_html(client, app, _windowed_result(), 0)
         assert "No shadow cosine samples" in html, (
             f"Expected empty-state message 'No shadow cosine samples' in HTML "
             f"when all buckets are zero, got:\n{html[:800]}"
         )
 
-    def test_no_whitespace_pre_in_chart_body(self, client, admin_session_cookie):
+    def test_no_whitespace_pre_in_chart_body(self, client, admin_session_cookie, app):
         """The chart body must NOT use `white-space: pre` which caused horizontal
         overflow when Jinja whitespace-control stripped newlines between buckets.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsWithHistogram(), 10)
+        html = _fetch_cache_metrics_html(
+            client,
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_with_high_and_low_bucket(),
+                shadow_cosine_min=0.03,
+                shadow_cosine_p05=0.92,
+                shadow_cosine_p50=0.94,
+            ),
+            10,
+        )
         assert "white-space: pre" not in html, (
             "Found 'white-space: pre' in rendered HTML — this causes horizontal "
             "overflow. The chart must use a block/flex layout instead."
@@ -898,26 +866,20 @@ class TestCSSBarChartRender:
 # ---------------------------------------------------------------------------
 
 
-class _FakeMetricsOnlyHighBucket(_FakeMetrics):
-    """FakeMetrics where ONLY the last bucket [0.95, 1.00) has a non-zero count.
+def _histogram_only_high_bucket() -> list:
+    """Histogram where ONLY the last bucket [0.95, 1.00) has a non-zero count.
 
     Mirrors the real-world scenario: shadow-cosine audits on cached embeddings
     of the SAME query always cluster at ~1.0, so index 39 (the highest bucket)
-    is the only populated one.  All 39 lower buckets are zero.
+    is the only populated one. All 39 lower buckets are zero.
     """
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        histogram = []
-        for i in range(40):
-            lo = round(-1.0 + i * 0.05, 10)
-            hi = round(-1.0 + (i + 1) * 0.05, 10)
-            count = 30 if i == 39 else 0  # only [0.95, 1.00) has samples
-            histogram.append((lo, hi, count))
-        self._snap["shadow_cosine_histogram"] = histogram
-        self._snap["shadow_cosine_min"] = 0.97
-        self._snap["shadow_cosine_p05"] = 0.98
-        self._snap["shadow_cosine_p50"] = 0.99
+    histogram = []
+    for i in range(40):
+        lo = round(-1.0 + i * 0.05, 10)
+        hi = round(-1.0 + (i + 1) * 0.05, 10)
+        count = 30 if i == 39 else 0  # only [0.95, 1.00) has samples
+        histogram.append((lo, hi, count))
+    return histogram
 
 
 class TestCosineChartReverseOrder:
@@ -932,14 +894,24 @@ class TestCosineChartReverseOrder:
     """
 
     def test_high_cosine_bucket_renders_before_low_cosine_bucket(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
         """[0.95, 1.00) row must appear earlier in the HTML than [-1.00, -0.95).
 
         With only the [0.95, 1.00) bucket populated the reversed chart places it
         at the top; the always-empty [-1.00, -0.95) row scrolls below.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+        html = _fetch_cache_metrics_html(
+            client,
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_only_high_bucket(),
+                shadow_cosine_min=0.97,
+                shadow_cosine_p05=0.98,
+                shadow_cosine_p50=0.99,
+            ),
+            5,
+        )
 
         # Both bucket labels must be present (all 40 rows still render).
         assert "[0.95, 1.00)" in html, "Expected '[0.95, 1.00)' label in rendered HTML"
@@ -958,13 +930,23 @@ class TestCosineChartReverseOrder:
         )
 
     def test_populated_bucket_count_visible_in_first_rows(
-        self, client, admin_session_cookie
+        self, client, admin_session_cookie, app
     ):
         """The count '30' from the [0.95, 1.00) bucket must appear in the HTML
         near the top (before any empty bucket rows), confirming data is not
         scrolled off.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+        html = _fetch_cache_metrics_html(
+            client,
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_only_high_bucket(),
+                shadow_cosine_min=0.97,
+                shadow_cosine_p05=0.98,
+                shadow_cosine_p50=0.99,
+            ),
+            5,
+        )
 
         # The populated [0.95, 1.00) row should appear before the first empty
         # zero-count row in the HTML (empty rows have count 0).
@@ -978,14 +960,24 @@ class TestCosineChartReverseOrder:
             "that populated data renders at the top of the chart."
         )
 
-    def test_max_height_is_compact(self, client, admin_session_cookie):
+    def test_max_height_is_compact(self, client, admin_session_cookie, app):
         """The cosine-chart container must use max-height: 14rem (not 28rem).
 
         A compact container ensures the visible viewport starts at the top
         (where data is after reversal) without wasting vertical space on the
         always-empty tail.
         """
-        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+        html = _fetch_cache_metrics_html(
+            client,
+            app,
+            _windowed_result(
+                shadow_cosine_histogram=_histogram_only_high_bucket(),
+                shadow_cosine_min=0.97,
+                shadow_cosine_p05=0.98,
+                shadow_cosine_p50=0.99,
+            ),
+            5,
+        )
         assert "max-height: 14rem" in html, (
             "Expected 'max-height: 14rem' on the cosine-chart container. "
             "The container was previously 28rem which hid populated buckets "

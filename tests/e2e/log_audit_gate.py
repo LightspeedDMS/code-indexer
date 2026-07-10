@@ -24,6 +24,7 @@ AuditGateResult           : dataclass          -- gate outcome
 query_logs_via_mcp        : (client, token) -> list[dict]  -- front-door call
 get_log_watermark         : (client, token) -> int         -- watermark snapshot
 run_log_audit_gate        : (client, token, wm, phase) -> AuditGateResult
+flush_log_pipeline        : (client) -> None  -- full two-stage drain barrier
 """
 
 from __future__ import annotations
@@ -320,6 +321,40 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # concurrent cidx-meta operations overlap.  Anchored on the static message prefix;
     # a genuine write-failure would surface with a different error shape.
     "on_repo_removed: write lock not acquired, skipping deletion of",
+    # test_01_mcp_search.py's parametrized test_mcp_search_tool[search_code_fts] case
+    # calls the MCP search_code tool with search_mode="fts" and deliberately omits
+    # repository_alias.  query_user_repositories (semantic_query_manager.py:~404,
+    # ~522-537) treats a falsy repository_alias as "no filter" and fans out across
+    # every repo it can see -- which, at that point in the session, is only the
+    # always-present, auto-bootstrapped cidx-meta-global internal bookkeeping repo (a
+    # git metadata repo, never FTS-indexed by design -- not real user source code).
+    # The per-repo FTS search against cidx-meta-global raises SemanticQueryError(
+    # "FTS index not available for repository 'cidx-meta-global'. Build FTS index
+    # with 'cidx index --fts'") (semantic_query_manager.py:2397).  This surfaces at
+    # three log sites, all interpolating the identical message text verbatim:
+    #   1. [QUERY-MIGRATE-006] WARNING -- per-repo catch, "log warning and continue
+    #      with other repos" (semantic_query_manager.py:960-967).
+    #   2. [QUERY-MIGRATE-008] ERROR -- re-raised once cidx-meta-global is the ONLY
+    #      visible repo and so ALL repos failed (semantic_query_manager.py:1724-1733).
+    #   3. "Error in search_code: ..." ERROR -- the MCP handler's outer exception
+    #      logger wrapping the re-raised exception (mcp/handlers/search.py:1354-1359).
+    # Benign: this is the omni/no-alias fan-out gracefully continuing past the
+    # never-indexed bookkeeping repo, the same category of noise as the existing
+    # cidx-meta-global entries above (dep-map refresh-failure / duplicate-job
+    # entries).  A single substring anchored on the exact repo name covers all three
+    # sites; a genuine FTS-missing-index bug on any OTHER real user repo would carry
+    # that repo's own alias, not "cidx-meta-global", and would NOT be suppressed.
+    "FTS index not available for repository 'cidx-meta-global'",
+    # Story #1292 (test_18_temporal_dual_embedder_1292.py::
+    # test_rest_temporal_embedder_override_to_unconfigured_returns_typed_empty):
+    # deliberately queries with temporal_embedder="not-a-configured-embedder"
+    # to prove the AC7/AC8 typed-empty-result contract (an override naming an
+    # embedder with no indexed collections returns a typed empty result, NEVER
+    # a silent fallback to a different embedder's data). These two WARNINGs
+    # are the test's own asserted signal that the no-fallback path fired
+    # correctly -- not a service defect.
+    "Temporal embedder 'not-a-configured-embedder' has no indexed collections",
+    "Temporal index not available for repository, returning empty results repository_alias=temporal-dual-embedder-1292",
 ]
 
 
@@ -642,3 +677,78 @@ def run_log_audit_gate(
     violations = [e for e in new_entries if not is_allowlisted(e)]
     passed = len(violations) == 0
     return AuditGateResult(passed=passed, violations=violations, phase_name=phase_name)
+
+
+# ---------------------------------------------------------------------------
+# Full drain barrier (Phase 3 in-process only) -- see module docstring for the
+# two-queue race this exists to close.
+# ---------------------------------------------------------------------------
+
+
+def flush_log_pipeline(client: Any) -> None:
+    """Block until every log record enqueued so far has reached logs.db.
+
+    Background -- TWO queues sit between a ``logger.warning()``/``.error()``
+    call and a row landing in ``logs.db``, and a caller must drain BOTH or it
+    will observe a false "nothing pending" signal while a record is still in
+    flight:
+
+    1. ``async_logging.py``'s ``IdentityQueueHandler`` -> ``DrainableQueueListener``
+       (the py-spy logging-lock fix, installed by ``startup/lifespan.py`` via
+       ``install_queue_logging()`` and exposed at ``app.state.log_queue_listener``).
+       A ``logger.warning()`` call on ANY thread just enqueues the raw
+       ``LogRecord`` onto this queue and returns immediately -- actual dispatch
+       to the real handlers (console ``StreamHandler``, ``SQLiteLogHandler``,
+       etc.) happens later, asynchronously, on the listener's OWN background
+       thread.
+    2. ``SQLiteLogHandler``'s own internal write queue (Bug #1078 -- a
+       dedicated ``sqlite-log-writer`` thread batches INSERTs).
+
+    Calling ONLY ``app.state.sqlite_log_handler.flush()`` (queue #2) drains
+    nothing if the record is still sitting in queue #1 -- the handler has not
+    even seen it yet, so its flush returns instantly having done nothing. This
+    produces a deterministic false-negative: a test that emits a WARNING and
+    immediately flushes queue #2 alone can observe the marker STILL MISSING
+    from ``logs.db`` because ``SQLiteLogHandler.emit()`` for that record fires
+    on a different thread, measurably later than the premature flush call
+    already returned.
+
+    ``DrainableQueueListener.flush()`` (queue #1's owner) already implements
+    the CORRECT full two-stage barrier: it pushes an acknowledged marker
+    record through queue #1, waits for the listener thread to dequeue it
+    (proving every record enqueued before the call has been handed to the real
+    handlers), and THEN calls ``handler.flush()`` on every real handler it
+    owns -- including ``SQLiteLogHandler`` (queue #2). So calling
+    ``listener.flush()`` alone is sufficient and correct; do NOT also call
+    ``handler.flush()`` afterward (redundant, not wrong, but unnecessary).
+
+    Do not "simplify" this back to a single ``handler.flush()`` call -- that
+    reintroduces the exact race this function exists to close.
+
+    Args:
+        client: TestClient (or any object exposing ``.app.state``) bound to
+            the in-process server.
+
+    Raises:
+        AssertionError: Neither ``app.state.log_queue_listener`` nor
+            ``app.state.sqlite_log_handler`` is present, or the fallback
+            handler's ``flush()`` call itself raises.
+    """
+    app = getattr(client, "app", None)
+    state = getattr(app, "state", None)
+
+    listener = getattr(state, "log_queue_listener", None)
+    if listener is not None:
+        listener.flush()
+        return
+
+    # Fallback for contexts where async_logging isn't installed (e.g. a
+    # server booted without install_queue_logging()). Drains queue #2 only,
+    # which is correct in that scenario because queue #1 doesn't exist.
+    handler = getattr(state, "sqlite_log_handler", None)
+    assert handler is not None, (
+        "flush_log_pipeline: neither app.state.log_queue_listener nor "
+        "app.state.sqlite_log_handler is present. The in-process server must "
+        "be started via the module-level app singleton before flushing."
+    )
+    handler.flush()

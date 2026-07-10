@@ -79,7 +79,12 @@ def _capture_subprocess_cmds(scheduler, alias_name, source_path):
         all_stderr,
         cwd,
         error_label=None,
+        env=None,
     ):
+        # Bug #1325 (code-review follow-up): the semantic/FTS call site now
+        # always passes an explicit sanitized env= kwarg (never relies on
+        # the caller inheriting os.environ implicitly), so this mock must
+        # accept it.
         captured.append(list(command))
         # No-op: don't actually spawn subprocess
 

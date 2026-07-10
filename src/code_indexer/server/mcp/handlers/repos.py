@@ -17,6 +17,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -954,7 +955,11 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "job_id": None,
                 }
             )
-        if alias not in _utils.app_module.golden_repo_manager.golden_repos:
+        # Bug #1314: resolve via golden_repo_exists() (shared-backend-backed,
+        # reloads on a local cache miss) instead of a raw in-memory dict
+        # membership check, so a repo registered by ANOTHER worker/node in
+        # the cluster is found here too.
+        if not _utils.app_module.golden_repo_manager.golden_repo_exists(alias):
             return _mcp_response(
                 {
                     "success": False,
@@ -1855,6 +1860,17 @@ def _run_provider_subprocess(
     except Exception as _seed_exc:  # noqa: BLE001
         logger.debug("Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc)
 
+    # Bug #1325 (code-review follow-up): sanitize env here, the single shared
+    # call site for both the semantic (_provider_index_job) and temporal
+    # (_provider_temporal_index_job) provider-index jobs, so a relative
+    # PYTHONPATH inherited from the server process is absolutized before the
+    # child changes cwd to actual_path -- otherwise it re-anchors into
+    # actual_path and a src/-layout package there can shadow an installed
+    # cidx dependency. Preserves the provider API key vars and (in postgres
+    # mode) the #1313 CIDX_TEMPORAL_PG_BOOTSTRAP_DIR var already merged into
+    # env by the callers.
+    sanitized_env = build_cidx_subprocess_env(env)
+
     try:
         run_with_popen_progress(
             command=cmd,
@@ -1864,7 +1880,7 @@ def _run_provider_subprocess(
             all_stdout=all_stdout,
             all_stderr=all_stderr,
             cwd=actual_path,
-            env=env,
+            env=sanitized_env,
             error_label=f"provider {phase_name}",
         )
         stdout_out = "".join(all_stdout)
@@ -1983,6 +1999,27 @@ def _provider_temporal_index_job(
         }
 
     env = _build_provider_api_key_env(provider_name)
+
+    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
+    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
+    # subprocess installs the PostgreSQL temporal-metadata backend instead
+    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
+    # returns a NEW dict (base_env=env, so the provider API key is
+    # preserved) in postgres mode, or None in sqlite mode -- fall back to
+    # the unmodified env in that case (byte-unchanged existing behavior).
+    # get_config_service().get_config() (not ServerConfigManager().load_config())
+    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
+    # get_config_service() as the sole config-read path.
+    from code_indexer.server.storage.postgres.temporal_child_wiring import (
+        build_temporal_child_env,
+    )
+
+    _merged_env = build_temporal_child_env(
+        get_config_service().get_config(), base_env=env
+    )
+    if _merged_env is not None:
+        env = _merged_env
+
     temporal_options = kwargs.get("temporal_options", {}) or {}
     cmd = _build_temporal_index_cmd(clear, temporal_options)
 

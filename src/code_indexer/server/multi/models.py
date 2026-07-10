@@ -54,6 +54,14 @@ class MultiSearchRequest(BaseModel):
         False,
         description="Bypass the query-embedding cache for this request (Story #1108)",
     )
+    # Story #1291 AC7/AC8: explicit temporal embedder override. Omit to use
+    # temporal.active_embedder. An override naming an embedder with no
+    # indexed collections returns an empty/typed result -- it never silently
+    # falls back to active_embedder. Only meaningful for search_type="temporal".
+    temporal_embedder: Optional[str] = Field(
+        None,
+        description="Explicit temporal embedder override (e.g. 'embed-v4.0'). Only used when search_type='temporal'.",
+    )
     # Story #1148 PART 1: pre-computed embedding vector for omni fan-out reuse.
     # When set, each per-repo semantic search uses this vector via
     # _PrecomputedEmbeddingProvider instead of calling coalesced_query_embedding

@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .git_error_classifier import GitFetchError
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .update_strategy import UpdateStrategy
 
@@ -97,7 +98,11 @@ class GitPullUpdater(UpdateStrategy):
         self.repo_path = Path(repo_path)
 
         if not self.repo_path.exists():
-            raise ValueError(f"Repository path does not exist: {repo_path}")
+            # Bug #1338: this is the ORPHAN case (registry row present, clone
+            # missing on disk) -- raise the typed OrphanedRepoError, not a
+            # plain ValueError, so the refresh-scheduler skip site can catch
+            # it by TYPE instead of matching this message's text.
+            raise OrphanedRepoError(f"Repository path does not exist: {repo_path}")
 
     def has_changes(self) -> bool:
         """

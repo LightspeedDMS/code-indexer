@@ -650,18 +650,23 @@ class TestAC5WorkersSaveFlow:
         svc._update_server_setting(config, "workers", "4")
         assert config.workers == 4
 
-    def test_workers_in_bootstrap_keys(self):
-        """AC5: 'workers' must be persisted to config.json.
+    def test_workers_no_longer_written_to_config_json(self):
+        """Story #1196: 'workers' is a pure runtime key -- no config.json copy.
 
         Story #1197 moved 'workers' from BOOTSTRAP_KEYS to TRANSITION_PRESERVE_KEYS
-        so that it continues to be written to config.json during the transition
-        release while also being available as a runtime key in the DB.
+        so it kept being written to config.json during the one-release transition
+        window. Story #1196 (next-release cleanup) removes that transition
+        allow-list entirely: 'workers' must be neither in BOOTSTRAP_KEYS nor in
+        any surviving transition set (TRANSITION_PRESERVE_KEYS no longer exists).
         """
-        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
+        import code_indexer.server.services.config_service as config_service_module
+        from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
 
-        assert "workers" in TRANSITION_PRESERVE_KEYS, (
-            "'workers' must be in TRANSITION_PRESERVE_KEYS so it is saved to config.json. "
-            "Story #1197 moved it from BOOTSTRAP_KEYS to TRANSITION_PRESERVE_KEYS."
+        assert not hasattr(config_service_module, "TRANSITION_PRESERVE_KEYS"), (
+            "Story #1196: TRANSITION_PRESERVE_KEYS must be removed entirely."
+        )
+        assert "workers" not in BOOTSTRAP_KEYS, (
+            "'workers' must remain out of BOOTSTRAP_KEYS (Story #1197 AC1, unchanged)."
         )
 
 

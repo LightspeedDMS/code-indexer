@@ -276,3 +276,42 @@ def test_registry_falls_back_to_sqlite_when_no_app_module(tmp_path, caplog):
     assert not any("backend_registry not set" in m for m in warning_messages), (
         f"Unexpected WARNING in CLI mode: {warning_messages}"
     )
+
+
+def test_resolve_registry_backend_never_imports_server_app(tmp_path):
+    """
+    Bug #1308 remediation items #4 (dedup) + #5 (CLI import cost):
+    GlobalRepoOperations._resolve_registry_backend() must delegate to the
+    shared resolve_backend_registry_state() helper (registry_factory.py),
+    which uses a sys.modules.get() lookup instead of a real import -- so
+    CLI usage of GlobalRepoOperations (cli.py) never pays the cost of
+    building the whole FastAPI app just to discover "not in server mode,
+    use SQLite".
+
+    Simulates a pristine CLI-only process by removing
+    code_indexer.server.app from sys.modules first; a `from
+    code_indexer.server import app` statement would re-populate
+    sys.modules, a sys.modules.get() lookup would not.
+    """
+    import sys
+
+    import code_indexer.global_repos.shared_operations as mod
+
+    importlib.reload(mod)
+
+    golden_repos_dir = str(tmp_path / "golden-repos")
+    ops = mod.GlobalRepoOperations(golden_repos_dir=golden_repos_dir)
+
+    saved = sys.modules.pop("code_indexer.server.app", None)
+    try:
+        _ = ops.registry  # triggers resolution
+
+        assert "code_indexer.server.app" not in sys.modules, (
+            "GlobalRepoOperations._resolve_registry_backend() must not "
+            "import code_indexer.server.app -- CLI usage must never pay "
+            "that cost just to discover 'not in server mode, use SQLite' "
+            "(Bug #1308 remediation item #5)."
+        )
+    finally:
+        if saved is not None:
+            sys.modules["code_indexer.server.app"] = saved

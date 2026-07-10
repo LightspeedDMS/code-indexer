@@ -13,6 +13,7 @@ Verifies:
 
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 
@@ -94,6 +95,7 @@ class TestGlobalReposProtocolCompliance:
             "update_enable_temporal",
             "update_enable_scip",
             "update_next_refresh",
+            "list_due_repos",
             "close",
         ]
         for method_name in required:
@@ -354,7 +356,7 @@ class TestListRepos:
                 True,
                 '{"d":7}',
                 True,
-                "9999",
+                datetime.fromtimestamp(9999.0, tz=timezone.utc),
             ),
         ]
         mock_pool, _, _ = _make_mock_pool(fetchall_return=rows)
@@ -364,6 +366,11 @@ class TestListRepos:
 
         assert set(result.keys()) == {"alias-a", "alias-b"}
         assert result["alias-b"]["temporal_options"] == {"d": 7}
+        assert result["alias-b"]["next_refresh"] == "9999.0", (
+            "next_refresh must round-trip to the epoch-float-STRING contract "
+            f"the scheduler/GlobalRegistry expects, got: "
+            f"{result['alias-b']['next_refresh']!r}"
+        )
 
     def test_list_repos_returns_empty_dict_when_no_repos(self) -> None:
         """
@@ -590,6 +597,159 @@ class TestUpdateNextRefresh:
         params = mock_cursor.execute.call_args[0][1]
         assert params[0] is None
         assert params[1] == "alias"
+
+    def test_update_next_refresh_with_value_converts_epoch_string_to_utc_datetime(
+        self,
+    ) -> None:
+        """
+        Blocker B (Bug #1308 re-review): next_refresh is TIMESTAMPTZ, not TEXT
+        (src/code_indexer/server/storage/postgres/migrations/sql/001_initial_schema.sql:82).
+        The scheduler's contract (via PostgresGlobalRegistryAdapter) passes an
+        epoch-float STRING (matching the SQLite backend's TEXT-column
+        semantics) -- the PG backend must convert that string to a
+        timezone-aware UTC datetime before binding it to the TIMESTAMPTZ
+        column, not write the naked string (which would error against a real
+        PG connection).
+        """
+        from code_indexer.server.storage.postgres.global_repos_backend import (
+            GlobalReposPostgresBackend,
+        )
+
+        mock_pool, _, mock_cursor = _make_mock_pool()
+        backend = GlobalReposPostgresBackend(mock_pool)
+
+        backend.update_next_refresh("alias", "1700000000.5")
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert isinstance(params[0], datetime), (
+            f"Expected a datetime bound to the TIMESTAMPTZ column, got: {params[0]!r}"
+        )
+        assert params[0].tzinfo == timezone.utc, (
+            f"next_refresh datetime must be UTC, got tzinfo={params[0].tzinfo!r}"
+        )
+        assert params[0].timestamp() == 1700000000.5
+        assert params[1] == "alias"
+
+
+# ---------------------------------------------------------------------------
+# close
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# list_due_repos (Bug #1308 remediation item #2)
+# ---------------------------------------------------------------------------
+
+
+class TestListDueRepos:
+    """
+    Tests for list_due_repos (Bug #1308): mirrors the SQLite backend's
+    oldest-first, capped due-query (Bug #1063 semantics) so the cluster
+    RefreshScheduler can auto-refresh in postgres mode.
+    """
+
+    def test_list_due_repos_returns_empty_list_when_limit_zero(self) -> None:
+        from code_indexer.server.storage.postgres.global_repos_backend import (
+            GlobalReposPostgresBackend,
+        )
+
+        mock_pool, _, mock_cursor = _make_mock_pool()
+        backend = GlobalReposPostgresBackend(mock_pool)
+
+        result = backend.list_due_repos(limit=0, now=1000.0)
+
+        assert result == []
+        mock_cursor.execute.assert_not_called()
+
+    def test_list_due_repos_executes_select_with_native_timestamptz_comparison(
+        self,
+    ) -> None:
+        """
+        Blocker B (Bug #1308 re-review): next_refresh is TIMESTAMPTZ, not TEXT.
+        `CAST(next_refresh AS DOUBLE PRECISION)` is an invalid query-plan
+        against a timestamptz column and would fail EVERY list_due_repos()
+        call against a real PG connection. The comparison must be NATIVE
+        timestamptz (via to_timestamp(%s) on the bound epoch float), never a
+        cast of the column itself.
+        """
+        from code_indexer.server.storage.postgres.global_repos_backend import (
+            GlobalReposPostgresBackend,
+        )
+
+        mock_pool, _, mock_cursor = _make_mock_pool(fetchall_return=[])
+        backend = GlobalReposPostgresBackend(mock_pool)
+
+        backend.list_due_repos(limit=5, now=1700000000.0)
+
+        sql = mock_cursor.execute.call_args[0][0]
+        params = mock_cursor.execute.call_args[0][1]
+        assert "next_refresh IS NOT NULL" in sql
+        assert "ORDER BY" in sql
+        assert "LIMIT %s" in sql
+        assert "to_timestamp(%s)" in sql, (
+            f"Expected a native to_timestamp(%s) comparison, got SQL: {sql}"
+        )
+        assert "DOUBLE PRECISION" not in sql.upper(), (
+            f"CAST(...AS DOUBLE PRECISION) is invalid against a TIMESTAMPTZ "
+            f"column (Blocker B); got SQL: {sql}"
+        )
+        assert params == (1700000000.0, 5)
+
+    def test_list_due_repos_returns_rows_as_dicts_oldest_first(self) -> None:
+        """
+        psycopg returns a real `datetime` for a TIMESTAMPTZ column -- the
+        fixture rows must reflect that (not raw epoch strings) so this test
+        actually exercises the datetime->epoch-string conversion that
+        _row_to_dict must perform to preserve the SQLite backend's
+        epoch-float-string contract for next_refresh.
+        """
+        from code_indexer.server.storage.postgres.global_repos_backend import (
+            GlobalReposPostgresBackend,
+        )
+
+        next_refresh_a = datetime.fromtimestamp(100.0, tz=timezone.utc)
+        next_refresh_b = datetime.fromtimestamp(200.0, tz=timezone.utc)
+        rows = [
+            (
+                "alias-a",
+                "repo-a",
+                None,
+                "/idx-a",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                False,
+                None,
+                False,
+                next_refresh_a,
+            ),
+            (
+                "alias-b",
+                "repo-b",
+                "https://b.com",
+                "/idx-b",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                True,
+                '{"d": 7}',
+                True,
+                next_refresh_b,
+            ),
+        ]
+        mock_pool, _, _ = _make_mock_pool(fetchall_return=rows)
+        backend = GlobalReposPostgresBackend(mock_pool)
+
+        result = backend.list_due_repos(limit=10, now=1000.0)
+
+        assert len(result) == 2
+        assert result[0]["alias_name"] == "alias-a"
+        assert result[1]["alias_name"] == "alias-b"
+        assert result[1]["temporal_options"] == {"d": 7}
+        assert result[1]["enable_scip"] is True
+        assert result[0]["next_refresh"] == "100.0", (
+            "next_refresh must round-trip to the epoch-float-STRING contract "
+            f"the scheduler/GlobalRegistry expects, got: {result[0]['next_refresh']!r}"
+        )
+        assert result[1]["next_refresh"] == "200.0"
 
 
 # ---------------------------------------------------------------------------

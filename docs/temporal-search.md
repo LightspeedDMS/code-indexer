@@ -40,29 +40,39 @@ Temporal search requires indexing your git history first:
 # One-time setup (indexes all commits)
 cidx index --index-commits
 
-# This creates temporal indexes in:
-# .code-indexer/index/code-indexer-temporal/temporal_meta.json
-# .code-indexer/index/code-indexer-temporal/temporal_progress.json
+# This creates per-embedder, quarterly-sharded temporal indexes, e.g.:
+# .code-indexer/index/code-indexer-temporal-voyage_context_4-2024Q3/
+# .code-indexer/index/code-indexer-temporal-embed_v4_0-2024Q3/
 ```
 
-**What Gets Indexed**:
-- Commit messages (semantic vectors)
-- Code diffs (semantic vectors)
-- Commit metadata (author, date, hash)
-- Diff types (added/modified/deleted/renamed/binary)
+**What Gets Indexed**: Each commit is aggregated into ONE per-commit document
+(the commit message once, at the head, followed by each changed file's diff
+under a `--- <path> ---` header). That aggregated document is chunked and
+embedded under every configured temporal embedder adapter (`temporal.embedders`
+in config, e.g. `voyage-context-4` and/or `embed-v4.0`) -- NOT as separate
+"commit message" and "code diff" vectors. Commit metadata (author, date,
+hash) rides in each chunk's payload; the `--diff-type` CLI filter is a
+documented no-op post-aggregation (a single chunk can span multiple files
+with different diff kinds -- see Diff Types below).
 
 **Indexing Time**:
 - Small repos (<100 commits): Seconds
 - Medium repos (100-1000 commits): 1-5 minutes
 - Large repos (1000+ commits): 5-30 minutes
 
+Re-running `cidx index --index-commits` is safe and cheap: a disk-scan-based
+reconcile step skips every already-indexed commit (per embedder, per
+quarterly shard) and only embeds genuinely new or missing commits.
+
 ### 2. Verify Temporal Index
 
 ```bash
-# Check if temporal index exists
-ls -lh .code-indexer/index/code-indexer-temporal/
+# Check if a temporal index exists for the active embedder (model slug varies
+# by embedder, e.g. voyage_context_4 or embed_v4_0)
+ls -lh .code-indexer/index/ | grep code-indexer-temporal
 
-# Should see temporal_meta.json and temporal_progress.json in the code-indexer-temporal collection
+# Each quarterly shard directory (e.g. code-indexer-temporal-voyage_context_4-2024Q3)
+# holds its own HNSW index, id index, and per-commit vector payload files.
 ```
 
 ## Basic Usage
@@ -160,6 +170,13 @@ cidx query "legacy code" --time-range-all --diff-type deleted --quiet
 }
 ```
 
+**Note**: under the per-commit aggregated model, `--diff-type` is a
+documented no-op -- a single chunk can span multiple changed files with
+DIFFERENT diff kinds (added/modified/deleted/renamed) within the same
+commit, so filtering by a single diff type at the chunk level would be
+ambiguous. The flag is accepted for backward compatibility but does not
+filter results.
+
 ### Author Filtering
 
 ```bash
@@ -194,6 +211,13 @@ cidx query "authentication logic" --time-range-all --chunk-type commit_diff --qu
 ```
 
 **Default**: Both commit messages and diffs are searched if chunk_type not specified.
+
+**Note**: under the per-commit aggregated model the commit message is never
+embedded as its own separate, message-only vector. The commit message forms
+the HEAD of each commit's single aggregated document (message once,
+followed by every changed file's diff); `chunk_type=commit_message` filters
+to that head chunk, and `chunk_type=commit_diff` returns all chunks (no
+filtering) -- it does not select a distinct "diff-only" vector type.
 
 ## Use Cases
 
@@ -354,16 +378,28 @@ cidx query "auth changes" \
 
 ### Storage Impact
 
-Temporal indexing increases storage:
+Temporal indexing increases storage. The per-commit aggregated model
+produces roughly ONE vector per commit (versus multiple per-file-diff
+vectors under the old layout), so per-commit storage is dramatically lower
+for commits touching many files with small changes each (see
+`scripts/analysis/temporal_vector_projection.py` for a git-history-derived
+projection on your own repo):
 
-| Repository | Additional Storage |
+| Repository | Additional Storage (per embedder) |
 |------------|-------------------|
 | Small (<100 commits) | ~1-5 MB |
 | Medium (100-1000) | ~5-50 MB |
 | Large (1000-10000) | ~50-500 MB |
 | Very Large (10000+) | ~500MB-2GB |
 
-**Storage Location**: `.code-indexer/index/code-indexer-temporal/` (includes temporal_meta.json, temporal_progress.json, HNSW index, ID index, quantized vectors)
+**Storage Location**: `.code-indexer/index/code-indexer-temporal-{model_slug}-{YYYY}Q{N}/` -- one directory per configured embedder (`model_slug`, e.g. `voyage_context_4`, `embed_v4_0`) PER CALENDAR QUARTER the indexed commits fall in. Each shard directory holds its own `temporal_progress.json` (per-commit completion tracking), `temporal_structure.json` (v2 layout marker), HNSW index, ID index, and per-commit vector payload files.
+
+**Why quarterly sharding is retained after per-commit aggregation**: per-commit aggregation already delivered the primary vector-count reduction (many per-file-diff vectors collapsed into ~1 vector per commit); quarterly sharding is an ORTHOGONAL, complementary optimization for repos with a long commit history:
+
+- **Expected shard counts stay small and bounded**: a repository active for N years produces at most `4*N` shard directories per embedder, growing linearly with calendar time regardless of commit volume or aggregation strategy -- a 10-year-old, 100k-commit repo still has only ~40 shards per embedder.
+- **Query fan-out is time-range-bounded, not history-bounded**: `--time-range-all` fans out across every existing shard (bounded by the small shard count above); a narrow `--time-range` only touches the shards whose quarter overlaps the requested window, so a query for "last quarter" never pays the cost of scanning years of unrelated history. Per-commit aggregation reduces the vectors WITHIN each shard; quarterly sharding reduces which shards a given query must even open.
+- **Retention/lifecycle management**: quarterly shard boundaries give golden-repo administrators a natural, low-blast-radius unit for archiving or pruning old temporal data (e.g. dropping shards older than a retention policy) without needing to rewrite or partially edit one single combined index -- a per-commit-only (unsharded) index would require expensive in-place vector deletion instead of a directory delete.
+- **HNSW index rebuild cost stays bounded**: each shard's HNSW graph only ever contains that quarter's vectors, so a rebuild (e.g. after a delta reindex) touches a bounded, small graph rather than the full multi-year history's graph.
 
 ## Troubleshooting
 
@@ -375,7 +411,7 @@ Temporal indexing increases storage:
 
 1. **Verify temporal index exists**:
    ```bash
-   ls -lh .code-indexer/index/code-indexer-temporal/
+   ls -lh .code-indexer/index/ | grep code-indexer-temporal
    ```
 
 2. **Index commits if missing**:

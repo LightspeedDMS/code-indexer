@@ -191,11 +191,29 @@
     </div>
 </div>
 
-<!-- Query-Embedding Cache Metrics Section (Story #1109 S5) -->
-<!-- Mirrors the langfuse-section polling pattern: 30s auto-refresh, HTMX only. -->
+<!-- Query-Embedding Cache Metrics Section (Story #1109 S5; windowed Story #1294) -->
+<!-- Mirrors the langfuse-section polling pattern: 30s auto-refresh, HTMX only.
+     Story #1294: the cache-window dropdown lives OUTSIDE the refresh target
+     (Story #69 convention) and is re-read on every HTMX request via
+     hx-include, with an extra "change from:#cache-window" trigger so picking
+     a new window refreshes immediately instead of waiting for the next poll. -->
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>Cache Metrics</h2>
+    <div>
+        <label for="cache-window" style="margin-right: 0.5rem;">Time Window:</label>
+        <select id="cache-window" name="cache_window" style="padding: 0.25rem 0.5rem;">
+            <option value="900" {{ 'selected' if cache_window == 900 else '' }}>Last 15 Minutes</option>
+            <option value="3600" {{ 'selected' if cache_window == 3600 else '' }}>Last 1 Hour</option>
+            <option value="86400" {{ 'selected' if cache_window is not defined or cache_window is none or cache_window == 86400 else '' }}>Last 24 Hours</option>
+            <option value="604800" {{ 'selected' if cache_window == 604800 else '' }}>Last 7 Days</option>
+            <option value="1296000" {{ 'selected' if cache_window == 1296000 else '' }}>Last 15 Days</option>
+        </select>
+    </div>
+</div>
 <div id="cache-metrics-section" class="dashboard-section"
     hx-get="/admin/partials/dashboard-cache-metrics"
-    hx-trigger="load, every 30s"
+    hx-trigger="load, every 30s, change from:#cache-window"
+    hx-include="#cache-window"
     hx-swap="innerHTML">
     <div class="loading-indicator">
         <p>Loading cache metrics...</p>

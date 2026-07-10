@@ -285,6 +285,12 @@ _SELECT_COLUMNS = (
 # Upper bound for backend list_jobs when enumerating candidates for bulk deletion.
 _CLEANUP_JOB_FETCH_LIMIT = 10000
 
+# Statuses considered terminal for a background job.  Once a row reaches one
+# of these, complete_job/fail_job must never resurrect or overwrite it — the
+# first terminal write always wins (Bug #1258).  Mirrors the terminal-status
+# set already used by cleanup_old_jobs/_evict_stale_from_memory.
+_TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
+
 
 # ---------------------------------------------------------------------------
 # JobTracker class
@@ -534,7 +540,9 @@ class JobTracker:
             job = self._active_jobs.pop(job_id, None)
 
         if job is None:
-            logger.warning(f"JobTracker.complete_job: job {job_id} not in memory")
+            self._finalize_absent_job(
+                job_id, terminal_status="completed", now=now, result=result
+            )
             return
 
         job.status = "completed"
@@ -563,7 +571,9 @@ class JobTracker:
             job = self._active_jobs.pop(job_id, None)
 
         if job is None:
-            logger.warning(f"JobTracker.fail_job: job {job_id} not in memory")
+            self._finalize_absent_job(
+                job_id, terminal_status="failed", now=now, error=error
+            )
             return
 
         job.status = "failed"
@@ -572,6 +582,122 @@ class JobTracker:
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: failed job {job_id}: {error}")
+
+    def cancel_job(self, job_id: str) -> None:
+        """
+        Mark job as cancelled (Bug #1342 symptom 2).
+
+        Sets status="cancelled" and completed_at, persists to SQLite, then
+        removes from in-memory dict. Mirrors fail_job's terminal-transition
+        contract but for cancellation instead of failure.
+
+        Without this method, BackgroundJobManager writes CANCELLED to the
+        shared background_jobs DB row and evicts its OWN in-memory job dict,
+        but JobTracker's `_active_jobs[job_id]` entry (last set to "running"
+        at job start) is never removed. Since get_recent_jobs() always
+        includes `_active_jobs` regardless of the requested time window, the
+        cancelled job then shows as permanently "running" in the dashboard
+        recent-activity feed until a server restart. Calling cancel_job from
+        every cancel-finalization exit path in
+        BackgroundJobManager._execute_job closes that gap.
+
+        Args:
+            job_id: Job to cancel.
+        """
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            job = self._active_jobs.pop(job_id, None)
+
+        if job is None:
+            self._finalize_absent_job(job_id, terminal_status="cancelled", now=now)
+            return
+
+        job.status = "cancelled"
+        job.completed_at = now
+
+        self._upsert_job(job)
+        logger.debug(f"JobTracker: cancelled job {job_id}")
+
+    def _finalize_absent_job(
+        self,
+        job_id: str,
+        terminal_status: str,
+        now: datetime,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        Handle complete_job/fail_job when job_id is absent from _active_jobs.
+
+        Bug #1258: LifecycleBatchRunner.run() is the terminal authority for a
+        description-refresh parent job — it calls complete_job/fail_job on the
+        SAME job_id that description_refresh_scheduler.on_refresh_complete
+        subsequently calls again as a safety net (kept deliberately — it is
+        the only finalization path when run() itself never reaches its own
+        terminal transition, e.g. an exception before it or a missing-wiring
+        early return). By the time the redundant call arrives, the job has
+        usually already been popped from _active_jobs, so unconditionally
+        logging a WARNING and returning floods the logs with a benign
+        "not in memory" message on every successful/failed refresh (240x/36h
+        in production).
+
+        Distinguishes two cases by reading the persisted DB row:
+
+        - Row already terminal (completed/failed/cancelled): benign double
+          dispatch. The first writer already finalized the row — log DEBUG
+          and return WITHOUT writing again (first-terminal-write wins; a
+          redundant fail_job must never downgrade an already-completed row,
+          and vice versa).
+        - Row missing or still non-terminal (e.g. "running"): genuine zombie
+          edge — the in-memory object was lost (pop-before-persist DB write
+          failure, crash, or a caller reaching complete_job/fail_job without
+          ever going through a prior terminal transition). Forces a direct
+          terminal DB update so the job is never stuck at a non-terminal
+          status forever. Logs at WARNING — unlike the benign case above,
+          this path indicates a real gap worth investigating.  When no
+          persisted row exists at all, there is nothing to update; logs
+          WARNING and returns.
+        """
+        persisted = self._load_job_from_sqlite(job_id)
+
+        if persisted is not None and persisted.status in _TERMINAL_JOB_STATUSES:
+            logger.debug(
+                "JobTracker: job %s already terminal (status=%s) — skipping "
+                "redundant %s completion (Bug #1258 benign double-dispatch)",
+                job_id,
+                persisted.status,
+                terminal_status,
+            )
+            return
+
+        if persisted is None:
+            logger.warning(
+                "JobTracker: job %s not in memory and no persisted row found "
+                "— cannot force terminal update",
+                job_id,
+            )
+            return
+
+        logger.warning(
+            "JobTracker: job %s not in memory but DB row is non-terminal "
+            "(status=%s) — forcing terminal update to %s (Bug #1258 "
+            "zombie-prevention fallback)",
+            job_id,
+            persisted.status,
+            terminal_status,
+        )
+        persisted.status = terminal_status
+        persisted.completed_at = now
+        if terminal_status == "completed":
+            persisted.progress = 100
+            if result is not None:
+                persisted.result = result
+        else:
+            if error is not None:
+                persisted.error = error
+
+        self._upsert_job(persisted)
 
     def get_job(self, job_id: str) -> Optional[TrackedJob]:
         """

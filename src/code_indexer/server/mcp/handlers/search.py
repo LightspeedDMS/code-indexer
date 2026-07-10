@@ -9,7 +9,16 @@ to avoid behavioral changes during extraction.  Refactoring is tracked
 separately.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+# Story #1293: WIRED correlation_id reader. The previous import
+# (code_indexer.server.middleware.correlation.get_correlation_id) reads a
+# ContextVar whose CorrelationContextMiddleware is NEVER registered in
+# startup/app_wiring.py -- only telemetry.correlation_bridge's
+# CorrelationBridgeMiddleware is -- so that reader always returned None in
+# production and every search_event_log / search_embed_event row emitted
+# from this module silently carried correlation_id=None.
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import asyncio
 import logging
@@ -33,6 +42,7 @@ from code_indexer.server.services.search_event_context import (
     _search_event_ctx,
 )
 from code_indexer.server.services.search_event_log_writer import SearchEventRecord
+from code_indexer.server.services.search_embed_event_emit import emit_embed_event
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from code_indexer.server.mcp.memory_retrieval_pipeline import (
     MemoryRetrievalPipeline,
@@ -275,6 +285,7 @@ def _build_multi_search_request(
         exclude_path=params.get("exclude_path"),
         accuracy=params.get("accuracy", "balanced"),
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 
@@ -356,7 +367,13 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     from ...multi.multi_search_config import MultiSearchConfig
     from ...multi.multi_search_service import MultiSearchService
 
-    repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
+    # Bug #1287 Defect B: search_mode is needed BEFORE wildcard expansion so
+    # the internal cidx-meta* bookkeeping repo(s) can be excluded from
+    # fts/hybrid wildcard fan-out (they have no FTS index by design).
+    search_mode = params.get("search_mode", "semantic")
+    repo_aliases = _expand_wildcard_patterns(
+        params.get("repository_alias", []), user, search_mode=search_mode
+    )
     if isinstance(repo_aliases, CapBreach):
         return cap_breach_response(repo_aliases)
     # Bug #894: enforce total fan-out cap after wildcard expansion + literal union
@@ -446,7 +463,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     response_format = params.get(
         "response_format", "grouped" if len(repo_aliases) > 1 else "flat"
     )
-    search_mode = params.get("search_mode", "semantic")
     fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
         final_results, fts_truncation_meta = _apply_search_truncation(
@@ -633,6 +649,10 @@ def _compute_memory_query_vector(
             _event_ctx.voyage_cache_hit = _embed_meta.key_found
             _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
             _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
         return cast(List[float], vec)
     except Exception as exc:
         logger.warning(
@@ -699,6 +719,10 @@ def _compute_shared_query_vector(
             _event_ctx.voyage_cache_hit = _embed_meta.key_found
             _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
             _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+        # Story #1293: emit the durable search_embed_event row for this inline
+        # MCP call. No-op when meta isn't yet classified (Path A coalescer
+        # path — Story #1293 S1b) or when no writer is installed.
+        emit_embed_event(_embed_meta)
         return (cast(List[float], vec), digest)
     except Exception as exc:
         logger.warning(
@@ -841,7 +865,10 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         (repo_entry, target_path, None) on success.
         (None, None, mcp_error_response) on failure.
     """
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
     golden_repos_dir = _get_golden_repos_dir()
     global_repos = _list_global_repos()
@@ -857,8 +884,13 @@ def _resolve_global_repo_target(repository_alias: str, user: User) -> tuple:
         )
         return None, None, err
 
+    # Bug #1315: fall back to the registry's own index_path when the alias
+    # pointer file is missing/unreadable, mirroring MultiSearchService's
+    # omni-path resolution so direct and omni queries behave identically.
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
     if not target_path:
         err = _repo_lookup_error(
             user,
@@ -883,7 +915,6 @@ def _build_search_kwargs(
     The ~30 parameters are required by the _perform_search API and cannot
     be reduced without changing the SemanticQueryManager interface.
     """
-    evolution_limit_raw = params.get("evolution_limit")
     return dict(
         username=user.username,
         user_repos=user_repos,
@@ -900,13 +931,6 @@ def _build_search_kwargs(
         time_range=params.get("time_range"),
         time_range_all=params.get("time_range_all", False),
         at_commit=params.get("at_commit"),
-        include_removed=params.get("include_removed", False),
-        show_evolution=params.get("show_evolution", False),
-        evolution_limit=(
-            _coerce_int(evolution_limit_raw, _DEFAULT_EDIT_DISTANCE)
-            if evolution_limit_raw is not None
-            else None
-        ),
         case_sensitive=params.get("case_sensitive", False),
         fuzzy=params.get("fuzzy", False),
         edit_distance=_coerce_int(params.get("edit_distance"), _DEFAULT_EDIT_DISTANCE),
@@ -921,6 +945,8 @@ def _build_search_kwargs(
         # Story #1108 (S4): per-request cache bypass; web UI search never sets
         # this — it has no such control, so False is correct for that path.
         no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+        # Story #1291 AC7/AC8: explicit temporal embedder override
+        temporal_embedder=params.get("temporal_embedder"),
     )
 
 

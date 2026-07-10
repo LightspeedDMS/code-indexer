@@ -25,6 +25,11 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
 )
+from code_indexer.server.utils.cancellable_subprocess import (
+    SHORT_POLL_SECONDS,
+    SubprocessCancelledError,
+    run_cancellable_subprocess,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -82,8 +87,19 @@ class CloneBackend(Protocol):
         dest_path: str,
         preserve_attrs: bool = True,
         timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
     ) -> str:
-        """Clone source_path to caller-specified dest_path. Returns dest_path."""
+        """Clone source_path to caller-specified dest_path. Returns dest_path.
+
+        Bug #1342: cancel_check is an optional zero-arg callable returning
+        True when the owning job has been cancelled. Implementations that
+        spawn a killable local subprocess (LocalCloneBackend) or poll a
+        remote job (CowDaemonBackend) MUST consult it and raise
+        SubprocessCancelledError promptly when it fires, instead of blocking
+        until natural completion. None disables cancellation (default,
+        preserves prior behavior).
+        """
         ...  # pragma: no cover
 
     def delete_clone(self, clone_path: str) -> bool:
@@ -154,21 +170,41 @@ class LocalCloneBackend:
         dest_path: str,
         preserve_attrs: bool = True,
         timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
     ) -> str:
-        """Clone source_path to caller-specified dest_path. Returns dest_path."""
+        """Clone source_path to caller-specified dest_path. Returns dest_path.
+
+        Bug #1342: runs `cp` via run_cancellable_subprocess (its own process
+        group, start_new_session=True) instead of a plain blocking
+        subprocess.run. When cancel_check fires, the entire `cp` process
+        group is killed and SubprocessCancelledError propagates -- callers
+        (ActivatedRepoManager._clone_with_copy_on_write) already rmtree the
+        partial dest_path on any exception from this method. The existing
+        `timeout` deadline (Bug #1285's cow_clone_timeout) is preserved
+        alongside cancel_check -- either one can end the clone.
+        """
         attr_flag = "-a" if preserve_attrs else "-r"
         logger.info(
             "LocalCloneBackend: creating clone at path '%s' from '%s'",
             dest_path,
             source_path,
         )
-        subprocess.run(
+        result = run_cancellable_subprocess(
             ["cp", "--reflink=auto", attr_flag, source_path, dest_path],
-            check=True,
-            capture_output=True,
-            text=True,
+            cwd=None,
+            cancel_check=cancel_check,
+            poll_interval=poll_interval,
             timeout=timeout,
         )
+        if result.returncode != 0:
+            # Preserve the previous subprocess.run(check=True) contract.
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                result.args,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
         return dest_path
 
     def delete_clone(self, clone_path: str) -> bool:
@@ -272,8 +308,14 @@ class OntapCloneBackend:
         dest_path: str,
         preserve_attrs: bool = True,
         timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
     ) -> str:
-        """Not supported by ONTAP backend (uses volume-level cloning, not path-specified)."""
+        """Not supported by ONTAP backend (uses volume-level cloning, not path-specified).
+
+        cancel_check/poll_interval accepted for CloneBackend Protocol
+        conformance (Bug #1342) but unused -- this method always raises.
+        """
         raise NotImplementedError(
             "OntapCloneBackend does not support create_clone_at_path; "
             "ONTAP uses volume-level FlexClone, not caller-specified paths."
@@ -364,11 +406,18 @@ class CowDaemonBackend:
            paths via NFS mount are rejected as "not under storage_path".
         2. For true XFS reflink, the daemon's cp must use its local-XFS paths on both sides.
 
-        When daemon_storage_path is empty (not configured), returns cidx_path unchanged (backward compat).
+        When daemon_storage_path is empty (not configured):
+        - If mount_point is also unset, or cidx_path does not resolve under mount_point,
+          translation is a genuine no-op (nothing to translate) -- returns cidx_path unchanged.
+        - If cidx_path DOES resolve under mount_point, translation IS required (the daemon
+          only accepts paths under its own local storage root) but impossible without a
+          configured daemon_storage_path. Bug #1320: silently returning the untranslatable
+          mount-point path here caused the CoW daemon to reject it with HTTP 400
+          PATH_NOT_ALLOWED at publish time. Raise a clear, actionable configuration error
+          instead of silently passing through a path the daemon is guaranteed to reject.
+
         Raises ValueError if cidx_path is not under mount_point (caller must use a path within the mount).
         """
-        if not self._daemon_storage_path:
-            return cidx_path
         # Bug #1046: resolve symlinks before path-prefix check, and accept
         # paths under EITHER mount_point or daemon_storage_path.
         #
@@ -383,15 +432,28 @@ class CowDaemonBackend:
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
         resolved = os.path.realpath(cidx_path)
+        path_under_mount_point = self._mount_point and (
+            resolved.startswith(self._mount_point + "/")
+            or resolved == self._mount_point
+        )
+
+        if not self._daemon_storage_path:
+            if path_under_mount_point:
+                raise ValueError(
+                    f"CoW daemon_storage_path is not configured; cannot translate "
+                    f"'{cidx_path}' (resolved '{resolved}') under mount_point "
+                    f"'{self._mount_point}' to a daemon-local path. Set "
+                    f"cow_daemon.daemon_storage_path in config.json to the CoW "
+                    f"daemon's local storage root."
+                )
+            return cidx_path
+
         if (
             resolved.startswith(self._daemon_storage_path + "/")
             or resolved == self._daemon_storage_path
         ):
             return resolved
-        if (
-            resolved.startswith(self._mount_point + "/")
-            or resolved == self._mount_point
-        ):
+        if path_under_mount_point:
             return self._daemon_storage_path + resolved[len(self._mount_point) :]
         raise ValueError(
             f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' "
@@ -482,8 +544,20 @@ class CowDaemonBackend:
         dest_path: str,
         preserve_attrs: bool = True,
         timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
     ) -> str:
-        """POST to create a clone at caller-specified dest_path. Returns dest_path (CIDX-view path)."""
+        """POST to create a clone at caller-specified dest_path. Returns dest_path (CIDX-view path).
+
+        Bug #1342: cancel_check is forwarded to _poll_job. When it fires
+        before the remote job completes, best-effort DELETE the (possibly
+        still-provisioning) remote clone before re-raising
+        SubprocessCancelledError, so a cancelled cluster activation does not
+        leak a daemon-side snapshot. A cleanup failure is logged and never
+        masks the cancellation. poll_interval exists for CloneBackend
+        Protocol symmetry with LocalCloneBackend; the daemon keeps its own
+        exponential-backoff poll cadence regardless.
+        """
         requests = self._requests()
         # Translate CIDX-view paths to daemon-local paths so daemon validation passes and reflink works
         daemon_source = self._translate_to_daemon_path(source_path)
@@ -495,6 +569,14 @@ class CowDaemonBackend:
             "namespace": namespace,
             "name": name,
             "dest_path": daemon_dest,
+            # Bug #1343 AC-3: forward preserve_attrs so the daemon can
+            # preserve working-tree mtimes (mirrors LocalCloneBackend's
+            # `cp --reflink=auto -a`). Without this, the daemon had no
+            # signal at all and the cluster activation path could not
+            # benefit from the checkStat=minimal fix applied downstream
+            # in ActivatedRepoManager -- an mtime-churning copy re-hashes
+            # the whole tree regardless of checkStat.
+            "preserve_attrs": preserve_attrs,
         }
         logger.info(
             "CowDaemonBackend: creating clone at path '%s' (daemon-side '%s') from '%s' (daemon-side '%s')",
@@ -512,7 +594,20 @@ class CowDaemonBackend:
 
         job_id = response.json()["job_id"]
         effective_timeout = timeout if timeout is not None else self._timeout
-        self._poll_job(job_id, effective_timeout)
+        try:
+            self._poll_job(job_id, effective_timeout, cancel_check=cancel_check)
+        except SubprocessCancelledError:
+            try:
+                self.delete_clone(dest_path)
+            except Exception as cleanup_exc:  # noqa: BLE001 -- best-effort
+                logger.warning(
+                    "CowDaemonBackend: best-effort cleanup of cancelled clone "
+                    "'%s' (job %s) failed: %s",
+                    dest_path,
+                    job_id,
+                    cleanup_exc,
+                )
+            raise
         # Bug #1084: the daemon reported success on ITS local XFS, but this node
         # reads the snapshot over NFS. Bust the negative dcache and wait until the
         # canonical dest is visible here before returning — otherwise downstream
@@ -520,14 +615,30 @@ class CowDaemonBackend:
         self._visibility_waiter(dest_path)
         return dest_path  # Return CIDX-view path; caller does file ops via NFS mount
 
-    def _poll_job(self, job_id: str, timeout: Optional[float] = None) -> str:
-        """Poll GET /api/v1/jobs/{job_id} until completed or timeout. Returns clone_path."""
+    def _poll_job(
+        self,
+        job_id: str,
+        timeout: Optional[float] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Poll GET /api/v1/jobs/{job_id} until completed, cancelled, or timeout.
+
+        Bug #1342: cancel_check is consulted once per iteration, BEFORE the
+        HTTP GET, so a cancellation is detected without waiting on the
+        (possibly slow) daemon round-trip. Raises SubprocessCancelledError
+        when it fires. None (default) preserves prior behavior exactly.
+        """
         requests = self._requests()
         effective_timeout = timeout if timeout is not None else self._timeout
         deadline = time.monotonic() + effective_timeout
         interval = self._poll_interval
 
         while time.monotonic() < deadline:
+            if cancel_check is not None and cancel_check():
+                raise SubprocessCancelledError(
+                    f"CoW daemon job {job_id} cancelled during execution "
+                    "(job cancellation requested)"
+                )
             resp = requests.get(
                 f"{self._daemon_url}/api/v1/jobs/{job_id}",
                 headers=self._headers(),

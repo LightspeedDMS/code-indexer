@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import yaml
 
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.unified_response_parser import (
     CURRENT_LIFECYCLE_SCHEMA_VERSION,
 )
@@ -581,24 +582,24 @@ class LifecycleBatchRunner:
         self,
         repo_aliases: List[str],
         parent_job_id: str,
-    ) -> None:
+    ) -> Dict[str, str]:
         """
         Run lifecycle detection for all aliases, sub-batching to stay within
         the write-lock TTL.
 
         Per-repo failures are logged at ERROR level and do not abort the batch.
-        Lock acquisition failure aborts immediately with LifecycleLockUnavailableError.
+        Per-repo lock acquisition failures are reported like other per-repo failures.
 
         Args:
             repo_aliases: Aliases to process.
             parent_job_id: Job identifier for progress/completion reporting.
 
-        Raises:
-            LifecycleLockUnavailableError: if cidx-meta write lock cannot be
-                acquired for any sub-batch. complete_job and signal_dirty are
-                NOT called in this case.
+        Returns:
+            Mapping of failed alias to human-readable error message. Successful
+            aliases are absent from the mapping.
         """
         total = len(repo_aliases)
+        failed: Dict[str, str] = {}
 
         self._job_tracker.update_status(
             job_id=parent_job_id,
@@ -624,18 +625,33 @@ class LifecycleBatchRunner:
         )
 
         for sub_batch in sub_batches:
-            self._run_sub_batch(sub_batch, parent_job_id)
+            failed.update(self._run_sub_batch(sub_batch, parent_job_id))
 
         # Signal debouncer ONCE after all sub-batches have been released.
         self._debouncer.signal_dirty()
 
-        # Terminal transition — complete_job, not update_status("completed").
-        self._job_tracker.complete_job(
-            job_id=parent_job_id,
-            result={"phase": "lifecycle", "done": total, "total": total},
-        )
+        if total > 0 and failed and len(failed) == total:
+            error_summary = "; ".join(
+                f"{alias}: {message}" for alias, message in failed.items()
+            )
+            self._job_tracker.fail_job(parent_job_id, error=error_summary)
+        else:
+            # Terminal transition — complete_job, not update_status("completed").
+            self._job_tracker.complete_job(
+                job_id=parent_job_id,
+                result={
+                    "phase": "lifecycle",
+                    "done": total,
+                    "total": total,
+                    "failed_aliases": list(failed.keys()),
+                },
+            )
 
-    def _run_sub_batch(self, sub_batch: List[str], parent_job_id: str) -> None:
+        return failed
+
+    def _run_sub_batch(
+        self, sub_batch: List[str], parent_job_id: str
+    ) -> Dict[str, str]:
         """
         Process all aliases in sub_batch concurrently under an already-held lock.
 
@@ -643,6 +659,7 @@ class LifecycleBatchRunner:
         sub-batch — all repos in the batch are attempted. Only BaseException
         subclasses that are not Exception (e.g. KeyboardInterrupt) propagate.
         """
+        failed: Dict[str, str] = {}
         futures_list = dispatch_parallel_with_jitter(
             sub_batch,
             concurrency=self._concurrency,
@@ -655,6 +672,8 @@ class LifecycleBatchRunner:
             exc = future.exception()
             if exc is not None:
                 if isinstance(exc, Exception):
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    failed[alias] = error_message
                     # Log the failure; the sub-batch continues for other repos.
                     _logger.error(
                         "lifecycle-runner: failed to process alias %r: %s: %s",
@@ -666,7 +685,7 @@ class LifecycleBatchRunner:
                         try:
                             self._journal_callback(
                                 alias,
-                                f"failed: {type(exc).__name__}: {exc}",
+                                f"failed: {error_message}",
                             )
                         except Exception as cb_exc:
                             _logger.debug(
@@ -685,6 +704,7 @@ class LifecycleBatchRunner:
                             "lifecycle-runner: journal_callback raised (non-fatal): %s",
                             cb_exc,
                         )
+        return failed
 
     def _process_one_repo(self, alias: str, parent_job_id: str) -> None:
         """
@@ -730,12 +750,39 @@ class LifecycleBatchRunner:
             la = pre_fm.get("last_analyzed") if pre_fm else None
             existing_last_analyzed = str(la) if la is not None else None
 
-        result = self._claude_cli_invoker(
-            alias,
-            repo_path,
-            existing_description=existing_description,
-            last_analyzed=existing_last_analyzed,
-        )
+        try:
+            result = self._claude_cli_invoker(
+                alias,
+                repo_path,
+                existing_description=existing_description,
+                last_analyzed=existing_last_analyzed,
+            )
+        except OrphanedRepoError as orphan_exc:
+            # Bug #1336 (hardened by #1338): an orphaned golden alias
+            # (registry row present, on-disk clone directory absent at
+            # repo_path) makes LifecycleClaudeCliInvoker._validate_repo_inputs()
+            # raise the typed OrphanedRepoError. Before #1336, this exception
+            # propagated as a per-alias failure -- when ALL aliases in a
+            # sub-batch/run() call are orphaned (the common startup-sweep
+            # case), run()'s all-failed threshold fired job_tracker.fail_job(),
+            # failing the whole lifecycle_backfill/description_refresh job.
+            # Skip gracefully instead: log a WARNING, write nothing, do not
+            # re-raise. Orphan CLEANUP (removing the stale registry row) is
+            # delegated to the #1317 reconciler -- this runner only skips.
+            #
+            # #1338: caught by TYPE (OrphanedRepoError, a ValueError
+            # subclass), never by message-substring matching -- any OTHER
+            # ValueError (e.g. a genuine Claude CLI/parsing failure) is a
+            # plain ValueError, not this type, so it is unaffected by this
+            # except clause and still propagates as a real per-alias failure.
+            _logger.warning(
+                "lifecycle-runner: alias %r appears orphaned (registry row "
+                "present, clone missing at %s): %s; skipping",
+                alias,
+                repo_path,
+                orphan_exc,
+            )
+            return
 
         # Bug #940: acquire the per-alias write lock BEFORE reading the existing
         # frontmatter so the entire read-merge-write sequence is atomic.

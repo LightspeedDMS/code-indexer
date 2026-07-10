@@ -244,7 +244,7 @@ class TestTemporalIndexerNoTimeout:
         """The future.result(timeout=30) call in commit-message indexing must be removed."""
         from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 
-        # Find the _index_commit_message or similar method
+        # Scan the whole class for any future.result(timeout=...) call site
         src = inspect.getsource(TemporalIndexer)
         import textwrap
 

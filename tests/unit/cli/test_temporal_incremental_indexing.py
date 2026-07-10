@@ -57,7 +57,7 @@ class TestIncrementalTemporalIndexing:
         mock_result = Mock()
         mock_result.approximate_vectors_created = 5
         mock_result.skip_ratio = 0.25  # 25% skipped (was 75% deduplication)
-        handler.temporal_indexer.index_commits_list = Mock(return_value=mock_result)
+        handler.temporal_indexer.index_commits = Mock(return_value=mock_result)
 
         # Mock RichLiveProgressManager
         with patch(
@@ -74,16 +74,15 @@ class TestIncrementalTemporalIndexing:
 
         # Assert
         handler.progressive_metadata.load_completed.assert_called_once()
-        handler.temporal_indexer.index_commits_list.assert_called_once()
+        handler.temporal_indexer.index_commits.assert_called_once()
 
-        # Verify only new commits were passed
-        call_args = handler.temporal_indexer.index_commits_list.call_args
-        commit_hashes = call_args.kwargs.get("commit_hashes") or call_args[0][0]
-        assert len(commit_hashes) == 2
-        assert "new_commit_3" in commit_hashes
-        assert "new_commit_2" in commit_hashes
-        assert "old_commit_1" not in commit_hashes
-        assert "old_commit_2" not in commit_hashes
+        # Bug #1296: index_commits() performs its OWN incremental commit
+        # discovery internally (via temporal_meta.json + shard-aware
+        # reconcile_temporal_index) -- it takes no commit_hashes argument.
+        # Verify the progress_callback was still wired through correctly.
+        call_kwargs = handler.temporal_indexer.index_commits.call_args.kwargs
+        assert "progress_callback" in call_kwargs
+        assert callable(call_kwargs["progress_callback"])
 
         # Verify metadata was updated
         handler.progressive_metadata.mark_completed.assert_called_once()
@@ -128,7 +127,7 @@ class TestIncrementalTemporalIndexing:
 
         # Assert
         handler.progressive_metadata.load_completed.assert_called_once()
-        handler.temporal_indexer.index_commits_list.assert_not_called()
+        handler.temporal_indexer.index_commits.assert_not_called()
 
     @patch("code_indexer.cli_temporal_watch_handler.subprocess.run")
     def test_handle_commit_detected_updates_metadata(self, mock_run, tmp_path):
@@ -163,7 +162,7 @@ class TestIncrementalTemporalIndexing:
         mock_result = Mock()
         mock_result.approximate_vectors_created = 3
         mock_result.skip_ratio = 0.5  # 50% skipped
-        handler.temporal_indexer.index_commits_list = Mock(return_value=mock_result)
+        handler.temporal_indexer.index_commits = Mock(return_value=mock_result)
 
         # Mock RichLiveProgressManager
         with patch("code_indexer.progress.progress_display.RichLiveProgressManager"):
@@ -211,7 +210,7 @@ class TestIncrementalTemporalIndexing:
         mock_result = Mock()
         mock_result.approximate_vectors_created = 3
         mock_result.skip_ratio = 0.5  # 50% skipped
-        handler.temporal_indexer.index_commits_list = Mock(return_value=mock_result)
+        handler.temporal_indexer.index_commits = Mock(return_value=mock_result)
 
         # Mock daemon connection
         mock_daemon_client = Mock()
@@ -268,7 +267,7 @@ class TestIncrementalTemporalIndexing:
         mock_result = Mock()
         mock_result.approximate_vectors_created = 3
         mock_result.skip_ratio = 0.5  # 50% skipped
-        handler.temporal_indexer.index_commits_list = Mock(return_value=mock_result)
+        handler.temporal_indexer.index_commits = Mock(return_value=mock_result)
 
         # Mock RichLiveProgressManager
         with patch(
@@ -285,7 +284,7 @@ class TestIncrementalTemporalIndexing:
 
             # Assert
             mock_progress_class.assert_called_once()
-            # Verify progress callback was passed to index_commits_list
-            call_kwargs = handler.temporal_indexer.index_commits_list.call_args.kwargs
+            # Verify progress callback was passed to index_commits
+            call_kwargs = handler.temporal_indexer.index_commits.call_args.kwargs
             assert "progress_callback" in call_kwargs
             assert callable(call_kwargs["progress_callback"])

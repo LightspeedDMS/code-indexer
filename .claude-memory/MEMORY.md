@@ -19,6 +19,7 @@
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
+- [feedback_no_artificial_work_budgets.md](feedback_no_artificial_work_budgets.md) - NEVER cap legitimate analysis/indexing work with hardcoded search-call ceilings, agent-turn caps, or per-file/job timeouts — correctness over bounded cost (same disease as Bug #1218); the dep-map "AT MOST 5 search calls" ceiling is a repeat offender
 - [feedback_storage_backend_dual.md](feedback_storage_backend_dual.md) - NEVER say "SQLite" as if PG doesn't exist — cover both backends or use agnostic language
 - [feedback_server_e2e_front_door_only.md](feedback_server_e2e_front_door_only.md) - Server E2E tests MUST use REST API/MCP front door, never CLI — CLI/SSH only for troubleshooting
 - [feedback_prove_root_cause_before_fix.md](feedback_prove_root_cause_before_fix.md) - Prove a stall/concurrency root cause with py-spy thread dumps BEFORE building a fix — don't infer from architecture or conclude "no 429s" from unlogged paths
@@ -35,6 +36,7 @@
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
+- [feedback_no_commit_during_background_agent.md](feedback_no_commit_during_background_agent.md) - NEVER git-add/commit a background agent's files while it's still running (add can snapshot a reverse-applied/broken state); verify commit content with git show <sha>:<file>, not just the working tree
 - [feedback_version_bump_must_be_push_tip.md](feedback_version_bump_must_be_push_tip.md) - The __init__.py version-bump commit MUST be the tip of its push or CI skips tag creation (compares HEAD~1..HEAD)
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart cidx-server without checking for active long-running jobs
 - [feedback_keep_local_server_running.md](feedback_keep_local_server_running.md) - ALWAYS keep the local dev cidx-server (:8000) running — never stop/pkill it; relaunch if down
@@ -49,12 +51,21 @@
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real Codex run via ~/.codex/sessions before claiming "codex reviewed it"
 - [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - fast-automation/server-fast flake under concurrent load (SQLite DB-open errors, timeouts); run them ALONE, re-run failures in isolation before concluding regression; omni '*' is MCP-only not REST
+- [feedback_active_monitoring_check_back.md](feedback_active_monitoring_check_back.md) - Never stay idle while background agents/jobs run — set a check-back timer and verify progress often; detect stalls early instead of waiting on a completion ping that never comes if it hangs
+- [feedback_study_anomalies_deeply.md](feedback_study_anomalies_deeply.md) - When you see odd/anomalous behavior, study it in depth to root cause and prove the classification with FACTS — never dismiss as "artifact/benign/cosmetic" without evidence; "odd" itself is a claim needing facts
+- [feedback_never_stop_never_blame_env.md](feedback_never_stop_never_blame_env.md) - NEVER self-abort a mission or blame the environment for slow tests; a stalled subagent is a RETRY not a blocker; do NOT kill a working subagent on a frozen output-file or "no git changes yet" — those are not stall signals
 
 ## Architectural Invariants
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER RRF coalescing, BEFORE truncation — mandatory pipeline order
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - FIXED v10.125.0 (#1100): scheduler now uses registry tracking backend (PG in cluster mode); validate against PG, not SQLite
+- [project_cluster_auto_updater_service.md](project_cluster_auto_updater_service.md) - The auto-updater is a SEPARATE cidx-auto-update.service + timer (not part of cidx-server); the cluster installer must provision it (fixed v11.21.0) and set CIDX_AUTO_UPDATE_BRANCH — staging nodes track staging else default master; retrofit via `cidx server install-auto-update --branch staging`
+- [project_nfs_host_down_hangs_systemd.md](project_nfs_host_down_hangs_systemd.md) - When the CoW/NFS host node is down, hard NFS mounts on other nodes hang daemon-reload and cascade into sudo/pam_systemd (every sudo blocks, non-sudo instant); recovers when host returns — diagnose non-sudo with timeout-wrapped probes
+- [project_cluster_temporal_metadata_pg_backed.md](project_cluster_temporal_metadata_pg_backed.md) - Cluster temporal metadata is PostgreSQL-backed (v11.23.0, #1313); process-local backend registry does NOT cross the child cidx-index subprocess boundary, so all 5 temporal launch sites pass CIDX_TEMPORAL_PG_BOOTSTRAP_DIR; validate against PG not SQLite; decisive tell = no temporal_metadata.db reappears on NFS
+- [project_staging_workers_config_durability.md](project_staging_workers_config_durability.md) - Durable uvicorn worker-count is the DB runtime.workers setting (NOT config.json, which strips it); set via web-UI form POST /admin/config/server over HTTPS (Secure session cookie + CSRF + TOTP elevation) — no JSON /api/admin/config; 3 layers DB->launch.json->applied_launch.json
+- [project_local_server_solo_sqlite.md](project_local_server_solo_sqlite.md) - Local dev cidx-server (:8000) is solo/SQLite (storage_mode=sqlite, no postgres_dsn) — local E2E validates ONLY solo/SQLite branches; PG/cluster paths (#1313 temporal, cluster-aware state, PG advisory locks) need staging; local temporal subprocess runs the env=None branch
 
 ## External References
+- [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA auth: `.local-testing` stores TOTP as a shell `$(...)` command (NOT a static seed) — eval it for a live code, then two-step /auth/login -> /auth/mfa/verify; do these staging tests ALWAYS, never ask the user
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access

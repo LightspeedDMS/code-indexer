@@ -186,14 +186,12 @@ def _reset_singletons():
     from code_indexer.server.services import governed_call
 
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
     yield
     ProviderConcurrencyGovernor.reset_instance()
     ProviderHealthMonitor.reset_instance()
     governed_call.clear_query_embedding_cache()
-    governed_call.clear_query_embedding_cache_metrics()
     clear_coalescer_registry()
     reset_config_service()
 
@@ -1357,173 +1355,32 @@ class TestPathAAuditCtxPopulation:
 
 
 # ===========================================================================
-# Path-A hit/miss metrics (BLOCKING 2 — metrics.record_hit/miss on all outcomes)
+# K-concurrent same-key cold MISS: exactly 1 provider embed call per key
 # ===========================================================================
-
-
-class _FakeMetrics:
-    """Fake metrics recorder tracking all record_hit/record_miss/record_shadow_cosine calls."""
-
-    def __init__(self) -> None:
-        self.hits: List[dict] = []
-        self.misses: List[dict] = []
-        self.shadow_cosines: int = 0
-
-    def record_hit(self, *, mode: str, provider: str) -> None:
-        self.hits.append({"mode": mode, "provider": provider})
-
-    def record_miss(self, *, mode: str, provider: str) -> None:
-        self.misses.append({"mode": mode, "provider": provider})
-
-    def record_shadow_cosine(self, *, cached_blob: bytes, live_vec: list) -> None:
-        self.shadow_cosines += 1
-
-    def record_long_key(self, *, provider: str) -> None:
-        pass
-
-
-def _make_coalescer_with_metrics(monkeypatch, mode: str, pre_seed_text=None):
-    """Build coalescer with real in-memory cache + fake metrics. Returns (coalescer, provider, metrics)."""
-    from code_indexer.server.services import governed_call
-
-    cache, _ = _make_real_cache(mode=mode, pre_seed_text=pre_seed_text)
-    metrics = _FakeMetrics()
-    monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-    monkeypatch.setattr(
-        governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-    )
-
-    gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-    provider = _FakeVoyageProvider()
-    coalescer = EmbeddingCoalescer(
-        LANE,
-        provider,
-        governor=gov,
-        acquire_timeout=5.0,
-        config_digest=_TEST_DIGEST,
-    )
-    return coalescer, provider, metrics
-
-
-class TestPathAMetrics:
-    """BLOCKING 2: hit/miss metric counters on Path A for all cache outcomes.
-
-    Pre-3c _serve_with_cache recorded all outcomes. Post-3c Path A only records
-    on-mode HIT; on-mode MISS, shadow HIT, and shadow MISS are missing.
-    """
-
-    def test_on_mode_hit_records_hit_metric(self, monkeypatch):
-        """Path A on-mode HIT: metrics.record_hit(mode='on', provider=...) called."""
-        text = "metric on hit"
-        coalescer, provider, metrics = _make_coalescer_with_metrics(
-            monkeypatch, "on", pre_seed_text=text
-        )
-
-        coalescer.submit(text)
-
-        assert len(metrics.hits) == 1, (
-            f"on-mode HIT must record exactly 1 hit metric, got {len(metrics.hits)}"
-        )
-        assert metrics.hits[0]["mode"] == "on"
-        assert metrics.hits[0]["provider"] == PROVIDER_NAME
-        assert len(metrics.misses) == 0
-
-    def test_on_mode_miss_records_miss_metric(self, monkeypatch):
-        """Path A on-mode MISS: metrics.record_miss(mode='on', provider=...) called."""
-        coalescer, provider, metrics = _make_coalescer_with_metrics(monkeypatch, "on")
-
-        coalescer.submit("on mode miss query")
-
-        assert len(metrics.misses) == 1, (
-            f"on-mode MISS must record exactly 1 miss metric, got {len(metrics.misses)}"
-        )
-        assert metrics.misses[0]["mode"] == "on"
-        assert metrics.misses[0]["provider"] == PROVIDER_NAME
-        assert len(metrics.hits) == 0
-
-    def test_shadow_hit_records_hit_metric_and_cosine(self, monkeypatch):
-        """Path A shadow HIT: metrics.record_hit + record_shadow_cosine both called."""
-        text = "shadow hit metric test"
-        coalescer, provider, metrics = _make_coalescer_with_metrics(
-            monkeypatch, "shadow", pre_seed_text=text
-        )
-
-        coalescer.submit(text)
-
-        assert len(metrics.hits) == 1, (
-            f"shadow HIT must record exactly 1 hit metric, got {len(metrics.hits)}"
-        )
-        assert metrics.hits[0]["mode"] == "shadow"
-        assert metrics.hits[0]["provider"] == PROVIDER_NAME
-        assert metrics.shadow_cosines == 1, (
-            f"shadow HIT must record 1 shadow cosine, got {metrics.shadow_cosines}"
-        )
-        assert len(metrics.misses) == 0
-
-    def test_shadow_miss_records_miss_metric(self, monkeypatch):
-        """Path A shadow MISS: metrics.record_miss(mode='shadow', provider=...) called."""
-        coalescer, provider, metrics = _make_coalescer_with_metrics(
-            monkeypatch, "shadow"
-        )
-
-        coalescer.submit("shadow miss query no seed")
-
-        assert len(metrics.misses) == 1, (
-            f"shadow MISS must record exactly 1 miss metric, got {len(metrics.misses)}"
-        )
-        assert metrics.misses[0]["mode"] == "shadow"
-        assert metrics.misses[0]["provider"] == PROVIDER_NAME
-        assert len(metrics.hits) == 0
-
-    def test_metrics_none_does_not_raise(self, monkeypatch):
-        """When get_query_embedding_cache_metrics() returns None, no errors on HIT."""
-        from code_indexer.server.services import governed_call
-
-        text = "metrics none noop"
-        cache, _ = _make_real_cache(mode="on", pre_seed_text=text)
-        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: None
-        )
-
-        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
-        provider = _FakeVoyageProvider()
-        coalescer = EmbeddingCoalescer(
-            LANE,
-            provider,
-            governor=gov,
-            acquire_timeout=5.0,
-            config_digest=_TEST_DIGEST,
-        )
-
-        vec, _ = coalescer.submit(text)
-        assert vec == pytest.approx(CACHED_VEC, abs=1e-4)
-
-
-# ===========================================================================
-# K-concurrent same-key cold MISS: exactly 1 miss metric per key-resolution
-# ===========================================================================
+#
+# Story #1295 (Epic #1288 final): the "Path-A hit/miss metrics" (BLOCKING 2)
+# test class that used to live here was deleted along with the
+# metrics.record_hit/miss/shadow_cosine push mechanism it exercised (a
+# monkeypatched get_query_embedding_cache_metrics() accessor that no longer
+# exists). Exactly-once cardinality is still proven below via
+# provider.call_count -- the real, unchanged observable: the coalescer
+# dedupes K concurrent same-key submits down to exactly 1 provider HTTP call
+# regardless of the retired metrics layer.
 
 
 class TestKConcurrentSameKeyCardinality:
-    """CRITICAL: K concurrent same-key cold-MISS requestors coalesce to 1 batch.
-    The dispatch loop records exactly 1 miss metric (once per unique key in the
-    dispatched batch), never K misses.
-    """
+    """CRITICAL: K concurrent same-key cold-MISS requestors coalesce to 1 batch
+    and exactly 1 dispatched provider embed call (never K)."""
 
     def test_k_concurrent_same_key_cold_records_exactly_one_miss(self, monkeypatch):
-        """K concurrent same-key cold submits -> exactly 1 miss metric (not K)."""
+        """K concurrent same-key cold submits -> exactly 1 provider call (not K)."""
         from code_indexer.server.services import governed_call
 
         K = 5
         text = "same key cold test"
         cache, _ = _make_real_cache(mode="on")  # empty, all misses
-        metrics = _FakeMetrics()
 
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
-        monkeypatch.setattr(
-            governed_call, "get_query_embedding_cache_metrics", lambda: metrics
-        )
 
         gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
         provider = _FakeVoyageProvider()
@@ -1542,17 +1399,10 @@ class TestKConcurrentSameKeyCardinality:
         assert not outcome.errors, f"Unexpected errors: {outcome.errors}"
         assert len(outcome.results) == K
 
-        # Dedup: exactly 1 provider call
+        # Dedup: exactly 1 provider call (the exactly-once cardinality proof)
         assert provider.call_count == 1, (
             f"K same-key cold submits must produce exactly 1 provider call, got {provider.call_count}"
         )
-
-        # Miss metric: exactly 1 (once per unique key in the dispatched batch)
-        assert len(metrics.misses) == 1, (
-            f"K same-key cold submits must record exactly 1 miss metric, got {len(metrics.misses)}"
-        )
-        assert metrics.misses[0]["mode"] == "on"
-        assert metrics.misses[0]["provider"] == PROVIDER_NAME
 
     def test_corrupt_blob_logs_warning_not_silent(self, monkeypatch):
         """NIT (reviewer): corrupt blob in on-mode HIT must log a WARNING, not silently pass."""

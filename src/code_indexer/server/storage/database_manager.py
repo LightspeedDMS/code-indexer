@@ -434,6 +434,22 @@ class DatabaseSchema:
         )
     """
 
+    # Story #287 / Bug #1340: wiki article view-count tracking table DDL.
+    # Used by a new _migrate_wiki_article_views_table() migration method
+    # (added next, invoked from initialize_database()'s migration block)
+    # so the table exists at every server startup instead of only being
+    # created lazily on the first wiki HTTP route hit.
+    CREATE_WIKI_ARTICLE_VIEWS_TABLE = """
+        CREATE TABLE IF NOT EXISTS wiki_article_views (
+            repo_alias TEXT NOT NULL,
+            article_path TEXT NOT NULL,
+            real_views INTEGER DEFAULT 0,
+            first_viewed_at TIMESTAMP,
+            last_viewed_at TIMESTAMP,
+            PRIMARY KEY (repo_alias, article_path)
+        )
+    """
+
     # Story #386: Git Credential Management with Identity Discovery
     CREATE_USER_GIT_CREDENTIALS_TABLE = """
         CREATE TABLE IF NOT EXISTS user_git_credentials (
@@ -657,6 +673,42 @@ class DatabaseSchema:
             ON query_analytics_exports (initiated_by)
     """
 
+    # Story #1293 (Epic #1288): Query-embedding decision event recording.
+    # Durable, phantom-free source of truth for every query-embedding decision
+    # on every server query path. correlation_id is NOT NULL (application
+    # layer guarantees a UUID fallback -- see search_embed_event_emit.py).
+    CREATE_SEARCH_EMBED_EVENT_TABLE = """
+        CREATE TABLE IF NOT EXISTS search_embed_event (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       REAL NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            node_id         TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            model           TEXT,
+            config_digest   TEXT,
+            cache_mode      TEXT,
+            outcome         TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            live_batch_id   TEXT,
+            embed_key       TEXT,
+            long_key        INTEGER,
+            latency_ms      INTEGER,
+            shadow_cosine   REAL,
+            audit_sampled   INTEGER,
+            audit_cosine    REAL
+        )
+    """
+
+    CREATE_IDX_SEE_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_see_timestamp
+            ON search_embed_event (timestamp)
+    """
+
+    CREATE_IDX_SEE_CORRELATION_ID = """
+        CREATE INDEX IF NOT EXISTS idx_see_correlation_id
+            ON search_embed_event (correlation_id)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -813,6 +865,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
             conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
             conn.execute(self.CREATE_IDX_QAE_INITIATED_BY)
+            # Story #1293: Query-embedding decision event recording
+            conn.execute(self.CREATE_SEARCH_EMBED_EVENT_TABLE)
+            conn.execute(self.CREATE_IDX_SEE_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_SEE_CORRELATION_ID)
 
             conn.commit()
 
@@ -828,6 +884,9 @@ class DatabaseSchema:
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
             self._migrate_wiki_cache_tables(conn)
+            # Story #287 / Bug #1340: wiki_article_views must exist at
+            # startup, not only after the first wiki HTTP route hit.
+            self._migrate_wiki_article_views_table(conn)
             # Epic #261: JobTracker schema additions
             self._migrate_background_jobs_job_tracker(conn)
             # Bug fix: Add current_phase and phase_detail columns for progress persistence
@@ -1282,6 +1341,23 @@ class DatabaseSchema:
         """
         conn.execute(self.CREATE_WIKI_CACHE_TABLE)
         conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
+        conn.commit()
+
+    def _migrate_wiki_article_views_table(self, conn: sqlite3.Connection) -> None:
+        """Create the wiki_article_views table for existing databases (Story #287, Bug #1340).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+
+        Previously this table was created ONLY lazily via
+        WikiCache.ensure_tables(), invoked exclusively from the first wiki
+        HTTP route hit. Registering the creation here guarantees the table
+        exists at every server startup, so the golden-repo-removal wiki
+        cleanup hook (which constructs its own WikiCache without ever
+        calling ensure_tables()) does not fail with "no such table:
+        wiki_article_views" when a golden repo is removed before any wiki
+        page has ever been viewed on that node/process.
+        """
+        conn.execute(self.CREATE_WIKI_ARTICLE_VIEWS_TABLE)
         conn.commit()
 
     def _migrate_server_config_table(self, conn: sqlite3.Connection) -> None:

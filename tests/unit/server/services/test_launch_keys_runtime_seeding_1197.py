@@ -1,10 +1,14 @@
-"""Story #1197 AC2 + AC4 + AC6: Runtime seeding, get_config, and save_config.
-
-RED-phase tests — all must FAIL before production code is written.
+"""Story #1197 AC2 + AC4: Runtime seeding and get_config.
+Story #1196 (next-release cleanup) supersedes Story #1197 AC6 below.
 
 AC2: initialize_runtime_db seeds host/port/workers/log_level idempotently.
 AC4: get_config() surfaces the four keys from the runtime row.
-AC6: save_config() retains the four keys in config.json on BOTH paths (MAJOR-5).
+
+Story #1197 AC6 originally required save_config() to RETAIN the four keys in
+config.json on both save paths (the one-release transition write-path
+inclusion, MAJOR-5). Story #1196 removes that write-path inclusion now that
+all cluster nodes are confirmed on the new release: save_config() must no
+longer write the four keys to config.json on EITHER path.
 """
 
 import json
@@ -155,11 +159,15 @@ class TestAC4GetConfigSurfacesRuntimeValues:
 
 
 @pytest.mark.slow
-class TestAC6SaveConfigRetainsFourKeys:
-    """Story #1197 AC6 (MAJOR-5): save_config() keeps the four keys in config.json."""
+class TestStory1196SaveConfigDropsFourKeys:
+    """Story #1196: save_config() no longer writes the four keys to config.json.
 
-    def test_sqlite_path_retains_four_launch_keys(self, tmp_path: Path) -> None:
-        """After save_config on the SQLite path, config.json still has the four keys."""
+    Supersedes Story #1197 AC6 (which required the OPPOSITE -- retention --
+    during the one-release transition window). That window has closed.
+    """
+
+    def test_sqlite_path_drops_four_launch_keys(self, tmp_path: Path) -> None:
+        """After save_config on the SQLite path, config.json has none of the four keys."""
         from code_indexer.server.services.config_service import ConfigService
 
         db_path = str(tmp_path / "cidx_server.db")
@@ -177,19 +185,21 @@ class TestAC6SaveConfigRetainsFourKeys:
         svc.save_config(config)
 
         saved = json.loads((tmp_path / "config.json").read_text())
-        assert "workers" in saved, "AC6 (SQLite): workers must survive save_config()"
-        assert "log_level" in saved, (
-            "AC6 (SQLite): log_level must survive save_config()"
+        assert "workers" not in saved, (
+            "Story #1196 (SQLite): workers must NOT survive save_config() anymore"
         )
-        assert "host" in saved, "AC6 (SQLite): host must survive save_config()"
-        assert "port" in saved, "AC6 (SQLite): port must survive save_config()"
-        assert saved["workers"] == 5
-        assert saved["log_level"] == "WARNING"
-        assert saved["host"] == "0.0.0.0"
-        assert saved["port"] == 8001
+        assert "log_level" not in saved, (
+            "Story #1196 (SQLite): log_level must NOT survive save_config() anymore"
+        )
+        assert "host" not in saved, (
+            "Story #1196 (SQLite): host must NOT survive save_config() anymore"
+        )
+        assert "port" not in saved, (
+            "Story #1196 (SQLite): port must NOT survive save_config() anymore"
+        )
 
-    def test_pg_path_retains_four_launch_keys(self, tmp_path: Path) -> None:
-        """After save_config on the PG path, config.json still has the four keys."""
+    def test_pg_path_drops_four_launch_keys(self, tmp_path: Path) -> None:
+        """After save_config on the PG path, config.json has none of the four keys."""
         from code_indexer.server.services.config_service import ConfigService
 
         svc = ConfigService(server_dir_path=str(tmp_path))
@@ -205,11 +215,15 @@ class TestAC6SaveConfigRetainsFourKeys:
         svc.save_config(config)
 
         saved = json.loads((tmp_path / "config.json").read_text())
-        assert "workers" in saved, "AC6 (PG): workers must survive save_config()"
-        assert "log_level" in saved, "AC6 (PG): log_level must survive save_config()"
-        assert "host" in saved, "AC6 (PG): host must survive save_config()"
-        assert "port" in saved, "AC6 (PG): port must survive save_config()"
-        assert saved["workers"] == 6
-        assert saved["log_level"] == "ERROR"
-        assert saved["host"] == "10.0.0.1"
-        assert saved["port"] == 9001
+        assert "workers" not in saved, (
+            "Story #1196 (PG): workers must NOT survive save_config() anymore"
+        )
+        assert "log_level" not in saved, (
+            "Story #1196 (PG): log_level must NOT survive save_config() anymore"
+        )
+        assert "host" not in saved, (
+            "Story #1196 (PG): host must NOT survive save_config() anymore"
+        )
+        assert "port" not in saved, (
+            "Story #1196 (PG): port must NOT survive save_config() anymore"
+        )

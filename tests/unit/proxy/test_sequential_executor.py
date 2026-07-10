@@ -4,6 +4,7 @@ Tests the sequential executor that processes start, stop, and uninstall
 commands one repository at a time to prevent resource contention.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -86,6 +87,24 @@ class TestExecuteSequential:
         # Verify timeout is 600 seconds (10 minutes)
         call_args = mock_run.call_args
         assert call_args.kwargs["timeout"] == 600
+
+    @patch("code_indexer.proxy.sequential_executor.subprocess.run")
+    def test_execute_single_absolutizes_relative_pythonpath(self, mock_run):
+        """Bug #1328: a relative PYTHONPATH must be absolutized before the
+        child subprocess changes cwd to the target repository, otherwise the
+        relative entry re-anchors into the repo dir and can shadow an
+        installed dependency with a same-named package inside it.
+        """
+        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
+
+        executor = SequentialCommandExecutor(["repo1"])
+        with patch.dict(os.environ, {"PYTHONPATH": "./src"}):
+            executor._execute_single("repo1", "start", [])
+
+        call_args = mock_run.call_args
+        env = call_args.kwargs.get("env")
+        assert env is not None, "subprocess.run must receive an explicit env kwarg"
+        assert env["PYTHONPATH"] == os.path.abspath("./src")
 
     @patch("code_indexer.proxy.sequential_executor.subprocess.run")
     def test_returns_results_dict(self, mock_run):

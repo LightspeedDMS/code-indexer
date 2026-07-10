@@ -134,6 +134,7 @@ _NOOP_EXECUTE_STEPS: dict = {
     "_ensure_claude_cli_installed": True,
     "_ensure_nfs_research_symlinks": True,
     "_ensure_activated_repos_symlink_for_cow_daemon": True,
+    "_ensure_daemon_storage_path": True,
     "_ensure_systemd_claude_path": True,
     "_ensure_rust_toolchain": True,
 }

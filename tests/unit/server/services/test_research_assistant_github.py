@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
 )
+from tests.utils.env_assertions import assert_env_absent, assert_env_present
 
 
 class TestGitHubTokenInit:
@@ -88,8 +89,8 @@ class TestSubprocessEnvironment:
             assert "env" in call_kwargs
 
             env = call_kwargs["env"]
-            assert "GITHUB_TOKEN" in env
-            assert "GH_TOKEN" in env
+            assert_env_present(env, "GITHUB_TOKEN")
+            assert_env_present(env, "GH_TOKEN")
             assert env["GITHUB_TOKEN"] == "github_token_xyz"
             assert env["GH_TOKEN"] == "github_token_xyz"
 
@@ -141,11 +142,13 @@ class TestSubprocessEnvironment:
             # Env should be empty (we mocked os.environ to empty)
             # Our code should NOT add GITHUB_TOKEN/GH_TOKEN when _github_token is None
             env = call_kwargs.get("env", {})
-            assert "GITHUB_TOKEN" not in env, (
-                "GITHUB_TOKEN should not be added when token is None"
+            assert_env_absent(
+                env,
+                "GITHUB_TOKEN",
+                msg="GITHUB_TOKEN should not be added when token is None",
             )
-            assert "GH_TOKEN" not in env, (
-                "GH_TOKEN should not be added when token is None"
+            assert_env_absent(
+                env, "GH_TOKEN", msg="GH_TOKEN should not be added when token is None"
             )
 
 

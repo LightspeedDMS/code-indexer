@@ -1,9 +1,9 @@
-"""Story #1197 AC1 + AC3: Bootstrap key removal and transition strip guard.
+"""Story #1197 AC1: Bootstrap key removal.  Story #1196: transition cleanup.
 
-RED-phase tests — all must FAIL before production code is written.
-
-AC1: host/port/workers/log_level removed from BOOTSTRAP_KEYS.
-AC3: _strip_config_file_to_bootstrap preserves them via TRANSITION_PRESERVE_KEYS.
+AC1 (Story #1197): host/port/workers/log_level removed from BOOTSTRAP_KEYS.
+Story #1196 (next-release cleanup) removes the Story #1197 AC3/AC6 transition
+mechanism entirely -- TRANSITION_PRESERVE_KEYS is gone, _strip_config_file_to_bootstrap()
+strips the four keys again, and save_config() no longer writes them to config.json.
 """
 
 import json
@@ -161,6 +161,10 @@ class TestAC1BootstrapKeysRemoved:
                 "log_level",
                 "host",
                 "port",
+                # PR #1332: admission control is opt-in (both gates default
+                # False) and read from the merged config at app-wiring time,
+                # not needed pre-DB -- runtime, not bootstrap.
+                "admission_control_config",
             }
         )
 
@@ -176,32 +180,29 @@ class TestAC1BootstrapKeysRemoved:
         assert not overlap, f"Fields in both sets (must be disjoint): {overlap}"
 
 
-class TestAC3TransitionPreserveKeys:
-    """Story #1197 AC3: TRANSITION_PRESERVE_KEYS constant and strip guard."""
+class TestStory1196TransitionMechanismRemoved:
+    """Story #1196 AC1: the Story #1197 transition allow-list is fully removed.
 
-    def test_transition_preserve_keys_constant_exists(self) -> None:
-        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
+    Story #1197 kept host/port/workers/log_level in config.json for one release
+    (via TRANSITION_PRESERVE_KEYS) so old nodes in a rolling upgrade could still
+    read them.  Story #1196 is the next-release cleanup: the operator has
+    confirmed all cluster nodes are on the new release, so both the strip-guard
+    and the write-path inclusion are removed, and the four keys disappear from
+    config.json entirely.
+    """
 
-        assert isinstance(TRANSITION_PRESERVE_KEYS, (set, frozenset))
+    def test_transition_preserve_keys_constant_removed(self) -> None:
+        """AC1 (MAJOR-5): TRANSITION_PRESERVE_KEYS must no longer exist."""
+        import code_indexer.server.services.config_service as config_service_module
 
-    def test_transition_preserve_keys_contains_four_launch_keys(self) -> None:
-        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
-
-        assert "workers" in TRANSITION_PRESERVE_KEYS
-        assert "log_level" in TRANSITION_PRESERVE_KEYS
-        assert "host" in TRANSITION_PRESERVE_KEYS
-        assert "port" in TRANSITION_PRESERVE_KEYS
-
-    def test_transition_preserve_keys_exactly_four(self) -> None:
-        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
-
-        assert len(TRANSITION_PRESERVE_KEYS) == 4, (
-            f"TRANSITION_PRESERVE_KEYS must have exactly 4 keys, got {len(TRANSITION_PRESERVE_KEYS)}"
+        assert not hasattr(config_service_module, "TRANSITION_PRESERVE_KEYS"), (
+            "Story #1196 AC1: TRANSITION_PRESERVE_KEYS must be removed from "
+            "config_service.py -- the transition window has closed."
         )
 
     @pytest.mark.slow
-    def test_strip_preserves_four_launch_keys(self, tmp_path: Path) -> None:
-        """After initialize_runtime_db, config.json STILL has the four keys."""
+    def test_strip_removes_four_launch_keys_after_cleanup(self, tmp_path: Path) -> None:
+        """AC1: after initialize_runtime_db, config.json no longer has the four keys."""
         from code_indexer.server.services.config_service import ConfigService
 
         config_file = tmp_path / "config.json"
@@ -224,18 +225,18 @@ class TestAC3TransitionPreserveKeys:
         svc.initialize_runtime_db(db_path)
 
         saved = json.loads(config_file.read_text())
-        assert "workers" in saved, (
-            "AC3: workers must survive strip (transition allow-list)"
+        assert "workers" not in saved, (
+            "AC1: workers must NOT survive the strip after transition cleanup"
         )
-        assert "log_level" in saved, "AC3: log_level must survive strip"
-        assert "host" in saved, "AC3: host must survive strip"
-        assert "port" in saved, "AC3: port must survive strip"
+        assert "log_level" not in saved, "AC1: log_level must NOT survive the strip"
+        assert "host" not in saved, "AC1: host must NOT survive the strip"
+        assert "port" not in saved, "AC1: port must NOT survive the strip"
 
     @pytest.mark.slow
-    def test_strip_still_removes_non_transition_runtime_keys(
+    def test_strip_still_removes_non_bootstrap_runtime_keys(
         self, tmp_path: Path
     ) -> None:
-        """The allow-list narrows strip behavior but does NOT disable it."""
+        """Regression: unrelated runtime keys are still stripped as before."""
         from code_indexer.server.services.config_service import ConfigService
 
         config_file = tmp_path / "config.json"
@@ -262,5 +263,92 @@ class TestAC3TransitionPreserveKeys:
 
         saved = json.loads(config_file.read_text())
         assert "jwt_expiration_minutes" not in saved, (
-            "AC3: non-launch runtime keys must still be stripped (allow-list narrows, not disables)"
+            "Non-launch runtime keys must still be stripped"
+        )
+
+    @pytest.mark.slow
+    def test_bootstrap_keys_remain_after_strip(self, tmp_path: Path) -> None:
+        """AC1: bootstrap-only keys (server_dir, storage_mode, ...) remain in config.json."""
+        from code_indexer.server.services.config_service import ConfigService
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "server_dir": str(tmp_path),
+                    "storage_mode": "local",
+                    "host": "127.0.0.1",
+                    "port": 8000,
+                    "workers": 1,
+                    "log_level": "INFO",
+                }
+            )
+        )
+
+        db_path = str(tmp_path / "cidx_server.db")
+        _make_sqlite_db(db_path)
+
+        svc = ConfigService(server_dir_path=str(tmp_path))
+        svc.load_config()
+        svc.initialize_runtime_db(db_path)
+
+        saved = json.loads(config_file.read_text())
+        assert saved.get("server_dir") == str(tmp_path), (
+            "AC1: server_dir (bootstrap) must remain in config.json"
+        )
+        assert saved.get("storage_mode") == "local", (
+            "AC1: storage_mode (bootstrap) must remain in config.json"
+        )
+
+    @pytest.mark.slow
+    def test_save_config_no_longer_writes_four_launch_keys(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1 (MAJOR-5): a normal save_config() no longer writes the four keys.
+
+        Story #1197 AC6 added _extract_bootstrap_dict_with_transition() so every
+        settings-save re-wrote the four keys into config.json.  Story #1196
+        removes that write-path inclusion: a subsequent save must write only
+        bootstrap keys.
+        """
+        from code_indexer.server.services.config_service import ConfigService
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "server_dir": str(tmp_path),
+                    "storage_mode": "local",
+                    "host": "127.0.0.1",
+                    "port": 8000,
+                    "workers": 1,
+                    "log_level": "INFO",
+                }
+            )
+        )
+
+        db_path = str(tmp_path / "cidx_server.db")
+        _make_sqlite_db(db_path)
+
+        svc = ConfigService(server_dir_path=str(tmp_path))
+        svc.load_config()
+        svc.initialize_runtime_db(db_path)
+
+        # A subsequent normal settings-save (e.g. an unrelated field change).
+        config = svc.get_config()
+        config.workers = 4  # in-memory TARGET change
+        svc.save_config(config)
+
+        saved = json.loads(config_file.read_text())
+        assert "workers" not in saved, (
+            "AC1: save_config() must NOT write 'workers' to config.json anymore"
+        )
+        assert "log_level" not in saved, (
+            "AC1: save_config() must NOT write 'log_level' to config.json anymore"
+        )
+        assert "host" not in saved, (
+            "AC1: save_config() must NOT write 'host' to config.json anymore"
+        )
+        assert "port" not in saved, (
+            "AC1: save_config() must NOT write 'port' to config.json anymore"
         )

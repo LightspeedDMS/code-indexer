@@ -60,6 +60,20 @@ try:
 except ImportError:  # pragma: no cover
     _run_deep_fidelity_audit = None  # type: ignore[assignment]
 
+# Story #1293 (Epic #1288) S1b [A8]: the shared emit helper. Lazy-import-safe
+# (same pattern as coalesced_query_embedding above) so the CLI startup import
+# budget is unaffected -- emit_embed_event() itself no-ops when no writer is
+# installed (CLI / solo / pre-lifespan), so calling it unconditionally here is
+# safe on every path.
+try:
+    from code_indexer.server.services.search_embed_event_emit import (
+        emit_embed_error_event,
+        emit_embed_event,
+    )
+except ImportError:  # pragma: no cover
+    emit_embed_event = None  # type: ignore[assignment]
+    emit_embed_error_event = None  # type: ignore[assignment]
+
 
 def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -> None:
     """Story #1159: write embedding-cache metadata to the active SearchEventContext.
@@ -92,6 +106,22 @@ def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -
         logging.getLogger(__name__).warning(
             "search_event_log: failed to write embed_meta to ctx: %s", _exc
         )
+
+    # Story #1293 (Epic #1288) S1b [A8]: emit the durable search_embed_event
+    # row for this FSV worker-thread embed, driven entirely by the meta
+    # returned from the worker. This call happens on the MAIN (calling)
+    # thread -- the same thread whose correlation_id ContextVar is correct
+    # (the worker thread's own context is never used for emission). No-op
+    # when role/outcome aren't yet classified or no writer is installed.
+    if emit_embed_event is not None:
+        try:
+            emit_embed_event(embed_meta)
+        except Exception as _emit_exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "search_embed_event: emit_embed_event failed: %s", _emit_exc
+            )
 
 
 # Minimum and default timeout (seconds) for git subprocess calls.
@@ -987,7 +1017,46 @@ class FilesystemVectorStore:
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
-        projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        try:
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        except FileNotFoundError:
+            # Bug #1264: the shard-prep self-heal in temporal_indexer.py (Bug
+            # #1242) only covers shards it enumerates ahead of the write, in a
+            # different module from this call. Any other path that reaches
+            # upsert_points() for a collection whose projection_matrix.npy is
+            # missing on disk still hard-crashed here. Self-heal AT the write
+            # chokepoint itself instead: reuse the exact copy/regenerate logic
+            # from Bug #1242 (no duplicated matrix-creation logic), then retry
+            # the load once. A genuine failure to heal still propagates loudly.
+            vector_size = self._get_vector_size(collection_name)
+            source_collection_path: Optional[Path] = None
+            if TemporalMetadataStore.is_temporal_collection(collection_name):
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    base_collection_name,
+                )
+
+                base_name = base_collection_name(collection_name)
+                if base_name != collection_name:
+                    base_path = self._get_collection_path(base_name, subdirectory)
+                    if base_path.exists():
+                        source_collection_path = base_path
+
+            self.logger.warning(
+                "Bug #1264: projection_matrix.npy missing for collection '%s' "
+                "at write time -- self-healing (source=%s)",
+                collection_name,
+                source_collection_path,
+            )
+
+            from code_indexer.services.temporal.temporal_projection_matrix import (
+                _ensure_shard_has_projection_matrix,
+            )
+
+            _ensure_shard_has_projection_matrix(
+                collection_path, source_collection_path, vector_size
+            )
+            self.matrix_manager._matrix_cache.pop(str(collection_path.absolute()), None)
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
 
         # Get expected vector dimensions from projection matrix
         expected_dims = projection_matrix.shape[0]
@@ -2758,9 +2827,17 @@ class FilesystemVectorStore:
             # .result() re-raises any sub-task exception in the caller's thread —
             # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-            query_vector, embedding_ms, audit_ctx, _embed_meta = (
-                embedding_future.result()
-            )
+            try:
+                query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                    embedding_future.result()
+                )
+            except Exception:
+                # Story #1293 S1b [A6]: a failed LIVE embedding attempt (e.g.
+                # the failover primary provider) is recorded as a durable
+                # outcome=error event BEFORE the exception propagates.
+                if emit_embed_error_event is not None:
+                    emit_embed_error_event(embedding_provider.get_provider_name())
+                raise
             # Story #1159: write embed metadata in main thread — ContextVar is not
             # propagated into ThreadPoolExecutor workers (Python 3.9).
             _write_embed_meta_to_event_ctx(
@@ -2774,9 +2851,14 @@ class FilesystemVectorStore:
 
                 # Wait for both to complete and gather results
                 hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-                query_vector, embedding_ms, audit_ctx, _embed_meta = (
-                    embedding_future.result()
-                )
+                try:
+                    query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                        embedding_future.result()
+                    )
+                except Exception:
+                    if emit_embed_error_event is not None:
+                        emit_embed_error_event(embedding_provider.get_provider_name())
+                    raise
             # Story #1159: write embed metadata in main thread.
             _write_embed_meta_to_event_ctx(
                 _embed_meta, embedding_provider.get_provider_name()
@@ -2847,6 +2929,7 @@ class FilesystemVectorStore:
                     primary_candidate_ids=candidate_ids,
                     embedding_provider=embedding_provider,
                     query=query,
+                    embed_key=_embed_meta.embed_key,
                 )
             except Exception:  # noqa: BLE001
                 pass  # fail-open: audit never breaks primary search

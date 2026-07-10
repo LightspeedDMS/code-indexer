@@ -881,14 +881,25 @@ def dashboard_api_metrics_partial(
 
 
 @web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
-def dashboard_cache_metrics_partial(request: Request):
-    """Story #1109 (S5): Query-embedding cache metrics partial.
+def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400):
+    """Story #1109 (S5) / Story #1294: Query-embedding cache metrics partial.
 
-    Returns an HTML fragment showing total cached entries and real hit/miss
-    ratios per mode for the query-embedding cache.  Hit/ratio stats come from
-    the in-process snapshot() on QueryEmbeddingCacheMetrics (readable tallies
-    kept alongside each OTEL counter increment, so the dashboard never needs
-    an OTEL exporter).  Mirrors the dashboard-api-metrics HTMX partial pattern.
+    Returns an HTML fragment showing total cached entries plus windowed,
+    cluster-aggregated cache statistics for the selected time window. Every
+    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT) and
+    On-Mode Hit Rate (Issue #1257, request-denominated from search_event_log)
+    is sourced from WindowedCacheMetrics — a GROUP BY (cache_mode, provider)
+    aggregation over the durable, phantom-free `search_embed_event` table
+    (Story #1293), computed for `[now - cache_window, now)`. This replaces
+    the old in-memory QueryEmbeddingCacheMetrics/CoalescerRegistry per-node,
+    volatile tallies (Story #1294) — the numbers are now durable, windowed,
+    and aggregated across every cluster node by construction (the backend
+    reads the shared store, never a per-node counter).
+
+    Args:
+        request: HTTP request.
+        cache_window: Time window in seconds for the windowed cache metrics
+            (default 86400 == 24h), mirroring the api_filter convention.
 
     Returns HTML fragment for htmx partial updates.
     """
@@ -899,77 +910,78 @@ def dashboard_cache_metrics_partial(request: Request):
         return HTMLResponse(content="", status_code=401)
 
     # total_entries: reuse the same helper used by the config-page readout so the
-    # dashboard and the config page always show the same live count.  The helper
-    # calls get_query_embedding_cache() from governed_call (the process-global
-    # accessor) and is fail-open (returns 0 when the cache is not wired).
+    # dashboard and the config page always show the same live count. Cache
+    # Entries is current cache STATE, not an event — it is NEVER windowed.
     total_entries = _get_qec_total_entries()
 
-    # Hit/ratio data from in-process snapshot (real tallies, not OTEL exporters).
-    # Hit-ratio is DERIVED per mode in the template — never blended across modes.
-    from code_indexer.server.services.governed_call import (
-        get_query_embedding_cache_metrics,
+    # Story #1294: WindowedCacheMetrics — durable, windowed, cluster-aggregated.
+    # Fail-open: any error (writer absent, backend raises) falls back to
+    # empty_windowed_result() so the dashboard never breaks (AC5).
+    from code_indexer.server.services.windowed_cache_metrics import (
+        empty_windowed_result,
     )
 
-    _metrics = get_query_embedding_cache_metrics()
-    shadow_hits = 0
-    shadow_requests = 0
-    on_hits = 0
-    on_requests = 0
-    shadow_cosine_p50 = None
-    shadow_cosine_histogram = None
-    shadow_cosine_min = None
-    shadow_cosine_p05 = None
-    audit_total = 0
-    audit_top1_matches = 0
-    audit_overlap_avg = None
-    long_key = 0
-
-    if _metrics is not None:
+    to_ts = time.time()
+    from_ts = to_ts - cache_window
+    see_writer = getattr(request.app.state, "search_embed_event_writer", None)
+    see_backend = see_writer.backend if see_writer is not None else None
+    if see_backend is not None:
         try:
-            snap = _metrics.snapshot()
-            _shadow = snap.get("shadow", {})
-            _on = snap.get("on", {})
-            shadow_hits = _shadow.get("hits", 0)
-            shadow_requests = shadow_hits + _shadow.get("misses", 0)
-            on_hits = _on.get("hits", 0)
-            on_requests = on_hits + _on.get("misses", 0)
-            shadow_cosine_p50 = snap.get("shadow_cosine_p50")
-            # Story #1152: histogram + min + p05
-            shadow_cosine_histogram = snap.get("shadow_cosine_histogram")
-            shadow_cosine_min = snap.get("shadow_cosine_min")
-            shadow_cosine_p05 = snap.get("shadow_cosine_p05")
-            audit_total = snap.get("audit_total", 0) or 0
-            audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
-            audit_overlap_avg = snap.get("audit_overlap_avg")
-            # Story #1149: long_key counter (queries skipped due to >256-char cap).
-            long_key = snap.get("long_key", 0) or 0
+            windowed = see_backend.get_windowed_metrics(from_ts, to_ts)
         except Exception as _exc:
             logger.warning(
-                "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
+                "dashboard_cache_metrics_partial: get_windowed_metrics failed: %s",
+                _exc,
             )
-
-    # Story #1146: coalescer dedup counters (per-node in-memory tallies).
-    # Aggregated from all (lane, digest) coalescers in the process-level registry.
-    # Returns zeros when the registry is absent (CLI/solo/pre-lifespan).
-    from code_indexer.server.services.coalescer_registry import get_coalescer_registry
-
-    _coa_registry = get_coalescer_registry()
-    if _coa_registry is not None:
-        try:
-            _coa_metrics = _coa_registry.metrics()
-        except Exception as _coa_exc:
-            logger.warning(
-                "dashboard_cache_metrics_partial: coalescer metrics() failed: %s",
-                _coa_exc,
-            )
-            _coa_metrics = {}
+            windowed = empty_windowed_result()
     else:
-        _coa_metrics = {}
+        windowed = empty_windowed_result()
 
-    coalescer_texts_coalesced = _coa_metrics.get("texts_coalesced", 0)
-    coalescer_batches_dispatched = _coa_metrics.get("batches_dispatched", 0)
-    coalescer_dedup_savings = _coa_metrics.get("dedup_savings", 0)
-    coalescer_provider_embed_calls = _coa_metrics.get("provider_embed_calls", 0)
+    overall = windowed.overall
+    shadow_agg = windowed.by_cache_mode.get("shadow")
+    if shadow_agg is None:
+        from code_indexer.server.services.windowed_cache_metrics import (
+            CacheMetricsAggregate,
+        )
+
+        shadow_agg = CacheMetricsAggregate()
+
+    shadow_hits = shadow_agg.hits
+    shadow_requests = shadow_agg.hits + shadow_agg.misses
+    shadow_cosine_p50 = shadow_agg.shadow_cosine_p50
+    shadow_cosine_p05 = shadow_agg.shadow_cosine_p05
+    shadow_cosine_min = shadow_agg.shadow_cosine_min
+    shadow_cosine_histogram = shadow_agg.shadow_cosine_histogram
+
+    long_key = overall.long_key
+    audit_total = overall.audit_count
+    audit_overlap_avg = overall.audit_avg if overall.audit_count > 0 else None
+
+    coalescer_texts_coalesced = overall.texts_coalesced
+    coalescer_batches_dispatched = overall.batches
+    coalescer_dedup_savings = overall.dedup
+    coalescer_provider_embed_calls = overall.provider_embed_calls
+
+    # Issue #1257: On-Mode Hit Rate must be REQUEST-denominated (one row per
+    # user request in search_event_log), NOT operation-denominated. This is
+    # UNCHANGED by Story #1294 — it stays sourced from search_event_log's
+    # get_hit_rate_counts, which aggregates REQUESTS (rows), matching the
+    # analytics denominator. Fail-open: on_hits/on_requests stay at 0 when
+    # the writer is not wired or the query fails.
+    on_hits = 0
+    on_requests = 0
+    sel_writer = getattr(request.app.state, "search_event_log_writer", None)
+    sel_backend = sel_writer.backend if sel_writer is not None else None
+    if sel_backend is not None:
+        try:
+            _on_counts = sel_backend.get_hit_rate_counts("on")
+            on_hits = _on_counts.get("hits", 0)
+            on_requests = _on_counts.get("requests", 0)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_hit_rate_counts failed: %s",
+                _exc,
+            )
 
     cache_metrics = types.SimpleNamespace(
         total_entries=total_entries,
@@ -978,25 +990,23 @@ def dashboard_cache_metrics_partial(request: Request):
         on_hits=on_hits,
         on_requests=on_requests,
         shadow_cosine_p50=shadow_cosine_p50,
-        # Story #1152: histogram + min + p05
         shadow_cosine_histogram=shadow_cosine_histogram,
         shadow_cosine_min=shadow_cosine_min,
         shadow_cosine_p05=shadow_cosine_p05,
         audit_total=audit_total,
-        audit_top1_matches=audit_top1_matches,
         audit_overlap_avg=audit_overlap_avg,
         long_key=long_key,
-        # Story #1146 coalescer dedup counters
+        # Story #1146 dedup counters — now windowed (Story #1294), not
+        # per-node in-memory coalescer tallies.
         coalescer_texts_coalesced=coalescer_texts_coalesced,
         coalescer_batches_dispatched=coalescer_batches_dispatched,
         coalescer_dedup_savings=coalescer_dedup_savings,
         coalescer_provider_embed_calls=coalescer_provider_embed_calls,
     )
 
-    # Resolve the current node identifier for the volatile-metrics footer label.
-    # In cluster (postgres) mode, lifespan.py stores the configured node_id on
-    # app.state (Story #505/#506).  In solo mode the attribute is absent; fall
-    # back to socket.gethostname().  getattr with a default is already safe.
+    # Resolve the current node identifier — retained for any node-scoped UX
+    # elsewhere on the page; the cache-metrics cards themselves are no longer
+    # per-node (Story #1294 made them cluster-aggregated).
     node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
 
     # Story #1152: precompute log10-scaled bar percentages in Python so the
@@ -1024,6 +1034,7 @@ def dashboard_cache_metrics_partial(request: Request):
             "cache_metrics": cache_metrics,
             "node_id": node_id,
             "histogram_bars": histogram_bars,
+            "cache_window": cache_window,
         },
     )
 
@@ -5006,7 +5017,6 @@ def _create_query_page_response(
     time_range_all: bool = False,
     time_range: str = "",
     at_commit: str = "",
-    include_removed: bool = False,
     case_sensitive: bool = False,
     fuzzy: bool = False,
     regex: bool = False,
@@ -5043,7 +5053,6 @@ def _create_query_page_response(
             "time_range_all": time_range_all,
             "time_range": time_range,
             "at_commit": at_commit,
-            "include_removed": include_removed,
             "case_sensitive": case_sensitive,
             "fuzzy": fuzzy,
             "regex": regex,
@@ -5080,7 +5089,6 @@ def query_submit(
     time_range_all: bool = Form(False),
     time_range: str = Form(""),
     at_commit: str = Form(""),
-    include_removed: bool = Form(False),
     case_sensitive: bool = Form(False),
     fuzzy: bool = Form(False),
     regex: bool = Form(False),
@@ -5108,7 +5116,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -5132,7 +5139,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -5155,7 +5161,6 @@ def query_submit(
             time_range_all=time_range_all,
             time_range=time_range,
             at_commit=at_commit,
-            include_removed=include_removed,
             case_sensitive=case_sensitive,
             fuzzy=fuzzy,
             regex=regex,
@@ -5491,7 +5496,6 @@ def query_submit(
                     time_range=time_range if time_range else None,
                     time_range_all=time_range_all,
                     at_commit=at_commit if at_commit else None,
-                    include_removed=include_removed,
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
                     regex=regex,
@@ -5539,7 +5543,6 @@ def query_submit(
         time_range_all=time_range_all,
         time_range=time_range,
         at_commit=at_commit,
-        include_removed=include_removed,
         case_sensitive=case_sensitive,
         fuzzy=fuzzy,
         regex=regex,
@@ -5779,7 +5782,6 @@ def query_results_partial_post(
     time_range_all: bool = Form(False),
     time_range: str = Form(""),
     at_commit: str = Form(""),
-    include_removed: bool = Form(False),
     case_sensitive: bool = Form(False),
     fuzzy: bool = Form(False),
     regex: bool = Form(False),
@@ -5962,7 +5964,6 @@ def query_results_partial_post(
                     time_range=time_range if time_range else None,
                     time_range_all=time_range_all,
                     at_commit=at_commit if at_commit else None,
-                    include_removed=include_removed,
                     case_sensitive=case_sensitive,
                     fuzzy=fuzzy,
                     regex=regex,
@@ -6260,9 +6261,9 @@ def _get_current_config() -> dict:
             "dependency_map_enabled": False,
             "dependency_map_interval_hours": 168,
             "dependency_map_pass_timeout_seconds": 600,
-            "dependency_map_pass1_max_turns": 50,
-            "dependency_map_pass2_max_turns": 60,
-            "dependency_map_delta_max_turns": 30,
+            "dependency_map_pass1_max_turns": 0,
+            "dependency_map_pass2_max_turns": 0,
+            "dependency_map_delta_max_turns": 0,
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": False,
             "fact_check_timeout_seconds": 600,
@@ -6292,13 +6293,13 @@ def _get_current_config() -> dict:
                 "dependency_map_pass_timeout_seconds", 600
             ),
             "dependency_map_pass1_max_turns": claude_cli_raw.get(
-                "dependency_map_pass1_max_turns", 50
+                "dependency_map_pass1_max_turns", 0
             ),
             "dependency_map_pass2_max_turns": claude_cli_raw.get(
-                "dependency_map_pass2_max_turns", 60
+                "dependency_map_pass2_max_turns", 0
             ),
             "dependency_map_delta_max_turns": claude_cli_raw.get(
-                "dependency_map_delta_max_turns", 30
+                "dependency_map_delta_max_turns", 0
             ),
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": claude_cli_raw.get(
@@ -6636,6 +6637,38 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                         return f"Temporal Parallel Requests must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
                 except (ValueError, TypeError):
                     return "Temporal Parallel Requests must be a valid number"
+
+        # Story #1290: per-commit temporal embedder registry.
+        _submitted_embedders: Optional[List[str]] = None
+        if "temporal_embedders" in data:
+            raw_embedders = data["temporal_embedders"]
+            _submitted_embedders = [
+                v.strip() for v in str(raw_embedders).split(",") if v.strip()
+            ]
+            if not _submitted_embedders:
+                return "Temporal Embedders must not be empty"
+
+        if "temporal_active_embedder" in data:
+            active_raw = str(data["temporal_active_embedder"]).strip()
+            if not active_raw:
+                return "Temporal Active Embedder must not be empty"
+            if (
+                _submitted_embedders is not None
+                and active_raw not in _submitted_embedders
+            ):
+                return (
+                    "Temporal Active Embedder must be one of the Temporal "
+                    "Embedders submitted"
+                )
+
+        if "temporal_aggregation_chunk_chars" in data:
+            chunk_raw = data["temporal_aggregation_chunk_chars"]
+            try:
+                chunk_int = int(chunk_raw)
+                if chunk_int <= 0:
+                    return "Temporal Aggregation Chunk Size must be a positive number"
+            except (ValueError, TypeError):
+                return "Temporal Aggregation Chunk Size must be a valid number"
 
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:

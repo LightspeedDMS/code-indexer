@@ -18,6 +18,9 @@ import sys
 import os
 import pwd
 import shutil
+import tarfile
+import tempfile
+import platform
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
@@ -43,11 +46,31 @@ AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
 # Default is the Linux standard /etc/systemd/system.
 SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
 
+# Bug #1320 Part B: fixed, documented installation location of the co-located
+# CoW Storage Daemon's own config file. This is a stable install-location
+# constant (not an environment-specific storage value) — used ONLY to
+# auto-detect cow_daemon.daemon_storage_path (the `base_path` field) on the
+# daemon-HOST node. Overridable via env var for testing only, mirroring the
+# SYSTEMD_UNIT_DIR pattern above.
+COW_DAEMON_HOST_CONFIG_PATH = Path(
+    os.environ.get(
+        "CIDX_COW_DAEMON_HOST_CONFIG_PATH", "/etc/cow-storage-daemon/config.json"
+    )
+)
+
 # Self-restart mechanism constants
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
 AUTO_UPDATE_STATUS_FILE = _cidx_data_dir / "auto-update-status.json"
-SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
+# Timeout for ALL systemd/sudo control-plane operations: daemon-reload,
+# systemctl restart, sudoers cat/tee/chmod/rm/visudo, unit-file read/write.
+# 120s (not the previous 30s/10s) because the FIRST auto-update deploy on a
+# freshly-built host compiles hnswlib and installs rustup/ripgrep/Claude-CLI/
+# pace-maker -- CPU-heavy work that transiently starves systemd/sudo
+# (pam_systemd blocks on a busy PID 1). A tighter timeout here raised
+# subprocess.TimeoutExpired, which a broad `except Exception` swallowed,
+# silently skipping real config steps (DEPLOY-GENERAL-034, -056).
+SYSTEMD_OP_TIMEOUT_SECONDS = 120
 
 # Story #355: Signal-based server restart via auto-updater
 # Server writes this file to request a restart; auto-updater detects and executes it.
@@ -100,6 +123,13 @@ CLAUDE_INSTALL_TIMEOUT_SECONDS = (
     300  # curl + sh pipeline; generous budget matches Codex
 )
 
+# scip-python install constants (same pattern as CODEX_CLI_INSTALL_TIMEOUT_SECONDS
+# above). scip-python (npm package @sourcegraph/scip-python) is the SCIP indexer
+# binary for Python projects (src/code_indexer/scip/indexers/python.py); without
+# it, SCIP indexing fails with "[Errno 2] No such file or directory: 'scip-python'".
+SCIP_PYTHON_PACKAGE = "@sourcegraph/scip-python"
+SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
+
 # Story #997: Pace-maker install/update constants
 PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
 PACE_MAKER_GIT_TIMEOUT = 60
@@ -132,6 +162,22 @@ RUSTC_VERSION_TIMEOUT_SECONDS = 10  # quick binary probe
 # The auto-updater runs as root but cidx-server runs as code-indexer;
 # /root/.cargo is unreachable (0550), so we install to /opt/rust.
 RUST_SYSTEM_DIR = Path("/opt/rust")
+
+# BUG #1318: Node.js toolchain provisioning constants. Node.js/npm is not
+# installed on any server node, so ensure_scip_python() and the Codex CLI
+# install both fail with "npm not available on PATH". Fix: provision a
+# pinned Node.js LTS release to a system-wide dir the SAME way Rust is
+# provisioned to RUST_SYSTEM_DIR (/opt/rust) — a static official tarball
+# (not a distro package, avoiding dnf/apt version drift) installed to a
+# dir reachable by both the (often root) auto-updater and the code-indexer
+# service user running cidx-server's child index subprocesses.
+NODEJS_VERSION = "22.11.0"  # current LTS ("Jod") at time of writing
+NODEJS_DIST_URL = (
+    f"https://nodejs.org/dist/v{NODEJS_VERSION}/node-v{NODEJS_VERSION}-linux-x64.tar.xz"
+)
+NODEJS_INSTALL_DIR = Path("/opt/node")
+NODEJS_INSTALL_TIMEOUT_SECONDS = 300  # curl download + tar extract; generous budget
+NODEJS_VERSION_PROBE_TIMEOUT_SECONDS = 10  # quick binary probe
 
 # Maximum bytes of subprocess stderr captured in warning log messages.
 MAX_ERROR_SNIPPET_LENGTH = 200
@@ -1597,7 +1643,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1647,7 +1693,7 @@ class DeploymentExecutor:
                 ["sudo", "cat", str(service_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -1666,6 +1712,64 @@ class DeploymentExecutor:
             )
             return None
 
+    def _run_systemd_op_with_retry(
+        self,
+        cmd: list,
+        *,
+        input: Optional[str] = None,
+        timeout: int = SYSTEMD_OP_TIMEOUT_SECONDS,
+        max_attempts: int = 3,
+        retry_delay_seconds: float = 5.0,
+    ) -> subprocess.CompletedProcess:
+        """Run a systemd/sudo control-plane subprocess with retry-on-timeout.
+
+        On a freshly-built host, the FIRST auto-update deploy is CPU-heavy
+        (hnswlib compile, rustup/ripgrep/Claude-CLI/pace-maker install) and
+        transiently starves systemd/sudo (pam_systemd blocks on a busy PID 1).
+        A single 30s/10s timeout could raise subprocess.TimeoutExpired even
+        though the operation would have succeeded moments later. This helper
+        retries ONLY on subprocess.TimeoutExpired -- a completed process with
+        ANY returncode (including nonzero) is returned immediately on the
+        first attempt that does not raise; nonzero returncode is a real
+        failure, not a transient one, so it is never retried.
+
+        Args:
+            cmd: Command argv list to execute.
+            input: Optional stdin text (e.g. for `sudo tee`).
+            timeout: Per-attempt timeout in seconds.
+            max_attempts: Maximum number of attempts before giving up.
+            retry_delay_seconds: Seconds to sleep between attempts.
+
+        Returns:
+            The subprocess.CompletedProcess from the first attempt that does
+            not raise subprocess.TimeoutExpired.
+
+        Raises:
+            subprocess.TimeoutExpired: If every attempt times out.
+        """
+        last_timeout_error: Optional[subprocess.TimeoutExpired] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return subprocess.run(
+                    cmd,
+                    input=input,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as e:
+                last_timeout_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"systemd/sudo op timed out after {timeout}s "
+                        f"(attempt {attempt}/{max_attempts}), retrying: {cmd}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    time.sleep(retry_delay_seconds)
+
+        assert last_timeout_error is not None
+        raise last_timeout_error
+
     def _write_service_file_and_reload(self, service_path: Path, content: str) -> bool:
         """Write systemd service file via sudo tee and reload daemon.
 
@@ -1678,12 +1782,9 @@ class DeploymentExecutor:
         """
         try:
             # Write via sudo tee
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(service_path)],
                 input=content,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -1697,11 +1798,8 @@ class DeploymentExecutor:
                 return False
 
             # Reload systemd
-            result = subprocess.run(
+            result = self._run_systemd_op_with_retry(
                 ["sudo", "systemctl", "daemon-reload"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if result.returncode != 0:
@@ -2229,14 +2327,18 @@ class DeploymentExecutor:
     def _read_launch_source(self, mode: str) -> Optional[dict]:
         """Read launch config JSON for the given mode.
 
-        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through
-                to config.json → defaults; APPLY's job is to apply the TARGET).
+        Story #1196 (next-release cleanup): the config.json rung is removed
+        from BOTH modes.
+
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (falls
+                through directly to ServerConfig defaults; APPLY's job is to
+                apply the TARGET).
         DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH. Both the MISSING and CORRUPT cases
             return None so the caller PRESERVES the live ExecStart unchanged — a routine
             code deploy must never rewrite the live unit from a stale config. The live
             ExecStart is the confirmed running state (e.g. --host 0.0.0.0 bound so HAProxy
-            on another host can reach this node); falling through to config.json /
-            ServerConfig defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
+            on another host can reach this node); falling through to ServerConfig
+            defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
             ServerConfig default), dropping the node off the load balancer (a confirmed
             production-outage path). A present+valid applied_launch.json is used normally.
         """
@@ -2248,7 +2350,7 @@ class DeploymentExecutor:
                 # DEPLOY + missing applied_launch.json: preserve the live ExecStart.
                 # The live unit IS the confirmed running state (e.g. --host 0.0.0.0 bound
                 # so HAProxy on another host can reach this node). Falling through to
-                # config.json / ServerConfig defaults risks rewriting --host 0.0.0.0
+                # ServerConfig defaults risks rewriting --host 0.0.0.0
                 # to 127.0.0.1 (the ServerConfig default), dropping the node off the
                 # load balancer (production outage).
                 # Treat identically to the CORRUPT case: return None so the caller
@@ -2273,32 +2375,39 @@ class DeploymentExecutor:
                 )
                 return None
             logger.debug(
-                f"APPLY: launch.json unreadable ({exc}); falling through to config.json",
+                f"APPLY: launch.json unreadable ({exc}); falling through to ServerConfig defaults",
                 extra={"correlation_id": get_correlation_id()},
             )
             return {}
 
-    def _fill_from_config_json(
-        self, host: Optional[str], port: Optional[int], workers: Optional[int]
+    def _fill_from_live_execstart(
+        self,
+        mode: str,
+        host: Optional[str],
+        port: Optional[int],
+        workers: Optional[int],
     ) -> tuple:
-        """Fill any still-None values from config.json; return (host, port, workers)."""
-        if all(v is not None for v in (host, port, workers)):
+        """Fill any still-None DEPLOY values from the live ExecStart.
+
+        Story #1196 AC2 (FIX-1 / MAJOR-M1): the config.json rung is removed
+        from BOTH modes.
+          APPLY:  missing values are left None here so the caller applies the
+                  ServerConfig defaults directly -- no fallback source between
+                  launch.json and the literal defaults.
+          DEPLOY: missing values (a partially-populated applied_launch.json)
+                  are filled from the CURRENT live-unit ExecStart -- the
+                  confirmed running state -- never from config.json, before
+                  falling through to ServerConfig defaults.
+        """
+        if mode != "DEPLOY" or all(v is not None for v in (host, port, workers)):
             return host, port, workers
-        config_path = _cidx_data_dir / "config.json"
-        if config_path.exists():
-            try:
-                cfg = json.loads(config_path.read_text())
-                if host is None:
-                    host = cfg.get("host")
-                if port is None:
-                    port = cfg.get("port")
-                if workers is None:
-                    workers = cfg.get("workers")
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.debug(
-                    f"config.json unreadable ({exc}); using ServerConfig defaults",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+        live = read_execstart_flags(self.service_name)
+        if host is None:
+            host = live.get("host")
+        if port is None:
+            port = live.get("port")
+        if workers is None:
+            workers = live.get("workers")
         return host, port, workers
 
     def _resolve_launch_values(self, mode: str) -> Optional[dict]:
@@ -2316,7 +2425,7 @@ class DeploymentExecutor:
             )
 
         host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
-        host, port, workers = self._fill_from_config_json(host, port, workers)
+        host, port, workers = self._fill_from_live_execstart(mode, host, port, workers)
         result: dict = {
             "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
             "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
@@ -2807,11 +2916,8 @@ class DeploymentExecutor:
             expected_rule = f"{service_user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {self.service_name}"
 
             # Use sudo to check /etc/sudoers.d/ (not readable by non-root)
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sudo", "cat", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.returncode == 0:
                 existing_content = check_result.stdout.strip()
@@ -2829,12 +2935,9 @@ class DeploymentExecutor:
             )
 
             # Use sudo tee to write the sudoers file
-            tee_result = subprocess.run(
+            tee_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", str(sudoers_path)],
                 input=expected_rule,
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if tee_result.returncode != 0:
@@ -2848,11 +2951,8 @@ class DeploymentExecutor:
                 return False
 
             # Set correct permissions (0440)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "0440", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if chmod_result.returncode != 0:
@@ -2864,20 +2964,14 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove file with wrong permissions
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
             # Validate with visudo
-            visudo_result = subprocess.run(
+            visudo_result = self._run_systemd_op_with_retry(
                 ["sudo", "visudo", "-c", "-f", str(sudoers_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
 
             if visudo_result.returncode != 0:
@@ -2889,11 +2983,8 @@ class DeploymentExecutor:
                     )
                 )
                 # Remove invalid sudoers file
-                subprocess.run(
+                self._run_systemd_op_with_retry(
                     ["sudo", "rm", "-f", str(sudoers_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 return False
 
@@ -3098,7 +3189,7 @@ class DeploymentExecutor:
                 ["sudo", "systemctl", "restart", AUTO_UPDATE_SERVICE_NAME],
                 capture_output=True,
                 text=True,
-                timeout=SYSTEMCTL_TIMEOUT_SECONDS,
+                timeout=SYSTEMD_OP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -3145,11 +3236,8 @@ class DeploymentExecutor:
         """
         try:
             # Check current value
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["sysctl", "-n", "vm.overcommit_memory"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip() == "1":
                 logger.debug(
@@ -3159,12 +3247,9 @@ class DeploymentExecutor:
                 return True
 
             # Write persistent sysctl config file
-            write_result = subprocess.run(
+            write_result = self._run_systemd_op_with_retry(
                 ["sudo", "tee", "/etc/sysctl.d/99-cidx-memory.conf"],
                 input="vm.overcommit_memory = 1\n",
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if write_result.returncode != 0:
                 logger.error(
@@ -3177,11 +3262,8 @@ class DeploymentExecutor:
                 return False
 
             # Apply immediately
-            apply_result = subprocess.run(
+            apply_result = self._run_systemd_op_with_retry(
                 ["sudo", "sysctl", "-p", "/etc/sysctl.d/99-cidx-memory.conf"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if apply_result.returncode != 0:
                 logger.error(
@@ -3231,11 +3313,8 @@ class DeploymentExecutor:
         """
         try:
             # Check if any swap is already active
-            check_result = subprocess.run(
+            check_result = self._run_systemd_op_with_retry(
                 ["swapon", "--show", "--noheadings"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if check_result.stdout.strip():
                 logger.debug(
@@ -3245,11 +3324,8 @@ class DeploymentExecutor:
                 return True
 
             # Allocate 4GB swap file
-            fallocate_result = subprocess.run(
+            fallocate_result = self._run_systemd_op_with_retry(
                 ["sudo", "fallocate", "-l", "4G", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=60,
             )
             if fallocate_result.returncode != 0:
                 logger.warning(
@@ -3263,11 +3339,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Set secure permissions (0600 - root only)
-            chmod_result = subprocess.run(
+            chmod_result = self._run_systemd_op_with_retry(
                 ["sudo", "chmod", "600", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if chmod_result.returncode != 0:
                 logger.warning(
@@ -3281,11 +3354,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Format as swap
-            mkswap_result = subprocess.run(
+            mkswap_result = self._run_systemd_op_with_retry(
                 ["sudo", "mkswap", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if mkswap_result.returncode != 0:
                 logger.warning(
@@ -3299,11 +3369,8 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Enable swap immediately
-            swapon_result = subprocess.run(
+            swapon_result = self._run_systemd_op_with_retry(
                 ["sudo", "swapon", "/swapfile"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if swapon_result.returncode != 0:
                 logger.warning(
@@ -3317,19 +3384,13 @@ class DeploymentExecutor:
                 return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Add fstab entry for reboot persistence
-            fstab_result = subprocess.run(
+            fstab_result = self._run_systemd_op_with_retry(
                 ["cat", "/etc/fstab"],
-                capture_output=True,
-                text=True,
-                timeout=30,
             )
             if "/swapfile" not in fstab_result.stdout:
-                tee_result = subprocess.run(
+                tee_result = self._run_systemd_op_with_retry(
                     ["sudo", "tee", "-a", "/etc/fstab"],
                     input="/swapfile none swap sw 0 0\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
                 )
                 if tee_result.returncode != 0:
                     # Non-fatal: swap is active but will not survive reboot
@@ -3517,7 +3578,8 @@ class DeploymentExecutor:
             return False
 
         # Step 3: Story #1199 - Ensure launch config (host/port/workers) from applied_launch.json.
-        # DEPLOY mode reads applied_launch.json → config.json → ServerConfig defaults (NEVER launch.json)
+        # DEPLOY mode reads applied_launch.json → parse/preserve the live ExecStart → ServerConfig
+        # defaults (NEVER launch.json/TARGET; the config.json rung was removed in Story #1196)
         # so a routine code deploy preserves the last operator-applied launch config without
         # auto-applying a saved-but-unconfirmed TARGET change (decision #3).
         # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape
@@ -3557,6 +3619,20 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Step 6.65: BUG #1318 - Provision Node.js/npm BEFORE the npm-dependent
+        # steps below (Codex CLI install, scip-python install) so both can
+        # actually find npm on PATH instead of silently no-op'ing.
+        if not self.ensure_nodejs():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js provisioning could not be verified/installed — "
+                    "npm-dependent features (scip-python, Codex CLI) will be "
+                    "unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Step 6.7: Story #845 - Idempotently install/update Codex CLI (optional feature)
         if not self._ensure_codex_cli_installed():
             logger.warning(
@@ -3581,6 +3657,25 @@ class DeploymentExecutor:
                     "Ripgrep installation failed",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            )
+
+        # Step 7.1: Ensure scip-python is installed for SCIP-based code intelligence
+        # (mirrors the ripgrep step above; non-fatal — SCIP indexing is degraded,
+        # not the whole deploy, when this fails).
+        scip_python_result = self.ensure_scip_python()
+        if scip_python_result:
+            logger.info(
+                "scip-python installation successful",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "scip-python installation could not be verified/installed — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Step 8: Ensure sudoers rule for server self-restart
@@ -3669,6 +3764,35 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-166",
                     "activated-repos symlink setup failed - "
                     "CoW-daemon activation may not function correctly",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14.6: Bug #1320 Part B - Ensure cow_daemon.daemon_storage_path is
+        # populated on CoW-daemon cluster nodes (non-fatal; leaves unset + logs
+        # when no source resolves, letting Part A's guard fail loud at publish
+        # time instead of silently guessing a value).
+        if not self._ensure_daemon_storage_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-206",
+                    "daemon_storage_path setup failed - "
+                    "CoW-daemon versioned-snapshot publish may fail loud "
+                    "with a path-translation error",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14.7: Bug #1337 - Ensure golden-repos symlink for CoW-daemon
+        # cluster (non-fatal). Runs AFTER Step 14.6 so it can use a
+        # freshly-resolved cow_daemon.daemon_storage_path for the co-located
+        # daemon-host target form.
+        if not self._ensure_golden_repos_symlink_for_cow_daemon():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-208",
+                    "golden-repos symlink setup failed - "
+                    "per-user CoW-daemon activation may not function correctly",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -4073,6 +4197,342 @@ class DeploymentExecutor:
         self._probe_codex_version()
         return True
 
+    def _check_node_installed(self) -> bool:
+        """BUG #1318: Return True if Node.js is already installed and runnable.
+
+        Checks NODEJS_INSTALL_DIR/bin/node first (our own provisioning
+        target) by actually invoking it with --version, then falls back to
+        shutil.which("node") to detect a system-installed Node.js elsewhere
+        on PATH. Never raises.
+        """
+        node_bin = NODEJS_INSTALL_DIR / "bin" / "node"
+        if node_bin.exists():
+            try:
+                result = subprocess.run(
+                    [str(node_bin), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=NODEJS_VERSION_PROBE_TIMEOUT_SECONDS,
+                )
+                if result.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return shutil.which("node") is not None
+
+    def _download_nodejs_tarball(self, dest_path: Path) -> bool:
+        """BUG #1318: Download the pinned Node.js LTS tarball via curl.
+
+        Mirrors the Rust toolchain's curl usage (no shell=True). Handles
+        nonzero returncode, TimeoutExpired, and OSError as WARNING +
+        return False. Never raises.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--proto",
+                    "=https",
+                    "--tlsv1.2",
+                    "-sSfL",
+                    "-o",
+                    str(dest_path),
+                    NODEJS_DIST_URL,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=NODEJS_INSTALL_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball download failed (curl exit "
+                    f"{result.returncode}): "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def _extract_nodejs_tarball(self, tar_path: Path, install_dir: Path) -> bool:
+        """BUG #1318: Safely extract the Node.js tarball into install_dir.
+
+        tarfile has no --strip-components, so the top-level
+        node-v{NODEJS_VERSION}-linux-x64/ directory shipped by the official
+        dist is extracted to a temp dir first, then its contents are moved
+        up into install_dir. Path-traversal validation mirrors
+        RipgrepInstaller._safe_extract_tar. Never raises.
+        """
+        expected_top_dir = f"node-v{NODEJS_VERSION}-linux-x64"
+        try:
+            with tempfile.TemporaryDirectory() as tmp_extract_dir:
+                abs_dest = os.path.abspath(tmp_extract_dir)
+                with tarfile.open(tar_path, "r:xz") as tar:
+                    for member in tar.getmembers():
+                        member_path = os.path.join(tmp_extract_dir, member.name)
+                        abs_path = os.path.abspath(member_path)
+                        if (
+                            not abs_path.startswith(abs_dest + os.sep)
+                            and abs_path != abs_dest
+                        ):
+                            raise ValueError(
+                                f"Path traversal detected in tar: {member.name}"
+                            )
+                    tar.extractall(tmp_extract_dir, filter="data")
+
+                extracted_root = Path(tmp_extract_dir) / expected_top_dir
+                if not extracted_root.is_dir():
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-202",
+                            f"Extracted Node.js tarball missing expected "
+                            f"directory {expected_top_dir}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+
+                for item in extracted_root.iterdir():
+                    shutil.move(str(item), str(install_dir / item.name))
+            return True
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js tarball extraction failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _add_nodejs_bin_to_process_path(self) -> None:
+        """BUG #1318: Prepend NODEJS_INSTALL_DIR/bin to THIS process's PATH.
+
+        ensure_scip_python()/_ensure_codex_cli_installed() call
+        shutil.which("npm")/subprocess.run(["npm", ...]) without an
+        explicit env= kwarg, relying on the inherited process environment
+        (unlike the Rust toolchain build, which passes an explicit env
+        dict). Updating os.environ here — not just the systemd unit file —
+        is what lets those SAME-execute()-run steps find npm immediately
+        after ensure_nodejs() provisions it. Idempotent: never duplicates
+        the segment. Never raises.
+        """
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        current_path = os.environ.get("PATH", "")
+        segments = current_path.split(":") if current_path else []
+        if node_bin in segments:
+            return
+        os.environ["PATH"] = f"{node_bin}:{current_path}" if current_path else node_bin
+
+    def _run_scip_python_npm_install(self) -> bool:
+        """Run `npm install -g @sourcegraph/scip-python`; return True on success.
+
+        Handles nonzero returncode, TimeoutExpired, and OSError as
+        WARNING + return False. Never raises. Mirrors
+        _run_codex_npm_install().
+        """
+        try:
+            result = subprocess.run(
+                ["npm", "install", "-g", SCIP_PYTHON_PACKAGE],
+                capture_output=True,
+                text=True,
+                timeout=SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            logger.debug(
+                "npm install %s stdout: %s",
+                SCIP_PYTHON_PACKAGE,
+                result.stdout,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-201",
+                        f"npm install {SCIP_PYTHON_PACKAGE} failed "
+                        f"(exit {result.returncode}): {result.stderr}",
+                    ),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} timed out after "
+                    f"{SCIP_PYTHON_INSTALL_TIMEOUT_SECONDS}s",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    f"npm install {SCIP_PYTHON_PACKAGE} could not be spawned: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _provision_nodejs_install_dir(self) -> bool:
+        """BUG #1318: sudo mkdir -p + sudo chown NODEJS_INSTALL_DIR so the
+        current (unprivileged) user can extract the tarball into it.
+        Mirrors the mkdir/chown block in _ensure_rust_toolchain(). Returns
+        False (with WARNING) on either subprocess failure; never raises.
+        """
+        mkdir_result = subprocess.run(
+            ["sudo", "mkdir", "-p", str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if mkdir_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo mkdir -p {NODEJS_INSTALL_DIR} failed: "
+                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        uid_gid = f"{os.getuid()}:{os.getgid()}"
+        chown_result = subprocess.run(
+            ["sudo", "chown", "-R", uid_gid, str(NODEJS_INSTALL_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if chown_result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"sudo chown -R {uid_gid} {NODEJS_INSTALL_DIR} failed: "
+                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        return True
+
+    def ensure_nodejs(self) -> bool:
+        """BUG #1318: Ensure a pinned Node.js LTS toolchain is provisioned
+        (system-wide, at NODEJS_INSTALL_DIR — mirrors RUST_SYSTEM_DIR) so
+        npm is available for scip-python / Codex CLI installation.
+
+        Idempotent (skips when already installed). Non-fatal: any failure
+        logs WARNING and returns False; never raises. On success (or when
+        already installed) wires NODEJS_INSTALL_DIR/bin onto this
+        process's PATH (so the SAME execute() run's npm-dependent steps
+        find it) and the systemd unit PATH (for the restarted server).
+        """
+        if self._check_node_installed():
+            logger.info(
+                "Node.js already installed, skipping provisioning",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            self._add_nodejs_bin_to_process_path()
+            self._ensure_systemd_node_path()
+            return True
+
+        if platform.machine() != "x86_64":
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    f"Node.js pinned tarball only available for x86_64, "
+                    f"found {platform.machine()}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._provision_nodejs_install_dir():
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tar_path = Path(tmp_dir) / "node.tar.xz"
+            if not self._download_nodejs_tarball(tar_path):
+                return False
+            if not self._extract_nodejs_tarball(tar_path, NODEJS_INSTALL_DIR):
+                return False
+
+        if not self._check_node_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-202",
+                    "Node.js installation verification failed after extraction",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        logger.info(
+            f"Node.js {NODEJS_VERSION} installed successfully at {NODEJS_INSTALL_DIR}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        self._add_nodejs_bin_to_process_path()
+        self._ensure_systemd_node_path()
+        return True
+
+    def ensure_scip_python(self) -> bool:
+        """Idempotently install scip-python via npm for SCIP-based indexing.
+
+        scip-python (npm package @sourcegraph/scip-python) is the SCIP
+        indexer binary invoked by PythonIndexer for `cidx scip generate` /
+        add_golden_repo_index(index_type="scip"). Without it, SCIP indexing
+        fails with "[Errno 2] No such file or directory: 'scip-python'".
+
+        Mirrors ensure_ripgrep() / _ensure_codex_cli_installed(): checks
+        shutil.which("scip-python") first (skip if already present), then
+        requires npm and delegates the install to
+        _run_scip_python_npm_install(). Unlike the optional Codex CLI,
+        scip-python is required for SCIP indexing, so a missing npm is
+        reported as a failed provisioning attempt (WARNING + False) rather
+        than silently "ok".
+
+        Returns:
+            True if already installed or the npm install succeeded.
+            False if it could not be provisioned (npm absent, install
+            failed, timed out, or could not be spawned).
+        """
+        if shutil.which("scip-python") is not None:
+            logger.info(
+                "scip-python already installed, skipping install",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if shutil.which("npm") is None:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-201",
+                    "npm not available on PATH; cannot install scip-python — "
+                    "SCIP indexing for Python projects will be unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if not self._run_scip_python_npm_install():
+            return False
+        logger.info(
+            "scip-python installed successfully via npm",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
     def _ensure_claude_cli_installed(self) -> bool:
         """Idempotently install Claude CLI if not already present on PATH.
 
@@ -4400,6 +4860,315 @@ class DeploymentExecutor:
             return False
 
     @staticmethod
+    def _resolve_daemon_storage_path() -> Optional[str]:
+        """Bug #1320 Part B: resolve the CoW daemon's local storage root
+        (base_path) using a fixed priority order. NEVER hardcodes or guesses
+        an environment-specific path — returns None when no source resolves.
+
+        Priority order:
+          1. CIDX_COW_DAEMON_STORAGE_PATH env var (explicit operator override,
+             set by the installer's --cow-daemon-storage-path flag or by the
+             operator directly on the auto-updater's environment).
+          2. Co-located CoW daemon config `base_path` field at
+             COW_DAEMON_HOST_CONFIG_PATH — only present/readable on the
+             daemon-HOST node (the daemon exposes no API reporting its own
+             base_path, so this is the only runtime-derivable source besides
+             the explicit override).
+
+        Returns:
+            The resolved absolute path string, or None if neither source
+            is available/valid.
+        """
+        env_value = os.environ.get("CIDX_COW_DAEMON_STORAGE_PATH", "").strip()
+        if env_value:
+            return env_value
+
+        try:
+            if COW_DAEMON_HOST_CONFIG_PATH.is_file():
+                with open(COW_DAEMON_HOST_CONFIG_PATH) as f:
+                    daemon_config = json.load(f)
+                base_path = daemon_config.get("base_path", "")
+                if isinstance(base_path, str) and base_path.strip():
+                    return base_path.strip()
+        except (OSError, json.JSONDecodeError, AttributeError) as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-203",
+                    "Bug #1320: could not read co-located CoW daemon config "
+                    f"at {COW_DAEMON_HOST_CONFIG_PATH} for daemon_storage_path "
+                    f"auto-detect: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return None
+
+    def _ensure_daemon_storage_path(self) -> bool:
+        """Bug #1320 Part B: idempotently populate cow_daemon.daemon_storage_path
+        in config.json so CowDaemonBackend can translate CIDX paths (mount_point
+        view) to the daemon's local filesystem paths (storage_path view).
+
+        Part A (already shipped) made CowDaemonBackend._translate_to_daemon_path
+        raise a clear ValueError instead of silently emitting an untranslatable
+        NFS path when this field is empty/null. This step is what actually
+        populates the value, using _resolve_daemon_storage_path() (env var,
+        then co-located daemon config — never a hardcoded default).
+
+        VALUE-AWARE idempotent (Bug #1183 style): only writes when the field
+        is currently missing or empty. NEVER overwrites an existing non-empty
+        value, even if a different value would be freshly resolved — an
+        operator or a prior run may have set it deliberately.
+
+        Non-fatal in all handled cases (no-op, write, or unresolved-leave-
+        unset all return True); only an unexpected exception while reading or
+        writing config.json returns False.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+            if config is None:
+                logger.debug(
+                    "Bug #1320: config.json absent — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1320: clone_backend=%r, not cow-daemon — skipping "
+                    "daemon_storage_path setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None:
+                logger.warning(
+                    "Bug #1320: clone_backend=cow-daemon but cow_daemon config "
+                    "missing — skipping daemon_storage_path setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            existing_value = (
+                getattr(cow_cfg, "daemon_storage_path", None) or ""
+            ).strip()
+            if existing_value:
+                logger.debug(
+                    "Bug #1320: cow_daemon.daemon_storage_path already set "
+                    "(%s) — no-op",
+                    existing_value,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            resolved_value = self._resolve_daemon_storage_path()
+            if not resolved_value:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-204",
+                        "Bug #1320: cow_daemon.daemon_storage_path is unset and "
+                        "could not be auto-resolved (no CIDX_COW_DAEMON_STORAGE_PATH "
+                        "env var, no readable co-located CoW daemon config at "
+                        f"{COW_DAEMON_HOST_CONFIG_PATH}) — leaving unset; "
+                        "CowDaemonBackend will fail loud on the next "
+                        "versioned-snapshot publish that needs path translation",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True
+
+            config_path = _cidx_data_dir / "config.json"
+            with open(config_path) as f:
+                config_dict = json.load(f)
+            cow_daemon_dict = config_dict.get("cow_daemon") or {}
+            cow_daemon_dict["daemon_storage_path"] = resolved_value
+            config_dict["cow_daemon"] = cow_daemon_dict
+            _cidx_data_dir.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(config_dict, f, indent=2)
+                f.write("\n")
+
+            logger.info(
+                "Bug #1320: set cow_daemon.daemon_storage_path=%s in config.json",
+                resolved_value,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-205",
+                    f"Bug #1320: daemon_storage_path setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _resolve_golden_repos_symlink_target(cow_cfg: Any) -> Path:
+        """Bug #1337: node-aware golden-repos symlink target.
+
+        Mirrors _resolve_daemon_storage_path's own co-located-daemon-host
+        detection (presence of the daemon's own config file at
+        COW_DAEMON_HOST_CONFIG_PATH — only readable on that node): use the
+        daemon-local form there (no bind-mount indirection needed); use the
+        mount_point form on every other (NFS-client) node. Uses safe
+        attribute access throughout — never raises on a malformed cow_cfg.
+        """
+        daemon_storage_path = (
+            getattr(cow_cfg, "daemon_storage_path", None) or ""
+        ).strip()
+        mount_point = getattr(cow_cfg, "mount_point", None) or ""
+        is_daemon_host = COW_DAEMON_HOST_CONFIG_PATH.is_file()
+        if is_daemon_host and daemon_storage_path:
+            return Path(daemon_storage_path) / "golden-repos"
+        return Path(mount_point) / "golden-repos"
+
+    @staticmethod
+    def _remove_if_empty_dir(path: Path) -> bool:
+        """Bug #1337: remove *path* iff it is an empty directory. Returns True
+        if removed (safe to replace with a symlink), False if it has content
+        or a race made it non-empty/non-removable (leave untouched, caller
+        warns)."""
+        try:
+            if any(path.iterdir()):
+                return False
+            path.rmdir()
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
+        """Bug #1337: an existing golden-repos symlink is already correct
+        (no-op) or points elsewhere (WARNING, never silently rewritten).
+        Returns False (non-fatal, logged) if the symlink cannot be read."""
+        try:
+            current_target = os.readlink(str(link_path))
+        except OSError as e:
+            logger.warning(
+                "Bug #1337: failed to read golden-repos symlink %s: %s",
+                link_path,
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if current_target == str(target):
+            logger.debug(
+                "Bug #1337: golden-repos symlink already correct: %s -> %s",
+                link_path,
+                target,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        logger.warning(
+            "Bug #1337: golden-repos symlink points to %s but expected %s "
+            "— manual review needed",
+            current_target,
+            target,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    @staticmethod
+    def _warn_golden_repos_real_dir_with_content(link_path: Path, target: Path) -> None:
+        """Bug #1337: golden-repos is a real directory WITH content — never
+        move production data unattended; log the manual migration steps."""
+        logger.warning(
+            "Bug #1337: golden-repos exists as real directory with content; "
+            "manual migration required to enable per-user CoW activation. "
+            "Run: sudo systemctl stop cidx-server && "
+            "mv %s %s.legacy.bug1337 && mkdir -p %s && ln -s %s %s && "
+            "sudo systemctl start cidx-server",
+            link_path,
+            link_path,
+            target,
+            target,
+            link_path,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    @staticmethod
+    def _create_golden_repos_symlink(link_path: Path, target: Path) -> None:
+        """Bug #1337: create *target* (if missing) and symlink link_path -> target."""
+        target.mkdir(parents=True, exist_ok=True)
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(str(target), str(link_path))
+        logger.info(
+            "Bug #1337: created golden-repos symlink %s -> %s",
+            link_path,
+            target,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _ensure_golden_repos_symlink_for_cow_daemon(self) -> bool:
+        """Bug #1337: idempotently set up golden-repos as a symlink into the
+        CoW storage tree on CoW-daemon cluster nodes, so per-user
+        activation's CowDaemonBackend.create_clone_at_path() can translate
+        the path (mirrors the Bug #1052 activated-repos twin).
+
+        Non-fatal: any exception returns False with a WARNING. Returns True
+        in all handled cases (no-op, symlink created/converted, real-dir-
+        with-content warning, unexpected-symlink warning).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1337: clone_backend=%r, not cow-daemon — skipping "
+                    "golden-repos symlink setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
+                logger.warning(
+                    "Bug #1337: clone_backend=cow-daemon but cow_daemon config "
+                    "missing or mount_point empty — skipping golden-repos "
+                    "symlink setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            target = self._resolve_golden_repos_symlink_target(cow_cfg)
+            link_path = _cidx_data_dir / "data" / "golden-repos"
+
+            if link_path.is_symlink():
+                return self._reconcile_existing_golden_repos_symlink(link_path, target)
+
+            if link_path.exists() and not self._remove_if_empty_dir(link_path):
+                self._warn_golden_repos_real_dir_with_content(link_path, target)
+                return True
+
+            self._create_golden_repos_symlink(link_path, target)
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-207",
+                    f"Bug #1337: golden-repos symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
     def _build_updated_service_content(content: str, local_bin: str) -> str:
         """Return updated systemd service content with local_bin prepended to PATH.
 
@@ -4658,6 +5427,48 @@ class DeploymentExecutor:
 
         logger.info(
             f"Updated PATH in {service_file} to include {rust_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_systemd_node_path(self) -> bool:
+        """BUG #1318: Ensure the cidx-server systemd service unit has
+        NODEJS_INSTALL_DIR/bin (/opt/node/bin) in PATH.
+
+        Mirrors _ensure_systemd_rust_path() exactly. Non-fatal: returns
+        False with WARNING when the service file is missing or any
+        subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        node_bin = str(NODEJS_INSTALL_DIR / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, node_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {node_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {node_bin}",
             extra={"correlation_id": get_correlation_id()},
         )
         return True
