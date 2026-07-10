@@ -72,18 +72,32 @@ class GitOperationError(ActivatedRepoError):
 # tuned/expected value.
 _MAX_EXCEPTION_CHAIN_DEPTH = 10
 
-# Bug #1349: bounded grace-period retry constants for clone-phase orphan
-# cleanup after a clone-phase failure/cancellation. A single-instant
+# Bug #1349/#1350: bounded grace-period retry constants for clone-phase
+# orphan cleanup after a clone-phase failure/cancellation. A single-instant
 # os.path.exists() check can miss a partial clone directory that an
 # async/NFS-backed clone backend (e.g. the CoW Storage Daemon) is still
 # materializing a beat after the exception has already propagated. This
 # is NOT a timeout on the indexing job itself (Bug #1218 forbids that) --
 # it is a short, fixed-iteration-count local retry loop around an
 # already-failed/cancelled path, analogous to the SIGTERM->grace->SIGKILL
-# bounded wait in cancellable_subprocess.py. Worst-case added latency is
-# (attempts - 1) * sleep_seconds = 4 * 0.3s = 1.2s, within the 1-2s budget.
-_ORPHAN_CLEANUP_RETRY_ATTEMPTS = 5
-_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS = 0.3
+# bounded wait in cancellable_subprocess.py.
+#
+# Bug #1350: the original #1349 bound (attempts=5, sleep=0.3s -- worst
+# case (5-1)*0.3s = 1.2s) was empirically proven too short on staging:
+# 3/3 clone-phase cancellations left PERMANENT orphan clone directories
+# because the real CoW-daemon/NFS materialization lag exceeded 1.2s (the
+# decisive evidence was the total ABSENCE of the "Removing orphaned
+# clone..." WARNING below, proving the loop ran to exhaustion without
+# ever observing the directory). Only a LOWER BOUND (>1.2s) was proven --
+# the true materialization delay was never measured, so this widened
+# ~12s total bound -- (attempts - 1) * sleep_seconds = (13-1) * 1.0s = 12s
+# -- is a larger mitigation window, not a proven-sufficient ceiling. It
+# remains a fixed, provably-terminating loop (Rule #14); the permanent
+# fix is a startup/periodic reconcile sweep for registry-orphan clone
+# dirs (mirroring the golden-repo reconciler, Bug #1317) which removes
+# the dependency on guessing a materialization deadline entirely.
+_ORPHAN_CLEANUP_RETRY_ATTEMPTS = 13
+_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS = 1.0
 
 
 def _is_cancellation_chain(exc: BaseException) -> bool:
@@ -1902,6 +1916,23 @@ class ActivatedRepoManager:
                 f"after clone-phase failure/cancellation for '{user_alias}' "
                 f"(retry_attempt={retry_attempt_that_removed} of "
                 f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            # Bug #1350 diagnostic: the #1349 loop was previously silent on
+            # exhaustion, which is exactly why the real staging orphan leak
+            # required manual disk inspection to detect instead of showing
+            # up in logs. This is a WARNING (not ERROR) because exhaustion
+            # is ambiguous: it may be a genuine no-op (the clone truly never
+            # wrote anything to disk) or a late-materializing async clone
+            # still in flight beyond even this widened window -- either
+            # way, it is now directly observable.
+            self.logger.warning(
+                f"Clone-phase cleanup for '{user_alias}' at "
+                f"'{activated_repo_path}' exhausted "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS} attempts without "
+                "observing/removing the directory; a late-materializing "
+                "async clone may still be in flight.",
                 extra={"correlation_id": get_correlation_id()},
             )
 
