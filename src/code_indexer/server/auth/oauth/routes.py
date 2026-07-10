@@ -260,6 +260,7 @@ def get_authorize_form(
         "state": state,  # None is a valid value; template handles empty state gracefully
     }
     return templates.TemplateResponse(
+        request,
         "oauth_authorize_consent.html",
         template_context,
     )
