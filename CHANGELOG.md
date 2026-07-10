@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.39.0] - 2026-07-10
+
+### Fixed
+
+- **#1350**: Follow-up to #1349 — live re-validation on staging proved the bounded-retry window for clone-phase activation-cancel orphan cleanup (worst case 1.2s) was too short for real CoW-daemon/NFS materialization lag, still leaving permanent orphan clone directories in 3/3 reproductions. Widened the bound to ~12s (still a fixed, provably-terminating loop) and added a WARNING when the retry loop exhausts without removing anything, so any residual case is now visible in logs instead of requiring manual disk inspection.
+
 ## [11.38.0] - 2026-07-10
 
 ### Fixed
