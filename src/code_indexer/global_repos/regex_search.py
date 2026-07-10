@@ -30,6 +30,11 @@ DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
 # Timeout for PCRE2 availability check subprocess
 _PCRE2_CHECK_TIMEOUT_SEC = 5
 
+# Above this many trigram-index candidates, skip the pre-filter and full-scan:
+# the ripgrep arg list would be unwieldy and the filter is not selective enough
+# to beat a plain scan.
+_MAX_PREFILTER_CANDIDATES = 8000
+
 
 class RipgrepExecutionError(Exception):
     """Raised when ripgrep/grep exits with a non-zero code AND has stderr output.
@@ -181,18 +186,29 @@ class RegexSearchService:
             raise ValueError(f"Path does not exist: {path}")
 
         if self._search_engine == "ripgrep":
-            matches, total = await self._search_ripgrep(
-                pattern,
-                search_path,
-                include_patterns,
-                exclude_patterns,
-                case_sensitive,
-                context_lines,
-                max_results,
-                timeout_seconds,
-                multiline=multiline,
-                pcre2=pcre2,
+            # Index-assisted pre-filter: when a trigram index is present, narrow
+            # the scan to files that could match instead of walking the whole
+            # (NFS-backed) working tree. Returns None to fall back to a full
+            # scan; an empty list means no file can match.
+            candidate_files = self._prefilter_candidate_files(
+                pattern, search_path, path, case_sensitive
             )
+            if candidate_files is not None and not candidate_files:
+                matches, total = [], 0
+            else:
+                matches, total = await self._search_ripgrep(
+                    pattern,
+                    search_path,
+                    include_patterns,
+                    exclude_patterns,
+                    case_sensitive,
+                    context_lines,
+                    max_results,
+                    timeout_seconds,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    candidate_files=candidate_files,
+                )
         else:
             matches, total = await self._search_grep(
                 pattern,
@@ -301,6 +317,56 @@ class RegexSearchService:
 
         return matches, total
 
+    def _prefilter_candidate_files(
+        self,
+        pattern: str,
+        search_path: Path,
+        path: Optional[str],
+        case_sensitive: bool,
+    ) -> Optional[List[Path]]:
+        """Return candidate file paths from the trigram index, or None.
+
+        None means "no usable pre-filter -> scan the whole ``search_path``". A
+        (possibly empty) list means the scan can be restricted to exactly those
+        files -- a guaranteed superset of matches (see :mod:`trigram_index_manager`).
+        Any failure degrades to None (full scan); the pre-filter never narrows
+        unsafely.
+        """
+        try:
+            from .regex_trigram import extract_required_trigrams
+            from .trigram_index_manager import TrigramIndexManager
+
+            index = TrigramIndexManager(
+                self.repo_path / ".code-indexer" / "trigram_index"
+            )
+            if not index.exists():
+                return None
+            required = extract_required_trigrams(
+                pattern, case_insensitive=not case_sensitive
+            )
+            if not required:
+                return None
+            rel_candidates = index.query(required)
+            if rel_candidates is None:
+                return None
+            if len(rel_candidates) > _MAX_PREFILTER_CANDIDATES:
+                # Too many candidates: the arg list would be huge and the filter
+                # is not selective -- a full scan is simpler and comparable.
+                return None
+            scope = search_path.resolve()
+            abs_paths: List[Path] = []
+            for rel in rel_candidates:
+                ap = (self.repo_path / rel).resolve()
+                try:
+                    ap.relative_to(scope)  # keep only files under the scan scope
+                except ValueError:
+                    continue
+                abs_paths.append(ap)
+            return abs_paths
+        except Exception as exc:  # never let the optimization break search
+            logger.debug("trigram pre-filter unavailable (%s); full scan", exc)
+            return None
+
     async def _search_ripgrep(
         self,
         pattern: str,
@@ -313,8 +379,14 @@ class RegexSearchService:
         timeout_seconds: Optional[int],
         multiline: bool = False,
         pcre2: bool = False,
+        candidate_files: Optional[List[Path]] = None,
     ) -> tuple:
-        """Search using ripgrep with JSON output and timeout protection."""
+        """Search using ripgrep with JSON output and timeout protection.
+
+        When ``candidate_files`` is provided, ripgrep searches exactly those
+        files (the trigram pre-filter's superset) instead of walking
+        ``search_path``; include/exclude globs still apply.
+        """
         cmd = ["rg", "--json", "-e", pattern]
 
         if multiline:
@@ -338,7 +410,14 @@ class RegexSearchService:
         cmd.extend(["-g", "!.code-indexer/**"])
         cmd.extend(["-g", "!.git/**"])
 
-        cmd.extend(["--", str(search_path)])
+        if candidate_files is not None:
+            # Trigram pre-filter narrowed the search to specific files; ripgrep
+            # searches those directly (gitignore is irrelevant for explicit paths,
+            # and the candidates already came from a gitignore-aware index).
+            cmd.append("--")
+            cmd.extend(str(f) for f in candidate_files)
+        else:
+            cmd.extend(["--", str(search_path)])
 
         # Create temp file for output
         temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="rg_search_")
