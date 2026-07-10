@@ -89,23 +89,6 @@ class TestBuildQuery:
         assert set(mgr.query(trigrams("OddAuthenticator"))) == {"bin.dat"}
         assert "bin.dat" not in mgr.query(trigrams("zzzznotpresent"))
 
-    def test_bucket_mask_prunes_cross_line_scatter(self, tmp_path):
-        # A file where the required trigrams appear only on DIFFERENT, far-apart
-        # lines cannot contain a default (line-oriented) match, so the bucket-mask
-        # AND drops it -- while a file with them on the SAME line is kept.
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        (repo / "together.txt").write_text("public enum Color {}\n")
-        apart = ["public class A"] + ["filler line"] * 200 + ["enum B"]
-        (repo / "apart.txt").write_text("\n".join(apart))
-        mgr = _mgr(tmp_path)
-        mgr.build(repo, file_list=["together.txt", "apart.txt"])
-
-        req = trigrams("public") | trigrams("enum")
-        cands = set(mgr.query(req))
-        assert "together.txt" in cands  # same line -> shared bucket -> kept
-        assert "apart.txt" not in cands  # far apart -> disjoint buckets -> pruned
-
     def test_exists_false_without_build(self, tmp_path):
         assert _mgr(tmp_path).exists() is False
 

@@ -37,16 +37,6 @@ _DB_NAME = "trigrams.db"
 # db size bounded; large files are rare and ripgrep handles them in the pass.
 _MAX_INDEX_BYTES = 5 * 1024 * 1024
 _INSERT_BATCH = 5000
-# Positional bucketing: each file is divided into this many line-buckets, and a
-# mask per (trigram, file) records which buckets the trigram appears in. A
-# default (line-oriented) ripgrep match lies on a single line, so all its
-# trigrams share that line's bucket -> the AND of their masks is non-zero. This
-# lets the query drop files where the required trigrams only co-occur in
-# DIFFERENT parts of the file (e.g. "public" and "enum" far apart) -- the main
-# source of false candidates -- while adding only 8 bytes per posting.
-# 63 (not 64): the mask is stored in SQLite's signed 64-bit INTEGER, so the
-# highest usable bit is 62 (1 << 63 overflows).
-_NUM_BUCKETS = 63
 # Commit (and fsync) every N files so dirty database pages are flushed and
 # reclaimed during a large build instead of accumulating against the container
 # memory limit.
@@ -122,45 +112,47 @@ class TrigramIndexManager:
                 );
                 CREATE TABLE postings (
                     trigram TEXT NOT NULL,
-                    file_id INTEGER NOT NULL,
-                    mask    INTEGER NOT NULL
+                    file_id INTEGER NOT NULL
                 );
                 """
-            )
-            insert_sql = (
-                "INSERT INTO postings (trigram, file_id, mask) VALUES (?, ?, ?)"
             )
             count = 0
             batch: List[tuple] = []
             for rel in rel_files:
                 file_id = count + 1
-                masks, indexed = self._file_trigrams(repo_path / rel)
+                tris, indexed = self._file_trigrams(repo_path / rel)
                 conn.execute(
                     "INSERT INTO files (id, path, indexed) VALUES (?, ?, ?)",
                     (file_id, rel, 1 if indexed else 0),
                 )
-                for t, mask in masks.items():
-                    batch.append((t, file_id, mask))
+                for t in tris:
+                    batch.append((t, file_id))
                     if len(batch) >= _INSERT_BATCH:
-                        conn.executemany(insert_sql, batch)
+                        conn.executemany(
+                            "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
+                            batch,
+                        )
                         batch.clear()
                 count += 1
                 if count % _COMMIT_EVERY_FILES == 0:
                     if batch:
-                        conn.executemany(insert_sql, batch)
+                        conn.executemany(
+                            "INSERT INTO postings (trigram, file_id) VALUES (?, ?)",
+                            batch,
+                        )
                         batch.clear()
                     conn.commit()  # flush dirty pages, bound memory
             if batch:
-                conn.executemany(insert_sql, batch)
+                conn.executemany(
+                    "INSERT INTO postings (trigram, file_id) VALUES (?, ?)", batch
+                )
             conn.commit()
             # Composite (trigram, file_id) index: serves both "file_ids of the
             # rarest trigram" (WHERE trigram=?) and the per-candidate membership
             # seek (WHERE trigram=? AND file_id=?) that the rarest-first
             # intersection relies on -- so checking "does file X contain trigram
             # T" is O(1), not a scan of T's whole posting list.
-            conn.execute(
-                "CREATE INDEX idx_postings_tc ON postings(trigram, file_id, mask)"
-            )
+            conn.execute("CREATE INDEX idx_postings_tc ON postings(trigram, file_id)")
             # Index the always-candidate flag so fetching unindexed files is a
             # seek, not a full scan of the (large) files table.
             conn.execute("CREATE INDEX idx_files_indexed ON files(indexed)")
@@ -210,36 +202,31 @@ class TrigramIndexManager:
             return []
 
     @staticmethod
-    def _file_trigrams(abs_path: Path) -> "tuple[dict[str, int], bool]":
-        """Return ``({trigram: bucket_mask}, indexed)`` for a file.
+    def _file_trigrams(abs_path: Path) -> "tuple[Set[str], bool]":
+        """Return ``(trigrams, indexed)`` for a file.
 
         ``indexed`` is False only for files that cannot be trigram-indexed here
         (too large, or unreadable); such files carry no postings and are treated
         as always-candidates at query time so matches are never missed. Files
-        with binary content are still indexed because ripgrep searches their text
-        too -- but only their printable text runs are indexed, so a binary file
-        (e.g. a .class) is prunable without its dense raw-byte trigrams bloating
-        the index. Correct: a match's required literals are printable and lie on
-        one line, so their trigrams share a run and a bucket.
-
-        ``bucket_mask`` is a 64-bit value with a bit set for each line-bucket the
-        trigram occurs in (see ``_NUM_BUCKETS``).
+        with binary content are still indexed (latin-1) because ripgrep searches
+        their text too.
         """
         try:
             if abs_path.stat().st_size > _MAX_INDEX_BYTES:
-                return {}, False  # large -> always-candidate (rg still scans)
+                return set(), False  # large -> always-candidate (rg still scans)
             data = abs_path.read_bytes()
         except OSError:
-            return {}, False  # unreadable -> always-candidate
-        lines = data.split(b"\n")
-        total = len(lines) or 1
-        masks: "dict[str, int]" = {}
-        for i, line in enumerate(lines):
-            bit = 1 << (i * _NUM_BUCKETS // total)
-            for m in _PRINTABLE_RUN.finditer(line):
-                for tg in trigrams(m.group().decode("ascii").lower()):
-                    masks[tg] = masks.get(tg, 0) | bit
-        return masks, True
+            return set(), False  # unreadable -> always-candidate
+        # Extract trigrams from printable text runs only. This indexes a binary
+        # file (e.g. a .class) by its embedded text -- the content ripgrep can
+        # match -- so it becomes prunable, without the dense random-byte trigrams
+        # of its raw bytes bloating the index. Correct: a match's required
+        # literals are printable and contiguous, so they fall within one run and
+        # their trigrams are captured here.
+        tris: Set[str] = set()
+        for m in _PRINTABLE_RUN.finditer(data):
+            tris |= trigrams(m.group().decode("ascii").lower())
+        return tris, True
 
     # ------------------------------------------------------------------
     # Query
@@ -255,12 +242,9 @@ class TrigramIndexManager:
         Requiring ALL trigrams is what makes the candidate set small; the
         intersection is computed rarest-first so it stays cheap: seed the
         candidate set from the rarest trigram's posting list, then for each
-        remaining trigram (in increasing document frequency) AND its per-file
-        bucket mask into the running candidate mask via an O(1)
-        ``(trigram, file_id)`` index seek -- never scanning a common trigram's
-        full posting list. A candidate is dropped when the AND reaches zero,
-        i.e. the required trigrams never share a line-bucket, so no default
-        (line-oriented) ripgrep match is possible.
+        remaining trigram (in increasing document frequency) drop candidates that
+        lack it via an O(1) ``(trigram, file_id)`` index seek -- never scanning a
+        common trigram's full posting list.
         """
         if not required:
             return None
@@ -286,29 +270,21 @@ class TrigramIndexManager:
                 if df_map[ordered[0]] == 0:
                     return always
 
-                # Rarest-first bucket-mask intersection in a connection-local
-                # temp table. cand.mask is the running AND of the required
-                # trigrams' bucket masks for that file.
+                # Rarest-first intersection in a connection-local temp table.
                 conn.execute("PRAGMA temp_store=FILE")
-                conn.execute(
-                    "CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY, mask INTEGER)"
-                )
+                conn.execute("CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY)")
                 try:
                     conn.execute(
-                        "INSERT INTO cand SELECT file_id, mask FROM postings "
-                        "WHERE trigram = ?",
+                        "INSERT INTO cand SELECT file_id FROM postings WHERE trigram = ?",
                         (ordered[0],),
                     )
                     for t in ordered[1:]:
-                        # AND this trigram's mask into each candidate; a file
-                        # lacking the trigram yields 0 (COALESCE) -> dropped next.
                         conn.execute(
-                            "UPDATE cand SET mask = mask & COALESCE("
-                            "  (SELECT p.mask FROM postings p"
-                            "   WHERE p.trigram = ? AND p.file_id = cand.id), 0)",
+                            "DELETE FROM cand WHERE NOT EXISTS ("
+                            "  SELECT 1 FROM postings"
+                            "  WHERE trigram = ? AND file_id = cand.id)",
                             (t,),
                         )
-                        conn.execute("DELETE FROM cand WHERE mask = 0")
                         if not conn.execute(
                             "SELECT EXISTS(SELECT 1 FROM cand)"
                         ).fetchone()[0]:
