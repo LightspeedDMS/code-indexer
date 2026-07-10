@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.42.0] - 2026-07-10
+
+### Fixed
+
+- **#1353**: Follow-up to #1351 -- live staging validation showed the ChatGPT MCP connector still failed OAuth authorization even with #1351's discovery-metadata fix live. Root cause (proven via staging `journalctl` logs): the connector requests `GET /.well-known/oauth-authorization-server/mcp` (path-suffixed with the MCP resource's own path segment) rather than the root-level discovery URL, and only the root path was registered, so the suffixed request 404'd and the client fell back to assuming PKCE was unsupported. Added a path-suffixed alias route (`/.well-known/oauth-authorization-server/mcp`) that serves the identical discovery metadata from the same existing handler -- zero behavior change to the pre-existing root route relied on by Claude Code/Claude.ai, verified via runtime route-table inspection to be a non-overlapping literal path with no precedence/collision risk.
+
 ## [11.41.0] - 2026-07-10
 
 ### Fixed
