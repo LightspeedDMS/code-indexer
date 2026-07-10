@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import logging
+import time
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
@@ -70,6 +71,19 @@ class GitOperationError(ActivatedRepoError):
 # wrapping a SubprocessCancelledError); this is a defensive ceiling, not a
 # tuned/expected value.
 _MAX_EXCEPTION_CHAIN_DEPTH = 10
+
+# Bug #1349: bounded grace-period retry constants for clone-phase orphan
+# cleanup after a clone-phase failure/cancellation. A single-instant
+# os.path.exists() check can miss a partial clone directory that an
+# async/NFS-backed clone backend (e.g. the CoW Storage Daemon) is still
+# materializing a beat after the exception has already propagated. This
+# is NOT a timeout on the indexing job itself (Bug #1218 forbids that) --
+# it is a short, fixed-iteration-count local retry loop around an
+# already-failed/cancelled path, analogous to the SIGTERM->grace->SIGKILL
+# bounded wait in cancellable_subprocess.py. Worst-case added latency is
+# (attempts - 1) * sleep_seconds = 4 * 0.3s = 1.2s, within the 1-2s budget.
+_ORPHAN_CLEANUP_RETRY_ATTEMPTS = 5
+_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS = 0.3
 
 
 def _is_cancellation_chain(exc: BaseException) -> bool:
@@ -1833,6 +1847,64 @@ class ActivatedRepoManager:
         metadata["wiki_enabled"] = enabled
         self._save_metadata(username, user_alias, metadata)
 
+    def _cleanup_orphaned_clone_after_failure(
+        self, activated_repo_path: str, user_alias: str
+    ) -> None:
+        """Bug #1349: best-effort, BOUNDED-retry removal of a clone-phase
+        orphan directory after a clone-phase failure/cancellation.
+
+        A single-instant os.path.exists() check (the #1345 fix) can miss a
+        partial clone directory that an async/NFS-backed clone backend
+        (e.g. the CoW Storage Daemon) is still materializing a beat after
+        the failure/cancellation exception has already propagated past
+        the check -- the daemon then finishes the reflink copy afterward,
+        leaving a permanent, unregistered orphan on shared storage.
+
+        shutil.rmtree(path, ignore_errors=True) is a safe no-op when the
+        path does not exist yet, so the first attempt is unconditional --
+        no exists() gate needed (and none is a race). A short, FIXED
+        iteration-count retry loop (_ORPHAN_CLEANUP_RETRY_ATTEMPTS,
+        provably terminating) then gives late materialization a brief
+        grace period to settle: it re-checks and, only if the path has
+        reappeared, re-attempts rmtree. In the common (non-racy) case the
+        path is already gone after the first rmtree, so the loop exits
+        immediately on the first check with NO sleep -- this is a grace
+        period on an already-failed/cancelled cleanup path, not a timeout
+        on the indexing job itself (Bug #1218 invariant).
+        """
+        existed_before_cleanup = os.path.exists(activated_repo_path)
+        shutil.rmtree(activated_repo_path, ignore_errors=True)
+        removed_something = existed_before_cleanup
+        retry_attempt_that_removed = 0  # 0 == removed on the immediate attempt
+
+        # Only poll-and-retry when the path was NOT yet visible at the
+        # initial check -- that is exactly the "async backend hasn't
+        # materialized it yet" state this loop exists to wait out. When
+        # it WAS already visible, the unconditional rmtree above already
+        # removed it, so looping further would only add needless latency
+        # to the common, non-racy case.
+        if not existed_before_cleanup:
+            for attempt in range(1, _ORPHAN_CLEANUP_RETRY_ATTEMPTS):
+                time.sleep(_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS)
+                if os.path.exists(activated_repo_path):
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                    removed_something = True
+                    retry_attempt_that_removed = attempt
+                    break
+
+        if removed_something:
+            # Bug #1349 diagnostic: logging which attempt actually caught the
+            # late materialization lets us size _ORPHAN_CLEANUP_RETRY_ATTEMPTS/
+            # _ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS against real observed
+            # NFS/CoW-daemon lag instead of guessing.
+            self.logger.warning(
+                f"Removing orphaned clone at '{activated_repo_path}' "
+                f"after clone-phase failure/cancellation for '{user_alias}' "
+                f"(retry_attempt={retry_attempt_that_removed} of "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def _do_activate_repository(
         self,
         username: str,
@@ -1908,25 +1980,22 @@ class ActivatedRepoManager:
                     cancel_check=cancel_check,
                 )
             except ActivatedRepoError:
-                # Bug #1345: a cancel (or any other failure) during the CLONE
-                # phase must not leave an orphaned partial clone directory on
-                # disk, mirroring the reindex-phase cleanup below.  This is a
-                # SECOND, defense-in-depth cleanup attempt:
+                # Bug #1345/#1349: a cancel (or any other failure) during the
+                # CLONE phase must not leave an orphaned partial clone
+                # directory on disk, mirroring the reindex-phase cleanup
+                # below. This is a SECOND, defense-in-depth cleanup attempt:
                 # _clone_with_copy_on_write's own except-Exception handler
-                # already removes activated_repo_path when it is visible to
-                # os.path.exists() at that instant, but a network/NFS-backed
-                # clone backend (e.g. the CoW Storage Daemon) can materialize
-                # the partial directory a beat AFTER that check runs, so it
-                # can still be present when control reaches here.
-                # shutil.rmtree(ignore_errors=True) is idempotent, so retrying
-                # is harmless when the inner cleanup already succeeded.
-                if os.path.exists(activated_repo_path):
-                    self.logger.warning(
-                        f"Removing orphaned clone at '{activated_repo_path}' "
-                        f"after clone-phase failure/cancellation for '{user_alias}'",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                # already attempts removal, but a network/NFS-backed clone
+                # backend (e.g. the CoW Storage Daemon) can still be
+                # materializing the partial directory a beat AFTER that
+                # inner cleanup ran -- a single-instant os.path.exists()
+                # check (the original #1345 fix) can miss it. The bounded
+                # retry loop in _cleanup_orphaned_clone_after_failure gives
+                # that late materialization a short, fixed grace period to
+                # settle before giving up (Bug #1349).
+                self._cleanup_orphaned_clone_after_failure(
+                    activated_repo_path, user_alias
+                )
                 raise
 
             if not success:

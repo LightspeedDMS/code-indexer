@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.38.0] - 2026-07-10
+
+### Fixed
+
+- **#1349**: Follow-up to #1345 — the clone-phase activation-cancel orphan cleanup used a single-instant `os.path.exists()` check, which could miss a partial clone directory that the CoW Storage Daemon (over NFS) was still materializing a beat after the cancellation/failure exception had already propagated. This let a complete, unregistered orphan clone permanently leak on the CoW-daemon/NFS backend (reproduced 4/4 on live staging). Cleanup now does an unconditional removal attempt first, then a short, fixed-iteration-count bounded retry (worst case ~1.2s) to catch late materialization, with zero added latency in the common non-racy case.
+
 ## [11.37.0] - 2026-07-10
 
 ### Fixed
