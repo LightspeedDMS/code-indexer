@@ -292,8 +292,17 @@ def register_misc_routes(
 
     # RFC 8414 compliance: OAuth discovery at root level for Claude.ai compatibility
     @app.get("/.well-known/oauth-authorization-server")
+    @app.get("/.well-known/oauth-authorization-server/mcp")
     def root_oauth_discovery(request: Request):
-        """OAuth 2.1 discovery endpoint at root path (RFC 8414 compliance)."""
+        """OAuth 2.1 discovery endpoint at root path (RFC 8414 compliance).
+
+        Also served at /.well-known/oauth-authorization-server/mcp as a
+        compatibility alias -- some MCP clients (e.g. ChatGPT's connector)
+        derive the AS-metadata discovery URL by appending the MCP resource's
+        own path segment rather than using the issuer's path (which has no
+        path component here). See bug #1353. Byte-identical response, same
+        function, same source of truth (oauth_manager.get_discovery_metadata()).
+        """
         oauth_manager = request.app.state.oauth_manager
         return oauth_manager.get_discovery_metadata()
 
