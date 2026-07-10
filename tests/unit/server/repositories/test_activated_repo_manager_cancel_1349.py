@@ -122,6 +122,32 @@ def _patch_committer():
     )
 
 
+# Bug #1350: test-only override for the retry loop constants, kept tiny so
+# the "directory never appears" scenario stays fast even though the real
+# production bound was widened to ~12s (see the constants lock-in test).
+_TEST_FAST_RETRY_ATTEMPTS = 3
+_TEST_FAST_RETRY_SLEEP_SECONDS = 0.01
+_TEST_FAST_LOOP_MAX_ELAPSED_SECONDS = 5.0
+
+
+def _patch_fast_retry_constants():
+    return patch.multiple(
+        "src.code_indexer.server.repositories.activated_repo_manager",
+        _ORPHAN_CLEANUP_RETRY_ATTEMPTS=_TEST_FAST_RETRY_ATTEMPTS,
+        _ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS=_TEST_FAST_RETRY_SLEEP_SECONDS,
+    )
+
+
+def _find_exhaustion_warnings(caplog_records, user_alias):
+    return [
+        record
+        for record in caplog_records
+        if record.levelname == "WARNING"
+        and "exhausted" in record.message
+        and user_alias in record.message
+    ]
+
+
 class TestClonePhaseOrphanCleanupBoundedRetry1349:
     def test_late_nfs_materialization_is_still_cleaned_up_by_bounded_retry(
         self, activated_repo_manager, mock_clone_backend
@@ -217,12 +243,20 @@ class TestClonePhaseOrphanCleanupBoundedRetry1349:
         mock_sleep.assert_not_called()
 
     def test_directory_never_appears_no_error_no_infinite_loop(
-        self, activated_repo_manager, mock_clone_backend
+        self, activated_repo_manager, mock_clone_backend, caplog
     ):
         """When the clone never materializes anything on disk at all (a
         pure in-memory cancellation, e.g. before any bytes were written),
-        the bounded retry loop must terminate promptly with no error and
-        no unbounded looping."""
+        the bounded retry loop must terminate promptly with no error, no
+        unbounded looping, and (Bug #1350) must now log a distinct
+        exhaustion WARNING instead of staying completely silent.
+
+        The retry constants are patched down to tiny test-only values
+        (see `_patch_fast_retry_constants`) so this scenario stays fast
+        even though production widened the real bound to ~12s -- the
+        loop's termination/logging behavior is what's under test here,
+        not the exact production timing (covered separately below).
+        """
         activated_repo_path = os.path.join(
             activated_repo_manager.activated_repos_dir,
             "testuser",
@@ -234,7 +268,11 @@ class TestClonePhaseOrphanCleanupBoundedRetry1349:
         )
 
         start = time.monotonic()
-        with _patch_committer():
+        with (
+            _patch_committer(),
+            _patch_fast_retry_constants(),
+            caplog.at_level("WARNING"),
+        ):
             with pytest.raises(ActivatedRepoError):
                 activated_repo_manager._do_activate_repository(
                     username="testuser",
@@ -246,12 +284,18 @@ class TestClonePhaseOrphanCleanupBoundedRetry1349:
         elapsed = time.monotonic() - start
 
         assert not os.path.exists(activated_repo_path)
-        # Bounded: the whole retry loop must finish well under the ~1-2s
-        # worst-case grace window plus generous scheduling slack -- this
-        # proves the loop is not unbounded/hanging.
-        assert elapsed < 5.0, (
+        assert elapsed < _TEST_FAST_LOOP_MAX_ELAPSED_SECONDS, (
             f"cleanup retry loop took {elapsed:.2f}s -- expected a bounded, "
             f"fast exit when the directory never appears"
+        )
+
+        exhaustion_warnings = _find_exhaustion_warnings(
+            caplog.records, "my-activated-repo"
+        )
+        assert exhaustion_warnings, (
+            "expected a WARNING logging that clone-phase cleanup exhausted "
+            "its retry attempts without observing/removing the directory, "
+            f"got log records: {[r.message for r in caplog.records]}"
         )
 
     def test_genuine_non_cancellation_failure_still_gets_same_cleanup(
@@ -296,3 +340,76 @@ class TestClonePhaseOrphanCleanupBoundedRetry1349:
             "genuine (non-cancel) clone failures must also get the bounded "
             "retry cleanup, not just user cancellations"
         )
+
+
+# Bug #1350: staging reproduced 3/3 permanent orphans because the #1349
+# bounded retry window (~1.2s worst case) was too short for real
+# CoW-daemon/NFS materialization lag. These tests lock in the widened
+# window (production constants, not patched) and its new exhaustion
+# diagnostic.
+_OLD_1349_WORST_CASE_BOUND_SECONDS = 1.2
+_WIDENED_WINDOW_MIN_TOTAL_SECONDS = 10.0
+_WIDENED_WINDOW_MAX_TOTAL_SECONDS = 15.0
+
+
+class TestClonePhaseOrphanCleanupWidenedWindow1350:
+    def test_delay_beyond_old_bound_is_still_cleaned_up_by_widened_window(
+        self, activated_repo_manager, mock_clone_backend
+    ):
+        """A clone-phase cancellation whose partial directory is created
+        by a REAL background thread ~3s after the clone call raises --
+        well beyond the OLD #1349 worst-case bound of ~1.2s, but safely
+        inside the new Bug #1350 widened bound -- must still be removed.
+        This is the exact staging failure mode: the async CoW-daemon/NFS
+        materialization simply took longer than the old window allowed."""
+        activated_repo_path = os.path.join(
+            activated_repo_manager.activated_repos_dir,
+            "testuser",
+            "my-activated-repo",
+        )
+
+        timer_holder = {}
+        materialize_delay_seconds = _OLD_1349_WORST_CASE_BOUND_SECONDS + 1.8
+
+        def _fake_clone(source_path, dest_path, **kwargs):
+            def _materialize_late():
+                os.makedirs(dest_path, exist_ok=True)
+                (Path(dest_path) / "late-materialized.txt").write_text("late")
+
+            timer = threading.Timer(materialize_delay_seconds, _materialize_late)
+            timer.daemon = True
+            timer.start()
+            timer_holder["timer"] = timer
+            raise SubprocessCancelledError("clone cancelled")
+
+        mock_clone_backend.create_clone_at_path.side_effect = _fake_clone
+
+        with _patch_committer():
+            with pytest.raises(ActivatedRepoError):
+                activated_repo_manager._do_activate_repository(
+                    username="testuser",
+                    golden_repo_alias="test-repo",
+                    branch_name="main",
+                    user_alias="my-activated-repo",
+                    cancel_check=lambda: True,
+                )
+
+        timer_holder["timer"].join(timeout=15.0)
+        assert not os.path.exists(activated_repo_path), (
+            f"a directory materializing {materialize_delay_seconds:.1f}s "
+            "late (beyond the old ~1.2s bound) must be removed by the "
+            "widened Bug #1350 retry window"
+        )
+
+    def test_retry_constants_total_to_widened_bound(self):
+        """Lock in the widened bound: (attempts - 1) * sleep_seconds must
+        fall in the 10-15s range the issue asked for, replacing the old
+        ~1.2s worst case that staging proved too short."""
+        from src.code_indexer.server.repositories import activated_repo_manager as m
+
+        total_bound_seconds = (
+            m._ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1
+        ) * m._ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS
+
+        assert _WIDENED_WINDOW_MIN_TOTAL_SECONDS <= total_bound_seconds
+        assert total_bound_seconds <= _WIDENED_WINDOW_MAX_TOTAL_SECONDS
