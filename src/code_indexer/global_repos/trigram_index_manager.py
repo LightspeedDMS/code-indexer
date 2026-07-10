@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 _PRINTABLE_RUN = re.compile(rb"[\t\n\r\x20-\x7e]{3,}")
 
 _DB_NAME = "trigrams.db"
+# Bump whenever the on-disk index schema changes (a new table/column, different
+# posting semantics, ...). An index whose stamped version differs is treated as
+# absent by exists(), so a stale/old-format index (e.g. a golden-repo refresh
+# swapped the alias to a snapshot indexed by an older build) yields a clean
+# full-scan + rebuild instead of a caught "no such column" query error.
+_SCHEMA_VERSION = 1
 # Skip trigram extraction for files larger than this (still recorded as an
 # always-candidate so matches inside them are never missed). Keeps build I/O and
 # db size bounded; large files are rare and ripgrep handles them in the pass.
@@ -58,14 +64,26 @@ class TrigramIndexManager:
         return self._db_path
 
     def exists(self) -> bool:
-        """True when a populated index database is present."""
+        """True when a populated, CURRENT-schema index database is present.
+
+        An index whose stamped ``schema_version`` differs from this build's (or
+        that predates the ``meta`` stamp) is reported as absent, so the caller
+        full-scans and a rebuild regenerates it -- rather than the query failing
+        on a missing table/column and silently degrading forever.
+        """
         if not self._db_path.exists():
             return False
         try:
             with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
-                row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
-                return bool(row and row[0] > 0)
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()
+                if not row or row[0] != _SCHEMA_VERSION:
+                    return False  # missing stamp or wrong version -> rebuild
+                populated = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+                return bool(populated and populated[0] > 0)
         except sqlite3.Error:
+            # Missing tables / unreadable / pre-stamp format -> treat as absent.
             return False
 
     # ------------------------------------------------------------------
@@ -165,8 +183,9 @@ class TrigramIndexManager:
             )
             conn.execute("CREATE INDEX idx_trigram_df ON trigram_df(trigram)")
             conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER)")
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('file_count', ?)", (count,)
+            conn.executemany(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                [("file_count", count), ("schema_version", _SCHEMA_VERSION)],
             )
             conn.commit()
         finally:
