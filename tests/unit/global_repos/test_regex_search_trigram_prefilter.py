@@ -96,6 +96,20 @@ async def test_prefilter_used_when_index_present(tmp_path):
     }
 
 
+async def test_non_ascii_match_not_dropped_by_prefilter(tmp_path):
+    """Regression: a pattern with a non-ASCII literal must still find the file
+    that genuinely contains it. The ASCII-only index formerly over-pruned because
+    a required trigram spanning the non-ASCII char had zero document frequency."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "menu.py").write_text("label = 'café table'\n")
+    (repo / "src" / "other.py").write_text("label = 'plain table'\n")
+    _index(repo)
+    svc = RegexSearchService(repo)
+    result = await svc.search("café table", max_results=1000)
+    assert {m.file_path for m in result.matches} == {"src/menu.py"}
+
+
 async def test_binary_file_with_match_not_missed(tmp_path):
     """A match inside an un-indexed (binary) file must still be found."""
     repo = tmp_path / "repo"

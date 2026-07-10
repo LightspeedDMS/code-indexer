@@ -86,6 +86,31 @@ class TestExtractRequiredTrigrams:
         )
         assert extract_required_trigrams("FOOBAR") == trigrams("foobar")
 
+    def test_non_ascii_literal_uses_only_ascii_subruns(self):
+        # "café" (accented e): the index stores printable-ASCII trigrams only, so
+        # a trigram spanning the non-ASCII char ("afé") would have zero document
+        # frequency and wrongly prune every indexed file. Only the ASCII sub-run
+        # "caf" is a valid required trigram.
+        assert extract_required_trigrams("café") == {"caf"}
+
+    def test_non_ascii_splits_run_into_subruns(self):
+        # "naïve string" -> ASCII sub-runs "na" (too short) and "ve string".
+        assert extract_required_trigrams("naïve string") == trigrams("ve string")
+
+    def test_non_ascii_leaving_no_long_ascii_run_returns_none(self):
+        # "aébc" -> ASCII sub-runs "a","bc": none >= 3 -> no safe constraint.
+        assert extract_required_trigrams("aébc") is None
+
+    def test_required_trigrams_are_always_index_storable_ascii(self):
+        # Whatever the pattern, every required trigram must be printable ASCII so
+        # it can actually exist in the (ASCII-only) index.
+        for pat in ["naïve string", "résumévalue", "café table"]:
+            req = extract_required_trigrams(pat)
+            if req is None:
+                continue
+            for t in req:
+                assert all(0x20 <= ord(c) <= 0x7E for c in t), (pat, t)
+
 
 # ---------------------------------------------------------------------------
 # Correctness property: for a pattern that yields trigrams, EVERY string that
@@ -107,6 +132,9 @@ _PROPERTY_CASES = [
     ("abcd?efg", ["abcefg", "abcdefg"]),
     (r"\d{3}xyzzy", ["123xyzzy", "  999xyzzy!"]),
     (r"get\w+Value", ["getFooValue", "getValue"[:0] + "getBarValue"]),
+    # non-ASCII literal: only the ASCII sub-run constrains, and it must remain a
+    # necessary condition for every match.
+    ("café table", ["a café table here", "café table"]),
 ]
 
 
