@@ -3004,12 +3004,26 @@ class ActivatedRepoManager:
                     timeout=60,
                 )
 
-                if status_result.returncode == 0 and status_result.stdout.strip():
-                    self.logger.warning(
-                        "git status reports unexpected changes after CoW "
-                        "clone refresh; NOT running git restore (would "
-                        f"discard content): {status_result.stdout.strip()}"
-                    )
+                if status_result.returncode == 0:
+                    # Bug #1347: `git status --porcelain` always reports the
+                    # untracked `.code-indexer/` index directory (`??` lines)
+                    # after every activation -- that is expected, normal
+                    # state, not a sign of trouble. `git restore` only ever
+                    # affects TRACKED files, so an untracked entry was never
+                    # at risk of being discarded. Filter out untracked (`??`)
+                    # lines and warn ONLY on genuine tracked-change lines.
+                    tracked_lines = [
+                        line
+                        for line in status_result.stdout.splitlines()
+                        if line.strip() and not line.startswith("??")
+                    ]
+                    if tracked_lines:
+                        self.logger.warning(
+                            "git status reports unexpected TRACKED changes "
+                            "after CoW clone refresh; NOT running git "
+                            "restore (would discard content): "
+                            + "; ".join(tracked_lines)
+                        )
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
             code_indexer_dir = os.path.join(dest_path, ".code-indexer")
