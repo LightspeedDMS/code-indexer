@@ -153,6 +153,9 @@ class TrigramIndexManager:
             # intersection relies on -- so checking "does file X contain trigram
             # T" is O(1), not a scan of T's whole posting list.
             conn.execute("CREATE INDEX idx_postings_tc ON postings(trigram, file_id)")
+            # Index the always-candidate flag so fetching unindexed files is a
+            # seek, not a full scan of the (large) files table.
+            conn.execute("CREATE INDEX idx_files_indexed ON files(indexed)")
             conn.commit()
             # Document frequency per trigram + total file count, so the query can
             # order the required trigrams rarest-first.
