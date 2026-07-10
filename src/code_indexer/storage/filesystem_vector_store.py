@@ -2716,9 +2716,14 @@ class FilesystemVectorStore:
                     id_mapping = hnsw_manager._load_id_mapping(collection_path)
                     return index, id_mapping
 
-                # Get or load from cache
+                # Get or load from cache.
+                # EVO-64244 Facet 2: pass the concrete hnsw_index.bin path so a
+                # rebuilt index (atomic replace on re-index) invalidates the
+                # stale in-RAM cache entry instead of being served for the TTL.
                 hnsw_index, _cached_id_mapping = self.hnsw_index_cache.get_or_load(
-                    cache_key, hnsw_loader
+                    cache_key,
+                    hnsw_loader,
+                    index_file=collection_path / hnsw_manager.INDEX_FILENAME,
                 )
             else:
                 # No cache - load directly (original behavior).

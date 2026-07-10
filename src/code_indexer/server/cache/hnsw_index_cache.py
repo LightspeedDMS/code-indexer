@@ -255,6 +255,10 @@ class HNSWIndexCacheEntry:
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
     index_size_bytes: int = 0
+    # EVO-64244 Facet 2: st_mtime of hnsw_index.bin captured at load time.
+    # None when the index_file path was not supplied (mtime check disabled),
+    # letting a later on-disk rebuild invalidate this stale in-RAM entry.
+    index_file_mtime: Optional[float] = None
 
     def record_access(self) -> None:
         """
@@ -373,6 +377,7 @@ class HNSWIndexCache:
         self,
         repo_path: str,
         loader: Callable[[], Tuple[Any, Dict[int, str]]],
+        index_file: Optional[Path] = None,
     ) -> Tuple[Any, Dict[int, str]]:
         """
         Get cached HNSW index or load if not cached (AC1: Cache Implementation).
@@ -383,10 +388,21 @@ class HNSWIndexCache:
         - AC3: Access refreshes TTL
         - AC5: Thread-safe operations with deduplication
 
+        EVO-64244: a loader that returns (None, id_mapping) — because
+        hnsw_index.bin does not exist yet (repo mid-(re)index) — is never
+        cached, so a later query re-runs the loader and picks up the built
+        index without waiting for TTL/restart. When index_file is provided,
+        a cache HIT is also invalidated if the on-disk index was rebuilt
+        (newer mtime), since hnswlib has no in-place reload.
+
         Args:
             repo_path: Repository path (cache key)
             loader: Function to load index if not cached
                     Returns (hnsw_index, id_mapping)
+            index_file: Optional path to hnsw_index.bin. When supplied, its
+                    st_mtime is stored on load and re-checked on every HIT so a
+                    rebuilt index invalidates the stale in-RAM object. Default
+                    None preserves the original behavior (no mtime check).
 
         Returns:
             Tuple of (hnsw_index, id_mapping)
@@ -416,6 +432,31 @@ class HNSWIndexCache:
                         # Evict expired entry and fall through to load
                         logger.debug(
                             f"Cache entry expired for {repo_path}, reloading",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        del self._cache[repo_path]
+                        self._eviction_count += 1
+                        # Fall through (no return here)
+                    elif entry.hnsw_index is None:
+                        # EVO-64244 Facet 1: never serve a negatively-cached
+                        # (None) index. If one somehow exists, treat it as a
+                        # miss so the loader re-runs and picks up a now-built
+                        # index rather than returning None for the full TTL.
+                        logger.debug(
+                            f"Cache entry for {repo_path} holds a None index, reloading",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        del self._cache[repo_path]
+                        self._eviction_count += 1
+                        # Fall through (no return here)
+                    elif index_file is not None and self._index_file_is_newer(
+                        index_file, entry.index_file_mtime
+                    ):
+                        # EVO-64244 Facet 2: the on-disk index was rebuilt after
+                        # this entry was cached (atomic replace bumps mtime).
+                        # hnswlib has no in-place reload, so evict and reload.
+                        logger.debug(
+                            f"On-disk index newer than cached entry for {repo_path}, reloading",
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
@@ -463,6 +504,19 @@ class HNSWIndexCache:
         try:
             hnsw_index, id_mapping = loader()
 
+            # EVO-64244 Facet 1: never negatively-cache a missing index.
+            # load_index() returns None when hnsw_index.bin does not exist yet
+            # (e.g. a repo mid-(re)index). Caching that None would serve
+            # "index not found" for the full TTL even after the graph is built.
+            # Return it directly WITHOUT storing an entry; the finally block
+            # still releases the sentinel/Event so waiters re-run the loader.
+            if hnsw_index is None:
+                logger.debug(
+                    f"Loader returned no HNSW index for {repo_path}, not caching",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return None, id_mapping
+
             # Capture real index memory footprint.
             # Bug #881 Phase 4: also add sys.getsizeof(id_mapping) so the cache
             # size cap accounts for the Python dict held alongside the native index.
@@ -476,6 +530,20 @@ class HNSWIndexCache:
                 )
             index_size_bytes += sys.getsizeof(id_mapping)
 
+            # EVO-64244 Facet 2: capture the on-disk index mtime so a later
+            # rebuild (atomic replace of hnsw_index.bin) invalidates this entry
+            # on the next HIT. Guarded: a missing file / OSError leaves it None
+            # (mtime check simply disabled for this entry) rather than crashing.
+            index_file_mtime: Optional[float] = None
+            if index_file is not None:
+                try:
+                    index_file_mtime = os.stat(index_file).st_mtime
+                except OSError as e:
+                    logger.debug(
+                        f"Could not stat index file {index_file} for mtime tracking: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = HNSWIndexCacheEntry(
@@ -484,6 +552,7 @@ class HNSWIndexCache:
                     repo_path=repo_path,
                     ttl_minutes=self.config.ttl_minutes,
                     index_size_bytes=index_size_bytes,
+                    index_file_mtime=index_file_mtime,
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
@@ -503,6 +572,34 @@ class HNSWIndexCache:
             with self._cache_lock:
                 self._loading.pop(repo_path, None)
             event.set()  # Wake ALL waiters (outside lock)
+
+    def _index_file_is_newer(
+        self, index_file: Path, cached_mtime: Optional[float]
+    ) -> bool:
+        """Return True if the on-disk index file is newer than the cached entry.
+
+        Used by get_or_load (EVO-64244 Facet 2) to detect a rebuilt index and
+        invalidate the stale in-RAM object. A None cached_mtime (entry stored
+        without mtime tracking) or any stat failure (missing file, OSError)
+        returns False so the cached entry is still served rather than crashing.
+
+        Args:
+            index_file: Path to hnsw_index.bin on disk.
+            cached_mtime: st_mtime captured when the entry was loaded, or None.
+
+        Returns:
+            True if the file's current mtime is strictly newer than cached_mtime.
+        """
+        if cached_mtime is None:
+            return False
+        try:
+            return os.stat(index_file).st_mtime > cached_mtime
+        except OSError as e:
+            logger.debug(
+                f"Could not stat index file {index_file} for staleness check: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
 
     def invalidate(self, repo_path: str) -> None:
         """
