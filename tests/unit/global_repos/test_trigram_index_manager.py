@@ -40,6 +40,14 @@ class TestBuildQuery:
         # a file that clearly lacks the (rare) trigrams is excluded
         assert "readme.md" not in mgr.query(trigrams("LSAuthenticator"))
 
+    def test_query_requires_all_trigrams(self, tmp_path):
+        repo = _repo(tmp_path)
+        mgr = _mgr(tmp_path)
+        mgr.build(repo, file_list=["auth.java", "a/other.py", "readme.md"])
+        # trigrams drawn from two different files -> no single file has them all
+        combined = trigrams("LSAuthenticator") | trigrams("relevant")
+        assert mgr.query(combined) == []
+
     def test_query_excludes_files_lacking_rare_trigrams(self, tmp_path):
         repo = _repo(tmp_path)
         mgr = _mgr(tmp_path)
@@ -54,23 +62,32 @@ class TestBuildQuery:
         mgr.build(repo, file_list=["auth.java"])
         assert mgr.query(set()) is None
 
-    def test_binary_and_large_files_are_always_candidates(self, tmp_path):
+    def test_large_files_are_always_candidates(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
-        (repo / "bin.dat").write_bytes(b"\x00\x01\x02binaryauthenticator\x00")
-        (repo / "big.txt").write_text("x" * (6 * 1024 * 1024))  # > 5MB
+        (repo / "big.txt").write_text("x" * (6 * 1024 * 1024))  # > 5MB -> unindexed
         (repo / "code.txt").write_text("class Widget")
         mgr = _mgr(tmp_path)
-        mgr.build(repo, file_list=["bin.dat", "big.txt", "code.txt"])
+        mgr.build(repo, file_list=["big.txt", "code.txt"])
 
-        # a query that matches none of the indexed content must STILL include the
-        # un-indexed binary + large files (they might contain a match)
-        cands = mgr.query(trigrams("zzzznotpresent"))
-        assert set(cands) == {"bin.dat", "big.txt"}
+        # a query matching nothing indexed must STILL include the large (unindexed)
+        # file, which ripgrep would still scan
+        assert set(mgr.query(trigrams("zzzznotpresent"))) == {"big.txt"}
+        # an indexed match plus the always-candidate large file
+        assert set(mgr.query(trigrams("widget"))) == {"big.txt", "code.txt"}
 
-        # an indexed file with the trigrams is added on top
-        cands = mgr.query(trigrams("widget"))
-        assert set(cands) == {"bin.dat", "big.txt", "code.txt"}
+    def test_binary_files_are_indexed_and_searchable(self, tmp_path):
+        # A file with NUL bytes still holds searchable text (ripgrep matches it),
+        # so it is trigram-indexed -- selectable by its content, prunable when
+        # its trigrams are absent -- NOT an opaque always-candidate.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "bin.dat").write_bytes(b"\x00\x01class OddAuthenticator\x00\xff")
+        (repo / "other.txt").write_text("nothing relevant to see")
+        mgr = _mgr(tmp_path)
+        mgr.build(repo, file_list=["bin.dat", "other.txt"])
+        assert set(mgr.query(trigrams("OddAuthenticator"))) == {"bin.dat"}
+        assert "bin.dat" not in mgr.query(trigrams("zzzznotpresent"))
 
     def test_exists_false_without_build(self, tmp_path):
         assert _mgr(tmp_path).exists() is False
