@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,53 @@ _PCRE2_CHECK_TIMEOUT_SEC = 5
 # the ripgrep arg list would be unwieldy and the filter is not selective enough
 # to beat a plain scan.
 _MAX_PREFILTER_CANDIDATES = 8000
+
+# Lazy trigram-index rebuild: when a regex search finds no compatible trigram
+# index (missing, or stale/old-format per the schema-version guard), kick off a
+# one-shot background build so the index self-heals before the next scheduled
+# golden-repo refresh. This request still full-scans; later ones use the index.
+# Disable by setting CIDX_TRIGRAM_LAZY_BUILD=0.
+_LAZY_BUILD_COOLDOWN_SEC = 300
+_lazy_build_lock = threading.Lock()
+_lazy_build_in_progress: "set[str]" = set()
+_lazy_build_last_attempt: "dict[str, float]" = {}
+
+
+def _lazy_build_enabled() -> bool:
+    return os.environ.get("CIDX_TRIGRAM_LAZY_BUILD", "1") not in ("0", "false", "False")
+
+
+def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
+    """Start a background trigram-index build for ``repo_path`` if none is
+    already running/recent. Best-effort; never raises into the caller."""
+    if not _lazy_build_enabled():
+        return
+    key = str(repo_path)
+    now = time.monotonic()
+    with _lazy_build_lock:
+        if key in _lazy_build_in_progress:
+            return  # a build is already running for this repo
+        last = _lazy_build_last_attempt.get(key)
+        if last is not None and now - last < _LAZY_BUILD_COOLDOWN_SEC:
+            return  # backed off after a recent attempt (avoid retry storms)
+        _lazy_build_in_progress.add(key)
+        _lazy_build_last_attempt[key] = now
+
+    def _run() -> None:
+        try:
+            from .trigram_index_manager import TrigramIndexManager
+
+            index_dir = repo_path / ".code-indexer" / "trigram_index"
+            n = TrigramIndexManager(index_dir).build(repo_path)
+            logger.info("lazy trigram index build complete for %s (%d files)", key, n)
+        except Exception as exc:  # never let the background build crash the server
+            logger.warning("lazy trigram index build failed for %s: %s", key, exc)
+        finally:
+            with _lazy_build_lock:
+                _lazy_build_in_progress.discard(key)
+                _lazy_build_last_attempt[key] = time.monotonic()
+
+    threading.Thread(target=_run, name="trigram-lazy-build", daemon=True).start()
 
 
 class RipgrepExecutionError(Exception):
@@ -340,6 +388,10 @@ class RegexSearchService:
                 self.repo_path / ".code-indexer" / "trigram_index"
             )
             if not index.exists():
+                # No compatible index (missing or stale/old-format). Self-heal in
+                # the background so later searches are pre-filtered; this one
+                # full-scans.
+                _maybe_trigger_lazy_index_build(self.repo_path)
                 return None
             required = extract_required_trigrams(
                 pattern, case_insensitive=not case_sensitive

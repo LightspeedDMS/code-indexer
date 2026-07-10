@@ -18,6 +18,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_lazy_build(monkeypatch):
+    # These tests build the index explicitly; disable the background lazy rebuild
+    # so it does not race the explicit build on the same repo.
+    monkeypatch.setenv("CIDX_TRIGRAM_LAZY_BUILD", "0")
+
+
 def _build_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "src" / "auth").mkdir(parents=True)
