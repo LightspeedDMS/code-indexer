@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.41.0] - 2026-07-10
+
+### Fixed
+
+- **#1351**: OAuth authorization-server discovery metadata (`/.well-known/oauth-authorization-server`) omitted `code_challenge_methods_supported`, so RFC 8414-compliant clients (e.g. ChatGPT's MCP connector) assumed PKCE was unsupported and omitted `code_challenge` when building their `/oauth/authorize` request, which the server's required `code_challenge` parameter then rejected with a 422 ("Field required"). Claude Code/Claude.ai were unaffected because they send `code_challenge` unconditionally. Discovery metadata now advertises `code_challenge_methods_supported: ["S256"]` and `token_endpoint_auth_methods_supported: ["none", "client_secret_basic"]` (pure metadata addition -- PKCE enforcement itself is unchanged). Also corrected a stale comment in `routes.py` that incorrectly warned against adding `/.well-known/oauth-protected-resource`, which already exists and is required by the current MCP auth spec.
+
 ## [11.40.0] - 2026-07-10
 
 ### Added
