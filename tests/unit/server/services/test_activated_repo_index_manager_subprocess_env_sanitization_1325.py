@@ -100,7 +100,8 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
         run_fn, captured_calls = capturing_subprocess_run
 
         with patch(
-            "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+            "code_indexer.server.services.activated_repo_index_manager"
+            ".run_cancellable_subprocess",
             side_effect=run_fn,
         ):
             index_manager._execute_semantic_indexing(str(tmp_path), clear=False)
@@ -116,7 +117,8 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
         run_fn, captured_calls = capturing_subprocess_run
 
         with patch(
-            "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+            "code_indexer.server.services.activated_repo_index_manager"
+            ".run_cancellable_subprocess",
             side_effect=run_fn,
         ):
             index_manager._execute_fts_indexing(str(tmp_path), clear=False)
@@ -136,7 +138,8 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
 
         with (
             patch(
-                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                "code_indexer.server.services.activated_repo_index_manager"
+                ".run_cancellable_subprocess",
                 side_effect=run_fn,
             ),
             patch(
@@ -163,7 +166,8 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
 
         with (
             patch(
-                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                "code_indexer.server.services.activated_repo_index_manager"
+                ".run_cancellable_subprocess",
                 side_effect=run_fn,
             ),
             patch(

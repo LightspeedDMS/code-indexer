@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.35.0] - 2026-07-09
+
+### Fixed
+
+- **#1342**: Activation-job cancellation now actually terminates the running clone/index subprocess. Previously an unbounded blocking subprocess ignored user cancels and the dashboard left a zombie RUNNING job. A new cancellable subprocess helper (own process group; SIGTERM -> grace -> SIGKILL; stdout/stderr drained on daemon threads) plus a `cancel_check` callback threaded from `BackgroundJobManager` through the clone backend, branch-delta reindex, and the telemetry subprocess runner now kill the process group on cancel, best-effort clean up CoW-daemon leftovers, and mark the job CANCELLED cross-node (backend + dashboard). No wall-clock/job/per-file timeout added (Bug #1218 invariant); termination is user-cancel-driven only.
+- **#1343**: Activation CoW clone no longer re-hashes the whole tree. The clone now preserves file attributes and sets `git config --local core.checkStat minimal` so git treats CoW-copied files as clean, turning non-default-branch activation into a fast branch-delta reindex instead of a full re-index.
+
 ## [11.34.0] - 2026-07-09
 
 ### Fixed

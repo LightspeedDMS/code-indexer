@@ -21,6 +21,10 @@ from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from ..utils.cancellable_subprocess import (
+    SHORT_POLL_SECONDS,
+    run_cancellable_subprocess,
+)
 
 
 class IndexingError(Exception):
@@ -567,19 +571,21 @@ class ActivatedRepoIndexManager:
         args: List[str],
         repo_path: str,
         env: Optional[dict] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
         Bug #678: Seeds config before the subprocess starts and drains health events
         in a finally block so telemetry is collected even when the command fails.
 
-        Bug #1313 round-4 (Finding 3): env is forwarded to subprocess.run so
+        Bug #1313 round-4 (Finding 3): env is forwarded to the subprocess so
         the temporal (--index-commits) child subprocess can be handed
         CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see
         _execute_temporal_indexing.
 
         Bug #1325: the resolved env is ALWAYS sanitized via
-        build_cidx_subprocess_env before being passed to subprocess.run, so
+        build_cidx_subprocess_env before being passed to the subprocess, so
         any relative PYTHONPATH entry inherited from the server process is
         absolutized before the child changes cwd to repo_path (otherwise a
         relative PYTHONPATH re-anchors into the repo and can shadow an
@@ -589,8 +595,20 @@ class ActivatedRepoIndexManager:
         temporal env dict (built by build_temporal_child_env), that dict's
         PYTHONPATH is absolutized too, preserving the PG bootstrap var.
 
-        Note (Bug #1218): no whole-job timeout is applied. The only legitimate timeout
-        is the per-request outbound embedding-provider HTTP call.
+        Bug #1342: the subprocess now runs via run_cancellable_subprocess
+        instead of a plain blocking subprocess.run. When cancel_check is
+        provided and returns True, the ENTIRE child process group (the
+        `cidx index` subprocess and any of its own children) is killed
+        (SIGTERM, brief grace, SIGKILL) and SubprocessCancelledError is
+        raised -- callers up the stack (run_branch_delta_index ->
+        ActivatedRepoManager._run_branch_delta_index) turn this into the
+        existing ActivatedRepoError + cleanup path.
+
+        Note (Bug #1218): no whole-job timeout is applied. poll_interval only
+        controls how often cancel_check() is consulted -- it is NOT a
+        wall-clock deadline on the subprocess itself. The only legitimate
+        fixed timeout in the system is the per-request outbound embedding-
+        provider HTTP call.
         """
         resolved_env = (
             build_cidx_subprocess_env(env)
@@ -599,18 +617,29 @@ class ActivatedRepoIndexManager:
         )
         self._seed_telemetry(repo_path)
         try:
-            return subprocess.run(
+            return run_cancellable_subprocess(
                 args,
                 cwd=repo_path,
-                capture_output=True,
-                text=True,
                 env=resolved_env,
+                cancel_check=cancel_check,
+                poll_interval=poll_interval,
             )
         finally:
             self._drain_telemetry(repo_path)
 
-    def _execute_semantic_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute semantic indexing using SmartIndexer."""
+    def _execute_semantic_indexing(
+        self,
+        repo_path: str,
+        clear: bool,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
+        """Execute semantic indexing using SmartIndexer.
+
+        Bug #1342: cancel_check is forwarded to the subprocess helper so a
+        cancelled activation/switch/sync job can kill the `cidx index`
+        child promptly instead of blocking to completion. None (the default,
+        used by the unrelated manual-reindex job path) disables cancellation.
+        """
         try:
             repo_path_obj = Path(repo_path)
             index_dir = repo_path_obj / ".code-indexer" / "index"
@@ -626,6 +655,7 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 ["cidx", "index"],
                 repo_path,
+                cancel_check=cancel_check,
             )
 
             if result.returncode != 0:
@@ -639,7 +669,11 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"Semantic indexing error: {str(e)}"}
 
-    def run_branch_delta_index(self, repo_path: str) -> None:
+    def run_branch_delta_index(
+        self,
+        repo_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """Run a synchronous branch-aware incremental semantic reindex.
 
         Called by ActivatedRepoManager after activation/switch/sync on a
@@ -649,11 +683,21 @@ class ActivatedRepoIndexManager:
 
         Args:
             repo_path: Absolute path to the activated repo clone.
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded down
+                to the `cidx index` subprocess so cancellation kills the
+                child promptly instead of waiting for it to finish. A
+                cancellation surfaces here as a RuntimeError (same as any
+                other subprocess failure), preserving this method's existing
+                contract for callers.
 
         Raises:
-            RuntimeError: If the indexing subprocess fails or times out.
+            RuntimeError: If the indexing subprocess fails, is cancelled, or
+                times out.
         """
-        result = self._execute_semantic_indexing(repo_path, False)
+        result = self._execute_semantic_indexing(
+            repo_path, False, cancel_check=cancel_check
+        )
         if not result.get("success", False):
             error_detail = result.get("error", "unknown error")
             raise RuntimeError(

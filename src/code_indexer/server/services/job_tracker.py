@@ -583,6 +583,42 @@ class JobTracker:
         self._upsert_job(job)
         logger.debug(f"JobTracker: failed job {job_id}: {error}")
 
+    def cancel_job(self, job_id: str) -> None:
+        """
+        Mark job as cancelled (Bug #1342 symptom 2).
+
+        Sets status="cancelled" and completed_at, persists to SQLite, then
+        removes from in-memory dict. Mirrors fail_job's terminal-transition
+        contract but for cancellation instead of failure.
+
+        Without this method, BackgroundJobManager writes CANCELLED to the
+        shared background_jobs DB row and evicts its OWN in-memory job dict,
+        but JobTracker's `_active_jobs[job_id]` entry (last set to "running"
+        at job start) is never removed. Since get_recent_jobs() always
+        includes `_active_jobs` regardless of the requested time window, the
+        cancelled job then shows as permanently "running" in the dashboard
+        recent-activity feed until a server restart. Calling cancel_job from
+        every cancel-finalization exit path in
+        BackgroundJobManager._execute_job closes that gap.
+
+        Args:
+            job_id: Job to cancel.
+        """
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            job = self._active_jobs.pop(job_id, None)
+
+        if job is None:
+            self._finalize_absent_job(job_id, terminal_status="cancelled", now=now)
+            return
+
+        job.status = "cancelled"
+        job.completed_at = now
+
+        self._upsert_job(job)
+        logger.debug(f"JobTracker: cancelled job {job_id}")
+
     def _finalize_absent_job(
         self,
         job_id: str,

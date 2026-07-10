@@ -19,6 +19,7 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.mark.e2e
@@ -89,6 +90,11 @@ class TestCoWGitStructureFix:
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         mock.golden_repos = {"test-repo": golden_repo}
+        # Avoid MagicMock auto-attribute leaking a Mock into
+        # resource_config.cow_clone_timeout (used as a subprocess timeout=
+        # value) -- force the real code path to fall back to the numeric
+        # _COW_CLONE_TIMEOUT_DEFAULT.
+        mock.resource_config = None
         return mock
 
     @pytest.fixture
@@ -107,6 +113,7 @@ class TestCoWGitStructureFix:
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     def test_cow_clone_preserves_git_directory(
