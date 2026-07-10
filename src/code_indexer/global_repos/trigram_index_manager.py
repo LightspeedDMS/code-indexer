@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -23,6 +24,12 @@ from typing import Iterable, List, Optional, Set
 from .regex_trigram import trigrams
 
 logger = logging.getLogger(__name__)
+
+# Maximal runs of printable ASCII (plus tab/newline/CR) of length >= 3. Trigrams
+# are extracted only from these runs, so a binary file (e.g. a .class) is indexed
+# by its embedded text -- exactly the content ripgrep can match -- without the
+# dense noise trigrams of its raw bytes bloating the index.
+_PRINTABLE_RUN = re.compile(rb"[\t\n\r\x20-\x7e]{3,}")
 
 _DB_NAME = "trigrams.db"
 # Skip trigram extraction for files larger than this (still recorded as an
@@ -34,15 +41,6 @@ _INSERT_BATCH = 5000
 # reclaimed during a large build instead of accumulating against the container
 # memory limit.
 _COMMIT_EVERY_FILES = 2000
-# A required trigram present in more than this FRACTION of files is "too common"
-# to discriminate; it is dropped from the candidate query so we never scan its
-# huge posting list. Dropping required trigrams keeps the result a superset
-# (still correct -- ripgrep does the exact match). Selectivity comes from the
-# remaining discriminating trigrams.
-_COMMON_DF_FRACTION = 0.15
-# Fallback: if every required trigram is "too common", still query with at least
-# this many of the rarest ones so we retain some pruning.
-_MIN_QUERY_TRIGRAMS = 3
 
 
 class TrigramIndexManager:
@@ -149,11 +147,15 @@ class TrigramIndexManager:
                     "INSERT INTO postings (trigram, file_id) VALUES (?, ?)", batch
                 )
             conn.commit()
-            conn.execute("CREATE INDEX idx_postings_trigram ON postings(trigram)")
+            # Composite (trigram, file_id) index: serves both "file_ids of the
+            # rarest trigram" (WHERE trigram=?) and the per-candidate membership
+            # seek (WHERE trigram=? AND file_id=?) that the rarest-first
+            # intersection relies on -- so checking "does file X contain trigram
+            # T" is O(1), not a scan of T's whole posting list.
+            conn.execute("CREATE INDEX idx_postings_tc ON postings(trigram, file_id)")
             conn.commit()
             # Document frequency per trigram + total file count, so the query can
-            # cheaply rank trigrams and drop non-discriminating common ones
-            # without scanning their posting lists.
+            # order the required trigrams rarest-first.
             conn.execute(
                 "CREATE TABLE trigram_df AS "
                 "SELECT trigram, COUNT(*) AS df FROM postings GROUP BY trigram"
@@ -200,43 +202,46 @@ class TrigramIndexManager:
     def _file_trigrams(abs_path: Path) -> "tuple[Set[str], bool]":
         """Return ``(trigrams, indexed)`` for a file.
 
-        ``indexed`` is False for files that cannot be trigram-indexed (too large,
-        unreadable, binary/decode error); such files carry no postings and are
-        treated as always-candidates at query time so matches are never missed.
+        ``indexed`` is False only for files that cannot be trigram-indexed here
+        (too large, or unreadable); such files carry no postings and are treated
+        as always-candidates at query time so matches are never missed. Files
+        with binary content are still indexed (latin-1) because ripgrep searches
+        their text too.
         """
         try:
             if abs_path.stat().st_size > _MAX_INDEX_BYTES:
-                return set(), False
+                return set(), False  # large -> always-candidate (rg still scans)
             data = abs_path.read_bytes()
         except OSError:
-            return set(), False
-        if b"\x00" in data:  # binary; ripgrep would skip it too
-            return set(), False
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                text = data.decode("latin-1")
-            except UnicodeDecodeError:
-                return set(), False
-        return trigrams(text.lower()), True
+            return set(), False  # unreadable -> always-candidate
+        # Extract trigrams from printable text runs only. This indexes a binary
+        # file (e.g. a .class) by its embedded text -- the content ripgrep can
+        # match -- so it becomes prunable, without the dense random-byte trigrams
+        # of its raw bytes bloating the index. Correct: a match's required
+        # literals are printable and contiguous, so they fall within one run and
+        # their trigrams are captured here.
+        tris: Set[str] = set()
+        for m in _PRINTABLE_RUN.finditer(data):
+            tris |= trigrams(m.group().decode("ascii").lower())
+        return tris, True
 
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
     def query(self, required: Set[str]) -> Optional[List[str]]:
-        """Return repo-relative candidate paths for ``required`` trigrams.
+        """Return repo-relative candidate paths that contain ALL ``required``
+        trigrams, plus every always-candidate (unindexed) file.
 
-        Candidates = every always-candidate (unindexed) file PLUS every indexed
-        file that contains the selected trigrams -- a guaranteed superset of real
-        matches. Returns ``None`` when ``required`` is empty (no pruning possible)
-        so the caller falls back to a full scan.
+        The result is a guaranteed superset of real matches (ripgrep does the
+        exact match over it). Returns ``None`` when ``required`` is empty (no
+        pruning possible) so the caller falls back to a full scan.
 
-        Only the RAREST few required trigrams are used for the candidate query.
-        Requiring a subset of the trigrams keeps the result a superset (still
-        correct -- ripgrep does the exact match), while avoiding the huge posting
-        lists of common trigrams (e.g. those from "class") that would otherwise
-        dominate the query. Selectivity comes from the rare trigrams anyway.
+        Requiring ALL trigrams is what makes the candidate set small; the
+        intersection is computed rarest-first so it stays cheap: seed the
+        candidate set from the rarest trigram's posting list, then for each
+        remaining trigram (in increasing document frequency) drop candidates that
+        lack it via an O(1) ``(trigram, file_id)`` index seek -- never scanning a
+        common trigram's full posting list.
         """
         if not required:
             return None
@@ -244,51 +249,52 @@ class TrigramIndexManager:
         ph_all = ",".join("?" for _ in tris)
         try:
             with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
-                # Document frequency per required trigram (0 if absent from every
-                # file). Cheap lookups against the small trigram_df table.
+                # Order the required trigrams rarest-first (df 0 == absent).
                 df_map = {t: 0 for t in tris}
                 for t, df in conn.execute(
                     f"SELECT trigram, df FROM trigram_df WHERE trigram IN ({ph_all})",
                     tris,
                 ):
                     df_map[t] = df
-                row = conn.execute(
-                    "SELECT value FROM meta WHERE key = 'file_count'"
-                ).fetchone()
-                total = row[0] if row else None
+                ordered = sorted(tris, key=lambda t: df_map[t])
 
-                # Drop non-discriminating (very common) trigrams so we never scan
-                # their huge posting lists. Dropping REQUIRED trigrams only widens
-                # the candidate set (still a correct superset). Keep the rarest
-                # few if everything is common.
-                threshold = int(total * _COMMON_DF_FRACTION) if total else None
-                chosen = [
-                    t for t in tris if threshold is None or df_map[t] <= threshold
+                always = [
+                    r[0]
+                    for r in conn.execute("SELECT path FROM files WHERE indexed = 0")
                 ]
-                if not chosen:
-                    chosen = [
-                        t
-                        for _, t in sorted((df_map[t], t) for t in tris)[
-                            :_MIN_QUERY_TRIGRAMS
-                        ]
-                    ]
+                # A required trigram present in no file -> no indexed file can
+                # contain the literal; only always-candidates remain.
+                if df_map[ordered[0]] == 0:
+                    return always
 
-                placeholders = ",".join("?" for _ in chosen)
-                rows = conn.execute(
-                    f"""
-                    SELECT path FROM files WHERE indexed = 0
-                    UNION
-                    SELECT f.path FROM files f
-                    WHERE f.indexed = 1 AND f.id IN (
-                        SELECT file_id FROM postings
-                        WHERE trigram IN ({placeholders})
-                        GROUP BY file_id
-                        HAVING COUNT(DISTINCT trigram) = ?
+                # Rarest-first intersection in a connection-local temp table.
+                conn.execute("PRAGMA temp_store=FILE")
+                conn.execute("CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY)")
+                try:
+                    conn.execute(
+                        "INSERT INTO cand SELECT file_id FROM postings WHERE trigram = ?",
+                        (ordered[0],),
                     )
-                    """,
-                    (*chosen, len(chosen)),
-                ).fetchall()
-            return [r[0] for r in rows]
+                    for t in ordered[1:]:
+                        conn.execute(
+                            "DELETE FROM cand WHERE NOT EXISTS ("
+                            "  SELECT 1 FROM postings"
+                            "  WHERE trigram = ? AND file_id = cand.id)",
+                            (t,),
+                        )
+                        if not conn.execute(
+                            "SELECT EXISTS(SELECT 1 FROM cand)"
+                        ).fetchone()[0]:
+                            break
+                    indexed = [
+                        r[0]
+                        for r in conn.execute(
+                            "SELECT f.path FROM files f JOIN cand ON f.id = cand.id"
+                        )
+                    ]
+                finally:
+                    conn.execute("DROP TABLE cand")
+            return always + indexed
         except sqlite3.Error as exc:
             logger.warning("trigram query failed (%s); caller should full-scan", exc)
             return None
