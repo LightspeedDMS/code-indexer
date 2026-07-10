@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.37.0] - 2026-07-10
+
+### Fixed
+
+- **#1344**: Guard `BackgroundJobManager` job persistence so a stale out-of-lock `running` snapshot can no longer overwrite an already-terminal (`completed`/`completed_partial`/`failed`/`cancelled`) job row, on both the SQLite and PostgreSQL backends. This was a root cause of cancelled/killed jobs appearing to never leave the dashboard (the persisted row could revert to `running` after the worker's terminal write).
+- **#1345**: A user cancel during the CoW clone phase of activation (before branch-delta reindex) now cleans up the partial activated-repo clone directory, matching the existing reindex-phase cleanup.
+- **#1346**: User-initiated activation cancellations now log at INFO ("cancelled by user") instead of ERROR; genuine failures still log ERROR.
+- **#1348**: Extended the #1344 terminal-status guard to `JobTracker._upsert_job` (both its backend `update_job()` call and its raw SQLite `UPDATE`), closing the second, uncovered path to the same stale-`running`-revert race. Also fixed a `_TERMINAL_JOB_STATUSES` divergence in `JobTracker` (was missing `completed_partial`). Together with #1342 and #1344, this completes the fix for cancelled/killed jobs persisting on the dashboard across both in-memory and persisted-row read paths.
+
 ## [11.36.0] - 2026-07-09
 
 ### Fixed
