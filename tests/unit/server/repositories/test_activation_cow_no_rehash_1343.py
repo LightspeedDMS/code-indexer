@@ -426,3 +426,135 @@ class TestActivationCowRestoreGatingBug1343:
             f"git restore . must not be invoked unconditionally on a "
             f"byte-identical clone (AC-6); calls made: {restore_calls}"
         )
+
+
+class TestActivationCowPorcelainWarnGatingBug1347:
+    """Bug #1347: the post-clone `git status --porcelain` sanity check (Step
+    2b, Bug #1343 AC-6) must ignore UNTRACKED porcelain lines (e.g.
+    `?? .code-indexer/`, which is ALWAYS present after activation since the
+    index directory is untracked) and warn ONLY when there are genuine
+    TRACKED-change lines. `git restore` only ever affects tracked files, so
+    an untracked entry was never at risk -- warning on it every single
+    activation is a false positive that trips the Phase 3 E2E log-audit
+    gate (Story #1122)."""
+
+    @pytest.fixture
+    def tmp_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            yield d
+
+    @pytest.fixture
+    def source_repo(self, tmp_dir):
+        root = os.path.join(tmp_dir, "golden")
+        relpaths = _build_settled_source_repo(root)
+        return root, relpaths
+
+    @pytest.fixture
+    def activated_repo_manager(self, tmp_dir, source_repo):
+        source_path, _ = source_repo
+        return _make_activated_repo_manager(tmp_dir, source_path)
+
+    @staticmethod
+    def _patch_status_porcelain(monkeypatch, porcelain_stdout: str) -> None:
+        """Intercept ONLY the `git status --porcelain` subprocess call made
+        by the Step 2b sanity check and force its stdout; every other
+        subprocess.run invocation (including the real git plumbing that
+        drives the CoW clone) passes through unchanged."""
+        original_run = subprocess.run
+
+        def _fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and cmd == ["git", "status", "--porcelain"]:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=porcelain_stdout, stderr=""
+                )
+            return original_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    @staticmethod
+    def _sanity_check_warnings(warning_mock: MagicMock) -> List[str]:
+        return [
+            call.args[0]
+            for call in warning_mock.call_args_list
+            if call.args and "changes after CoW clone refresh" in call.args[0]
+        ]
+
+    def test_untracked_only_porcelain_does_not_warn(
+        self, activated_repo_manager, source_repo, tmp_dir, monkeypatch
+    ):
+        """GIVEN porcelain output containing ONLY untracked (`??`) lines,
+        the sanity check must emit NO warning."""
+        source_path, _ = source_repo
+        dest_path = os.path.join(tmp_dir, "activated")
+
+        self._patch_status_porcelain(
+            monkeypatch, "?? .code-indexer/\n?? .code-indexer/index/\n"
+        )
+        warning_mock = MagicMock()
+        monkeypatch.setattr(activated_repo_manager.logger, "warning", warning_mock)
+
+        success = activated_repo_manager._clone_with_copy_on_write(
+            source_path, dest_path
+        )
+        assert success is True
+
+        assert self._sanity_check_warnings(warning_mock) == [], (
+            "Untracked-only porcelain output (e.g. `?? .code-indexer/`) must "
+            "NOT trigger the CoW sanity-check warning (Bug #1347); "
+            f"warning calls: {warning_mock.call_args_list!r}"
+        )
+
+    def test_tracked_change_porcelain_warns_with_tracked_lines_only(
+        self, activated_repo_manager, source_repo, tmp_dir, monkeypatch
+    ):
+        """GIVEN porcelain output with a TRACKED modification alongside an
+        untracked line, the sanity check DOES warn, and the message contains
+        only the tracked line."""
+        source_path, _ = source_repo
+        dest_path = os.path.join(tmp_dir, "activated")
+
+        tracked_line = " M src/foo.py"
+        untracked_line = "?? .code-indexer/"
+        self._patch_status_porcelain(monkeypatch, f"{tracked_line}\n{untracked_line}\n")
+        warning_mock = MagicMock()
+        monkeypatch.setattr(activated_repo_manager.logger, "warning", warning_mock)
+
+        success = activated_repo_manager._clone_with_copy_on_write(
+            source_path, dest_path
+        )
+        assert success is True
+
+        sanity_calls = self._sanity_check_warnings(warning_mock)
+        assert len(sanity_calls) == 1, (
+            f"Expected exactly one sanity-check warning for tracked changes, "
+            f"got: {warning_mock.call_args_list!r}"
+        )
+        message = sanity_calls[0]
+        assert tracked_line.strip() in message, (
+            f"Warning message must include the tracked change line, got: {message!r}"
+        )
+        assert untracked_line not in message, (
+            f"Warning message must NOT include untracked lines, got: {message!r}"
+        )
+
+    def test_empty_porcelain_does_not_warn(
+        self, activated_repo_manager, source_repo, tmp_dir, monkeypatch
+    ):
+        """GIVEN empty porcelain output, the sanity check must emit NO
+        warning (baseline clean-tree case, unchanged from before the fix)."""
+        source_path, _ = source_repo
+        dest_path = os.path.join(tmp_dir, "activated")
+
+        self._patch_status_porcelain(monkeypatch, "")
+        warning_mock = MagicMock()
+        monkeypatch.setattr(activated_repo_manager.logger, "warning", warning_mock)
+
+        success = activated_repo_manager._clone_with_copy_on_write(
+            source_path, dest_path
+        )
+        assert success is True
+
+        assert self._sanity_check_warnings(warning_mock) == [], (
+            f"Empty porcelain output must not trigger a warning; "
+            f"warning calls: {warning_mock.call_args_list!r}"
+        )
