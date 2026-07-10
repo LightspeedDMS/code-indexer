@@ -349,8 +349,9 @@ class TestActivatedRepoManager:
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             golden_path,
             activated_path,
-            preserve_attrs=False,
+            preserve_attrs=True,
             timeout=3600,
+            cancel_check=None,
         )
 
         # Verify git operations still run after the clone (no cp subprocess for clone)
@@ -398,8 +399,9 @@ class TestActivatedRepoManager:
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             golden_path,
             activated_path,
-            preserve_attrs=False,
+            preserve_attrs=True,
             timeout=3600,
+            cancel_check=None,
         )
 
         # For non-git repos, no cp subprocess (backend handles the clone)
@@ -802,7 +804,7 @@ class TestCloneWithCopyOnWriteUsesBackend:
         """
         Story #1034 Commit 4: when clone_backend is injected, _clone_with_copy_on_write
         must call clone_backend.create_clone_at_path(source_path, dest_path,
-        preserve_attrs=False, timeout=<timeout>) instead of subprocess.run for cp.
+        preserve_attrs=True, timeout=<timeout>, cancel_check=None) instead of subprocess.run for cp.
         """
         source_path = temp_data_dir + "/source-repo"
         dest_path = temp_data_dir + "/dest-repo"
@@ -816,8 +818,9 @@ class TestCloneWithCopyOnWriteUsesBackend:
         mock_clone_backend.create_clone_at_path.assert_called_once_with(
             source_path,
             dest_path,
-            preserve_attrs=False,
+            preserve_attrs=True,
             timeout=3600,
+            cancel_check=None,
         )
         # Direct subprocess.run for cp must NOT be called (backend handles it)
         cp_calls = [

@@ -1070,7 +1070,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "source")
         dest = str(tmp_path / "dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             backend.create_clone_at_path(source, dest)
 
@@ -1088,7 +1091,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "source")
         dest = str(tmp_path / "dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             backend.create_clone_at_path(source, dest, preserve_attrs=False)
 
@@ -1104,7 +1110,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "source")
         dest = str(tmp_path / "dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             backend.create_clone_at_path(source, dest)
 
@@ -1119,7 +1128,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "source")
         dest = str(tmp_path / "my_dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = backend.create_clone_at_path(source, dest)
 
@@ -1133,7 +1145,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "source")
         dest = str(tmp_path / "dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             backend.create_clone_at_path(source, dest, timeout=99)
 
@@ -1149,7 +1164,8 @@ class TestLocalCloneBackendCreateCloneAtPath:
         dest = str(tmp_path / "dest")
 
         with patch(
-            "subprocess.run",
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess",
             side_effect=subprocess.CalledProcessError(1, "cp"),
         ):
             with pytest.raises(subprocess.CalledProcessError):
@@ -1164,7 +1180,8 @@ class TestLocalCloneBackendCreateCloneAtPath:
         dest = str(tmp_path / "dest")
 
         with patch(
-            "subprocess.run",
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess",
             side_effect=subprocess.TimeoutExpired("cp", 5),
         ):
             with pytest.raises(subprocess.TimeoutExpired):
@@ -1178,7 +1195,10 @@ class TestLocalCloneBackendCreateCloneAtPath:
         source = str(tmp_path / "my_source")
         dest = str(tmp_path / "my_dest")
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "code_indexer.server.storage.shared.clone_backend"
+            ".run_cancellable_subprocess"
+        ) as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             backend.create_clone_at_path(source, dest)
 

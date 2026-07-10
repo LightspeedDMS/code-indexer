@@ -1802,6 +1802,7 @@ class ActivatedRepoManager:
         branch_name: str,
         user_alias: str,
         progress_callback: Optional[Callable[[int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Perform actual repository activation (called by background job).
@@ -1812,6 +1813,14 @@ class ActivatedRepoManager:
             branch_name: Branch to activate
             user_alias: User's alias for the repo
             progress_callback: Optional callback for progress updates (0-100)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. This parameter
+                is signature-injected by BackgroundJobManager._execute_job
+                (mirroring progress_callback) and threaded into the clone
+                step (_clone_with_copy_on_write) and the branch-delta
+                reindex step (_run_branch_delta_index) so a cancelled
+                activation kills its long-running subprocess promptly
+                instead of blocking to completion.
 
         Returns:
             Result dictionary with success status and message
@@ -1855,7 +1864,9 @@ class ActivatedRepoManager:
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
             success = self._clone_with_copy_on_write(
-                golden_repo_actual_path, activated_repo_path
+                golden_repo_actual_path,
+                activated_repo_path,
+                cancel_check=cancel_check,
             )
 
             if not success:
@@ -1950,7 +1961,11 @@ class ActivatedRepoManager:
             if branch_name != golden_repo.default_branch:
                 update_progress(88, f"Reindexing branch '{branch_name}' (branch-delta)")
                 try:
-                    self._run_branch_delta_index(activated_repo_path, user_alias)
+                    self._run_branch_delta_index(
+                        activated_repo_path,
+                        user_alias,
+                        cancel_check=cancel_check,
+                    )
                 except ActivatedRepoError:
                     # Bug #1203 MEDIUM 2: reindex failed BEFORE metadata was written.
                     # Remove the orphaned CoW clone so a failed activation does not
@@ -2767,7 +2782,12 @@ class ActivatedRepoManager:
 
         return leaks
 
-    def _clone_with_copy_on_write(self, source_path: str, dest_path: str) -> bool:
+    def _clone_with_copy_on_write(
+        self,
+        source_path: str,
+        dest_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         """
         Clone repository using copy-on-write to preserve all files including .code-indexer/.
 
@@ -2792,6 +2812,15 @@ class ActivatedRepoManager:
         Args:
             source_path: Source repository path (golden repository)
             dest_path: Destination repository path (activated repository)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the clone backend so a cancelled activation kills the CoW
+                clone (local `cp` process group or remote CoW daemon job)
+                promptly instead of blocking to completion. On cancellation
+                the backend raises SubprocessCancelledError, which the
+                existing except-Exception handler below treats like any
+                other clone failure -- cleaning up the partial dest_path
+                before re-raising as ActivatedRepoError.
 
         Returns:
             True if cloning succeeded
@@ -2831,6 +2860,7 @@ class ActivatedRepoManager:
                 dest_path,
                 preserve_attrs=True,
                 timeout=clone_timeout,
+                cancel_check=cancel_check,
             )
 
             self.logger.info(
@@ -3377,7 +3407,12 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
-    def _run_branch_delta_index(self, repo_path: str, user_alias: str) -> None:
+    def _run_branch_delta_index(
+        self,
+        repo_path: str,
+        user_alias: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
 
@@ -3393,6 +3428,13 @@ class ActivatedRepoManager:
         Args:
             repo_path: Filesystem path of the activated repository clone.
             user_alias: User's alias for the repository.
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the index manager so a cancelled activation/switch/sync
+                kills the `cidx index` branch-delta reindex subprocess
+                promptly instead of blocking to completion. A cancellation
+                surfaces here as a RuntimeError (same as any other reindex
+                failure), so the except clause below is unchanged.
 
         Raises:
             ActivatedRepoError: If indexing fails (correctness-first: the
@@ -3411,7 +3453,9 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
-            self._index_manager.run_branch_delta_index(repo_path)
+            self._index_manager.run_branch_delta_index(
+                repo_path, cancel_check=cancel_check
+            )
         except RuntimeError as exc:
             error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
             self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})

@@ -1120,6 +1120,19 @@ class BackgroundJobManager:
                 # Story #267 Component 3-4: Persist outside lock
                 if job.cancelled:
                     self._persist_jobs(job_id=job_id)
+                    # Bug #1342: this early return bypasses the rest of
+                    # _execute_job entirely (including the later cancel-notify
+                    # blocks), so notify the tracker here too -- otherwise its
+                    # _active_jobs entry (still "pending") never reaches a
+                    # terminal state and shows as a zombie forever.
+                    if self._job_tracker is not None:
+                        try:
+                            self._job_tracker.cancel_job(job_id)
+                        except Exception:
+                            logging.warning(
+                                f"JobTracker.cancel_job failed for {job_id}",
+                                exc_info=True,
+                            )
                     return
 
                 with self._lock:
@@ -1189,6 +1202,24 @@ class BackgroundJobManager:
                     # (cheap read; must not be gated by the debounce window).
                     self._check_db_cancellation(job_id)
 
+                def cancel_check() -> bool:
+                    """Bug #1342: cooperative cancel-check callable injected into
+                    progress_callback-shaped worker functions that also accept it
+                    (e.g. _do_activate_repository), so they can poll for
+                    cancellation while blocked inside a long subprocess (CoW
+                    clone / cidx index reindex) instead of relying on progress
+                    ticks, which never fire during that window.
+
+                    Reads the SAME cross-node DB cancellation source
+                    _check_db_cancellation uses -- not per-node RAM alone -- so
+                    cancellation triggered on a different cluster node is
+                    detected here too.
+                    """
+                    self._check_db_cancellation(job_id)
+                    with self._lock:
+                        job_obj = self.jobs.get(job_id)
+                        return bool(job_obj is not None and job_obj.cancelled)
+
                 # Check if function accepts progress callback
                 func_signature = inspect.signature(func)
 
@@ -1202,6 +1233,19 @@ class BackgroundJobManager:
                 if cancelled:
                     # Story #267 Component 3-4: Persist outside lock
                     self._persist_jobs(job_id=job_id)
+                    # Bug #1342: this early return skips func() entirely, but
+                    # the RUNNING transition above already told the tracker
+                    # this job is "running" -- without a terminal notify here,
+                    # that _active_jobs entry never reaches "cancelled" and
+                    # shows as a permanent running zombie in the dashboard.
+                    if self._job_tracker is not None:
+                        try:
+                            self._job_tracker.cancel_job(job_id)
+                        except Exception:
+                            logging.warning(
+                                f"JobTracker.cancel_job failed for {job_id}",
+                                exc_info=True,
+                            )
                     return
 
                 # Execute the actual operation with frequent cancellation checks
@@ -1212,6 +1256,12 @@ class BackgroundJobManager:
                     # starts at 0 (e.g., phase_start("semantic") == 0).
                     enhanced_kwargs = kwargs.copy()
                     enhanced_kwargs["progress_callback"] = progress_callback
+                    # Bug #1342: also inject cancel_check when the worker
+                    # function's signature accepts it (e.g.
+                    # _do_activate_repository), so it can kill its long-running
+                    # subprocess promptly on cancellation.
+                    if "cancel_check" in func_signature.parameters:
+                        enhanced_kwargs["cancel_check"] = cancel_check
                     result = func(*args, **enhanced_kwargs)
                 else:
                     # For functions without progress callback, emit a coarse 25%
@@ -1265,6 +1315,14 @@ class BackgroundJobManager:
                                 else "job failed"
                             )
                             self._job_tracker.fail_job(job_id, error=error_msg)
+                        elif job.status == JobStatus.CANCELLED:
+                            # Bug #1342: the "success-after-cancel" split-brain
+                            # case -- func() returned successfully but the job
+                            # was flagged cancelled meanwhile. Without this
+                            # branch, JobTracker was never told the job is
+                            # terminal, so its _active_jobs entry (still
+                            # "running") survived forever as a dashboard zombie.
+                            self._job_tracker.cancel_job(job_id)
                     except Exception:
                         logging.warning(
                             f"JobTracker completion callback failed for {job_id}",
@@ -1313,8 +1371,18 @@ class BackgroundJobManager:
                 # Story #267 Component 3-4: Persist outside lock
                 # Bug fix: gate eviction on persist success.
                 interrupted_persisted = self._persist_jobs(job_id=job_id)
-                # Tracker notification skipped for InterruptedError (always
-                # cancellation) — fail_job would overwrite status to "failed".
+                # Bug #1342: notify tracker of the cancellation via the real
+                # cancel_job terminal transition (previously skipped here
+                # entirely because fail_job would have mislabeled this as
+                # "failed" -- cancel_job does not have that problem).
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.cancel_job(job_id)
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.cancel_job failed for {job_id}",
+                            exc_info=True,
+                        )
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
                     if interrupted_persisted:
@@ -1348,17 +1416,24 @@ class BackgroundJobManager:
                 # Story #267 Component 3-4: Persist outside lock
                 # Bug fix: gate eviction on persist success.
                 exception_persisted = self._persist_jobs(job_id=job_id)
-                # Story #311 AC3: Notify tracker of failure (skip for
-                # cancelled jobs — fail_job overwrites status to "failed").
-                if self._job_tracker is not None and not job.cancelled:
+                # Story #311 AC3 / Bug #1342: notify tracker of the terminal
+                # outcome. Cancelled jobs use the real cancel_job transition
+                # (previously this branch was skipped entirely for cancelled
+                # jobs because fail_job would have mislabeled them as
+                # "failed" -- leaving JobTracker's _active_jobs entry stuck
+                # at "running" forever).
+                if self._job_tracker is not None:
                     try:
-                        self._job_tracker.fail_job(
-                            job_id,
-                            error=error_msg,
-                        )
+                        if job.cancelled:
+                            self._job_tracker.cancel_job(job_id)
+                        else:
+                            self._job_tracker.fail_job(
+                                job_id,
+                                error=error_msg,
+                            )
                     except Exception:
                         logging.warning(
-                            f"JobTracker.fail_job failed for {job_id}",
+                            f"JobTracker completion callback failed for {job_id}",
                             exc_info=True,
                         )
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
