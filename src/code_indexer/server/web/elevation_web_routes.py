@@ -85,6 +85,7 @@ def _sanitize_next(next_value: str) -> str:
 def _elev_error(request: Request, safe_next: str, message: str, http_status: int):
     """Render elevation form with an error message at the given HTTP status."""
     return templates.TemplateResponse(
+        request,
         "elevate.html",
         {"request": request, "next": safe_next, "error": message},
         status_code=http_status,
@@ -235,6 +236,7 @@ def elevate_page(
         )
         return _redirect_to_setup(safe_next)
     return templates.TemplateResponse(
+        request,
         "elevate.html",
         {"request": request, "next": safe_next, "error": None},
     )

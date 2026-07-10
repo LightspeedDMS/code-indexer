@@ -15,7 +15,6 @@ from .primitives import QueryResult, SCIPQueryEngine
 from .backends import CallChain as BackendCallChain
 from ..database.queries import QueryTimeoutError
 
-
 logger = logging.getLogger(__name__)
 
 MAX_TRAVERSAL_DEPTH = 10
@@ -424,6 +423,22 @@ def analyze_impact(
 
     # Find target definition
     target_location = _find_target_definition(symbol, scip_dir)
+
+    # Early-out: a symbol with no definition anywhere in the index cannot have
+    # dependents, so skip the (expensive) BFS pass. Without this guard an
+    # unresolved symbol still triggers a full depth-N dependents traversal over
+    # every .scip.db under scip_dir -- tens of seconds for a guaranteed-empty
+    # result.
+    if target_location is None:
+        return ImpactAnalysisResult(
+            target_symbol=symbol,
+            target_location=None,
+            depth_analyzed=depth,
+            affected_symbols=[],
+            affected_files=[],
+            truncated=False,
+            total_affected=0,
+        )
 
     # BFS traversal to find affected symbols
     affected_symbols = _bfs_traverse_dependents(

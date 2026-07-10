@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,58 @@ DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
 
 # Timeout for PCRE2 availability check subprocess
 _PCRE2_CHECK_TIMEOUT_SEC = 5
+
+# Above this many trigram-index candidates, skip the pre-filter and full-scan:
+# the ripgrep arg list would be unwieldy and the filter is not selective enough
+# to beat a plain scan.
+_MAX_PREFILTER_CANDIDATES = 8000
+
+# Lazy trigram-index rebuild: when a regex search finds no compatible trigram
+# index (missing, or stale/old-format per the schema-version guard), kick off a
+# one-shot background build so the index self-heals before the next scheduled
+# golden-repo refresh. This request still full-scans; later ones use the index.
+# Disable by setting CIDX_TRIGRAM_LAZY_BUILD=0.
+_LAZY_BUILD_COOLDOWN_SEC = 300
+_lazy_build_lock = threading.Lock()
+_lazy_build_in_progress: "set[str]" = set()
+_lazy_build_last_attempt: "dict[str, float]" = {}
+
+
+def _lazy_build_enabled() -> bool:
+    return os.environ.get("CIDX_TRIGRAM_LAZY_BUILD", "1") not in ("0", "false", "False")
+
+
+def _maybe_trigger_lazy_index_build(repo_path: Path) -> None:
+    """Start a background trigram-index build for ``repo_path`` if none is
+    already running/recent. Best-effort; never raises into the caller."""
+    if not _lazy_build_enabled():
+        return
+    key = str(repo_path)
+    now = time.monotonic()
+    with _lazy_build_lock:
+        if key in _lazy_build_in_progress:
+            return  # a build is already running for this repo
+        last = _lazy_build_last_attempt.get(key)
+        if last is not None and now - last < _LAZY_BUILD_COOLDOWN_SEC:
+            return  # backed off after a recent attempt (avoid retry storms)
+        _lazy_build_in_progress.add(key)
+        _lazy_build_last_attempt[key] = now
+
+    def _run() -> None:
+        try:
+            from .trigram_index_manager import TrigramIndexManager
+
+            index_dir = repo_path / ".code-indexer" / "trigram_index"
+            n = TrigramIndexManager(index_dir).build(repo_path)
+            logger.info("lazy trigram index build complete for %s (%d files)", key, n)
+        except Exception as exc:  # never let the background build crash the server
+            logger.warning("lazy trigram index build failed for %s: %s", key, exc)
+        finally:
+            with _lazy_build_lock:
+                _lazy_build_in_progress.discard(key)
+                _lazy_build_last_attempt[key] = time.monotonic()
+
+    threading.Thread(target=_run, name="trigram-lazy-build", daemon=True).start()
 
 
 class RipgrepExecutionError(Exception):
@@ -66,6 +119,10 @@ class RegexSearchResult:
 class RegexSearchService:
     """Service for performing regex searches on repository files."""
 
+    # Set once, process-wide, the first time we degrade to the grep fallback so
+    # the warning in _detect_search_engine is emitted a single time, not per call.
+    _grep_fallback_warned: bool = False
+
     def __init__(self, repo_path: Path, subprocess_max_workers: int = 2):
         """Initialize the regex search service.
 
@@ -94,6 +151,18 @@ class RegexSearchService:
         if shutil.which("rg"):
             return "ripgrep"
         elif shutil.which("grep"):
+            # ripgrep is absent -> we degrade to a linear `grep -r` scan that has
+            # no gitignore awareness and reads the entire working tree. On large
+            # repos this reliably hits the search timeout. Warn loudly (once) so
+            # the degradation is visible instead of manifesting as opaque 30s
+            # timeouts. Install ripgrep in the deployment image to avoid this.
+            if not RegexSearchService._grep_fallback_warned:
+                RegexSearchService._grep_fallback_warned = True
+                logger.warning(
+                    "ripgrep (rg) not found on PATH; falling back to 'grep -r'. "
+                    "Regex search will linearly scan the full working tree and "
+                    "may time out on large repos. Install ripgrep in the image."
+                )
             return "grep"
         else:
             raise RuntimeError("Neither ripgrep nor grep found on system")
@@ -165,18 +234,29 @@ class RegexSearchService:
             raise ValueError(f"Path does not exist: {path}")
 
         if self._search_engine == "ripgrep":
-            matches, total = await self._search_ripgrep(
-                pattern,
-                search_path,
-                include_patterns,
-                exclude_patterns,
-                case_sensitive,
-                context_lines,
-                max_results,
-                timeout_seconds,
-                multiline=multiline,
-                pcre2=pcre2,
+            # Index-assisted pre-filter: when a trigram index is present, narrow
+            # the scan to files that could match instead of walking the whole
+            # (NFS-backed) working tree. Returns None to fall back to a full
+            # scan; an empty list means no file can match.
+            candidate_files = self._prefilter_candidate_files(
+                pattern, search_path, path, case_sensitive
             )
+            if candidate_files is not None and not candidate_files:
+                matches, total = [], 0
+            else:
+                matches, total = await self._search_ripgrep(
+                    pattern,
+                    search_path,
+                    include_patterns,
+                    exclude_patterns,
+                    case_sensitive,
+                    context_lines,
+                    max_results,
+                    timeout_seconds,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    candidate_files=candidate_files,
+                )
         else:
             matches, total = await self._search_grep(
                 pattern,
@@ -285,6 +365,60 @@ class RegexSearchService:
 
         return matches, total
 
+    def _prefilter_candidate_files(
+        self,
+        pattern: str,
+        search_path: Path,
+        path: Optional[str],
+        case_sensitive: bool,
+    ) -> Optional[List[Path]]:
+        """Return candidate file paths from the trigram index, or None.
+
+        None means "no usable pre-filter -> scan the whole ``search_path``". A
+        (possibly empty) list means the scan can be restricted to exactly those
+        files -- a guaranteed superset of matches (see :mod:`trigram_index_manager`).
+        Any failure degrades to None (full scan); the pre-filter never narrows
+        unsafely.
+        """
+        try:
+            from .regex_trigram import extract_required_trigrams
+            from .trigram_index_manager import TrigramIndexManager
+
+            index = TrigramIndexManager(
+                self.repo_path / ".code-indexer" / "trigram_index"
+            )
+            if not index.exists():
+                # No compatible index (missing or stale/old-format). Self-heal in
+                # the background so later searches are pre-filtered; this one
+                # full-scans.
+                _maybe_trigger_lazy_index_build(self.repo_path)
+                return None
+            required = extract_required_trigrams(
+                pattern, case_insensitive=not case_sensitive
+            )
+            if not required:
+                return None
+            rel_candidates = index.query(required)
+            if rel_candidates is None:
+                return None
+            if len(rel_candidates) > _MAX_PREFILTER_CANDIDATES:
+                # Too many candidates: the arg list would be huge and the filter
+                # is not selective -- a full scan is simpler and comparable.
+                return None
+            scope = search_path.resolve()
+            abs_paths: List[Path] = []
+            for rel in rel_candidates:
+                ap = (self.repo_path / rel).resolve()
+                try:
+                    ap.relative_to(scope)  # keep only files under the scan scope
+                except ValueError:
+                    continue
+                abs_paths.append(ap)
+            return abs_paths
+        except Exception as exc:  # never let the optimization break search
+            logger.debug("trigram pre-filter unavailable (%s); full scan", exc)
+            return None
+
     async def _search_ripgrep(
         self,
         pattern: str,
@@ -297,8 +431,14 @@ class RegexSearchService:
         timeout_seconds: Optional[int],
         multiline: bool = False,
         pcre2: bool = False,
+        candidate_files: Optional[List[Path]] = None,
     ) -> tuple:
-        """Search using ripgrep with JSON output and timeout protection."""
+        """Search using ripgrep with JSON output and timeout protection.
+
+        When ``candidate_files`` is provided, ripgrep searches exactly those
+        files (the trigram pre-filter's superset) instead of walking
+        ``search_path``; include/exclude globs still apply.
+        """
         cmd = ["rg", "--json", "-e", pattern]
 
         if multiline:
@@ -322,7 +462,14 @@ class RegexSearchService:
         cmd.extend(["-g", "!.code-indexer/**"])
         cmd.extend(["-g", "!.git/**"])
 
-        cmd.extend(["--", str(search_path)])
+        if candidate_files is not None:
+            # Trigram pre-filter narrowed the search to specific files; ripgrep
+            # searches those directly (gitignore is irrelevant for explicit paths,
+            # and the candidates already came from a gitignore-aware index).
+            cmd.append("--")
+            cmd.extend(str(f) for f in candidate_files)
+        else:
+            cmd.extend(["--", str(search_path)])
 
         # Create temp file for output
         temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="rg_search_")
