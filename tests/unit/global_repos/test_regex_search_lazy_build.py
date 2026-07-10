@@ -7,6 +7,8 @@ Guarded by an in-progress flag, a cooldown, and an env toggle.
 
 import threading
 import time
+from pathlib import Path
+from typing import List
 
 import pytest
 
@@ -39,7 +41,7 @@ def _patch_build(monkeypatch, record, event=None):
 
 
 def test_triggers_background_build(tmp_path, monkeypatch):
-    calls = []
+    calls: List[Path] = []
     done = threading.Event()
     _patch_build(monkeypatch, calls, done)
     rs._maybe_trigger_lazy_index_build(tmp_path)
@@ -48,7 +50,7 @@ def test_triggers_background_build(tmp_path, monkeypatch):
 
 
 def test_skipped_within_cooldown(tmp_path, monkeypatch):
-    calls = []
+    calls: List[Path] = []
     _patch_build(monkeypatch, calls)
     rs._lazy_build_last_attempt[str(tmp_path)] = time.monotonic()  # recent attempt
     rs._maybe_trigger_lazy_index_build(tmp_path)
@@ -57,7 +59,7 @@ def test_skipped_within_cooldown(tmp_path, monkeypatch):
 
 
 def test_skipped_when_in_progress(tmp_path, monkeypatch):
-    calls = []
+    calls: List[Path] = []
     _patch_build(monkeypatch, calls)
     rs._lazy_build_in_progress.add(str(tmp_path))  # a build is "running"
     rs._maybe_trigger_lazy_index_build(tmp_path)
@@ -67,7 +69,7 @@ def test_skipped_when_in_progress(tmp_path, monkeypatch):
 
 def test_disabled_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CIDX_TRIGRAM_LAZY_BUILD", "0")
-    calls = []
+    calls: List[Path] = []
     _patch_build(monkeypatch, calls)
     rs._maybe_trigger_lazy_index_build(tmp_path)
     time.sleep(0.2)
@@ -100,7 +102,7 @@ def test_build_failure_is_swallowed_and_clears_in_progress(tmp_path, monkeypatch
 
 
 def test_single_build_under_concurrent_triggers(tmp_path, monkeypatch):
-    calls = []
+    calls: List[Path] = []
     started = threading.Event()
     release = threading.Event()
 

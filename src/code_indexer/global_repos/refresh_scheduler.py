@@ -2431,8 +2431,9 @@ class RefreshScheduler:
                 TrigramIndexManager,
             )
 
-            _tri_dir = source_path / ".code-indexer" / "trigram_index"
-            _tri_files = TrigramIndexManager(_tri_dir).build(source_path)
+            _tri_source_path = Path(source_path)
+            _tri_dir = _tri_source_path / ".code-indexer" / "trigram_index"
+            _tri_files = TrigramIndexManager(_tri_dir).build(_tri_source_path)
             logger.info(f"Trigram index built for {alias_name} ({_tri_files} files)")
         except Exception as _tri_exc:  # never fail indexing over the pre-filter
             logger.warning(
