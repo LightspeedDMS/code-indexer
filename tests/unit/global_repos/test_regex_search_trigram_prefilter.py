@@ -110,6 +110,35 @@ async def test_non_ascii_match_not_dropped_by_prefilter(tmp_path):
     assert {m.file_path for m in result.matches} == {"src/menu.py"}
 
 
+async def test_multiline_cross_line_match_not_dropped_by_prefilter(tmp_path):
+    """Regression: a genuine CROSS-LINE multiline match must not be dropped by
+    the trigram pre-filter.
+
+    A prior version of the index stored a per-line "bucket" bitmask per
+    (trigram, file) and pruned a file when the required trigrams' masks did
+    not share a bucket -- correct for single-line ripgrep matches, but wrong
+    for a multiline pattern whose required literals legitimately live on
+    different lines (see reverted commit "perf: positional line-bucket
+    bitmask to prune cross-line trigram scatter"). The file-level (trigram ->
+    file) intersection the index uses today has no such assumption: it must
+    surface the file as a candidate whenever it contains each required
+    trigram ANYWHERE, and ripgrep's own multiline pass then confirms the
+    match.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "cross.py").write_text(
+        "foo_marker\nline2\nline3\nline4\nbar_marker\n"
+    )
+    _index(repo)
+    svc = RegexSearchService(repo)
+    result = await svc.search(
+        r"foo_marker[\s\S]*bar_marker", multiline=True, max_results=1000
+    )
+    assert result.total_matches == 1
+    assert {m.file_path for m in result.matches} == {"src/cross.py"}
+
+
 async def test_binary_file_with_match_not_missed(tmp_path):
     """A match inside an un-indexed (binary) file must still be found."""
     repo = tmp_path / "repo"
