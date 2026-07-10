@@ -142,6 +142,80 @@ class TestSchemaVersionGuard:
         assert set(mgr.query(trigrams("relevant"))) == {"readme.md"}
 
 
+class TestBuildAtomicity:
+    """A build publishes atomically and never leaves a partial index behind, so a
+    concurrent build on a shared (NFS, cluster-mode) index dir cannot clobber
+    another's in-progress database and publish a partially-populated index that
+    would pass exists() and silently drop matches."""
+
+    def test_failed_build_keeps_prior_index_and_leaves_no_temp(self, tmp_path):
+        import code_indexer.global_repos.trigram_index_manager as tim
+
+        repo = _repo(tmp_path)
+        mgr = _mgr(tmp_path)
+        mgr.build(repo, file_list=["auth.java"])
+        assert mgr.query(trigrams("lsauthenticator")) == ["auth.java"]
+
+        def boom(_abs_path):
+            raise RuntimeError("disk full mid-build")
+
+        orig = tim.TrigramIndexManager._file_trigrams
+        tim.TrigramIndexManager._file_trigrams = staticmethod(boom)
+        try:
+            with pytest.raises(RuntimeError):
+                mgr.build(repo, file_list=["a/other.py"])
+        finally:
+            tim.TrigramIndexManager._file_trigrams = staticmethod(orig)
+
+        # the previously-published index is untouched (no partial replace)...
+        assert mgr.query(trigrams("lsauthenticator")) == ["auth.java"]
+        # ...and the failed build cleaned up its unique temp file.
+        assert list((tmp_path / "idx").glob("*.db.building")) == []
+
+    def test_concurrent_builds_publish_a_valid_index(self, tmp_path):
+        import threading
+        import time
+
+        import code_indexer.global_repos.trigram_index_manager as tim
+
+        repo = _repo(tmp_path)
+        mgr = _mgr(tmp_path)
+
+        # Slow the per-file work so the three builds genuinely overlap against the
+        # same index dir (each must use its own temp file).
+        real = tim.TrigramIndexManager._file_trigrams
+
+        def slow(abs_path):
+            time.sleep(0.02)
+            return real(abs_path)
+
+        tim.TrigramIndexManager._file_trigrams = staticmethod(slow)
+        errors: list = []
+
+        def run():
+            try:
+                mgr.build(repo, file_list=["auth.java", "a/other.py", "readme.md"])
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        try:
+            threads = [threading.Thread(target=run) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            tim.TrigramIndexManager._file_trigrams = staticmethod(real)
+
+        assert errors == []
+        # the published index is complete and valid -- not a clobbered partial.
+        assert mgr.exists()
+        assert "auth.java" in mgr.query(trigrams("lsauthenticator"))
+        assert "a/other.py" in mgr.query(trigrams("authenticate"))
+        # no leftover in-progress temp files.
+        assert list((tmp_path / "idx").glob("*.db.building")) == []
+
+
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
 class TestRgEnumeration:
     def test_build_via_rg_files(self, tmp_path):

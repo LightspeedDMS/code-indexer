@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
@@ -105,9 +106,19 @@ class TrigramIndexManager:
         )
 
         self._dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._db_path.with_suffix(".db.building")
-        if tmp_path.exists():
-            tmp_path.unlink()
+        # Build into a UNIQUE temp file (not a fixed ".db.building" name): in
+        # cluster mode this index dir lives on shared NFS under the golden repo,
+        # so a lazy rebuild on another pod -- or a scheduled refresh racing a
+        # lazy build -- can target it concurrently. A shared temp name let one
+        # build's unlink()/write corrupt the other and publish a
+        # partially-populated index that passes exists() and silently drops
+        # matches. With a unique temp per build, os.replace still atomically
+        # publishes the last writer and neither build damages the other's file.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self._dir), prefix="trigrams.", suffix=".db.building"
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
 
         conn = sqlite3.connect(str(tmp_path))
         try:
@@ -188,6 +199,16 @@ class TrigramIndexManager:
                 [("file_count", count), ("schema_version", _SCHEMA_VERSION)],
             )
             conn.commit()
+        except BaseException:
+            # A failed build must not leave its half-written temp behind. Each
+            # build's temp is unique, so this only ever removes our own file --
+            # never a concurrent build's in-progress database.
+            conn.close()
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
         finally:
             conn.close()
 

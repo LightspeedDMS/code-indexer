@@ -35,6 +35,41 @@ def trigrams(text: str) -> Set[str]:
     return {text[i : i + _TRIGRAM] for i in range(len(text) - _TRIGRAM + 1)}
 
 
+def _index_storable(ch: str) -> bool:
+    """True if a trigram containing ``ch`` could exist in the index.
+
+    The trigram index only stores runs of printable ASCII (plus tab/newline/CR),
+    mirroring ``trigram_index_manager._PRINTABLE_RUN``. A required trigram with
+    any other character can never be present, so requiring it would wrongly prune
+    every indexed file. Keep this predicate in sync with that pattern.
+    """
+    o = ord(ch)
+    return 0x20 <= o <= 0x7E or ch in "\t\n\r"
+
+
+def _ascii_subruns(run: str) -> List[str]:
+    """Split a literal run into its maximal index-storable (printable-ASCII) parts.
+
+    A file matching the pattern contains the whole run contiguously, so it also
+    contains each maximal ASCII sub-run contiguously -- and the index stores that
+    sub-run's trigrams. Trigrams of a sub-run are therefore a valid *necessary*
+    condition; trigrams spanning a non-ASCII character are not (the index never
+    holds them), so they must be excluded to preserve the no-false-negative
+    guarantee.
+    """
+    parts: List[str] = []
+    current: List[str] = []
+    for ch in run:
+        if _index_storable(ch):
+            current.append(ch)
+        elif current:
+            parts.append("".join(current))
+            current.clear()
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
 def _is_quantifier_at(pattern: str, i: int) -> int:
     """If a quantifier starts at ``pattern[i]``, return its length, else 0.
 
@@ -181,7 +216,12 @@ def extract_required_trigrams(
         return None
     required: Set[str] = set()
     for run in runs:
-        if len(run) >= _TRIGRAM:
-            required |= trigrams(run.lower())
+        # Only derive trigrams from the ASCII portions of each run: the index
+        # stores printable-ASCII trigrams only, so a trigram spanning a non-ASCII
+        # literal (e.g. the ``afe`` of ``cafe`` with an accented e) would have
+        # zero document frequency and wrongly prune every indexed file.
+        for sub in _ascii_subruns(run):
+            if len(sub) >= _TRIGRAM:
+                required |= trigrams(sub.lower())
     # An empty set would select every file (no pruning) -> signal full scan.
     return required or None
