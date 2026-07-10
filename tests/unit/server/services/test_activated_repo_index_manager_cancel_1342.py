@@ -133,3 +133,26 @@ class TestCancelCheckForwardingWiring:
                 index_manager.run_branch_delta_index(
                     "/tmp/repo", cancel_check=lambda: True
                 )
+
+
+class TestCancellationIdentityPreservedBug1346:
+    """Bug #1346: ActivatedRepoManager._run_branch_delta_index distinguishes a
+    user cancel from a genuine failure via `isinstance(exc,
+    SubprocessCancelledError)`. That only works if the SubprocessCancelledError
+    raised deep inside `_run_subprocess_with_telemetry` survives
+    `_execute_semantic_indexing`'s broad `except Exception` (which used to
+    swallow it into a plain result dict, losing the type) and
+    `run_branch_delta_index`'s re-raise unscathed."""
+
+    def test_run_branch_delta_index_cancellation_preserves_subprocess_cancelled_identity(
+        self, index_manager
+    ):
+        with patch.object(
+            index_manager,
+            "_run_subprocess_with_telemetry",
+            side_effect=SubprocessCancelledError("cidx index cancelled"),
+        ):
+            with pytest.raises(SubprocessCancelledError):
+                index_manager.run_branch_delta_index(
+                    "/tmp/repo", cancel_check=lambda: True
+                )

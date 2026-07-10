@@ -23,6 +23,7 @@ from .config_service import get_config_service
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from ..utils.cancellable_subprocess import (
     SHORT_POLL_SECONDS,
+    SubprocessCancelledError,
     run_cancellable_subprocess,
 )
 
@@ -666,6 +667,13 @@ class ActivatedRepoIndexManager:
 
             return {"success": True, "message": "Semantic indexing completed"}
 
+        except SubprocessCancelledError:
+            # Bug #1346: a user-initiated cancel must propagate with its
+            # original type intact so ActivatedRepoManager._run_branch_delta_index
+            # can recognize it via isinstance() and log it as a cancellation
+            # (INFO) rather than a genuine failure (ERROR). Swallowing it into
+            # the generic result-dict shape below would lose that type.
+            raise
         except Exception as e:
             return {"success": False, "error": f"Semantic indexing error: {str(e)}"}
 
