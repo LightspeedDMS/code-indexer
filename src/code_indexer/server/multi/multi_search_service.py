@@ -122,6 +122,26 @@ class MultiSearchService:
         self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self._shutdown = False
 
+        # Repo-shard ownership (cluster sharding). None/solo -> caching stays off
+        # for fan-out (Bug #881, unchanged). When sharding is active, an OWNED
+        # repo warms this pod's cache (bounded to its shard) instead of
+        # load-and-discard.
+        self._shard_ownership: Optional[Any] = None
+
+    def set_shard_ownership(self, shard_ownership: Any) -> None:
+        """Inject shard ownership so owned-repo fan-out searches warm the cache."""
+        self._shard_ownership = shard_ownership
+
+    def _owns_for_cache(self, repo_id: str) -> bool:
+        """True only when sharding is active AND this node owns ``repo_id``.
+
+        Returns False in solo mode (no ownership injected), preserving the
+        fan-out cache-bypass behavior (Bug #881) by default.
+        """
+        # getattr default keeps instances built via __new__ (some tests) safe.
+        shard_ownership = getattr(self, "_shard_ownership", None)
+        return shard_ownership is not None and shard_ownership.owns(repo_id)
+
     def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
         Execute search across multiple repositories.
@@ -404,7 +424,11 @@ class MultiSearchService:
             response = search_service.search_repository_path(
                 repo_path,
                 single_repo_request,
-                hnsw_cache=None,
+                # Bug #881: fan-out bypasses the cache by default; under cluster
+                # sharding an OWNED repo warms this pod's (shard-bounded) cache.
+                hnsw_cache=(
+                    self.hnsw_index_cache if self._owns_for_cache(repo_id) else None
+                ),
                 precomputed_query_vector=effective_precomputed,
             )
 

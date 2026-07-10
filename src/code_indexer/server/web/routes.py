@@ -521,6 +521,7 @@ def dashboard(request: Request):
     # asynchronously via /admin/partials/dashboard-health endpoint
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
             "request": request,
@@ -644,6 +645,7 @@ def dashboard_health_partial(request: Request):
         logger.debug("Failed to compute dependency latency rows", exc_info=True)
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_health.html",
         {
             "request": request,
@@ -708,6 +710,7 @@ def dashboard_stats_partial(
     )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_stats.html",
         {
             "request": request,
@@ -754,6 +757,7 @@ def dashboard_job_counts_partial(
     )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_job_counts.html",
         {
             "request": request,
@@ -794,6 +798,7 @@ def dashboard_recent_jobs_partial(
     )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_recent_jobs.html",
         {
             "request": request,
@@ -869,6 +874,7 @@ def dashboard_api_metrics_partial(
             logger.debug("Could not read per-node api_metrics: %s", _exc)
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_api_metrics.html",
         {
             "request": request,
@@ -1028,6 +1034,7 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
             )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_cache_metrics.html",
         {
             "request": request,
@@ -1059,6 +1066,7 @@ def dashboard_langfuse_partial(request: Request):
     langfuse_data = dashboard_service.get_langfuse_metrics()
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_langfuse.html",
         {
             "request": request,
@@ -1155,6 +1163,7 @@ def dashboard_api_per_user_partial(
     )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_api_per_user.html",
         {
             "request": request,
@@ -1202,6 +1211,7 @@ def dashboard_api_chart_partial(
     )
 
     return templates.TemplateResponse(
+        request,
         "partials/dashboard_api_chart.html",
         {
             "request": request,
@@ -1345,6 +1355,7 @@ def _create_users_page_response(
     csrf_token = generate_csrf_token()
 
     response = templates.TemplateResponse(
+        request,
         "users.html",
         {
             "request": request,
@@ -1751,6 +1762,7 @@ def users_list_partial(request: Request):
     users = _get_users_list()
 
     response = templates.TemplateResponse(
+        request,
         "partials/users_list.html",
         {
             "request": request,
@@ -1975,6 +1987,7 @@ def _create_groups_page_response(
             repo["category_priority"] = UNASSIGNED_CATEGORY_PRIORITY
 
     response = templates.TemplateResponse(
+        request,
         "groups.html",
         {
             "request": request,
@@ -2234,6 +2247,7 @@ def groups_list_partial(request: Request):
     groups_data = _get_groups_data()
 
     response = templates.TemplateResponse(
+        request,
         "partials/groups_list.html",
         {"request": request, "csrf_token": csrf_token, "groups": groups_data},
     )
@@ -2286,6 +2300,7 @@ def groups_users_list_partial(request: Request):
     ]
 
     response = templates.TemplateResponse(
+        request,
         "partials/groups_users_list.html",
         {
             "request": request,
@@ -2325,6 +2340,7 @@ def groups_audit_logs_partial(
         )
 
     return templates.TemplateResponse(
+        request,
         "partials/groups_audit_logs.html",
         {"request": request, "audit_logs": audit_logs, "total_count": total_count},
     )
@@ -2390,6 +2406,7 @@ def groups_repo_access_partial(request: Request):
             repo["category_priority"] = UNASSIGNED_CATEGORY_PRIORITY
 
     response = templates.TemplateResponse(
+        request,
         "partials/groups_repo_access.html",
         {
             "request": request,
@@ -3103,6 +3120,7 @@ def _create_golden_repos_page_response(
         categories = []
 
     response = templates.TemplateResponse(
+        request,
         "golden_repos.html",
         {
             "request": request,
@@ -3422,6 +3440,7 @@ def toggle_wiki_enabled(
         return _create_login_redirect(request)
     if not validate_login_csrf_token(request, csrf_token):
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": "Invalid CSRF token"},
             status_code=400,
@@ -3492,6 +3511,7 @@ def save_temporal_options(
         return _create_login_redirect(request)
     if not validate_login_csrf_token(request, csrf_token):
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": "Invalid CSRF token"},
             status_code=400,
@@ -3507,6 +3527,7 @@ def save_temporal_options(
             options["max_commits"] = mc
         except ValueError:
             return templates.TemplateResponse(
+                request,
                 "partials/error_message.html",
                 {"request": request, "error": "max_commits must be a positive integer"},
                 status_code=400,
@@ -3520,6 +3541,7 @@ def save_temporal_options(
             options["diff_context"] = dc
         except ValueError:
             return templates.TemplateResponse(
+                request,
                 "partials/error_message.html",
                 {"request": request, "error": "diff_context must be an integer 0-50"},
                 status_code=400,
@@ -3533,6 +3555,7 @@ def save_temporal_options(
             datetime.strptime(since_date_val, "%Y-%m-%d")
         except ValueError:
             return templates.TemplateResponse(
+                request,
                 "partials/error_message.html",
                 {
                     "request": request,
@@ -3568,6 +3591,7 @@ def refresh_wiki_cache(
         return _create_login_redirect(request)
     if not validate_login_csrf_token(request, csrf_token):
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": "Invalid CSRF token"},
             status_code=400,
@@ -3772,6 +3796,7 @@ def golden_repo_details(
         csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
 
         response = templates.TemplateResponse(
+            request,
             "partials/golden_repos_list.html",
             {
                 "request": request,
@@ -3831,6 +3856,7 @@ def golden_repos_list_partial(request: Request):
         categories = []
 
     response = templates.TemplateResponse(
+        request,
         "partials/golden_repos_list.html",
         {
             "request": request,
@@ -3860,6 +3886,7 @@ def _render_details_error(
     error, allowing htmx to swap the message into the details cell.
     """
     return templates.TemplateResponse(
+        request,
         "partials/details_error.html",
         {
             "request": request,
@@ -3961,6 +3988,7 @@ def golden_repo_details_partial(request: Request, alias: str):
         csrf_token = get_csrf_token_from_cookie(request)
         categories = _get_repo_category_service().list_categories()
         return templates.TemplateResponse(
+            request,
             "partials/golden_repo_details.html",
             {
                 "request": request,
@@ -4241,6 +4269,7 @@ def _create_repos_page_response(
     deactivating_map = _build_deactivating_map()
 
     response = templates.TemplateResponse(
+        request,
         "repos.html",
         {
             "request": request,
@@ -4328,6 +4357,7 @@ def repos_list_partial(
     paginated_repos, total_pages, current_page = _paginate_repos(filtered_repos, page)
 
     response = templates.TemplateResponse(
+        request,
         "partials/repos_list.html",
         {
             "request": request,
@@ -4378,6 +4408,7 @@ def repo_details(
         csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
 
         response = templates.TemplateResponse(
+            request,
             "partials/repos_list.html",
             {
                 "request": request,
@@ -4760,6 +4791,7 @@ def _create_jobs_page_response(
     )
 
     response = templates.TemplateResponse(
+        request,
         "jobs.html",
         {
             "request": request,
@@ -4835,6 +4867,7 @@ def jobs_list_partial(
     )
 
     response = templates.TemplateResponse(
+        request,
         "partials/jobs_list.html",
         {
             "request": request,
@@ -5030,6 +5063,7 @@ def _create_query_page_response(
     query_history = _get_session_query_history(session.username)
 
     response = templates.TemplateResponse(
+        request,
         "query.html",
         {
             "request": request,
@@ -5565,6 +5599,7 @@ def query_results_partial(request: Request):
     csrf_token = generate_csrf_token()
 
     response = templates.TemplateResponse(
+        request,
         "partials/query_results.html",
         {
             "request": request,
@@ -5809,6 +5844,7 @@ def query_results_partial_post(
     # Validate required fields
     if not query_text or not query_text.strip():
         return templates.TemplateResponse(
+            request,
             "partials/query_results.html",
             {
                 "request": request,
@@ -5821,6 +5857,7 @@ def query_results_partial_post(
 
     if not repository:
         return templates.TemplateResponse(
+            request,
             "partials/query_results.html",
             {
                 "request": request,
@@ -5997,6 +6034,7 @@ def query_results_partial_post(
 
     csrf_token_new = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "partials/query_results.html",
         {
             "request": request,
@@ -7558,6 +7596,7 @@ def _create_config_page_response(
         logger.warning("Failed to fetch golden repos for config dropdown: %s", e)
 
     response = templates.TemplateResponse(
+        request,
         "config.html",
         {
             "request": request,
@@ -7639,6 +7678,7 @@ def _build_gitlab_repos_response(
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
 
     response = templates.TemplateResponse(
+        request,
         "partials/gitlab_repos.html",
         {
             "request": request,
@@ -7681,6 +7721,7 @@ def _build_github_repos_response(
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
 
     response = templates.TemplateResponse(
+        request,
         "partials/github_repos.html",
         {
             "request": request,
@@ -7713,6 +7754,7 @@ def auto_discovery_page(request: Request):
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "auto_discovery.html",
         {
             "request": request,
@@ -7734,6 +7776,7 @@ def analytics_export_page(request: Request):
 
     csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "analytics_export.html",
         {
             "request": request,
@@ -8767,6 +8810,7 @@ def clear_query_embedding_cache_table(
     config["query_embedding_cache"]["total_cached_entries"] = new_count
     csrf_token_new = generate_csrf_token()
     return templates.TemplateResponse(
+        request,
         "partials/qec_display.html",
         {
             "request": request,
@@ -9012,6 +9056,7 @@ def config_section_partial(
     gitlab_token_data = token_manager.get_token("gitlab")
 
     response = templates.TemplateResponse(
+        request,
         "partials/config_section.html",
         {
             "request": request,
@@ -10237,6 +10282,7 @@ def logs_page(
 
     # Render template
     response = templates.TemplateResponse(
+        request,
         "logs.html",
         {
             "request": request,
@@ -10336,6 +10382,7 @@ def logs_list_partial(
 
     # Render partial template
     response = templates.TemplateResponse(
+        request,
         "partials/logs_list.html",
         {
             "request": request,
@@ -10487,6 +10534,7 @@ def unified_login_page(
 
     # Create response with CSRF token in signed cookie
     response = templates.TemplateResponse(
+        request,
         "unified_login.html",
         {
             "request": request,
@@ -10576,6 +10624,7 @@ def unified_login_submit(
             sso_enabled = oidc_routes.oidc_manager.is_enabled()
 
         error_response = templates.TemplateResponse(
+            request,
             "unified_login.html",
             {
                 "request": request,
@@ -10916,14 +10965,12 @@ def _get_last_scan_time(
         conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT started_at
             FROM self_monitoring_scans
             ORDER BY started_at DESC
             LIMIT 1
-            """
-        )
+            """)
         row = cursor.fetchone()
         return row["started_at"] if row else None
     except Exception as e:
@@ -11004,13 +11051,11 @@ def _get_scan_status(
     try:
         conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT COUNT(*)
             FROM self_monitoring_scans
             WHERE completed_at IS NULL
-            """
-        )
+            """)
         count = cursor.fetchone()[0]
         return "Running..." if count > 0 else "Idle"
     except Exception as e:
@@ -11069,6 +11114,7 @@ def _create_self_monitoring_page_response(
 
     csrf_token = generate_csrf_token()
     response = templates.TemplateResponse(
+        request,
         "self_monitoring.html",
         {
             "request": request,

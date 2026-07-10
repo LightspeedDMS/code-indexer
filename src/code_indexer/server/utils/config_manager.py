@@ -1036,6 +1036,19 @@ class ClusterConfig:
     """Cluster node configuration (Epic #408)."""
 
     node_id: str = ""
+    # Repo sharding (opt-in). When False (default) the cluster runs symmetric:
+    # every pod may cache every repo, and replicas scale read concurrency. When
+    # True, repos are sharded across pods via HRW ownership so each pod's index
+    # cache holds only its shard -- bounding per-pod memory when the total working
+    # set exceeds one pod's cache. Enable only when memory (not concurrency) is
+    # the limit.
+    sharding_enabled: bool = False
+    # How many nodes own (cache + serve) each repo under HRW sharding. MUST be
+    # < number of nodes for sharding to do anything: with shard_replicas >= node
+    # count every node owns every repo (no memory bounding, no forwarding).
+    # Default 1 = each repo on exactly one node (maximum bounding, no redundancy);
+    # raise to 2 for owner redundancy on clusters with 3+ nodes.
+    shard_replicas: int = 1
 
 
 @dataclass

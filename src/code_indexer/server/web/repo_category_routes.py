@@ -75,6 +75,7 @@ def repo_categories_page(request: Request):
     csrf_token = generate_csrf_token()
 
     response = templates.TemplateResponse(
+        request,
         "repo_categories.html",
         {
             "request": request,
@@ -434,6 +435,7 @@ def _render_categories_response(
     if is_htmx:
         # Return partial list only
         response = templates.TemplateResponse(
+            request,
             "partials/repo_categories_list.html",
             {
                 "request": request,
@@ -446,6 +448,7 @@ def _render_categories_response(
     else:
         # Return full page
         response = templates.TemplateResponse(
+            request,
             "repo_categories.html",
             {
                 "request": request,
@@ -498,6 +501,7 @@ def update_repo_category_route(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": "Invalid CSRF token"},
             status_code=400,
@@ -510,6 +514,7 @@ def update_repo_category_route(
             parsed_category_id = int(category_id.strip())
         except ValueError:
             return templates.TemplateResponse(
+                request,
                 "partials/error_message.html",
                 {"request": request, "error": "Invalid category ID format"},
                 status_code=400,
@@ -527,6 +532,7 @@ def update_repo_category_route(
         # Return success response
         # For HTMX, return a simple success message or trigger page refresh
         return templates.TemplateResponse(
+            request,
             "partials/success_message.html",
             {"request": request, "message": "Category updated successfully"},
             status_code=200,
@@ -536,6 +542,7 @@ def update_repo_category_route(
         # Repository not found or other validation error
         logger.warning(f"Failed to update category for '{alias}': {e}")
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": str(e)},
             status_code=404,
@@ -547,6 +554,7 @@ def update_repo_category_route(
         if "FOREIGN KEY constraint failed" in error_msg:
             error_msg = "Invalid category ID"
         return templates.TemplateResponse(
+            request,
             "partials/error_message.html",
             {"request": request, "error": error_msg},
             status_code=400,

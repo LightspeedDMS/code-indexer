@@ -2421,6 +2421,26 @@ class RefreshScheduler:
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
+        # Step 1b: build the trigram index for index-assisted regex search, so
+        # /api/regex/search can pre-filter candidate files instead of scanning the
+        # whole (NFS-backed) working tree. Built here at index time from the same
+        # gitignore-aware file set. Non-fatal: on any failure regex search simply
+        # falls back to a full scan.
+        try:
+            from code_indexer.global_repos.trigram_index_manager import (
+                TrigramIndexManager,
+            )
+
+            _tri_source_path = Path(source_path)
+            _tri_dir = _tri_source_path / ".code-indexer" / "trigram_index"
+            _tri_files = TrigramIndexManager(_tri_dir).build(_tri_source_path)
+            logger.info(f"Trigram index built for {alias_name} ({_tri_files} files)")
+        except Exception as _tri_exc:  # never fail indexing over the pre-filter
+            logger.warning(
+                f"Trigram index build failed for {alias_name} "
+                f"(regex search will full-scan): {_tri_exc}"
+            )
+
         # Execute Step 2: temporal indexing (if enabled)
         if temporal_command is not None:
             # Bug #1313 round-3: in postgres/cluster mode, hand the child

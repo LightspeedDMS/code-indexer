@@ -2726,16 +2726,35 @@ def make_lifespan(
             try:
                 _pg_dsn = ""
                 _configured_node_id = ""
+                _sharding_enabled = False
+                _shard_replicas = 1
                 try:
                     import json as _json
 
-                    _cfg_path = Path.home() / ".cidx-server" / "config.json"
+                    # Honor CIDX_SERVER_DATA_DIR for the config location (mirrors
+                    # the data-dir resolution above); a deployment that sets the
+                    # data dir elsewhere keeps config.json there, so hardcoding
+                    # ~/.cidx-server would silently skip cluster services.
+                    _cfg_path = (
+                        Path(
+                            os.environ.get(
+                                "CIDX_SERVER_DATA_DIR",
+                                str(Path.home() / ".cidx-server"),
+                            )
+                        )
+                        / "config.json"
+                    )
                     if _cfg_path.exists():
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
-                            _configured_node_id = _cfg_data.get("cluster", {}).get(
-                                "node_id", ""
+                            _cluster_cfg = _cfg_data.get("cluster", {})
+                            _configured_node_id = _cluster_cfg.get("node_id", "")
+                            _sharding_enabled = bool(
+                                _cluster_cfg.get("sharding_enabled", False)
+                            )
+                            _shard_replicas = max(
+                                1, int(_cluster_cfg.get("shard_replicas", 1))
                             )
                 except Exception:
                     pass
@@ -2786,6 +2805,150 @@ def make_lifespan(
                     _heartbeat.set_leader_election(_leader_election)
                     _heartbeat.start()
                     _cluster_services.append(("heartbeat", _heartbeat))
+
+                    if _sharding_enabled:
+                        try:
+                            from code_indexer.server.services.shard_ownership import (
+                                ShardOwnership,
+                            )
+                            from code_indexer.server.services.shard_router import (
+                                ShardRouter,
+                            )
+
+                            _shard_ownership = ShardOwnership(
+                                node_id=_node_id,
+                                active_nodes_provider=_heartbeat.get_active_nodes,
+                                replicas=_shard_replicas,
+                            )
+                            _sqm = getattr(app.state, "semantic_query_manager", None)
+                            if _sqm is not None:
+                                _sqm.set_shard_ownership(_shard_ownership)
+                            # Expose ownership on app.state so the multi-repo endpoint
+                            # can warm the multi-search service's cache for owned repos
+                            # (C6 Phase 3).
+                            app.state.shard_ownership = _shard_ownership
+                            # Also inject into the shared multi-search singleton at
+                            # startup so the MCP omni path (which does not go through
+                            # the REST endpoint) caches owned repos too.
+                            try:
+                                from code_indexer.server.routes.multi_query_routes import (
+                                    get_multi_search_service,
+                                )
+
+                                get_multi_search_service().set_shard_ownership(
+                                    _shard_ownership
+                                )
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "C6: could not inject shard ownership into the "
+                                    "multi-search singleton at startup"
+                                )
+                            # http_client_factory is set later in startup
+                            # (_apply_fault_injection_state), after this cluster block,
+                            # so app.state may not have it yet -- construct a dedicated
+                            # one for internal pod-to-pod routing (fault injection is
+                            # not relevant to internal forwards).
+                            from code_indexer.server.fault_injection.http_client_factory import (
+                                HttpClientFactory,
+                            )
+
+                            _http_factory = getattr(
+                                app.state, "http_client_factory", None
+                            ) or HttpClientFactory(fault_injection_service=None)
+                            app.state.shard_router = ShardRouter(
+                                node_id=_node_id,
+                                shard_ownership=_shard_ownership,
+                                node_addresses_provider=_heartbeat.get_node_addresses,
+                                http_client_factory=_http_factory,
+                            )
+                            logging.getLogger(__name__).info(
+                                "C6: shard ownership + router wired "
+                                "(node_id=%s, replicas=%d)",
+                                _node_id,
+                                _shard_replicas,
+                            )
+
+                            # C6 rebalance pre-warming: proactively load this pod's
+                            # owned repos into the cache so the first query after a
+                            # membership change is not a cold load. Best-effort and
+                            # fully fail-safe (a warm failure just leaves the repo cold
+                            # until its first query -- today's behaviour).
+                            try:
+                                from code_indexer.server.services.shard_prewarm_service import (
+                                    ShardPrewarmService,
+                                )
+                                from code_indexer.server.services.search_service import (
+                                    SemanticSearchService,
+                                )
+                                from code_indexer.server.models.api_models import (
+                                    SemanticSearchRequest,
+                                )
+
+                                def _list_shardable_repos() -> list:
+                                    # The shardable set is the GOLDEN repos (the shared,
+                                    # indexed repos queries fan out over) -- resolved
+                                    # lazily from app.state so startup ordering does not
+                                    # matter.
+                                    grm = getattr(
+                                        app.state, "golden_repo_manager", None
+                                    )
+                                    if grm is None:
+                                        return []
+                                    try:
+                                        return [
+                                            str(
+                                                r.get("alias")
+                                                or r.get("alias_name")
+                                                or ""
+                                            )
+                                            for r in grm.list_golden_repos()
+                                        ]
+                                    except Exception:
+                                        return []
+
+                                def _warm_repo(alias: str) -> None:
+                                    grm = getattr(
+                                        app.state, "golden_repo_manager", None
+                                    )
+                                    if grm is None or not alias:
+                                        return
+                                    repo_path = grm.get_actual_repo_path(alias)
+                                    if not repo_path:
+                                        return
+                                    # A minimal search loads the repo's HNSW index into
+                                    # this pod's cache (Phase 0 caches it since owned).
+                                    SemanticSearchService().search_repository_path(
+                                        str(repo_path),
+                                        SemanticSearchRequest(query="warm", limit=1),
+                                    )
+
+                                _prewarm = ShardPrewarmService(
+                                    _shard_ownership,
+                                    _list_shardable_repos,
+                                    _warm_repo,
+                                )
+                                _prewarm.start()
+                                _cluster_services.append(("shard_prewarm", _prewarm))
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "C6: could not start shard prewarm service"
+                                )
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                "C6: failed to wire sharding; falling back to "
+                                "symmetric caching + local serving"
+                            )
+                    else:
+                        # Replication mode (default): no HRW ownership gate and
+                        # no query forwarding, so every pod caches and serves all
+                        # repos locally -> N replicas scale read concurrency. Enable
+                        # cluster.sharding_enabled only when the working set exceeds
+                        # one pod's cache. Fail-open helpers already treat a missing
+                        # shard_ownership/shard_router as 'own everything, serve local'.
+                        logging.getLogger(__name__).info(
+                            "C6: sharding disabled (cluster.sharding_enabled=false); "
+                            "replication mode -- every pod caches and serves all repos"
+                        )
 
                     # Job reconciliation
                     from code_indexer.server.services.job_reconciliation_service import (
@@ -3332,7 +3495,15 @@ def make_lifespan(
             try:
                 import json as _nm_json
 
-                _nm_cfg_path = Path.home() / ".cidx-server" / "config.json"
+                _nm_cfg_path = (
+                    Path(
+                        os.environ.get(
+                            "CIDX_SERVER_DATA_DIR",
+                            str(Path.home() / ".cidx-server"),
+                        )
+                    )
+                    / "config.json"
+                )
                 if _nm_cfg_path.exists():
                     with open(_nm_cfg_path) as _nm_f:
                         _nm_cfg = _nm_json.load(_nm_f)
