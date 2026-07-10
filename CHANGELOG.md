@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.40.0] - 2026-07-10
+
+### Added
+
+- **Cluster-mode hardening (PR #1339, external contribution + review-driven fixes)**: opt-in HRW (rendezvous-hash) repo sharding for cluster mode (`cluster.sharding_enabled`, default off; fail-open and byte-for-byte unchanged when disabled — independently verified), a trigram-index-assisted regex pre-filter for large NFS-backed repos (with a fixed cross-line multiline correctness gap and additional non-ASCII/concurrent-build-safety fixes from the author), and six independent correctness fixes: `scip_impact` scoping (48s→39ms, plus a latent access-control fix), ripgrep-in-image for regex search, a recursive/depth-bounded repo-file-listing endpoint, an activated-repos storage-locality startup warning, and golden-repo clone-URL credential masking.
+
+### Fixed
+
+- Completed the Starlette 1.x `TemplateResponse` call-signature migration across the remaining 29 call sites the PR left unmigrated (`wiki/routes.py`, `web/dependency_map_routes.py`, `web/repo_category_routes.py`, `web/elevation_web_routes.py`, `auth/oauth/routes.py`), with a permanent AST-based regression guard against reintroducing the old signature anywhere in the server tree.
+
 ## [11.39.0] - 2026-07-10
 
 ### Fixed
