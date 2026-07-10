@@ -100,7 +100,12 @@ build:image:
   resource_group: docker-build/cidx
   timeout: 90m
   before_script:
-    - apk add --no-cache aws-cli jq
+    # --upgrade bumps expat to match python3.12's pyexpat: without it the alpine
+    # aws-cli package fails with "XML_SetAllocTrackerActivationThreshold: symbol
+    # not found" and get-login-password emits nothing (docker login then falls
+    # back to an interactive prompt and errors). Matches sandbox-mcp's job.
+    - apk add --no-cache --upgrade aws-cli jq
+    - aws --version
     - until docker info >/dev/null 2>&1; do sleep 2; done
   script:
     - |
