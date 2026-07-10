@@ -1,0 +1,163 @@
+# CI for code-indexer-internal (the cidx multi-pod / cluster-mode fork).
+#
+# Stages
+#   test   smoke tests (mirrors the upstream GitHub CI) + advisory ruff lint.
+#   build  Docker build + push of the cluster-mode server image to the shared
+#          `gitlab-runner` ECR in the legacy tools account (601706661779) -- the
+#          ECR home every tools-* image shares. The ArgoCD overlay
+#          (cloud-engineering/k8s/tools/dev-platform/claude-code-indexer) pins a
+#          `gitlab-runner:cidx-<version>-<sha>` tag produced here.
+#
+# Image push runs under the default runner's NATIVE 601 identity (no assume-role)
+# -- the same path sandbox-mcp's "Deploy Docker" job uses. The `gitlab-runner`
+# repo enforces IMMUTABLE tags, so the moving `cidx-tools-latest` tag is
+# re-pointed via batch-get-image -> batch-delete-image -> put-image (a fresh
+# create, which immutability allows), never a plain `docker push`.
+#
+# Submodules are skipped (GIT_SUBMODULE_STRATEGY: none): the image pulls its
+# custom hnswlib from the git+https dependency declared in pyproject (the vendored
+# third_party/hnswlib submodule is not COPYed into the image), and one fixture
+# submodule uses an SSH URL that CI cannot fetch.
+
+stages:
+  - test
+  - build
+
+variables:
+  GIT_SUBMODULE_STRATEGY: none
+  ECR_REGION: "us-west-2"
+  ECR_ACCOUNT_ID: "601706661779"
+  ECR_REPOSITORY_NAME: "gitlab-runner"
+  IMAGE_PREFIX: "cidx"
+  LATEST_TAG: "cidx-tools-latest"
+
+# One pipeline per change: merge-request pipelines, master branch pipelines, and
+# manual web-triggered pipelines (to build a pre-merge branch image on demand) --
+# never a duplicate branch pipeline while an MR is open.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# -- test ----------------------------------------------------------------------
+smoke:
+  stage: test
+  tags: [default]
+  image: python:3.11-slim-bookworm
+  variables:
+    PIP_NO_CACHE_DIR: "1"
+  before_script:
+    # hnswlib + psycopg build from source; the git+https hnswlib dep needs git.
+    - apt-get update && apt-get install -y --no-install-recommends build-essential cmake git pkg-config
+    - python -m pip install --upgrade pip
+    - pip install ".[dev,cluster,cohere]"
+  script:
+    # Same smoke subset the upstream GitHub CI runs (no live Postgres required).
+    - >
+      python -m pytest
+      tests/unit/server/storage/test_factory.py
+      tests/unit/server/mcp/test_protocol.py
+      tests/unit/services/test_database_health_cluster.py
+      -v --tb=short
+      --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# Advisory only for now: the fork carries pre-existing lint debt, so a red ruff
+# must not block image builds. Tighten to blocking once the tree is clean.
+lint:
+  stage: test
+  tags: [default]
+  image: python:3.11-slim-bookworm
+  allow_failure: true
+  before_script:
+    - pip install ruff
+  script:
+    - ruff check src
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# -- build ---------------------------------------------------------------------
+# Gated on `smoke` (later stage runs only if the test stage passed). Auto on
+# master; manual on a web-triggered branch pipeline so we can cut an image from a
+# feature branch (e.g. to point the ArgoCD test overlay at a pre-merge build).
+build:image:
+  stage: build
+  tags: [default]
+  image: public.ecr.aws/docker/library/docker:24
+  services:
+    - name: public.ecr.aws/docker/library/docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    DOCKER_BUILDKIT: "1"
+  resource_group: docker-build/cidx
+  timeout: 90m
+  before_script:
+    - apk add --no-cache aws-cli jq
+    - until docker info >/dev/null 2>&1; do sleep 2; done
+  script:
+    - |
+      ECR_REPOSITORY="${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+      aws ecr get-login-password --region "$ECR_REGION" \
+        | docker login --username AWS --password-stdin "${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com"
+
+      VERSION=$(TZ=America/Denver date +"%Y.%m.%d.%H%M")
+      SHORT_SHA=$(echo "$CI_COMMIT_SHORT_SHA" | cut -c1-7)
+      if [ "$CI_COMMIT_BRANCH" = "master" ]; then
+        # Matches the existing overlay convention: cidx-<YYYY.MM.DD.HHMM>-<sha>.
+        IMAGE_TAG="${IMAGE_PREFIX}-${VERSION}-${SHORT_SHA}"
+      else
+        BRANCH_SAFE=$(echo "$CI_COMMIT_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | cut -c1-40)
+        IMAGE_TAG="${IMAGE_PREFIX}-${BRANCH_SAFE}-${VERSION}-${SHORT_SHA}"
+      fi
+      FULL="${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+      # Best-effort layer cache from the current moving-latest.
+      docker pull "${ECR_REPOSITORY}:${LATEST_TAG}" || true
+
+      docker build \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --cache-from "${ECR_REPOSITORY}:${LATEST_TAG}" \
+        -t "$FULL" .
+
+      # Unique versioned tag -> plain push (immutable repo accepts a fresh tag);
+      # the pre-delete covers a same-minute rerun of the same commit.
+      aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$IMAGE_TAG" --region "$ECR_REGION" || true
+      docker push "$FULL"
+      echo "Pushed $FULL"
+
+      # Re-point the moving latest by manifest copy (immutable tag -> put-image),
+      # master builds only.
+      if [ "$CI_COMMIT_BRANCH" = "master" ]; then
+        MANIFEST=$(aws ecr batch-get-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$IMAGE_TAG" --region "$ECR_REGION" \
+          --query 'images[0].imageManifest' --output text)
+        aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$LATEST_TAG" --region "$ECR_REGION" || true
+        aws ecr put-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-tag "$LATEST_TAG" --image-manifest "$MANIFEST" --region "$ECR_REGION"
+        echo "Re-pointed ${ECR_REPOSITORY}:${LATEST_TAG} -> $IMAGE_TAG"
+      fi
+
+      # Publish the tag so it is visible in the job log and consumable by a
+      # downstream ArgoCD-overlay bump (dotenv artifact).
+      echo "IMAGE_TAG=$IMAGE_TAG" > image.env
+      echo "Overlay image ref: ${ECR_REPOSITORY}:${IMAGE_TAG}"
+  artifacts:
+    reports:
+      dotenv: image.env
+    paths:
+      - image.env
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
