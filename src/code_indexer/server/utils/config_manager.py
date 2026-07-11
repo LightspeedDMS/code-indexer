@@ -821,6 +821,30 @@ class ActivatedReaperConfig:
 
 
 @dataclass
+class HNSWOrphanRepairSweepConfig:
+    """
+    Configuration for the HNSW orphan repair fleet sweep (Story #1360,
+    Epic #1333 S3).
+
+    Controls the paced, resumable background sweep that walks ALL on-disk
+    HNSW indexes across golden + activated repos, detecting and repairing
+    orphans in pre-existing indexes built before S2's build-path self-heal
+    fix existed. Settled defaults (2026-07-11): ships ON by default with
+    conservative pacing so the historical backlog starts paying down
+    automatically after deployment without requiring an operator opt-in.
+    """
+
+    # Whether the sweep scheduler is active (default: True -- ships ON).
+    enabled: bool = True
+
+    # Indexes checked per tick (default: 15, settled range ~10-20).
+    batch_size: int = 15
+
+    # Minutes between ticks (default: 7, settled range ~5-10).
+    tick_interval_minutes: int = 7
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1284,6 +1308,9 @@ class ServerConfig:
     # Story #967 - Activated repository reaper configuration
     activated_reaper_config: Optional[ActivatedReaperConfig] = None
 
+    # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
+    hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
+
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -1544,6 +1571,9 @@ class ServerConfig:
         # Story #967 - Initialize activated reaper config
         if self.activated_reaper_config is None:
             self.activated_reaper_config = ActivatedReaperConfig()
+        # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
+        if self.hnsw_orphan_repair_sweep_config is None:
+            self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
