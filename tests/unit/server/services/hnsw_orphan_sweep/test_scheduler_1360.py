@@ -252,6 +252,26 @@ class TestPassCompletion:
         assert state["last_completed_key"] is None
         assert state["last_full_pass_completed_at"] is not None
 
+    def test_empty_candidate_set_does_not_complete_pass(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        """Code review finding: a tick that finds NOTHING to check (empty
+        fleet -- no golden repos, no activated repos, no collections at all)
+        must NOT be treated as a completed pass. Otherwise pass_id/
+        last_full_pass_completed_at churn meaninglessly on every idle tick
+        instead of only advancing when an actual sweep of real candidates
+        completes."""
+        golden = _FakeGoldenRepoManager({})
+        scheduler = _make_scheduler(tmp_path, golden, state_backend, batch_size=5)
+
+        scheduler._run_tick()
+        scheduler._run_tick()
+        scheduler._run_tick()
+
+        state = state_backend.get_state()
+        assert state["pass_id"] == 1
+        assert state["last_full_pass_completed_at"] is None
+
 
 class TestFailSoftPerItem:
     def test_one_item_raising_does_not_abort_tick(

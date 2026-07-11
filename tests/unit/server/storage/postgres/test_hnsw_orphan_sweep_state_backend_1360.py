@@ -114,6 +114,29 @@ class TestHNSWOrphanSweepStatePostgresBackend:
         assert "pass_orphaned_found" in sql
         assert "pass_repaired" in sql
 
+    def test_record_item_processed_error_outcome_also_bumps_orphaned_found(
+        self,
+    ) -> None:
+        """Code review finding: process_candidate() only ever returns ERROR
+        after orphans were confirmed present, so the "error" outcome's SQL
+        must bump pass_orphaned_found too, not just pass_errors."""
+        from code_indexer.server.storage.postgres.hnsw_orphan_sweep_state_backend import (
+            HNSWOrphanSweepStatePostgresBackend,
+        )
+
+        pool = _make_pool(fetchone_return=_DEFAULT_ROW)
+        backend = HNSWOrphanSweepStatePostgresBackend(pool)
+        backend.record_item_processed("golden:a:1", "error")
+
+        conn = _get_conn(pool)
+        update_calls = [
+            c for c in conn.execute.call_args_list if "UPDATE" in str(c[0][0]).upper()
+        ]
+        assert update_calls, "expected an UPDATE statement"
+        sql = update_calls[-1][0][0]
+        assert "pass_orphaned_found" in sql
+        assert "pass_errors" in sql
+
     def test_record_item_processed_unknown_outcome_raises_without_sql(self) -> None:
         from code_indexer.server.storage.postgres.hnsw_orphan_sweep_state_backend import (
             HNSWOrphanSweepStatePostgresBackend,
@@ -150,3 +173,7 @@ class TestHNSWOrphanSweepStatePostgresBackend:
         assert "%s" in sql
         assert "pass_id = pass_id + 1" in sql
         assert "total_orphans_repaired_lifetime" in sql
+        # Code review finding: pass_started_at must be wired up to a real
+        # timestamp for the new pass, never left as a dead NULL literal.
+        assert "pass_started_at = %s" in sql
+        assert "pass_started_at = NULL" not in sql

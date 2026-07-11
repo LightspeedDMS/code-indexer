@@ -38,6 +38,9 @@ class TestDefaultState:
         assert state["pass_transient_skips"] == 0
         assert state["last_full_pass_completed_at"] is None
         assert state["total_orphans_repaired_lifetime"] == 0
+        # Code review finding: pass_started_at must be wired up (set when a
+        # pass begins), never a dead always-NULL column.
+        assert state["pass_started_at"] is not None
 
 
 class TestRecordItemProcessed:
@@ -71,6 +74,21 @@ class TestRecordItemProcessed:
 
         state = backend.get_state()
         assert state["pass_errors"] == 1
+        assert state["pass_orphaned_found"] == 1
+
+    def test_error_outcome_also_counts_as_orphan_found(self, db_path: str) -> None:
+        """Code review finding: process_candidate() only ever returns ERROR
+        after orphans were confirmed present (repair attempted but failed to
+        converge, or persist/reload verification failed post-repair) -- so
+        pass_orphaned_found must count ERROR outcomes too, not just REPAIRED
+        ones. Otherwise an operator sees a total that silently excludes
+        orphans that were found but never successfully fixed."""
+        backend = HNSWOrphanSweepStateSqliteBackend(db_path)
+        backend.record_item_processed("golden:alpha:x", "error")
+
+        state = backend.get_state()
+        assert state["pass_orphaned_found"] == 1
+        assert state["pass_repaired"] == 0
 
     def test_transient_skip_outcome_increments_transient_counter(
         self, db_path: str
@@ -99,6 +117,7 @@ class TestRecordItemProcessed:
         assert state["pass_indexes_checked"] == 3
         assert state["pass_repaired"] == 1
         assert state["pass_errors"] == 1
+        assert state["pass_orphaned_found"] == 2  # repaired + error both found orphans
 
     def test_persists_immediately_visible_to_a_second_backend_instance(
         self, db_path: str
@@ -138,6 +157,18 @@ class TestCompletePass:
         assert backend.get_state()["pass_id"] == 2
         backend.complete_pass()
         assert backend.get_state()["pass_id"] == 3
+
+    def test_complete_pass_sets_new_pass_started_at(self, db_path: str) -> None:
+        """Code review finding: pass_started_at must be wired up (set when a
+        new pass begins), not left as a dead always-NULL column."""
+        backend = HNSWOrphanSweepStateSqliteBackend(db_path)
+        assert backend.get_state()["pass_started_at"] is not None
+
+        backend.complete_pass()
+
+        state = backend.get_state()
+        assert state["pass_id"] == 2
+        assert state["pass_started_at"] is not None
 
     def test_complete_pass_accrues_lifetime_repaired_total(self, db_path: str) -> None:
         backend = HNSWOrphanSweepStateSqliteBackend(db_path)

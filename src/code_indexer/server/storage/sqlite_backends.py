@@ -7106,12 +7106,18 @@ class QueryEmbeddingCacheSqliteBackend:
 # import dependency on the server-services layer).
 _HNSW_SWEEP_OUTCOMES = {"clean", "repaired", "transient_skip", "error"}
 
-# Column bumped for each outcome value, alongside pass_indexes_checked which
-# always bumps.
-_HNSW_SWEEP_OUTCOME_COLUMN = {
-    "repaired": "pass_orphaned_found",  # a repair implies an orphan was found
-    "error": "pass_errors",
-    "transient_skip": "pass_transient_skips",
+# Columns bumped (by +1 each) for each outcome value, alongside
+# pass_indexes_checked which always bumps. "error" bumps pass_orphaned_found
+# too: process_candidate() only ever returns ERROR after orphans were
+# confirmed present under the lock (repair attempted but failed to converge,
+# or the post-repair persist/reload verification failed) -- so an ERROR
+# outcome IS an "orphan found" outcome, just one that wasn't successfully
+# fixed. Code review finding: without this, pass_orphaned_found silently
+# undercounted the true number of orphaned indexes discovered this pass.
+_HNSW_SWEEP_OUTCOME_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "repaired": ("pass_orphaned_found", "pass_repaired"),
+    "error": ("pass_orphaned_found", "pass_errors"),
+    "transient_skip": ("pass_transient_skips",),
 }
 
 
@@ -7131,9 +7137,15 @@ class HNSWOrphanSweepStateSqliteBackend:
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def _ensure_row(self, conn: Any) -> None:
+        """Create the singleton row on first access. pass_started_at is set
+        to "now" at creation time -- pass 1 begins the moment the row first
+        exists (code review finding: pass_started_at must reflect real
+        pass-start timing, never a dead always-NULL column)."""
+        now_iso = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT OR IGNORE INTO hnsw_orphan_sweep_state (id) VALUES (?)",
-            (self._ROW_ID,),
+            "INSERT OR IGNORE INTO hnsw_orphan_sweep_state (id, pass_started_at) "
+            "VALUES (?, ?)",
+            (self._ROW_ID, now_iso),
         )
 
     def get_state(self) -> Dict[str, Any]:
@@ -7184,39 +7196,29 @@ class HNSWOrphanSweepStateSqliteBackend:
                 f"{sorted(_HNSW_SWEEP_OUTCOMES)}"
             )
 
-        outcome_column = _HNSW_SWEEP_OUTCOME_COLUMN.get(outcome)
-        repaired_bump = 1 if outcome == "repaired" else 0
+        extra_columns = _HNSW_SWEEP_OUTCOME_COLUMNS.get(outcome, ())
         now_iso = datetime.now(timezone.utc).isoformat()
+        extra_bumps = "".join(f", {col} = {col} + 1" for col in extra_columns)
 
         def operation(conn: Any) -> None:
             self._ensure_row(conn)
-            if outcome_column is not None:
-                conn.execute(
-                    f"""UPDATE hnsw_orphan_sweep_state
-                        SET last_completed_key = ?,
-                            pass_indexes_checked = pass_indexes_checked + 1,
-                            {outcome_column} = {outcome_column} + 1,
-                            pass_repaired = pass_repaired + ?,
-                            updated_at = ?
-                        WHERE id = ?""",
-                    (key, repaired_bump, now_iso, self._ROW_ID),
-                )
-            else:
-                # "clean" bumps only the checked counter.
-                conn.execute(
-                    """UPDATE hnsw_orphan_sweep_state
-                       SET last_completed_key = ?,
-                           pass_indexes_checked = pass_indexes_checked + 1,
-                           updated_at = ?
-                       WHERE id = ?""",
-                    (key, now_iso, self._ROW_ID),
-                )
+            conn.execute(
+                f"""UPDATE hnsw_orphan_sweep_state
+                    SET last_completed_key = ?,
+                        pass_indexes_checked = pass_indexes_checked + 1,
+                        updated_at = ?
+                        {extra_bumps}
+                    WHERE id = ?""",
+                (key, now_iso, self._ROW_ID),
+            )
 
         self._conn_manager.execute_atomic(operation)
 
     def complete_pass(self) -> None:
         """Record a completed full pass: accrue the lifetime repaired total,
-        reset the cursor and per-pass counters, and increment pass_id."""
+        reset the cursor and per-pass counters, set a fresh pass_started_at
+        for the NEW pass (never NULL -- see _ensure_row docstring), and
+        increment pass_id."""
         now_iso = datetime.now(timezone.utc).isoformat()
 
         def operation(conn: Any) -> None:
@@ -7228,7 +7230,7 @@ class HNSWOrphanSweepStateSqliteBackend:
                        last_full_pass_completed_at = ?,
                        pass_id = pass_id + 1,
                        last_completed_key = NULL,
-                       pass_started_at = NULL,
+                       pass_started_at = ?,
                        pass_indexes_checked = 0,
                        pass_orphaned_found = 0,
                        pass_repaired = 0,
@@ -7236,7 +7238,7 @@ class HNSWOrphanSweepStateSqliteBackend:
                        pass_transient_skips = 0,
                        updated_at = ?
                    WHERE id = ?""",
-                (now_iso, now_iso, self._ROW_ID),
+                (now_iso, now_iso, now_iso, self._ROW_ID),
             )
 
         self._conn_manager.execute_atomic(operation)

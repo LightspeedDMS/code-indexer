@@ -213,8 +213,13 @@ class HNSWOrphanRepairSweepScheduler:
         # pending list -- i.e. no candidate remains whose key is greater
         # than the new cursor. `pending` is the untruncated list (before
         # the batch_size slice), so `len(pending) <= batch_size` means
-        # everything pending was just processed.
-        if len(pending) <= batch_size:
+        # everything pending was just processed. Guarded by `candidates`
+        # being non-empty (code review finding): an EMPTY fleet (nothing
+        # enumerated at all -- no golden repos, no activated repos) has no
+        # real sweep work to conclude, so it must never be treated as "a
+        # pass just completed" -- that would spuriously churn pass_id and
+        # last_full_pass_completed_at on every idle tick.
+        if candidates and len(pending) <= batch_size:
             self._state_backend.complete_pass()
             logger.info("HNSWOrphanRepairSweepScheduler: pass complete")
 
