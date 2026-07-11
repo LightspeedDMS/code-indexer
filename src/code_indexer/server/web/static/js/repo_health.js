@@ -186,6 +186,9 @@ function renderHealthDetails(healthData) {
                 if (collection.max_inbound !== null) {
                     html += `<div class="metadata-item"><span class="metadata-label">Max Inbound:</span> <span class="metadata-value">${collection.max_inbound}</span></div>`;
                 }
+                if (collection.orphan_count !== null && collection.orphan_count !== undefined) {
+                    html += `<div class="metadata-item"><span class="metadata-label">Orphan Count:</span> <span class="metadata-value">${Number(collection.orphan_count)}</span></div>`;
+                }
                 html += '</div>';
             }
 
@@ -234,6 +237,7 @@ function renderHealthDetails(healthData) {
             ${healthData.connections_checked ? `<div class="metadata-item"><span class="metadata-label">Connections Checked:</span> <span class="metadata-value">${healthData.connections_checked.toLocaleString()}</span></div>` : ''}
             ${healthData.min_inbound !== null ? `<div class="metadata-item"><span class="metadata-label">Min Inbound:</span> <span class="metadata-value">${healthData.min_inbound}</span></div>` : ''}
             ${healthData.max_inbound !== null ? `<div class="metadata-item"><span class="metadata-label">Max Inbound:</span> <span class="metadata-value">${healthData.max_inbound}</span></div>` : ''}
+            ${(healthData.orphan_count !== null && healthData.orphan_count !== undefined) ? `<div class="metadata-item"><span class="metadata-label">Orphan Count:</span> <span class="metadata-value">${Number(healthData.orphan_count)}</span></div>` : ''}
         </div>`;
     }
 

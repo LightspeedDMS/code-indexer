@@ -59,6 +59,17 @@ class HealthCheckResult(BaseModel):
     max_inbound: Optional[int] = Field(
         None, description="Maximum incoming connections across nodes"
     )
+    orphan_count: Optional[int] = Field(
+        None,
+        description=(
+            "Number of zero-inbound-connection (orphan) nodes detected by "
+            "check_integrity(). Zero-tolerance binary status (Story #1359 "
+            "AC4): orphan_count == 0 is OK, any orphan_count > 0 is ERROR "
+            "(reflected in `valid`) -- there is no intermediate WARNING tier "
+            "and no configurable threshold. Every orphan is real, current "
+            "recall loss on the core query product."
+        ),
+    )
 
     # File metadata
     index_path: str = Field(description="Path to index file")
@@ -283,7 +294,10 @@ class HNSWHealthService:
 
         # Level 4: Integrity check
         try:
+            from code_indexer.storage.hnsw_index_manager import count_orphan_errors
+
             integrity_result = index.check_integrity()
+            orphan_count = count_orphan_errors(integrity_result)
 
             elapsed_ms = (time.time() - start_time) * 1000
 
@@ -297,6 +311,7 @@ class HNSWHealthService:
                 connections_checked=integrity_result["connections_checked"],
                 min_inbound=integrity_result["min_inbound"],
                 max_inbound=integrity_result["max_inbound"],
+                orphan_count=orphan_count,
                 index_path=index_path,
                 file_size_bytes=file_size,
                 last_modified=file_mtime,

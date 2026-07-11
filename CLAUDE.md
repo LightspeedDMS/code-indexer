@@ -313,6 +313,12 @@ Temporal indexing is per-commit-aggregated (message once + all changed-file diff
 
 -> Detail: docs/architecture-invariants.md#indexing-and-migrations
 
+### HNSW Finalize-Time Orphan Detect+Repair + Zero-Tolerance Health (Epic #1333, Story #1359)
+
+Every HNSW build/finalize path (`build_index`, `rebuild_from_vectors`, incremental `save_incremental_update`) runs `check_integrity()` -> `repair_orphans()` (Story #1358 fork primitive) -> re-verify BEFORE the index is persisted, via `HNSWIndexManager._detect_and_repair_orphans()`. A repair that fails to converge raises `HNSWIntegrityRepairError` loud — never a silent partial index. Health check (`cidx health`/MCP `check_hnsw_health`/REST/Web) exposes `orphan_count` as a STRICT BINARY signal: 0 is OK, any value >0 is ERROR — no WARNING tier, no configurable threshold (a graded-severity design was explicitly rejected during maintainer review).
+
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "HNSW Finalize-Time Orphan Detect+Repair + Zero-Tolerance Health")
+
 ### Database Migrations Must Be Backward Compatible
 
 Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.
