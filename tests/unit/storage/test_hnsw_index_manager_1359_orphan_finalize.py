@@ -134,7 +134,7 @@ class TestDetectAndRepairGuardLogic:
 
         result = manager._detect_and_repair_orphans(fake, context="unit-test")
 
-        assert result == 0
+        assert result is None
         assert fake.repair_called is False
 
     def test_orphans_detected_triggers_repair_and_succeeds(self):
@@ -143,7 +143,7 @@ class TestDetectAndRepairGuardLogic:
 
         result = manager._detect_and_repair_orphans(fake, context="unit-test")
 
-        assert result == 0
+        assert result is None
         assert fake.repair_called is True
 
     def test_repair_failing_to_converge_raises_loud(self):
@@ -154,6 +154,53 @@ class TestDetectAndRepairGuardLogic:
             manager._detect_and_repair_orphans(fake, context="unit-test")
 
         assert fake.repair_called is True
+
+
+class TestDetectAndRepairLogLevels:
+    """Code-review finding: near-tie detect+repair is now the EXPECTED happy
+    path (every temporal near-tie rebuild triggers it), so the "detected,
+    running repair_orphans()" line must NOT log at WARNING -- that would
+    trip the Story #1122 post-E2E automated log-audit gate on ordinary,
+    successful rebuilds. Only genuine non-convergence (a real
+    repair-pipeline regression) should log at ERROR.
+    """
+
+    def test_repair_detected_and_succeeded_logs_at_info_not_warning(self, caplog):
+        import logging
+
+        manager = HNSWIndexManager(vector_dim=CORPUS_DIM)
+        fake = _FakeOrphanedIndex(orphans_before=3, orphans_after=0)
+
+        with caplog.at_level(
+            logging.INFO, logger="code_indexer.storage.hnsw_index_manager"
+        ):
+            manager._detect_and_repair_orphans(fake, context="unit-test")
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records == [], (
+            f"expected no WARNING-level log records on the happy repair path, "
+            f"got: {[r.getMessage() for r in warning_records]}"
+        )
+        info_messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.INFO
+        ]
+        assert any("detected" in m and "repair_orphans" in m for m in info_messages)
+
+    def test_repair_non_convergence_still_logs_at_error(self, caplog):
+        import logging
+
+        manager = HNSWIndexManager(vector_dim=CORPUS_DIM)
+        fake = _FakeOrphanedIndex(orphans_before=3, orphans_after=2)
+
+        with caplog.at_level(
+            logging.INFO, logger="code_indexer.storage.hnsw_index_manager"
+        ):
+            with pytest.raises(HNSWIntegrityRepairError):
+                manager._detect_and_repair_orphans(fake, context="unit-test")
+
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(error_records) == 1
+        assert "remain after repair" in error_records[0].getMessage()
 
 
 class TestRebuildFromVectorsFinalizeRepairsOrphans:

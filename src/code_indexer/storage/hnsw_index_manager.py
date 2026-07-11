@@ -151,7 +151,7 @@ class HNSWIndexManager:
         # Any: hnswlib.Index is a C extension with no Python type stubs
         index.save_index(path)
 
-    def _detect_and_repair_orphans(self, index: Any, context: str) -> int:
+    def _detect_and_repair_orphans(self, index: Any, context: str) -> None:
         """Detect + repair HNSW orphans on an in-memory index before it is
         persisted (Story #1359 AC1/AC2).
 
@@ -162,16 +162,18 @@ class HNSWIndexManager:
         caller's atomic swap publishes the index (AC2). A repair that fails
         to reach zero orphans fails LOUD -- never a silent partial index.
 
+        Near-tie detect+repair is the EXPECTED happy path for temporal
+        rebuilds (not an anomaly), so the "detected, repairing" line logs at
+        INFO -- WARNING is reserved for the non-convergence failure case, so
+        this does not trip the Story #1122 post-E2E log-audit gate on
+        ordinary, successful rebuilds.
+
         Args:
             index: hnswlib.Index instance with vectors already added, not
                 yet saved to disk.
             context: short label identifying the call site (e.g.
                 "build_index", "rebuild_from_vectors",
                 "incremental_update") for log correlation.
-
-        Returns:
-            0 (orphan_count after any repair is always 0 on success --
-            failure raises instead of returning a nonzero count).
 
         Raises:
             HNSWIntegrityRepairError: repair_orphans() ran but orphans
@@ -186,9 +188,9 @@ class HNSWIndexManager:
         )
 
         if orphan_count == 0:
-            return 0
+            return
 
-        logger.warning(
+        logger.info(
             "HNSW finalize (%s): %d orphan(s) detected, running repair_orphans()",
             context,
             orphan_count,
@@ -214,7 +216,6 @@ class HNSWIndexManager:
             "HNSW finalize (%s): repair_orphans() succeeded, orphan_count now 0",
             context,
         )
-        return 0
 
     def build_index(
         self,
