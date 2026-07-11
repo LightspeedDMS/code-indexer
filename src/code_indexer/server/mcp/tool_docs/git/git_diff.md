@@ -22,6 +22,12 @@ inputSchema:
       type: string
       description: 'Limit diff to this path (file or directory). Relative to repo root. Use to focus on specific files/directories
         in large diffs. Examples: ''src/auth.py'', ''lib/utils/'', ''*.md'' (all markdown files).'
+    file_paths:
+      type: array
+      items:
+        type: string
+      description: 'Optional list of specific files to diff. Distinct from the single-path/glob path parameter above -- use
+        this to restrict the diff to an explicit set of files rather than a single path or glob pattern.'
     context_lines:
       type: integer
       description: 'Context lines around changes. Default: 3.'

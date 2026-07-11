@@ -101,7 +101,13 @@ class TestGitCommitPushPullTools:
         validate(instance=valid_input, schema=schema)
 
     def test_git_commit_schema_with_optional_author(self):
-        """Verify git_commit accepts optional author_name and author_email."""
+        """Verify git_commit accepts optional author_name.
+
+        Note (bug #1356): author_email was removed from the schema because
+        the git_commit handler in git_write.py never reads it -- the
+        commit author email always comes from git config user.email or the
+        PAT credential, never from the MCP tool call parameters.
+        """
         tool = TOOL_REGISTRY["git_commit"]
         schema = tool["inputSchema"]
 
@@ -109,7 +115,6 @@ class TestGitCommitPushPullTools:
             "repository_alias": "test-repo",
             "message": "Add feature",
             "author_name": "John Doe",
-            "author_email": "john@example.com",
         }
         validate(instance=valid_input, schema=schema)
 

@@ -216,7 +216,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>
 
 The evaluator receives the file's root AST node. The `OwnedNode` and `EvalFinding` types are injected automatically by the compiler preamble -- do not define them in your evaluator code.
 
-- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text`. Walk descendant nodes via `node.descendants_of_kind(...)`.
+- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text()`. Walk descendant nodes via `node.descendants_of_kind(...)`.
 - **Output**: `Vec<EvalFinding>` -- a list of zero or more findings. An empty Vec means the file matched Phase 1 but the evaluator found nothing noteworthy.
 
 ### EvalFinding struct
@@ -233,7 +233,7 @@ pub struct EvalFinding {
 
 - `pattern`: a short, descriptive label for the kind of finding. This surfaces in the response `matches[]` as the `pattern` field. Use consistent names across findings to allow grouping/filtering.
 - `line`: 1-based line number. Use `node.start_line` directly -- it is already 1-based.
-- `snippet`: code context for the finding. Typically the node's text truncated to a reasonable length: `node.text.chars().take(80).collect()`.
+- `snippet`: code context for the finding. Typically the node's text truncated to a reasonable length: `node.text().chars().take(80).collect()`.
 
 ### debug_log() function
 
@@ -272,7 +272,7 @@ The full public surface of any `OwnedNode` reachable via `node`, `descendants_of
 | `node.end_byte` | usize | byte offset where the node ends |
 | `node.start_line` | usize | 1-based line number where the node starts |
 | `node.is_named` | bool | true for named nodes (not anonymous punctuation/keywords) |
-| `node.text` | String | raw source text of this node |
+| `node.text()` | &str | raw source text of this node |
 | `node.child_by_kind(kind)` | Option\<&OwnedNode\> | first child whose `kind` matches the given string |
 | `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
 | `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
@@ -349,7 +349,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
                findings.push(EvalFinding {
                    pattern: "call_outside_comment_string".to_string(),
                    line: call.start_line,
-                   snippet: call.text.chars().take(80).collect(),
+                   snippet: call.text().chars().take(80).collect(),
                });
            }
        }
@@ -363,11 +363,11 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
        let mut findings = Vec::new();
        let target_name = "public_method";
        for call in node.descendants_of_kind("call") {
-           if call.text.contains(target_name) {
+           if call.text().contains(target_name) {
                findings.push(EvalFinding {
                    pattern: "target_call".to_string(),
                    line: call.start_line,
-                   snippet: call.text.chars().take(80).collect(),
+                   snippet: call.text().chars().take(80).collect(),
                });
            }
        }
@@ -398,12 +398,12 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
        let mut findings = Vec::new();
        for s in node.descendants_of_kind("string") {
-           let text = s.text.to_string();
+           let text = s.text().to_string();
            if text.contains("SELECT") || text.contains("select") {
                findings.push(EvalFinding {
                    pattern: "sql_string".to_string(),
                    line: s.start_line,
-                   snippet: s.text.chars().take(80).collect(),
+                   snippet: s.text().chars().take(80).collect(),
                });
            }
        }
@@ -494,7 +494,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
                 findings.push(EvalFinding {
                     pattern: "return_inside_if".to_string(),
                     line: ret.start_line,
-                    snippet: ret.text.chars().take(80).collect(),
+                    snippet: ret.text().chars().take(80).collect(),
                 });
             }
         }
@@ -515,7 +515,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
                 findings.push(EvalFinding {
                     pattern: "unguarded_call".to_string(),
                     line: call.start_line,
-                    snippet: call.text.chars().take(80).collect(),
+                    snippet: call.text().chars().take(80).collect(),
                 });
             }
         }
@@ -528,11 +528,11 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
     fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let mut findings = Vec::new();
         for c in node.descendants_of_kind("comment") {
-            if c.text.contains("TODO") || c.text.contains("FIXME") {
+            if c.text().contains("TODO") || c.text().contains("FIXME") {
                 findings.push(EvalFinding {
                     pattern: "todo_fixme".to_string(),
                     line: c.start_line,
-                    snippet: c.text.chars().take(120).collect(),
+                    snippet: c.text().chars().take(120).collect(),
                 });
             }
         }
@@ -549,7 +549,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
             if children.is_empty() {
                 continue;
             }
-            let name_text = &children[0].text;
+            let name_text = children[0].text();
             if name_text.starts_with("_") {
                 continue;
             }
@@ -578,7 +578,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
                 findings.push(EvalFinding {
                     pattern: "bare_except".to_string(),
                     line: e.start_line,
-                    snippet: e.text.chars().take(80).collect(),
+                    snippet: e.text().chars().take(80).collect(),
                 });
             }
         }
@@ -593,7 +593,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
         for cls in node.descendants_of_kind("class_definition") {
             let children = cls.named_children();
             let class_name = if !children.is_empty() {
-                children[0].text.clone()
+                children[0].text().to_string()
             } else {
                 "<unnamed>".to_string()
             };
@@ -838,7 +838,7 @@ List stored patterns using standard cidx-meta browsing tools:
 {
   "repository_alias": "backend-global",
   "pattern": "prepareStatement",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text.contains(\"prepareStatement\") {\n            findings.push(EvalFinding {\n                pattern: \"prepare_statement\".to_string(),\n                line: inv.start_line,\n                snippet: inv.text.chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text().contains(\"prepareStatement\") {\n            findings.push(EvalFinding {\n                pattern: \"prepare_statement\".to_string(),\n                line: inv.start_line,\n                snippet: inv.text().chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content",
   "max_results": 5
 }
@@ -849,7 +849,7 @@ List stored patterns using standard cidx-meta browsing tools:
 {
   "repository_alias": "backend-global",
   "pattern": "test_.*\\.py$",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text.chars().take(80).collect(),\n    }]\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text().chars().take(80).collect(),\n    }]\n}",
   "search_target": "filename"
 }
 ```
@@ -859,7 +859,7 @@ List stored patterns using standard cidx-meta browsing tools:
 {
   "repository_alias": "backend-global",
   "pattern": "TODO|FIXME",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text.contains(\"TODO\") || c.text.contains(\"FIXME\") {\n            findings.push(EvalFinding {\n                pattern: \"todo_fixme\".to_string(),\n                line: c.start_line,\n                snippet: c.text.chars().take(120).collect(),\n            });\n        }\n    }\n    findings\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text().contains(\"TODO\") || c.text().contains(\"FIXME\") {\n            findings.push(EvalFinding {\n                pattern: \"todo_fixme\".to_string(),\n                line: c.start_line,\n                snippet: c.text().chars().take(120).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content",
   "include_patterns": ["*.py", "*.java", "*.ts"],
   "exclude_patterns": ["*/vendor/*", "*/node_modules/*", "*/test/*"]
@@ -871,7 +871,7 @@ List stored patterns using standard cidx-meta browsing tools:
 {
   "repository_alias": ["backend-global", "frontend-global"],
   "pattern": "TODO",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text.contains(\"TODO\") {\n            findings.push(EvalFinding {\n                pattern: \"todo\".to_string(),\n                line: c.start_line,\n                snippet: c.text.chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text().contains(\"TODO\") {\n            findings.push(EvalFinding {\n                pattern: \"todo\".to_string(),\n                line: c.start_line,\n                snippet: c.text().chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content"
 }
 ```
@@ -885,7 +885,7 @@ Find every `prepareStatement(...)` call that is NOT inside a try-with-resources 
   "repository_alias": "myapp-global",
   "pattern": "prepareStatement",
   "search_target": "content",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    let try_blocks = node.descendants_of_kind(\"try_with_resources_statement\");\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text.contains(\"prepareStatement\") {\n            let in_try = try_blocks.iter().any(|t| {\n                t.start_byte <= inv.start_byte && inv.end_byte <= t.end_byte\n            });\n            if !in_try {\n                findings.push(EvalFinding {\n                    pattern: \"no_try_with_resources\".to_string(),\n                    line: inv.start_line,\n                    snippet: inv.text.chars().take(80).collect(),\n                });\n            }\n        }\n    }\n    findings\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    let try_blocks = node.descendants_of_kind(\"try_with_resources_statement\");\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text().contains(\"prepareStatement\") {\n            let in_try = try_blocks.iter().any(|t| {\n                t.start_byte <= inv.start_byte && inv.end_byte <= t.end_byte\n            });\n            if !in_try {\n                findings.push(EvalFinding {\n                    pattern: \"no_try_with_resources\".to_string(),\n                    line: inv.start_line,\n                    snippet: inv.text().chars().take(80).collect(),\n                });\n            }\n        }\n    }\n    findings\n}",
   "include_patterns": ["*.java"]
 }
 ```

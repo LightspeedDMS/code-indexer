@@ -216,7 +216,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>
 
 The evaluator receives the file's root AST node. The `OwnedNode` and `EvalFinding` types are injected automatically by the compiler preamble -- do not define them in your evaluator code.
 
-- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text`. Walk descendant nodes via `node.descendants_of_kind(...)`.
+- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text()`. Walk descendant nodes via `node.descendants_of_kind(...)`.
 - **Output**: `Vec<EvalFinding>` -- a list of zero or more findings. An empty Vec means the file matched Phase 1 but the evaluator found nothing noteworthy.
 
 ### EvalFinding struct
@@ -257,7 +257,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 | `node.end_byte` | usize | byte offset where the node ends |
 | `node.start_line` | usize | 1-based line number where the node starts |
 | `node.is_named` | bool | true for named nodes (not anonymous punctuation/keywords) |
-| `node.text` | String | raw source text of this node |
+| `node.text()` | &str | raw source text of this node |
 | `node.child_by_kind(kind)` | Option\<&OwnedNode\> | first child whose `kind` matches the given string |
 | `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
 | `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
@@ -455,7 +455,7 @@ To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`)
 {
   "repository_alias": "backend-global",
   "pattern": "test_.*\\.py$",
-  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text.chars().take(80).collect(),\n    }]\n}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text().chars().take(80).collect(),\n    }]\n}",
   "search_target": "filename",
   "max_results": 2,
   "max_debug_nodes": 50
