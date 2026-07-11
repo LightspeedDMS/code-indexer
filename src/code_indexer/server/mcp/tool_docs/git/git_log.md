@@ -47,12 +47,6 @@ inputSchema:
         - flat
         - grouped
       default: flat
-    aggregation_mode:
-      type: string
-      description: 'Result aggregation mode for multi-repo queries: global (merge all) or per_repo (group by repository)'
-      enum:
-        - global
-        - per_repo
     rerank_query:
       type: string
       description: 'Query for cross-encoder reranking. When set, commits are semantically reranked before return. Leave empty to preserve the default chronological order.'

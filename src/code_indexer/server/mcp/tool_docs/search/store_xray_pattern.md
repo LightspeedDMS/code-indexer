@@ -144,7 +144,7 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
 ```json
 {
   "scope": "__any__",
-  "pattern_yaml": "name: find-todos\ndescription: \"Find TODO and FIXME comments\"\nlanguage: python\nevaluator_code: |\n  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n      let mut findings = Vec::new();\n      for c in node.descendants_of_kind(\"comment\") {\n          if c.text.contains(\"TODO\") || c.text.contains(\"FIXME\") {\n              findings.push(EvalFinding {\n                  pattern: \"todo_fixme\".to_string(),\n                  line: c.start_line,\n                  snippet: c.text.chars().take(120).collect(),\n              });\n          }\n      }\n      findings\n  }\n"
+  "pattern_yaml": "name: find-todos\ndescription: \"Find TODO and FIXME comments\"\nlanguage: python\nevaluator_code: |\n  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n      let mut findings = Vec::new();\n      for c in node.descendants_of_kind(\"comment\") {\n          if c.text().contains(\"TODO\") || c.text().contains(\"FIXME\") {\n              findings.push(EvalFinding {\n                  pattern: \"todo_fixme\".to_string(),\n                  line: c.start_line,\n                  snippet: c.text().chars().take(120).collect(),\n              });\n          }\n      }\n      findings\n  }\n"
 }
 ```
 

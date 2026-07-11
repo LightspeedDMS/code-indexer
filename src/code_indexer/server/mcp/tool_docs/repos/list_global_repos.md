@@ -16,29 +16,21 @@ outputSchema:
       description: Whether operation succeeded
     repos:
       type: array
-      description: List of global repositories (normalized schema)
+      description: List of global repositories (raw registry rows)
       items:
         type: object
         properties:
-          user_alias:
+          alias_name:
             type: string
-            description: Global repository alias (ends with '-global')
-          golden_repo_alias:
+            description: Global repository alias (unique primary key)
+          repo_name:
             type: string
             description: Base repository name
-          is_global:
-            type: boolean
-            description: Always true for global repos
           repo_url:
             type:
             - string
             - 'null'
             description: Repository URL
-          last_refresh:
-            type:
-            - string
-            - 'null'
-            description: ISO 8601 last refresh timestamp
           index_path:
             type: string
             description: Filesystem path to index
@@ -47,6 +39,20 @@ outputSchema:
             - string
             - 'null'
             description: ISO 8601 creation timestamp
+          last_refresh:
+            type:
+            - string
+            - 'null'
+            description: ISO 8601 last refresh timestamp
+          enable_temporal:
+            type: boolean
+            description: Whether temporal indexing is enabled
+          temporal_options:
+            type: object
+            description: Temporal indexing configuration options
+          enable_scip:
+            type: boolean
+            description: Whether SCIP indexing is enabled
     error:
       type: string
       description: Error message if failed

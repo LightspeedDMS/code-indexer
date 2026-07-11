@@ -36,7 +36,7 @@ outputSchema:
     branch:
       type: string
       description: Branch name pushed
-    commits_pushed:
+    pushed_commits:
       type: integer
       description: Number of commits pushed
 ---
