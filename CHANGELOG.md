@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.44.0] - 2026-07-10
+
+### Fixed
+
+- **#1355/#1356**: Two-pass audit (independent fact-check + adversarial verification) of all 151 MCP tool docs against their handler code found 35 confirmed inaccuracies. Fixed across 40 doc files: a `node.text` field-vs-method Rust compile bug (the method is `.text()`, not a field) that would break copy-pasted X-Ray evaluator examples in `xray_search.md`, `store_xray_pattern.md`, and `xray_explore.md`, with a new regression test guarding against recurrence; SCIP tool docs claiming unsupported `project`/`exact` filters on `scip_callchain`/`scip_impact`/`scip_context`, a wrong `max_depth` cap, and example return shapes that didn't match actual handler output; Git tool docs with a wrong `git_push` output field name, a non-functional `git_commit` `author_email` param, a non-functional `git_log` `aggregation_mode` param, overclaimed `git_status` fields, a false `git_amend` write-mode-gating implication, and undocumented `git_diff`/`switch_branch`/`get_branches` parameters; and Repos/Admin/Guides doc mismatches including wrong response-shape claims on `list_global_repos`/`authenticate`/`cidx_quick_reference`/`poll_delegation_job`/`update_group`, a missing elevation-required error across 11 admin tools, and several wrong tool-name/example/field references. `discover_repositories.md` was deliberately left unchanged -- its documented behavior (discovering not-yet-indexed external repos) looks like a real missing feature rather than a doc bug, flagged separately for a product decision. Documentation-only; zero application code changed.
+
 ## [11.43.0] - 2026-07-10
 
 ### Fixed
