@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.43.0] - 2026-07-10
+
+### Fixed
+
+- **#1354**: Discovered during live ChatGPT MCP connector validation of #1351/#1353 -- the connector completed the full OAuth PKCE flow and successfully called `POST /mcp` (initialize, notifications/initialized, tools/list all 200/202), then still reported "Disconnected" after a brief delay. Root cause (proven via manual protocol replay against staging, with cluster node affinity independently ruled out via cookie-jar testing): `mcp_endpoint`'s session-ID resolution only checked a `session_id` query parameter that no client populates, never the `Mcp-Session-Id` request header that MCP clients (including ChatGPT's) use to convey session continuity after `initialize` -- so a brand-new session ID was minted on every single request, even when hitting the identical cluster node. Added header lookup as the primary source (query param kept as a legacy fallback tier, `str(uuid.uuid4())` as the final fallback for brand-new sessions) -- restores `get_or_create_session`'s originally intended cross-call session persistence. The separate, unauthenticated `/mcp-public` endpoint was confirmed unreachable from ChatGPT's flow and left untouched.
+
 ## [11.42.0] - 2026-07-10
 
 ### Fixed
