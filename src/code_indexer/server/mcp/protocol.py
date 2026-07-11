@@ -879,9 +879,16 @@ async def mcp_endpoint(
     Returns:
         JSON-RPC response (single or batch)
     """
-    # Bug fix: Use session_id from query parameter if provided (for session persistence)
-    # Otherwise generate a new one for new sessions
-    session_id = request.query_params.get("session_id")
+    # Bug #1354: Resolve session ID with three-tier priority per the MCP
+    # Streamable HTTP transport spec:
+    #   1. Mcp-Session-Id REQUEST HEADER (spec-compliant clients send this on
+    #      follow-up calls after initialize; Headers is case-insensitive)
+    #   2. session_id query parameter (legacy fallback, preserved for
+    #      backward compatibility even though nothing internal produces it)
+    #   3. Freshly minted UUID for brand-new sessions
+    session_id = request.headers.get("mcp-session-id")
+    if not session_id:
+        session_id = request.query_params.get("session_id")
     if not session_id:
         session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id

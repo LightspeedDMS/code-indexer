@@ -137,7 +137,7 @@ class TestClearQueryEmbeddingCacheEndpoint:
 
         captured_context: dict = {}
 
-        def capture_template_response(template_name: str, context: dict):
+        def capture_template_response(request, template_name: str, context: dict):
             captured_context.update(context)
             resp = MagicMock()
             resp.status_code = 200
@@ -190,7 +190,7 @@ class TestClearQueryEmbeddingCacheEndpoint:
 
         captured_template_name: list = []
 
-        def capture_template_response(template_name: str, context: dict):
+        def capture_template_response(request, template_name: str, context: dict):
             captured_template_name.append(template_name)
             resp = MagicMock()
             resp.status_code = 200

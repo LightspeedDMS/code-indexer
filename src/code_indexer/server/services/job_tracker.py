@@ -289,7 +289,14 @@ _CLEANUP_JOB_FETCH_LIMIT = 10000
 # of these, complete_job/fail_job must never resurrect or overwrite it — the
 # first terminal write always wins (Bug #1258).  Mirrors the terminal-status
 # set already used by cleanup_old_jobs/_evict_stale_from_memory.
-_TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
+#
+# Bug #1348: this MUST match _TERMINAL_JOB_STATUSES in
+# storage/sqlite_backends.py and storage/postgres/background_jobs_backend.py
+# exactly — those two already guard update_job(guard_terminal_status=True)
+# against this same set; a divergent copy here would let the raw-SQLite
+# _upsert_job path and the backend path disagree on what counts as terminal
+# for the SAME background_jobs table.
+_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -1453,7 +1460,19 @@ class JobTracker:
         self._conn_manager.execute_atomic(operation)
 
     def _upsert_job(self, job: TrackedJob) -> None:
-        """Update an existing job row in background_jobs (by job_id)."""
+        """Update an existing job row in background_jobs (by job_id).
+
+        Bug #1348: update_status() takes its snapshot under self._lock but
+        persists it OUTSIDE the lock via this method. For a progress-only
+        call, job.status is unchanged (e.g. still "running"), so a stale
+        snapshot can be persisted AFTER a concurrent terminal write
+        (complete_job/fail_job/cancel_job) and revert the row's status back
+        to "running" -- the same out-of-lock commit-ordering hazard Bug
+        #1344 fixed for BackgroundJobManager, but on this path. Both write
+        paths below guard non-terminal writes against clobbering an
+        already-terminal row; a terminal job.status is always written
+        unconditionally (first-terminal-write-wins, Bug #1258).
+        """
         if self._backend is not None:
             self._backend.update_job(
                 job.job_id,
@@ -1465,12 +1484,30 @@ class JobTracker:
                 progress=job.progress,
                 progress_info=job.progress_info,
                 metadata=job.metadata,
+                guard_terminal_status=True,
             )
             return
 
+        where_clause = "WHERE job_id = ?"
+        params: List[Any] = [
+            job.status,
+            _dt_to_iso(job.started_at),
+            _dt_to_iso(job.completed_at),
+            json.dumps(job.result) if job.result is not None else None,
+            job.error,
+            job.progress,
+            _serialize_progress_info(job.progress_info),
+            json.dumps(job.metadata) if job.metadata is not None else None,
+            job.job_id,
+        ]
+        if job.status not in _TERMINAL_JOB_STATUSES:
+            placeholders = ", ".join("?" for _ in _TERMINAL_JOB_STATUSES)
+            where_clause += f" AND status NOT IN ({placeholders})"
+            params.extend(_TERMINAL_JOB_STATUSES)
+
         def operation(conn) -> None:
             conn.execute(
-                """UPDATE background_jobs SET
+                f"""UPDATE background_jobs SET
                    status = ?,
                    started_at = ?,
                    completed_at = ?,
@@ -1479,18 +1516,8 @@ class JobTracker:
                    progress = ?,
                    progress_info = ?,
                    metadata = ?
-                   WHERE job_id = ?""",
-                (
-                    job.status,
-                    _dt_to_iso(job.started_at),
-                    _dt_to_iso(job.completed_at),
-                    json.dumps(job.result) if job.result is not None else None,
-                    job.error,
-                    job.progress,
-                    _serialize_progress_info(job.progress_info),
-                    json.dumps(job.metadata) if job.metadata is not None else None,
-                    job.job_id,
-                ),
+                   {where_clause}""",
+                params,
             )
 
         self._conn_manager.execute_atomic(operation)

@@ -40,15 +40,6 @@ logger = logging.getLogger(__name__)
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
 _THREAD_JOIN_GRACE_SECONDS = 5
 
-# DDL to create the cluster_nodes table if absent (idempotent).
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS cluster_nodes (
-    node_id        TEXT PRIMARY KEY,
-    status         TEXT NOT NULL DEFAULT 'online',
-    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"""
-
 
 class NodeHeartbeatService:
     """
@@ -174,6 +165,27 @@ class NodeHeartbeatService:
                 rows = cur.fetchall()
         return [row[0] for row in rows]
 
+    def get_node_addresses(self) -> "dict[str, str]":
+        """Return ``{node_id: 'host:port'}`` for currently-online nodes.
+
+        Used by the shard router to reach the pod that owns a repo. Explicit
+        tuple_row cursor so positional access is correct regardless of a borrowed
+        connection's row_factory.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=tuple_row) as cur:
+                cur.execute(
+                    """
+                    SELECT node_id, hostname, port
+                    FROM   cluster_nodes
+                    WHERE  status = 'online'
+                      AND  last_heartbeat >= NOW() - %s * INTERVAL '1 second'
+                    """,
+                    (self._active_threshold_seconds,),
+                )
+                rows = cur.fetchall()
+        return {str(r[0]): f"{r[1]}:{r[2] or 8090}" for r in rows if r[1]}
+
     def set_leader_election(self, leader_election: Any) -> None:
         """Set leader election service reference for role updates."""
         self._leader_election = leader_election
@@ -215,19 +227,27 @@ class NodeHeartbeatService:
         """Insert or update this node's row with the given status."""
         import os
 
-        hostname = os.uname().nodename
+        # Peers address this node at hostname:port for shard routing. Prefer the
+        # routable pod IP (downward API POD_IP); fall back to the node name. Port
+        # is the server port (CIDX_PORT), default 8090.
+        hostname = os.environ.get("POD_IP") or os.uname().nodename
+        try:
+            port = int(os.environ.get("CIDX_PORT", "8090"))
+        except ValueError:
+            port = 8090
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO cluster_nodes (node_id, hostname, status, last_heartbeat)
-                    VALUES (%s, %s, %s, NOW())
+                    INSERT INTO cluster_nodes (node_id, hostname, port, status, last_heartbeat)
+                    VALUES (%s, %s, %s, %s, NOW())
                     ON CONFLICT (node_id) DO UPDATE
                         SET status         = EXCLUDED.status,
                             hostname       = EXCLUDED.hostname,
+                            port           = EXCLUDED.port,
                             last_heartbeat = NOW()
                     """,
-                    (self._node_id, hostname, status),
+                    (self._node_id, hostname, port, status),
                 )
             conn.commit()
 

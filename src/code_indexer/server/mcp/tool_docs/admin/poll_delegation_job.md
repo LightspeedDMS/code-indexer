@@ -19,22 +19,10 @@ outputSchema:
     status:
       type: string
       enum:
-      - in_progress
+      - waiting
       - completed
       - failed
       description: Current job status
-    phase:
-      type: string
-      enum:
-      - repo_registration
-      - repo_cloning
-      - cidx_indexing
-      - job_running
-      - done
-      description: Current phase of job execution
-    progress:
-      type: object
-      description: Phase-specific progress metrics
     message:
       type: string
       description: Human-readable status message

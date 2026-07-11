@@ -81,4 +81,10 @@ outputSchema:
   - pagination
 ---
 
-Query operational logs from SQLite database with pagination and filtering. USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, user_id, request_path. PERMISSIONS: Requires admin role (admin only). EXAMPLE: {"page": 1, "page_size": 50, "search": "SSO", "level": "ERROR"}
+Query operational logs from SQLite database with pagination and filtering. Requires MCP elevation (TOTP step-up). USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, user_id, request_path. PERMISSIONS: Requires admin role (admin only).
+
+ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+
+EXAMPLE: {"page": 1, "page_size": 50, "search": "SSO", "level": "ERROR"}

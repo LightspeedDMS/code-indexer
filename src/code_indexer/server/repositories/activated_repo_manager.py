@@ -8,6 +8,9 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.server.utils.cancellable_subprocess import (
+    SubprocessCancelledError,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -15,6 +18,7 @@ import os
 import shutil
 import subprocess
 import logging
+import time
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
@@ -60,6 +64,68 @@ class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
 
     pass
+
+
+# Bug #1346: bound on how many __cause__/__context__ links _is_cancellation_chain
+# will follow before giving up. Real chains here are 1-2 deep (ActivatedRepoError
+# wrapping a SubprocessCancelledError); this is a defensive ceiling, not a
+# tuned/expected value.
+_MAX_EXCEPTION_CHAIN_DEPTH = 10
+
+# Bug #1349/#1350: bounded grace-period retry constants for clone-phase
+# orphan cleanup after a clone-phase failure/cancellation. A single-instant
+# os.path.exists() check can miss a partial clone directory that an
+# async/NFS-backed clone backend (e.g. the CoW Storage Daemon) is still
+# materializing a beat after the exception has already propagated. This
+# is NOT a timeout on the indexing job itself (Bug #1218 forbids that) --
+# it is a short, fixed-iteration-count local retry loop around an
+# already-failed/cancelled path, analogous to the SIGTERM->grace->SIGKILL
+# bounded wait in cancellable_subprocess.py.
+#
+# Bug #1350: the original #1349 bound (attempts=5, sleep=0.3s -- worst
+# case (5-1)*0.3s = 1.2s) was empirically proven too short on staging:
+# 3/3 clone-phase cancellations left PERMANENT orphan clone directories
+# because the real CoW-daemon/NFS materialization lag exceeded 1.2s (the
+# decisive evidence was the total ABSENCE of the "Removing orphaned
+# clone..." WARNING below, proving the loop ran to exhaustion without
+# ever observing the directory). Only a LOWER BOUND (>1.2s) was proven --
+# the true materialization delay was never measured, so this widened
+# ~12s total bound -- (attempts - 1) * sleep_seconds = (13-1) * 1.0s = 12s
+# -- is a larger mitigation window, not a proven-sufficient ceiling. It
+# remains a fixed, provably-terminating loop (Rule #14); the permanent
+# fix is a startup/periodic reconcile sweep for registry-orphan clone
+# dirs (mirroring the golden-repo reconciler, Bug #1317) which removes
+# the dependency on guessing a materialization deadline entirely.
+_ORPHAN_CLEANUP_RETRY_ATTEMPTS = 13
+_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS = 1.0
+
+
+def _is_cancellation_chain(exc: BaseException) -> bool:
+    """Bug #1346: detect whether *exc* (or anything it was raised from) is a
+    user-initiated SubprocessCancelledError, as opposed to a genuine failure.
+
+    Both _clone_with_copy_on_write and _run_branch_delta_index re-wrap the
+    original SubprocessCancelledError into an ActivatedRepoError before it
+    reaches _do_activate_repository's outer exception handler -- one path
+    chains explicitly (`raise ... from exc`, setting __cause__), the other
+    implicitly (a bare `raise` inside an `except Exception as e:` block,
+    which Python sets as __context__). This walks both links, bounded to
+    avoid an unbounded loop on a pathological/cyclic chain.
+    """
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while (
+        current is not None
+        and depth < _MAX_EXCEPTION_CHAIN_DEPTH
+        and id(current) not in seen
+    ):
+        if isinstance(current, SubprocessCancelledError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return False
 
 
 class ActivatedRepo(BaseModel):
@@ -191,6 +257,37 @@ class ActivatedRepoManager:
             "ActivatedRepoManager: using shared storage at %s",
             self.activated_repos_dir,
         )
+        self._warn_if_activated_storage_not_shared(shared_dir)
+
+    def _warn_if_activated_storage_not_shared(self, shared_dir: str) -> None:
+        """Warn loudly when activated-repos is NOT on the same shared volume as
+        golden-repos in cluster mode.
+
+        Cluster mode runs multiple pods behind a load balancer. Activation writes
+        a per-user working tree to ``activated-repos``; if that directory is on a
+        pod-local filesystem (e.g. only ``golden-repos`` was mounted on the shared
+        RWX/NFS volume, leaving its ``activated-repos`` sibling on local disk),
+        then a repo activated on one pod is invisible to the others -- browse,
+        list-files, branch and file-content reads 404 on ~(N-1)/N of requests.
+        Detect the split by comparing the backing device of the two sibling
+        directories and surface it, since it otherwise manifests only as opaque,
+        intermittent 404s. Best-effort: any stat failure is ignored.
+        """
+        golden = Path(shared_dir) / "golden-repos"
+        try:
+            if not golden.exists():
+                return
+            if os.stat(self.activated_repos_dir).st_dev != os.stat(golden).st_dev:
+                self.logger.warning(
+                    "ActivatedRepoManager: activated-repos (%s) is on a different "
+                    "filesystem than golden-repos (%s). In a multi-pod cluster a "
+                    "repo activated on one pod will 404 on the others. Mount "
+                    "activated-repos on the same shared RWX volume as golden-repos.",
+                    self.activated_repos_dir,
+                    str(golden),
+                )
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Dual-mode metadata helpers (Bug #587)
@@ -1795,6 +1892,81 @@ class ActivatedRepoManager:
         metadata["wiki_enabled"] = enabled
         self._save_metadata(username, user_alias, metadata)
 
+    def _cleanup_orphaned_clone_after_failure(
+        self, activated_repo_path: str, user_alias: str
+    ) -> None:
+        """Bug #1349: best-effort, BOUNDED-retry removal of a clone-phase
+        orphan directory after a clone-phase failure/cancellation.
+
+        A single-instant os.path.exists() check (the #1345 fix) can miss a
+        partial clone directory that an async/NFS-backed clone backend
+        (e.g. the CoW Storage Daemon) is still materializing a beat after
+        the failure/cancellation exception has already propagated past
+        the check -- the daemon then finishes the reflink copy afterward,
+        leaving a permanent, unregistered orphan on shared storage.
+
+        shutil.rmtree(path, ignore_errors=True) is a safe no-op when the
+        path does not exist yet, so the first attempt is unconditional --
+        no exists() gate needed (and none is a race). A short, FIXED
+        iteration-count retry loop (_ORPHAN_CLEANUP_RETRY_ATTEMPTS,
+        provably terminating) then gives late materialization a brief
+        grace period to settle: it re-checks and, only if the path has
+        reappeared, re-attempts rmtree. In the common (non-racy) case the
+        path is already gone after the first rmtree, so the loop exits
+        immediately on the first check with NO sleep -- this is a grace
+        period on an already-failed/cancelled cleanup path, not a timeout
+        on the indexing job itself (Bug #1218 invariant).
+        """
+        existed_before_cleanup = os.path.exists(activated_repo_path)
+        shutil.rmtree(activated_repo_path, ignore_errors=True)
+        removed_something = existed_before_cleanup
+        retry_attempt_that_removed = 0  # 0 == removed on the immediate attempt
+
+        # Only poll-and-retry when the path was NOT yet visible at the
+        # initial check -- that is exactly the "async backend hasn't
+        # materialized it yet" state this loop exists to wait out. When
+        # it WAS already visible, the unconditional rmtree above already
+        # removed it, so looping further would only add needless latency
+        # to the common, non-racy case.
+        if not existed_before_cleanup:
+            for attempt in range(1, _ORPHAN_CLEANUP_RETRY_ATTEMPTS):
+                time.sleep(_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS)
+                if os.path.exists(activated_repo_path):
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                    removed_something = True
+                    retry_attempt_that_removed = attempt
+                    break
+
+        if removed_something:
+            # Bug #1349 diagnostic: logging which attempt actually caught the
+            # late materialization lets us size _ORPHAN_CLEANUP_RETRY_ATTEMPTS/
+            # _ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS against real observed
+            # NFS/CoW-daemon lag instead of guessing.
+            self.logger.warning(
+                f"Removing orphaned clone at '{activated_repo_path}' "
+                f"after clone-phase failure/cancellation for '{user_alias}' "
+                f"(retry_attempt={retry_attempt_that_removed} of "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            # Bug #1350 diagnostic: the #1349 loop was previously silent on
+            # exhaustion, which is exactly why the real staging orphan leak
+            # required manual disk inspection to detect instead of showing
+            # up in logs. This is a WARNING (not ERROR) because exhaustion
+            # is ambiguous: it may be a genuine no-op (the clone truly never
+            # wrote anything to disk) or a late-materializing async clone
+            # still in flight beyond even this widened window -- either
+            # way, it is now directly observable.
+            self.logger.warning(
+                f"Clone-phase cleanup for '{user_alias}' at "
+                f"'{activated_repo_path}' exhausted "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS} attempts without "
+                "observing/removing the directory; a late-materializing "
+                "async clone may still be in flight.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def _do_activate_repository(
         self,
         username: str,
@@ -1863,11 +2035,30 @@ class ActivatedRepoManager:
                 golden_repo_alias
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
-            success = self._clone_with_copy_on_write(
-                golden_repo_actual_path,
-                activated_repo_path,
-                cancel_check=cancel_check,
-            )
+            try:
+                success = self._clone_with_copy_on_write(
+                    golden_repo_actual_path,
+                    activated_repo_path,
+                    cancel_check=cancel_check,
+                )
+            except ActivatedRepoError:
+                # Bug #1345/#1349: a cancel (or any other failure) during the
+                # CLONE phase must not leave an orphaned partial clone
+                # directory on disk, mirroring the reindex-phase cleanup
+                # below. This is a SECOND, defense-in-depth cleanup attempt:
+                # _clone_with_copy_on_write's own except-Exception handler
+                # already attempts removal, but a network/NFS-backed clone
+                # backend (e.g. the CoW Storage Daemon) can still be
+                # materializing the partial directory a beat AFTER that
+                # inner cleanup ran -- a single-instant os.path.exists()
+                # check (the original #1345 fix) can miss it. The bounded
+                # retry loop in _cleanup_orphaned_clone_after_failure gives
+                # that late materialization a short, fixed grace period to
+                # settle before giving up (Bug #1349).
+                self._cleanup_orphaned_clone_after_failure(
+                    activated_repo_path, user_alias
+                )
+                raise
 
             if not success:
                 raise ActivatedRepoError("Failed to clone repository")
@@ -2016,8 +2207,25 @@ class ActivatedRepoManager:
             }
 
         except Exception as e:
-            error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
-            self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # possibly wrapped as an ActivatedRepoError by
+            # _clone_with_copy_on_write / _run_branch_delta_index) is NOT a
+            # genuine failure -- log it at INFO with a "cancelled by user"
+            # framing instead of ERROR, so it does not read as an incident.
+            # Genuine failures keep logging ERROR unchanged.
+            if _is_cancellation_chain(e):
+                error_msg = (
+                    f"Activation of '{user_alias}' for user '{username}' "
+                    f"was cancelled by user: {str(e)}"
+                )
+                self.logger.info(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
+            else:
+                error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
+                self.logger.error(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
 
             # Report failure through progress callback
             if progress_callback:
@@ -3471,6 +3679,18 @@ class ActivatedRepoManager:
                 repo_path, cancel_check=cancel_check
             )
         except RuntimeError as exc:
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # a RuntimeError subclass) is NOT a genuine reindex failure --
+            # log it at INFO with a "cancelled by user" framing instead of
+            # ERROR. Genuine reindex failures keep logging ERROR unchanged.
+            if isinstance(exc, SubprocessCancelledError):
+                cancel_msg = (
+                    f"Branch-delta reindex cancelled by user for '{user_alias}': {exc}"
+                )
+                self.logger.info(
+                    cancel_msg, extra={"correlation_id": get_correlation_id()}
+                )
+                raise ActivatedRepoError(cancel_msg) from exc
             error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
             self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise ActivatedRepoError(error_msg) from exc

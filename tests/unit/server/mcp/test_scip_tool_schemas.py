@@ -23,6 +23,21 @@ SCIP_TOOLS = [
     "scip_context",
 ]
 
+# Tools whose handlers (scip.py) read and use the "project" filter parameter.
+SCIP_TOOLS_WITH_PROJECT_FILTER = [
+    "scip_definition",
+    "scip_references",
+    "scip_dependencies",
+    "scip_dependents",
+]
+
+# Tools whose handlers never read "project" -- removed from schema (bug #1356).
+SCIP_TOOLS_WITHOUT_PROJECT_FILTER = [
+    "scip_impact",
+    "scip_callchain",
+    "scip_context",
+]
+
 
 class TestSCIPToolSchemasRepositoryAlias:
     """Test that all SCIP tools have repository_alias in their schemas."""
@@ -160,13 +175,34 @@ class TestSCIPToolSchemaBackwardCompatibility:
             # Other SCIP tools require symbol
             assert "symbol" in required
 
-    @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
+    @pytest.mark.parametrize("tool_name", SCIP_TOOLS_WITH_PROJECT_FILTER)
     def test_existing_project_filter_preserved(self, tool_name: str):
-        """Existing project filter parameter is preserved."""
+        """Existing project filter parameter is preserved.
+
+        These 4 tools' handlers (scip.py) read and use the project
+        parameter, so it must remain in their schemas.
+        """
         schema = TOOL_REGISTRY[tool_name]["inputSchema"]
         properties = schema["properties"]
 
-        # All SCIP tools should have project filter (existing functionality)
         assert "project" in properties, (
             f"Tool {tool_name}: existing project filter should be preserved"
+        )
+
+    @pytest.mark.parametrize("tool_name", SCIP_TOOLS_WITHOUT_PROJECT_FILTER)
+    def test_project_filter_not_supported_for_non_reading_tools(self, tool_name: str):
+        """Project filter is absent for tools whose handlers never read it.
+
+        Bug #1356: scip_impact, scip_callchain, and scip_context handlers
+        in scip.py never read the project parameter (unlike
+        scip_definition/references/dependencies/dependents, which do), so
+        it was removed from their schemas to avoid documenting a parameter
+        that has no effect.
+        """
+        schema = TOOL_REGISTRY[tool_name]["inputSchema"]
+        properties = schema["properties"]
+
+        assert "project" not in properties, (
+            f"Tool {tool_name}: project filter should not be present "
+            "since the handler never reads it (bug #1356)"
         )

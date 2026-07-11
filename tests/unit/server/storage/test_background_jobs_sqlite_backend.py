@@ -439,3 +439,102 @@ class TestBackgroundJobsSqliteBackendScipFields:
         assert job["error"] == "SCIP indexer failed for java project"
         assert job["extended_error"] == extended_error
         assert job["failure_reason"] == "Maven dependencies missing"
+
+
+@pytest.mark.slow
+class TestUpdateJobTerminalStatusGuardBug1344:
+    """Bug #1344: update_job() must guard against a stale non-terminal
+    status write reverting a row that has already reached a terminal
+    status (completed/completed_partial/failed/cancelled)."""
+
+    def test_update_job_does_not_revert_terminal_status_to_non_terminal(
+        self, backend
+    ) -> None:
+        """A row already 'cancelled' must not be reverted to 'running' by
+        a later update_job() call carrying a stale non-terminal status --
+        this is the exact reversion cancel_job()'s outside-lock persist can
+        cause when it races the worker's own terminal write."""
+        backend.save_job(
+            job_id="job-1344-terminal",
+            operation_type="add_golden_repo",
+            status="cancelled",
+            created_at="2025-01-15T10:00:00+00:00",
+            completed_at="2025-01-15T10:05:00+00:00",
+            username="admin",
+            progress=42,
+            cancelled=True,
+        )
+
+        # Simulates the stale cancel_job() snapshot write landing late.
+        backend.update_job(
+            job_id="job-1344-terminal",
+            guard_terminal_status=True,
+            status="running",
+            cancelled=True,
+        )
+
+        job = backend.get_job("job-1344-terminal")
+        assert job is not None
+        assert job["status"] == "cancelled", (
+            "a stale 'running' write must never revert an already-terminal "
+            "'cancelled' row"
+        )
+        # Unguarded columns in the same UPDATE are correctly rejected too --
+        # the guard blocks the whole statement, not just the status column.
+        assert job["progress"] == 42
+
+    def test_update_job_without_guard_flag_preserves_legacy_unconditional_write(
+        self, backend
+    ) -> None:
+        """The terminal-status guard is opt-in (guard_terminal_status=False
+        by default). Without explicitly requesting it, update_job() must
+        keep its pre-#1344 unconditional write semantics -- JobTracker's
+        Bug #1256 dedup mechanism deliberately relies on an unconditional
+        write reaching the DB so a real unique-constraint violation from
+        idx_active_job_per_repo surfaces and can be classified as a benign
+        race, rather than being silently absorbed by this guard."""
+        backend.save_job(
+            job_id="job-1344-no-guard",
+            operation_type="add_golden_repo",
+            status="completed",
+            created_at="2025-01-15T10:00:00+00:00",
+            username="admin",
+            progress=100,
+        )
+
+        backend.update_job(
+            job_id="job-1344-no-guard",
+            status="running",
+        )
+
+        job = backend.get_job("job-1344-no-guard")
+        assert job is not None
+        assert job["status"] == "running", (
+            "without guard_terminal_status=True, update_job() must retain "
+            "its prior unconditional write behavior"
+        )
+
+    def test_update_job_terminal_to_different_terminal_status_still_writes(
+        self, backend
+    ) -> None:
+        """A terminal new status must always be allowed through, even when
+        the row is already terminal (the guard only blocks a NON-terminal
+        new status from clobbering an existing terminal row)."""
+        backend.save_job(
+            job_id="job-1344-terminal-2",
+            operation_type="add_golden_repo",
+            status="failed",
+            created_at="2025-01-15T10:00:00+00:00",
+            username="admin",
+            progress=10,
+        )
+
+        backend.update_job(
+            job_id="job-1344-terminal-2",
+            status="cancelled",
+            cancelled=True,
+        )
+
+        job = backend.get_job("job-1344-terminal-2")
+        assert job is not None
+        assert job["status"] == "cancelled"

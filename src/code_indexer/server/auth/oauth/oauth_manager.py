@@ -135,6 +135,11 @@ class OAuthManager:
                 "refresh_token",
                 "client_credentials",
             ],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": [
+                "none",
+                "client_secret_basic",
+            ],
         }
 
     def register_client(

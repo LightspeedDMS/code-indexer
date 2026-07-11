@@ -1851,6 +1851,13 @@ class BackgroundJobManager:
             if existing:
                 self._sqlite_backend.update_job(
                     job_id=job_id,
+                    # Bug #1344: this is the single-job persist path used by
+                    # cancel_job()'s outside-lock write for a RUNNING job, as
+                    # well as the worker's own terminal-status write. Without
+                    # this guard, a stale non-terminal snapshot can commit
+                    # after the worker's terminal write and revert the row's
+                    # status back to a non-terminal value.
+                    guard_terminal_status=True,
                     status=snapshot["status"],
                     started_at=snapshot["started_at"],
                     completed_at=snapshot["completed_at"],

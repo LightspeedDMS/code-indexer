@@ -14,7 +14,7 @@ inputSchema:
   - key_id
 ---
 
-TL;DR: Delete an API key and immediately invalidate it. Delete an API key belonging to the authenticated user. The key will be immediately invalidated.
+TL;DR: Delete an API key and immediately invalidate it. Requires MCP elevation (TOTP step-up). Delete an API key belonging to the authenticated user. The key will be immediately invalidated.
 
 USE CASES:
 - Revoke compromised key
@@ -28,5 +28,9 @@ RETURNS:
 - success: Boolean indicating if deletion succeeded
 
 NOTE: You can only delete your own keys. Use list_api_keys to find key IDs.
+
+ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
 EXAMPLE: {"key_id": "key_xyz"} Returns: {"success": true}

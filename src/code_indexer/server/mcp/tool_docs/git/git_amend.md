@@ -9,7 +9,7 @@ inputSchema:
   properties:
     repository_alias:
       type: string
-      description: Repository alias (must be in write mode or an activated workspace)
+      description: Repository alias
     message:
       type: string
       description: New commit message. If omitted, keeps the existing commit message (--no-edit).

@@ -60,7 +60,12 @@ outputSchema:
   properties:
     status:
       type: string
-      description: 'End status: "ended" if trace was active and ended successfully, "no_active_trace" if no trace was running, "disabled" if Langfuse not configured'
+      enum:
+      - ended
+      - no_active_trace
+      - disabled
+      - error
+      description: 'End status: "ended" if trace was active and ended successfully, "no_active_trace" if no trace was running, "disabled" if Langfuse not configured, "error" if ending the trace failed (e.g. no session context, internal error)'
     trace_id:
       type: string
       description: Unique identifier of the trace that was ended (only present when status is "ended")

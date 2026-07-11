@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.44.0] - 2026-07-10
+
+### Fixed
+
+- **#1355/#1356**: Two-pass audit (independent fact-check + adversarial verification) of all 151 MCP tool docs against their handler code found 35 confirmed inaccuracies. Fixed across 40 doc files: a `node.text` field-vs-method Rust compile bug (the method is `.text()`, not a field) that would break copy-pasted X-Ray evaluator examples in `xray_search.md`, `store_xray_pattern.md`, and `xray_explore.md`, with a new regression test guarding against recurrence; SCIP tool docs claiming unsupported `project`/`exact` filters on `scip_callchain`/`scip_impact`/`scip_context`, a wrong `max_depth` cap, and example return shapes that didn't match actual handler output; Git tool docs with a wrong `git_push` output field name, a non-functional `git_commit` `author_email` param, a non-functional `git_log` `aggregation_mode` param, overclaimed `git_status` fields, a false `git_amend` write-mode-gating implication, and undocumented `git_diff`/`switch_branch`/`get_branches` parameters; and Repos/Admin/Guides doc mismatches including wrong response-shape claims on `list_global_repos`/`authenticate`/`cidx_quick_reference`/`poll_delegation_job`/`update_group`, a missing elevation-required error across 11 admin tools, and several wrong tool-name/example/field references. `discover_repositories.md` was deliberately left unchanged -- its documented behavior (discovering not-yet-indexed external repos) looks like a real missing feature rather than a doc bug, flagged separately for a product decision. Documentation-only; zero application code changed.
+
+## [11.43.0] - 2026-07-10
+
+### Fixed
+
+- **#1354**: Discovered during live ChatGPT MCP connector validation of #1351/#1353 -- the connector completed the full OAuth PKCE flow and successfully called `POST /mcp` (initialize, notifications/initialized, tools/list all 200/202), then still reported "Disconnected" after a brief delay. Root cause (proven via manual protocol replay against staging, with cluster node affinity independently ruled out via cookie-jar testing): `mcp_endpoint`'s session-ID resolution only checked a `session_id` query parameter that no client populates, never the `Mcp-Session-Id` request header that MCP clients (including ChatGPT's) use to convey session continuity after `initialize` -- so a brand-new session ID was minted on every single request, even when hitting the identical cluster node. Added header lookup as the primary source (query param kept as a legacy fallback tier, `str(uuid.uuid4())` as the final fallback for brand-new sessions) -- restores `get_or_create_session`'s originally intended cross-call session persistence. The separate, unauthenticated `/mcp-public` endpoint was confirmed unreachable from ChatGPT's flow and left untouched.
+
+## [11.42.0] - 2026-07-10
+
+### Fixed
+
+- **#1353**: Follow-up to #1351 -- live staging validation showed the ChatGPT MCP connector still failed OAuth authorization even with #1351's discovery-metadata fix live. Root cause (proven via staging `journalctl` logs): the connector requests `GET /.well-known/oauth-authorization-server/mcp` (path-suffixed with the MCP resource's own path segment) rather than the root-level discovery URL, and only the root path was registered, so the suffixed request 404'd and the client fell back to assuming PKCE was unsupported. Added a path-suffixed alias route (`/.well-known/oauth-authorization-server/mcp`) that serves the identical discovery metadata from the same existing handler -- zero behavior change to the pre-existing root route relied on by Claude Code/Claude.ai, verified via runtime route-table inspection to be a non-overlapping literal path with no precedence/collision risk.
+
+## [11.41.0] - 2026-07-10
+
+### Fixed
+
+- **#1351**: OAuth authorization-server discovery metadata (`/.well-known/oauth-authorization-server`) omitted `code_challenge_methods_supported`, so RFC 8414-compliant clients (e.g. ChatGPT's MCP connector) assumed PKCE was unsupported and omitted `code_challenge` when building their `/oauth/authorize` request, which the server's required `code_challenge` parameter then rejected with a 422 ("Field required"). Claude Code/Claude.ai were unaffected because they send `code_challenge` unconditionally. Discovery metadata now advertises `code_challenge_methods_supported: ["S256"]` and `token_endpoint_auth_methods_supported: ["none", "client_secret_basic"]` (pure metadata addition -- PKCE enforcement itself is unchanged). Also corrected a stale comment in `routes.py` that incorrectly warned against adding `/.well-known/oauth-protected-resource`, which already exists and is required by the current MCP auth spec.
+
+## [11.40.0] - 2026-07-10
+
+### Added
+
+- **Cluster-mode hardening (PR #1339, external contribution + review-driven fixes)**: opt-in HRW (rendezvous-hash) repo sharding for cluster mode (`cluster.sharding_enabled`, default off; fail-open and byte-for-byte unchanged when disabled — independently verified), a trigram-index-assisted regex pre-filter for large NFS-backed repos (with a fixed cross-line multiline correctness gap and additional non-ASCII/concurrent-build-safety fixes from the author), and six independent correctness fixes: `scip_impact` scoping (48s→39ms, plus a latent access-control fix), ripgrep-in-image for regex search, a recursive/depth-bounded repo-file-listing endpoint, an activated-repos storage-locality startup warning, and golden-repo clone-URL credential masking.
+
+### Fixed
+
+- Completed the Starlette 1.x `TemplateResponse` call-signature migration across the remaining 29 call sites the PR left unmigrated (`wiki/routes.py`, `web/dependency_map_routes.py`, `web/repo_category_routes.py`, `web/elevation_web_routes.py`, `auth/oauth/routes.py`), with a permanent AST-based regression guard against reintroducing the old signature anywhere in the server tree.
+
+## [11.39.0] - 2026-07-10
+
+### Fixed
+
+- **#1350**: Follow-up to #1349 — live re-validation on staging proved the bounded-retry window for clone-phase activation-cancel orphan cleanup (worst case 1.2s) was too short for real CoW-daemon/NFS materialization lag, still leaving permanent orphan clone directories in 3/3 reproductions. Widened the bound to ~12s (still a fixed, provably-terminating loop) and added a WARNING when the retry loop exhausts without removing anything, so any residual case is now visible in logs instead of requiring manual disk inspection.
+
+## [11.38.0] - 2026-07-10
+
+### Fixed
+
+- **#1349**: Follow-up to #1345 — the clone-phase activation-cancel orphan cleanup used a single-instant `os.path.exists()` check, which could miss a partial clone directory that the CoW Storage Daemon (over NFS) was still materializing a beat after the cancellation/failure exception had already propagated. This let a complete, unregistered orphan clone permanently leak on the CoW-daemon/NFS backend (reproduced 4/4 on live staging). Cleanup now does an unconditional removal attempt first, then a short, fixed-iteration-count bounded retry (worst case ~1.2s) to catch late materialization, with zero added latency in the common non-racy case.
+
+## [11.37.0] - 2026-07-10
+
+### Fixed
+
+- **#1344**: Guard `BackgroundJobManager` job persistence so a stale out-of-lock `running` snapshot can no longer overwrite an already-terminal (`completed`/`completed_partial`/`failed`/`cancelled`) job row, on both the SQLite and PostgreSQL backends. This was a root cause of cancelled/killed jobs appearing to never leave the dashboard (the persisted row could revert to `running` after the worker's terminal write).
+- **#1345**: A user cancel during the CoW clone phase of activation (before branch-delta reindex) now cleans up the partial activated-repo clone directory, matching the existing reindex-phase cleanup.
+- **#1346**: User-initiated activation cancellations now log at INFO ("cancelled by user") instead of ERROR; genuine failures still log ERROR.
+- **#1348**: Extended the #1344 terminal-status guard to `JobTracker._upsert_job` (both its backend `update_job()` call and its raw SQLite `UPDATE`), closing the second, uncovered path to the same stale-`running`-revert race. Also fixed a `_TERMINAL_JOB_STATUSES` divergence in `JobTracker` (was missing `completed_partial`). Together with #1342 and #1344, this completes the fix for cancelled/killed jobs persisting on the dashboard across both in-memory and persisted-row read paths.
+
 ## [11.36.0] - 2026-07-09
 
 ### Fixed
