@@ -243,7 +243,41 @@ class TestGovStructuredLogs:
         )
 
     def test_gov005_swap_in_forced_red_logged(self, log_db):
-        """GOV-005 lands in logs.db when pswpin_rate > 0 forces the band to RED."""
+        """GOV-005 lands in logs.db when pswpin_rate > 0, corroborated by
+        used_pct >= yellow_pct (Bug #1374), forces the band to RED."""
+        db_path, handler = log_db
+        gov = MemoryGovernor(
+            readers=_make_readers(YELLOW_USAGE_PCT, pswpin=NO_SWAP_PAGES_IN),
+            enabled=True,
+            start_sampler=False,
+            yellow_pct=YELLOW_PCT_DEFAULT,
+            red_pct=RED_PCT_DEFAULT,
+            hysteresis_pct=HYSTERESIS_PCT_DEFAULT,
+            red_min_dwell_seconds=NO_RED_DWELL_SECONDS,
+            swap_forces_red=True,
+        )
+        gov._tick()
+        assert gov.band == MemoryBand.YELLOW
+
+        # Inject swap-in activity (delta = SWAP_PAGES_DELTA > 0) while
+        # used_pct remains >= yellow_pct (genuine memory pressure).
+        gov._readers = _make_readers(YELLOW_USAGE_PCT, pswpin=SWAP_PAGES_DELTA)  # type: ignore[attr-defined]
+        gov._prev_pswpin = PREV_PSWPIN_BASELINE
+        gov._tick()
+        assert gov.band == MemoryBand.RED
+
+        handler.flush()
+        rows = _query_gov_rows(db_path)
+        gov005 = [r for r in rows if r[2].startswith("GOV-005")]
+        assert len(gov005) >= 1, f"GOV-005 not in logs.db. All GOV rows: {rows}"
+
+    def test_gov005_not_emitted_at_low_used_pct_despite_swap_bug_1374(self, log_db):
+        """Bug #1374 regression guard: GOV-005 must NOT fire, and the band
+        must NOT go RED, at GREEN_USAGE_PCT(30.0) despite swap-in activity.
+
+        This reproduces the exact production symptom: used_pct=29.4% with
+        residual swap-in noise pinned the band RED for days before this fix.
+        """
         db_path, handler = log_db
         gov = MemoryGovernor(
             readers=_make_readers(GREEN_USAGE_PCT, pswpin=NO_SWAP_PAGES_IN),
@@ -258,13 +292,14 @@ class TestGovStructuredLogs:
         gov._tick()
         assert gov.band == MemoryBand.GREEN
 
-        # Inject swap-in activity (delta = SWAP_PAGES_DELTA > 0)
+        # Inject swap-in activity (delta = SWAP_PAGES_DELTA > 0) while
+        # used_pct stays well below yellow_pct — must NOT force RED.
         gov._readers = _make_readers(GREEN_USAGE_PCT, pswpin=SWAP_PAGES_DELTA)  # type: ignore[attr-defined]
         gov._prev_pswpin = PREV_PSWPIN_BASELINE
         gov._tick()
-        assert gov.band == MemoryBand.RED
+        assert gov.band == MemoryBand.GREEN
 
         handler.flush()
         rows = _query_gov_rows(db_path)
         gov005 = [r for r in rows if r[2].startswith("GOV-005")]
-        assert len(gov005) >= 1, f"GOV-005 not in logs.db. All GOV rows: {rows}"
+        assert len(gov005) == 0, f"GOV-005 falsely emitted in logs.db: {rows}"
