@@ -242,9 +242,19 @@ class AggregateProgressDisplay:
                 file_count=f"{current}/{total} {item_type}",
             )
 
-        # Update progress bar with current state
+        # Update progress bar with current state.
+        # Bug #1378: pass total= here too -- without it Rich's internal
+        # task.total stays frozen at whatever the first update_progress()
+        # call supplied, so a later call's changed total desyncs the bar %
+        # from the "X/Y" counter text (which always reflects the fresh
+        # total). See the identical fix in MultiThreadedProgressManager
+        # (progress/multi_threaded_display.py), the class actually wired to
+        # the CLI's temporal indexing display.
         self.progress_bar.update(
-            self.task_id, completed=current, file_count=f"{current}/{total} {item_type}"
+            self.task_id,
+            total=total,
+            completed=current,
+            file_count=f"{current}/{total} {item_type}",
         )
 
     def update_metrics(

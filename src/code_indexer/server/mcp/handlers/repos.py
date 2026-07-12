@@ -1678,7 +1678,19 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     """Set enable_temporal=True in the SQLite backend and in-memory golden_repo_manager.
 
     Called after _provider_temporal_index_job succeeds to persist the flag.
-    Degrades gracefully: logs a warning on any failure rather than raising.
+    Degrades gracefully: logs an error on any failure rather than raising
+    (except the global_repos exception path below, which re-raises by
+    pre-existing design).
+
+    Bug #1373: repo_alias may arrive already _GLOBAL_SUFFIX-suffixed --
+    _provider_temporal_index_job is invoked with the route-level alias,
+    which is the "-global" form when the admin targets the global repo.
+    Normalize once: bare_alias for golden_repos_metadata (bare-keyed table
+    and in-memory cache), global_alias for global_repos (exactly one
+    "-global" suffix). A golden repo's bare alias can never itself end in
+    "-global" (rejected at registration time in add_golden_repo), so
+    stripping a trailing suffix is unambiguous for both bare and
+    already-suffixed callers.
     """
     if not repo_alias:
         return
@@ -1692,23 +1704,31 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
         )
         return
 
+    bare_alias = (
+        repo_alias[: -len(_GLOBAL_SUFFIX)]
+        if repo_alias.endswith(_GLOBAL_SUFFIX)
+        else repo_alias
+    )
+
     try:
-        if grm._sqlite_backend.update_enable_temporal(repo_alias, True):
-            repo_meta = grm.golden_repos.get(repo_alias)
+        if grm._sqlite_backend.update_enable_temporal(bare_alias, True):
+            repo_meta = grm.golden_repos.get(bare_alias)
             if repo_meta is not None:
                 repo_meta.enable_temporal = True
             logger.info(
-                "Set enable_temporal=True for %s in golden_repos_metadata", repo_alias
+                "Set enable_temporal=True for %s in golden_repos_metadata", bare_alias
             )
         else:
-            logger.warning(
-                "Failed to set enable_temporal=True for %s in golden_repos_metadata",
-                repo_alias,
+            logger.error(
+                "Failed to set enable_temporal=True for %s in golden_repos_metadata "
+                "(0 rows matched) -- temporal index exists but readiness status is "
+                "now permanently wrong until manually corrected",
+                bare_alias,
             )
     except Exception as exc:
-        logger.warning("Error setting enable_temporal for %s: %s", repo_alias, exc)
+        logger.error("Error setting enable_temporal for %s: %s", bare_alias, exc)
 
-    global_alias = f"{repo_alias}-global"
+    global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
     try:
         _app_state = getattr(_utils.app_module.app, "state", None)
         _storage_mode = (
@@ -1724,8 +1744,10 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
                         global_alias,
                     )
                 else:
-                    logger.warning(
-                        "Failed to set enable_temporal=True for %s in global_repos (PG)",
+                    logger.error(
+                        "Failed to set enable_temporal=True for %s in global_repos (PG) "
+                        "(0 rows matched) -- temporal index exists but readiness status "
+                        "is now permanently wrong until manually corrected",
                         global_alias,
                     )
             else:
@@ -1752,8 +1774,10 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
                     "Set enable_temporal=True for %s in global_repos", global_alias
                 )
             else:
-                logger.warning(
-                    "Failed to set enable_temporal=True for %s in global_repos",
+                logger.error(
+                    "Failed to set enable_temporal=True for %s in global_repos "
+                    "(0 rows matched) -- temporal index exists but readiness status "
+                    "is now permanently wrong until manually corrected",
                     global_alias,
                 )
     except Exception as exc:

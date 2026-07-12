@@ -309,6 +309,7 @@ class HNSWIndexCacheStats:
     miss_count: int
     eviction_count: int
     per_repository_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    oversized_load_count: int = 0
 
     @property
     def hit_ratio(self) -> float:
@@ -359,6 +360,7 @@ class HNSWIndexCache:
         self._hit_count = 0
         self._miss_count = 0
         self._eviction_count = 0
+        self._oversized_load_count = 0  # Bug #1377: entries too big to ever cache
 
         # Background cleanup thread (AC2)
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -575,32 +577,51 @@ class HNSWIndexCache:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-    def _enforce_size_limit(self) -> None:
+    def _evict_oversized_entries(self, cap_bytes: float) -> None:
         """
-        Enforce cache size limit by evicting LRU entries (AC3A: Cache size limits).
+        Evict entries whose OWN size exceeds the entire cache cap, in isolation.
 
-        IMPORTANT: Must be called while holding _cache_lock (does not acquire lock itself).
-        Called after adding new entries to ensure cache stays within max_cache_size_mb.
-        Evicts oldest (least recently accessed) entries first.
+        Bug #1377 fix: such an entry can never be made to fit by evicting other
+        (smaller, unrelated) entries -- doing so used to flush the whole cache
+        for zero benefit. These entries are evicted FIRST and IN ISOLATION;
+        no other entry is touched. Must be called while holding _cache_lock.
         """
-        # Skip if no size limit configured
-        if self.config.max_cache_size_mb is None:
-            return
+        oversized_keys = [
+            key for key, e in self._cache.items() if e.index_size_bytes > cap_bytes
+        ]
+        for key in oversized_keys:
+            entry = self._cache.pop(key)
+            self._eviction_count += 1
+            self._oversized_load_count += 1
+            logger.warning(
+                f"HNSW index for {key} ({entry.index_size_bytes / (1024 * 1024):.1f}MB) "
+                f"exceeds the entire cache cap ({self.config.max_cache_size_mb}MB) on its "
+                "own and cannot be cached; it will cold-load on every access. Other "
+                "cached entries were left untouched. Consider raising "
+                "index_cache_max_size_mb or reducing worker count.",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
-        # Calculate current cache size using real index sizes
+    def _evict_lru_until_under_cap(self, max_cache_size_mb: int) -> None:
+        """
+        Evict least-recently-accessed entries until the cache is under the cap.
+
+        Must be called while holding _cache_lock (does not acquire lock itself).
+
+        Args:
+            max_cache_size_mb: Non-Optional cap in MB, narrowed by the caller's
+                None-check (self.config.max_cache_size_mb is Optional[int]).
+        """
         current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (
             1024 * 1024
         )
 
-        # Evict LRU entries until under limit
-        while current_size_mb > self.config.max_cache_size_mb and self._cache:
-            # Find least recently accessed entry
+        while current_size_mb > max_cache_size_mb and self._cache:
             lru_repo_path = min(
                 self._cache.keys(),
                 key=lambda path: self._cache[path].last_accessed,
             )
 
-            # Evict LRU entry
             del self._cache[lru_repo_path]
             self._eviction_count += 1
             logger.debug(
@@ -608,16 +629,37 @@ class HNSWIndexCache:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Recalculate size
             current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (
                 1024 * 1024
             )
 
-        if current_size_mb <= self.config.max_cache_size_mb and self._cache:
+        if current_size_mb <= max_cache_size_mb and self._cache:
             logger.debug(
-                f"Cache size: {current_size_mb}MB / {self.config.max_cache_size_mb}MB",
+                f"Cache size: {current_size_mb}MB / {max_cache_size_mb}MB",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _enforce_size_limit(self) -> None:
+        """
+        Enforce cache size limit by evicting LRU entries (AC3A: Cache size limits).
+
+        IMPORTANT: Must be called while holding _cache_lock (does not acquire lock itself).
+        Called after adding new entries to ensure cache stays within max_cache_size_mb.
+        Evicts oldest (least recently accessed) entries first.
+
+        Bug #1377 fix: individually-oversized entries are evicted FIRST and IN
+        ISOLATION via _evict_oversized_entries() (no other entry is touched),
+        then normal LRU eviction runs via _evict_lru_until_under_cap() for the
+        remaining entries that CAN fit together.
+        """
+        # Skip if no size limit configured
+        max_cache_size_mb = self.config.max_cache_size_mb
+        if max_cache_size_mb is None:
+            return
+
+        cap_bytes = max_cache_size_mb * 1024 * 1024
+        self._evict_oversized_entries(cap_bytes)
+        self._evict_lru_until_under_cap(max_cache_size_mb)
 
     def _cleanup_expired_entries(self) -> None:
         """
@@ -773,4 +815,5 @@ class HNSWIndexCache:
                 miss_count=self._miss_count,
                 eviction_count=self._eviction_count,
                 per_repository_stats=per_repo_stats,
+                oversized_load_count=self._oversized_load_count,
             )

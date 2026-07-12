@@ -768,6 +768,65 @@ class TestBug648GlobalRegistryUpdate:
         )
 
 
+class TestBug1373AliasSuffixMismatch:
+    """Bug #1373: _set_enable_temporal_flag must normalize an already
+    '-global'-suffixed repo_alias instead of using it as-is.
+
+    _provider_temporal_index_job is invoked with the route-level alias,
+    which is already the '-global' form when the admin targets the global
+    repo (inline_admin_ops.py temporal job submission). Before the fix,
+    calling with "evolution-global" caused:
+      - golden_repos_metadata update with alias="evolution-global" (0 rows
+        matched -- that table is keyed by the BARE alias "evolution")
+      - global_repos update with alias_name="evolution-global-global" (0
+        rows matched -- double-suffixed, matches nothing)
+    Both failures silently no-op, permanently misreporting enable_temporal
+    as False even though the temporal index was built successfully.
+    """
+
+    def test_set_enable_temporal_flag_normalizes_already_suffixed_alias(self):
+        """Calling with an already '-global'-suffixed alias must update
+        golden_repos_metadata with the BARE alias and global_repos with the
+        SINGLE '-global'-suffixed alias (never bare, never double-suffixed)."""
+        from code_indexer.server.mcp.handlers.repos import (
+            _set_enable_temporal_flag,
+        )
+
+        mock_grm = MagicMock()
+        mock_grm._sqlite_backend.update_enable_temporal.return_value = True
+        mock_grm.data_dir = "/tmp/bug-1373-fake-data-dir"
+        fake_repo_meta = MagicMock(enable_temporal=False)
+        mock_grm.golden_repos = {"evolution": fake_repo_meta}
+
+        mock_global_registry_instance = MagicMock()
+        mock_global_registry_instance._sqlite_backend = MagicMock()
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.return_value = True
+
+        with (
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                return_value=mock_global_registry_instance,
+            ),
+        ):
+            mock_app_module.golden_repo_manager = mock_grm
+
+            _set_enable_temporal_flag("evolution-global")
+
+        # golden_repos_metadata is keyed by the BARE alias -- must receive
+        # "evolution", never the suffixed input "evolution-global".
+        mock_grm._sqlite_backend.update_enable_temporal.assert_called_once_with(
+            "evolution", True
+        )
+        # global_repos is keyed by the '-global'-suffixed alias -- must
+        # receive exactly "evolution-global", never "evolution-global-global".
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.assert_called_once_with(
+            "evolution-global", True
+        )
+        # In-memory cache (keyed bare) must reflect the update too.
+        assert fake_repo_meta.enable_temporal is True
+
+
 class TestBug648OrphanedSnapshotCleanup:
     """Bug #648 Fix #6: Orphaned snapshot dirs cleaned up when swap_alias raises ValueError."""
 

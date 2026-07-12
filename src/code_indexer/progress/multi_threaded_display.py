@@ -256,8 +256,19 @@ class MultiThreadedProgressManager:
         # Update Rich Progress bar
         if self._progress_started and self.main_task_id is not None:
             files_info = f"{current}/{total} {item_type}"
+            # Bug #1378: always refresh `total` here, not just at add_task()
+            # time. Without this, Rich's internal task.total stays frozen at
+            # whatever value the FIRST update_complete_state() call supplied
+            # (e.g. one temporal quarterly shard's commit count), so once a
+            # later call's `total` legitimately changes (a new shard, or a
+            # different configured embedder's run), the bar % / ETA keep
+            # referencing the stale denominator while the "X/Y" text above
+            # shows the fresh one -- the exact contradictory display (bar
+            # pegged near/at 100% while the counter shows single-digit
+            # percent) reported in Bug #1378.
             self.progress.update(
                 self.main_task_id,
+                total=total,
                 completed=current,
                 files_info=files_info,
                 description=self._current_phase,

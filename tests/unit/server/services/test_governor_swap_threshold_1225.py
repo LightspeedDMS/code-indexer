@@ -21,6 +21,7 @@ Test coverage for:
 
 from __future__ import annotations
 
+import math
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -54,18 +55,29 @@ PSWPIN_AFTER_NOISE_50 = PSWPIN_BASE + NOISE_BELOW_THRESHOLD_50  # delta = 50
 PSWPIN_AFTER_THRESHOLD = PSWPIN_BASE + THRESHOLD_EXACTLY  # delta = 100
 PSWPIN_AFTER_SPIRAL = PSWPIN_BASE + SPIRAL_RATE  # delta = 3630
 
+# Bug #1374: used_pct corroboration required for swap to force/hold RED.
+DEFAULT_USED_PCT = 25.0  # well below 70/85% watermarks (the 8GB/32GB fixture default)
+CORROBORATED_USED_PCT = 72.0  # strictly within [yellow_exit=60, red_exit=75) band
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _fake_readers(pswpin_start: int = PSWPIN_BASE) -> MagicMock:
-    """FakeMemoryReaders returning 25% host usage — band would be GREEN otherwise."""
+def _fake_readers(
+    pswpin_start: int = PSWPIN_BASE, *, used_pct: float = DEFAULT_USED_PCT
+) -> MagicMock:
+    """FakeMemoryReaders returning `used_pct`% host usage (default 25%).
+
+    Uses math.ceil for the byte conversion so a boundary value (e.g. exactly
+    YELLOW_PCT) lands at-or-slightly-above the target percentage rather than
+    a hair below it due to int()-truncation, matching `>=` semantics.
+    """
     readers = MagicMock()
     vm = MagicMock()
     vm.total = HOST_TOTAL
-    vm.used = HOST_USED
+    vm.used = math.ceil(HOST_TOTAL * used_pct / 100.0)
     readers.read_host_memory.return_value = vm
     readers.read_cgroup_v2_max.side_effect = FileNotFoundError
     readers.read_cgroup_v1_limit.side_effect = FileNotFoundError
@@ -160,10 +172,11 @@ class TestSwapThresholdAtOrAboveForcsRed:
     """pswpin_rate AT or ABOVE threshold must force RED (death-spiral guard)."""
 
     def test_rate_at_threshold_forces_red(self):
-        """Rate exactly AT threshold (100) forces RED."""
+        """Rate exactly AT threshold (100), corroborated by used_pct >= yellow_pct
+        (Bug #1374), forces RED."""
         from code_indexer.server.services.memory_governor import MemoryBand
 
-        readers = _fake_readers(PSWPIN_BASE)
+        readers = _fake_readers(PSWPIN_BASE, used_pct=CORROBORATED_USED_PCT)
         gov = _gov_with_threshold(readers, threshold=DEFAULT_THRESHOLD)
         gov._tick()
         readers.read_pswpin.return_value = PSWPIN_AFTER_THRESHOLD  # delta = 100
@@ -172,13 +185,50 @@ class TestSwapThresholdAtOrAboveForcsRed:
         assert gov.band == MemoryBand.RED
 
     def test_spiral_rate_forces_red(self):
-        """Staging spiral rate (3630) forces RED."""
+        """Staging spiral rate (3630), corroborated by used_pct >= yellow_pct
+        (Bug #1374), forces RED."""
         from code_indexer.server.services.memory_governor import MemoryBand
 
-        readers = _fake_readers(PSWPIN_BASE)
+        readers = _fake_readers(PSWPIN_BASE, used_pct=CORROBORATED_USED_PCT)
         gov = _gov_with_threshold(readers, threshold=DEFAULT_THRESHOLD)
         gov._tick()
         readers.read_pswpin.return_value = PSWPIN_AFTER_SPIRAL  # delta = 3630
+        gov._tick()
+
+        assert gov.band == MemoryBand.RED
+
+
+class TestSwapThresholdCorroboratedWithUsedPct:
+    """Bug #1374 — swap RED-forcing requires used_pct >= yellow_pct.
+
+    The governor previously forced/held RED purely from pswpin_rate >=
+    threshold, with ZERO corroboration from actual memory usage.  On
+    production this pinned the band RED for days with used_pct as low as
+    10-29% (host had 22GB free of 30GB) — pure residual swap-in noise.
+    """
+
+    def test_threshold_rate_at_default_low_used_pct_does_not_force_red(self):
+        """Rate AT threshold (100) at the default 25% used_pct fixture must
+        NOT force RED — used_pct corroboration is required."""
+        from code_indexer.server.services.memory_governor import MemoryBand
+
+        readers = _fake_readers(PSWPIN_BASE)  # default used_pct=25.0
+        gov = _gov_with_threshold(readers, threshold=DEFAULT_THRESHOLD)
+        gov._tick()
+        readers.read_pswpin.return_value = PSWPIN_AFTER_THRESHOLD  # delta = 100
+        gov._tick()
+
+        assert gov.band == MemoryBand.GREEN
+
+    def test_threshold_rate_at_exact_yellow_pct_boundary_forces_red(self):
+        """Rate AT threshold(100) with used_pct exactly == yellow_pct(70.0)
+        DOES force RED — boundary case proving `>=` semantics."""
+        from code_indexer.server.services.memory_governor import MemoryBand
+
+        readers = _fake_readers(PSWPIN_BASE, used_pct=YELLOW_PCT)  # exactly 70.0
+        gov = _gov_with_threshold(readers, threshold=DEFAULT_THRESHOLD)
+        gov._tick()
+        readers.read_pswpin.return_value = PSWPIN_AFTER_THRESHOLD  # delta = 100
         gov._tick()
 
         assert gov.band == MemoryBand.RED
@@ -236,10 +286,17 @@ class TestHotReloadThreshold:
     """Changing threshold via live config takes effect on the next tick."""
 
     def test_raise_threshold_stops_forcing_red(self):
-        """Threshold raised above current rate: band returns GREEN on next tick."""
+        """Threshold raised above current rate: band exits RED on next tick.
+
+        used_pct is held at CORROBORATED_USED_PCT throughout so swap can
+        legitimately force RED (Bug #1374 corroboration requirement); once
+        the threshold is raised above the ongoing rate, swap no longer
+        forces RED and the band settles back to YELLOW (used_pct alone is
+        within the yellow band at this level, not GREEN).
+        """
         from code_indexer.server.services.memory_governor import MemoryBand
 
-        readers = _fake_readers(PSWPIN_BASE)
+        readers = _fake_readers(PSWPIN_BASE, used_pct=CORROBORATED_USED_PCT)
         # Start with threshold=1 so rate=50 forces RED
         svc = _make_config_svc(threshold=1)
         gov = _gov_with_threshold(readers, threshold=1, config_service=svc)
@@ -253,20 +310,25 @@ class TestHotReloadThreshold:
         readers.read_pswpin.return_value = PSWPIN_AFTER_NOISE_50  # same delta = 50
         gov._tick()
 
-        assert gov.band == MemoryBand.GREEN  # threshold no longer triggered
+        assert gov.band == MemoryBand.YELLOW  # threshold no longer triggered
 
     def test_lower_threshold_starts_forcing_red(self):
-        """Threshold lowered below current rate: band becomes RED on next tick."""
+        """Threshold lowered below current rate: band becomes RED on next tick.
+
+        used_pct is held at CORROBORATED_USED_PCT throughout (Bug #1374
+        corroboration requirement) so the mid-test resting state is YELLOW
+        (used_pct alone is within the yellow band), not GREEN.
+        """
         from code_indexer.server.services.memory_governor import MemoryBand
 
-        readers = _fake_readers(PSWPIN_BASE)
+        readers = _fake_readers(PSWPIN_BASE, used_pct=CORROBORATED_USED_PCT)
         # Start with threshold=200 so delta=100 does NOT force RED
         svc = _make_config_svc(threshold=200)
         gov = _gov_with_threshold(readers, threshold=200, config_service=svc)
         gov._tick()  # baseline — pswpin = PSWPIN_BASE
         readers.read_pswpin.return_value = PSWPIN_AFTER_THRESHOLD  # delta = 100
         gov._tick()
-        assert gov.band == MemoryBand.GREEN  # high threshold, no RED
+        assert gov.band == MemoryBand.YELLOW  # high threshold, no RED
 
         # Now lower threshold below the ongoing rate AND advance pswpin so delta is 100 again
         svc.get_config.return_value.cache_config.memory_governor_swap_pswpin_red_threshold = 50
@@ -299,8 +361,9 @@ class TestGov005LogGating:
             assert len(gov005_calls) == 0
 
     def test_gov005_emitted_at_threshold(self):
-        """GOV-005 is emitted when pswpin_rate >= threshold forces RED."""
-        readers = _fake_readers(PSWPIN_BASE)
+        """GOV-005 is emitted when pswpin_rate >= threshold, corroborated by
+        used_pct >= yellow_pct (Bug #1374), forces RED."""
+        readers = _fake_readers(PSWPIN_BASE, used_pct=CORROBORATED_USED_PCT)
         gov = _gov_with_threshold(readers, threshold=DEFAULT_THRESHOLD)
         gov._tick()
         readers.read_pswpin.return_value = PSWPIN_AFTER_THRESHOLD  # delta = 100
