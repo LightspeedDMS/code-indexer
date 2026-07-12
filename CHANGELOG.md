@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.46.0] - 2026-07-12
+
+### Fixed
+
+- **#1368**: found via live E2E validation of Epic #1333 S3 on the staging cluster -- `HNSWOrphanRepairSweepScheduler` raised `AttributeError` ('dict' object has no attribute 'enabled'/'batch_size') on every real SQLite AND PostgreSQL config load, because `hnsw_orphan_repair_sweep_config` was the one nested-dataclass `ServerConfig` field missing its dict-to-dataclass conversion block in `_dict_to_server_config` (every sibling section, e.g. `data_retention_config`/`activated_reaper_config`, already had one). The scheduler's defensive fallback masked this functionally (fallback values happened to match the story's intended defaults), but it meant any Web-UI change to the sweep's enable/batch-size/tick-interval settings had zero effect. Added the missing conversion block; regression coverage now drives the real SQLite seed-then-restart cycle and a live-PostgreSQL round trip against the actual `server_config` schema, not a hand-constructed config object injected in-process (the unfaithful-mock gap that let this through undetected).
+
 ## [11.45.0] - 2026-07-12
 
 ### Added
