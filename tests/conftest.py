@@ -412,6 +412,120 @@ def clear_rate_limiters():
         pass  # Rate limiter might not be available in all test contexts
 
 
+# Bug #1370: module-level `rich.console.Console()` singletons that cache
+# color/terminal detection at import time. See
+# tests/unit/cli/test_console_singleton_test_isolation_bug1370.py for the
+# reproduction and rationale.
+#
+# Two independent import paths load each of these modules as SEPARATE
+# module objects (`code_indexer.X` via PYTHONPATH=./src, and
+# `src.code_indexer.X` via project-root-on-sys.path), each with its own
+# `console` singleton -- both prefixes must be covered.
+_CONSOLE_SINGLETON_MODULE_SUFFIXES = [
+    "cli",
+    "cli_keys",
+    "cli_watch_helpers",
+    "cli_cicd",
+    "cli_scip",
+    "cli_files",
+    "cli_index",
+    "proxy.cli_integration",
+    "cli_help",
+    "cli_daemon_lifecycle",
+    "cli_git",
+    "cli_daemon_delegation",
+    "mode_specific_handlers",
+    "utils.temporal_display",
+]
+_CONSOLE_SINGLETON_MODULES = [
+    f"{prefix}.{suffix}"
+    for prefix in ("code_indexer", "src.code_indexer")
+    for suffix in _CONSOLE_SINGLETON_MODULE_SUFFIXES
+]
+
+# Bug #1370: rich.Console() also honors FORCE_COLOR/NO_COLOR read LIVE off
+# os.environ (https://force-color.org/) on every color-detection call, not
+# just at construction. If FORCE_COLOR is set in the ambient sandbox/shell
+# running pytest, it forces color on for every freshly-built Console() too
+# -- including ones built inside Click command bodies, ones built by a CLI
+# subprocess spawned via `subprocess.run([sys.executable, "-m",
+# "code_indexer.cli", ...])` (inherits os.environ), and ones built directly
+# by test code. This is independent of test order.
+_FORCE_COLOR_ENV_VAR = "FORCE_COLOR"
+_NO_COLOR_ENV_VAR = "NO_COLOR"
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_cli_console_singletons():
+    """Reset module-level rich Console() singletons before each test.
+
+    Bug #1370: rich.console.Console() detects terminal/color capability
+    at CONSTRUCTION time and caches it for the object's lifetime (Rich
+    calls _detect_color_system() exactly once in __init__ and stores the
+    result in self._color_system). The modules listed above each build
+    their console exactly once, at import. In a single pytest process
+    running hundreds of Click CliRunner-based CLI tests together (as
+    fast-automation.sh does), whichever test (or the process's first
+    import of these modules) happened to run first "freezes"
+    color/highlight behavior for every subsequent test that touches the
+    shared singleton -- splitting plain-text assertions with stray ANSI
+    codes (Rich's automatic ReprHighlighter wraps numbers even without
+    an explicit style=) and, for JSON-emitting commands, leaking
+    spinner/progress control sequences ahead of the payload.
+
+    This fixture also normalizes os.environ (stripping FORCE_COLOR,
+    forcing NO_COLOR=1) for the duration of each test, since Rich reads
+    these live rather than only at construction -- this covers
+    subprocess-spawned CLI invocations and test-local Console() builds
+    that the singleton reset above cannot reach.
+
+    This fixture does NOT change production code_indexer.cli behavior --
+    real CLI usage is one process per invocation, so the caching is
+    harmless there. It only forces a fixed, deterministic Console
+    (force_terminal=False, no_color=True) and environment for the
+    duration of each test so output is stable and order-independent
+    regardless of what any other test in the same pytest process did to
+    these singletons or the environment.
+    """
+    import importlib
+    import os
+
+    from rich.console import Console
+
+    modules = []
+    for module_name in _CONSOLE_SINGLETON_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "console"):
+            modules.append(module)
+
+    originals = {module: module.console for module in modules}
+    for module in modules:
+        module.console = Console(force_terminal=False, no_color=True)
+
+    had_force_color = _FORCE_COLOR_ENV_VAR in os.environ
+    original_force_color = os.environ.pop(_FORCE_COLOR_ENV_VAR, None)
+    had_no_color = _NO_COLOR_ENV_VAR in os.environ
+    original_no_color = os.environ.get(_NO_COLOR_ENV_VAR)
+    os.environ[_NO_COLOR_ENV_VAR] = "1"
+
+    yield
+
+    for module, original_console in originals.items():
+        module.console = original_console
+
+    if had_force_color:
+        os.environ[_FORCE_COLOR_ENV_VAR] = original_force_color  # type: ignore[assignment]
+    else:
+        os.environ.pop(_FORCE_COLOR_ENV_VAR, None)
+    if had_no_color:
+        os.environ[_NO_COLOR_ENV_VAR] = original_no_color  # type: ignore[assignment]
+    else:
+        os.environ.pop(_NO_COLOR_ENV_VAR, None)
+
+
 @pytest.fixture
 def temp_audit_dir():
     """Provide temporary directory for audit logging tests."""
