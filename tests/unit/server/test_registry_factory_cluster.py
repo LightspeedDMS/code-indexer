@@ -357,6 +357,53 @@ def test_repos_handler_update_enable_temporal_uses_postgres_backend(
     assert flag_called is True
 
 
+def test_repos_handler_update_enable_temporal_normalizes_suffixed_alias_postgres_bug_1373(
+    tmp_path: Path,
+) -> None:
+    """
+    Bug #1373: _set_enable_temporal_flag() may be called with an ALREADY
+    '-global'-suffixed repo_alias (the route-level alias for global repos,
+    as passed by _provider_temporal_index_job). In postgres mode it must
+    still update golden_repos_metadata with the BARE alias and global_repos
+    with exactly one '-global' suffix -- never the double-suffixed
+    "evolution-global-global" that matches no row.
+    """
+    backend = _make_backend_with_one_repo("evolution-global", "evolution")
+
+    grm_mock = MagicMock()
+    grm_mock.data_dir = str(tmp_path)
+    grm_mock._sqlite_backend = MagicMock()
+    grm_mock._sqlite_backend.update_enable_temporal.return_value = True
+    grm_mock.golden_repos = {"evolution": MagicMock()}
+
+    from code_indexer.server import app as app_module
+
+    saved_grm = getattr(app_module, "golden_repo_manager", None)
+
+    with _app_state_postgres_mode(backend):
+        try:
+            app_module.golden_repo_manager = grm_mock
+
+            from code_indexer.server.mcp.handlers.repos import (
+                _set_enable_temporal_flag,
+            )
+
+            _set_enable_temporal_flag("evolution-global")
+        finally:
+            if saved_grm is not None:
+                app_module.golden_repo_manager = saved_grm
+            elif hasattr(app_module, "golden_repo_manager"):
+                delattr(app_module, "golden_repo_manager")
+
+    grm_mock._sqlite_backend.update_enable_temporal.assert_called_once_with(
+        "evolution", True
+    )
+    assert len(backend.update_enable_temporal_calls) == 1
+    alias_called, flag_called = backend.update_enable_temporal_calls[0]
+    assert alias_called == "evolution-global"
+    assert flag_called is True
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Bug #1308 - RefreshScheduler resolves PostgreSQL registry in cluster
 # mode instead of an empty per-node SQLite registry bound at construction.
