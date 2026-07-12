@@ -103,9 +103,7 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
             calls["n"] += 1
             return (index_v1 if calls["n"] == 1 else index_v2), {0: "v0"}
 
-        idx1, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
+        idx1, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx1, index_v1)
         self.assertEqual(calls["n"], 1)
 
@@ -113,9 +111,7 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
         new_time = time.time() + 100
         os.utime(index_file, (new_time, new_time))
 
-        idx2, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
+        idx2, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx2, index_v2)  # stale entry evicted and reloaded
         self.assertEqual(calls["n"], 2)
 
@@ -131,12 +127,8 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
             calls["n"] += 1
             return real_index, {0: "v0"}
 
-        idx1, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
-        idx2, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
+        idx1, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
+        idx2, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx1, real_index)
         self.assertIs(idx2, real_index)
         self.assertEqual(calls["n"], 1)  # no reload when mtime is unchanged
@@ -152,12 +144,8 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
             calls["n"] += 1
             return real_index, {0: "v0"}
 
-        idx1, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
-        idx2, _ = self.cache.get_or_load(
-            self.repo_path, loader, index_file=index_file
-        )
+        idx1, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
+        idx2, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx1, real_index)
         self.assertIs(idx2, real_index)  # served cached, no crash
         self.assertEqual(calls["n"], 1)
