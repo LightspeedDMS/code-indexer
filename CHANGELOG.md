@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.47.0] - 2026-07-12
+
+### Fixed
+
+- **#1370 / #1372**: two test-infrastructure-only bugs found while running `e2e-automation.sh`/`fast-automation.sh` as the final regression gate for Epic #1333. No production `code_indexer.cli` runtime behavior changed for either.
+  - **#1370**: 14 modules (`cli.py` and 13 siblings) each construct a module-level `rich.Console()` singleton that caches color/terminal detection at import time; a single pytest process running hundreds of Click `CliRunner`-based tests reused whichever test's import ran first, corrupting plain-text output assertions with stray ANSI codes in ~23 unrelated CLI test files. A dual import-path issue (`code_indexer.cli` vs `src.code_indexer.cli` loading as separate module objects) and Rich reading `FORCE_COLOR`/`NO_COLOR` live off `os.environ` on every color check (not just at construction) compounded the effect. Fixed via one autouse pytest fixture that resets all singletons and normalizes the environment per test -- order-independence proven for all 23 originally-failing node IDs.
+  - **#1372**: `tests/e2e/conftest.py`'s `e2e_cli_env` fixture (and two sibling CLI-env builders under `tests/e2e/phase5_resiliency/`) blindly copied the full ambient environment into every real `cidx` subprocess invocation, so a `FORCE_COLOR` set in the shell running pytest (e.g. an interactive session) forced color output even on piped/captured stdout, breaking `e2e-automation.sh` Phase 1's plain-text result-count regex. Fixed with a shared `sanitize_cli_subprocess_env()` helper; confirmed `FORCE_COLOR=0` does not work (Rich treats any present value as "force on") -- the key must be removed entirely.
+
 ## [11.46.0] - 2026-07-12
 
 ### Fixed
