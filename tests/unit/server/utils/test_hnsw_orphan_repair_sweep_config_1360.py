@@ -47,3 +47,42 @@ class TestServerConfigWiresHNSWOrphanRepairSweepConfig:
             hnsw_orphan_repair_sweep_config=custom,
         )
         assert config.hnsw_orphan_repair_sweep_config.batch_size == 7
+
+
+class TestDictToServerConfigDeserializesHNSWOrphanRepairSweep:
+    """Bug #1368: _dict_to_server_config must convert a raw
+    hnsw_orphan_repair_sweep_config dict (as loaded from the runtime DB's
+    JSON column, PG or SQLite) into a real HNSWOrphanRepairSweepConfig
+    instance -- mirroring the sibling activated_reaper_config /
+    data_retention_config conversion blocks. Without this conversion, the
+    scheduler's `cfg.enabled` / `cfg.batch_size` attribute access raises
+    AttributeError on every real cluster/solo deployment, silently caught
+    by the scheduler's defensive except-Exception fallback.
+    """
+
+    def test_dict_to_server_config_deserializes_hnsw_orphan_repair_sweep_config(
+        self, tmp_path
+    ) -> None:
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        manager = ServerConfigManager(str(tmp_path))
+        config_dict = {
+            "server_dir": str(tmp_path),
+            "hnsw_orphan_repair_sweep_config": {
+                "enabled": False,
+                "batch_size": 42,
+                "tick_interval_minutes": 3,
+            },
+        }
+        config = manager._dict_to_server_config(config_dict)
+
+        assert isinstance(
+            config.hnsw_orphan_repair_sweep_config, HNSWOrphanRepairSweepConfig
+        ), (
+            "hnsw_orphan_repair_sweep_config must be a real "
+            "HNSWOrphanRepairSweepConfig instance, not a plain dict "
+            "(Bug #1368: 'dict' object has no attribute 'enabled')"
+        )
+        assert config.hnsw_orphan_repair_sweep_config.enabled is False
+        assert config.hnsw_orphan_repair_sweep_config.batch_size == 42
+        assert config.hnsw_orphan_repair_sweep_config.tick_interval_minutes == 3

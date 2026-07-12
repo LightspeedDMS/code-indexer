@@ -2275,6 +2275,27 @@ class ServerConfigManager:
                 **config_dict["activated_reaper_config"]
             )
 
+        # Bug #1368 (Story #1360 / Epic #1333 S3): Convert
+        # hnsw_orphan_repair_sweep_config dict to HNSWOrphanRepairSweepConfig.
+        # Without this block, the raw dict round-tripped through the runtime
+        # DB's JSON column (PG AND SQLite -- both merge paths call this
+        # method) is passed straight into ServerConfig(**config_dict)
+        # unconverted; __post_init__ only replaces None, not a dict, so
+        # `cfg.enabled` / `cfg.batch_size` raise AttributeError on every
+        # normal cluster/solo deployment. Unknown keys are filtered for
+        # rolling-upgrade safety -- same fields() pattern as
+        # memory_retrieval_config / admission_control_config conversion.
+        if "hnsw_orphan_repair_sweep_config" in config_dict and isinstance(
+            config_dict["hnsw_orphan_repair_sweep_config"], dict
+        ):
+            _hnsw_dict = config_dict["hnsw_orphan_repair_sweep_config"]
+            _hnsw_allowed = {f.name for f in fields(HNSWOrphanRepairSweepConfig)}
+            config_dict["hnsw_orphan_repair_sweep_config"] = (
+                HNSWOrphanRepairSweepConfig(
+                    **{k: v for k, v in _hnsw_dict.items() if k in _hnsw_allowed}
+                )
+            )
+
         # Story #977: Convert xray_config dict to XRayConfig
         if "xray_config" in config_dict and isinstance(
             config_dict["xray_config"], dict
