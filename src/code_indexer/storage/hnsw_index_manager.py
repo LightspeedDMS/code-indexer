@@ -33,6 +33,31 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+class HNSWIntegrityRepairError(RuntimeError):
+    """Raised when finalize-time orphan repair fails to reach zero orphans.
+
+    Story #1359 (Epic #1333, S2): every build/finalize path runs
+    check_integrity() -> repair_orphans() -> re-verify before the index is
+    considered done. S1's repair_orphans() is deterministic and proven to
+    drive orphan_count to exactly 0 for both measured regimes (near-tie,
+    exact-tie), so this should never fire in practice -- if it ever does,
+    that is itself the signal something is wrong (a genuine repair-pipeline
+    regression), and it must surface loudly rather than publish a silent
+    partial index (Messi Rule 2: fail fast, no fallback).
+    """
+
+
+def count_orphan_errors(integrity_result: Dict[str, Any]) -> int:
+    """Count orphan-node entries in a check_integrity() errors list.
+
+    check_integrity() does not expose a structured orphan_count field --
+    orphans are reported as entries in the `errors` list containing the
+    substring "orphan" (verified against the real fork; see S1's own
+    `_orphan_ids` test helper pattern).
+    """
+    return sum(1 for e in integrity_result.get("errors", []) if "orphan" in e)
+
+
 def _is_corrupt_index_error(exc: BaseException) -> bool:
     """Return True if *exc* is hnswlib's corrupt-index RuntimeError.
 
@@ -126,6 +151,72 @@ class HNSWIndexManager:
         # Any: hnswlib.Index is a C extension with no Python type stubs
         index.save_index(path)
 
+    def _detect_and_repair_orphans(self, index: Any, context: str) -> None:
+        """Detect + repair HNSW orphans on an in-memory index before it is
+        persisted (Story #1359 AC1/AC2).
+
+        Runs check_integrity() and logs orphan_count (AC1 -- count only, no
+        ratio: there is no threshold that consumes it, per the AC4
+        zero-tolerance KISS design). If orphan_count > 0, runs S1's
+        repair_orphans() and re-verifies via check_integrity() BEFORE the
+        caller's atomic swap publishes the index (AC2). A repair that fails
+        to reach zero orphans fails LOUD -- never a silent partial index.
+
+        Near-tie detect+repair is the EXPECTED happy path for temporal
+        rebuilds (not an anomaly), so the "detected, repairing" line logs at
+        INFO -- WARNING is reserved for the non-convergence failure case, so
+        this does not trip the Story #1122 post-E2E log-audit gate on
+        ordinary, successful rebuilds.
+
+        Args:
+            index: hnswlib.Index instance with vectors already added, not
+                yet saved to disk.
+            context: short label identifying the call site (e.g.
+                "build_index", "rebuild_from_vectors",
+                "incremental_update") for log correlation.
+
+        Raises:
+            HNSWIntegrityRepairError: repair_orphans() ran but orphans
+                remain afterward.
+        """
+        integrity = index.check_integrity()
+        orphan_count = count_orphan_errors(integrity)
+        logger.info(
+            "HNSW finalize integrity check (%s): orphan_count=%d",
+            context,
+            orphan_count,
+        )
+
+        if orphan_count == 0:
+            return
+
+        logger.info(
+            "HNSW finalize (%s): %d orphan(s) detected, running repair_orphans()",
+            context,
+            orphan_count,
+        )
+        index.repair_orphans()
+
+        post_repair = index.check_integrity()
+        post_orphan_count = count_orphan_errors(post_repair)
+
+        if post_orphan_count > 0:
+            logger.error(
+                "HNSW finalize (%s): repair_orphans() failed to eliminate all "
+                "orphans (%d remain after repair)",
+                context,
+                post_orphan_count,
+            )
+            raise HNSWIntegrityRepairError(
+                f"HNSW orphan repair failed for {context}: "
+                f"{post_orphan_count} orphan(s) remain after repair_orphans()"
+            )
+
+        logger.info(
+            "HNSW finalize (%s): repair_orphans() succeeded, orphan_count now 0",
+            context,
+        )
+
     def build_index(
         self,
         collection_path: Path,
@@ -189,6 +280,10 @@ class HNSWIndexManager:
             )
 
         index.add_items(vectors, labels)
+
+        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+        # persisted, so a freshly-built index never finalizes with orphans.
+        self._detect_and_repair_orphans(index, context=f"build_index:{collection_path}")
 
         # Report info message at completion
         if progress_callback:
@@ -553,6 +648,13 @@ class HNSWIndexManager:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="🔧 Building HNSW index...")
             index.add_items(vectors, labels)
+
+            # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index
+            # is persisted. ONE shared code path serves regular, temporal,
+            # and multimodal rebuilds (all converge on this method).
+            self._detect_and_repair_orphans(
+                index, context=f"rebuild_from_vectors:{collection_path}"
+            )
 
             # Save to temp file
             index.save_index(str(temp_file))
@@ -1058,6 +1160,16 @@ class HNSWIndexManager:
         # Use INFO level so it's visible in logs
         logger.info(
             f"⚡ INCREMENTAL HNSW UPDATE: Adding/updating {num_new_vectors} vectors (total index size: {current_index_size})"
+        )
+
+        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+        # persisted. This is the incremental path's finalize checkpoint --
+        # the two single-point add_items sites in add_or_update_vector()
+        # batch/defer the full-index integrity check to here rather than
+        # running check_integrity() (O(elements)) on every single-point add,
+        # which would be impractical for a per-point incremental operation.
+        self._detect_and_repair_orphans(
+            index, context=f"incremental_update:{collection_path}"
         )
 
         # Save index to disk atomically — temp file + rename prevents corruption on crash

@@ -502,6 +502,18 @@ class DependencyMapTrackingBackend(Protocol):
 
     def get_run_history(self, limit: int = 5) -> List[Dict[str, Any]]: ...
 
+
+@runtime_checkable
+class HNSWOrphanSweepStateBackend(Protocol):
+    """Protocol for HNSW orphan repair fleet sweep durable state
+    (Story #1360, Epic #1333 S3)."""
+
+    def get_state(self) -> Dict[str, Any]: ...
+
+    def record_item_processed(self, key: str, outcome: str) -> None: ...
+
+    def complete_pass(self) -> None: ...
+
     def cleanup_old_history(self, cutoff_iso: str) -> int:
         """Delete dependency_map_run_history records older than cutoff_iso.
 

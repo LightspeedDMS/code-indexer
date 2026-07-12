@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         GlobalReposBackend,
         GoldenRepoMetadataBackend,
         GroupsBackend,
+        HNSWOrphanSweepStateBackend,
         LogsBackend,
         MaintenanceBackend,
         NodeMetricsBackend,
@@ -82,6 +83,7 @@ class BackendRegistry:
     ssh_keys: "SSHKeysBackend"
     golden_repo_metadata: "GoldenRepoMetadataBackend"
     dependency_map_tracking: "DependencyMapTrackingBackend"
+    hnsw_orphan_sweep_state: "HNSWOrphanSweepStateBackend"
     git_credentials: "GitCredentialsBackend"
     repo_category: "RepoCategoryBackend"
     groups: "GroupsBackend"
@@ -180,6 +182,7 @@ class StorageFactory:
             GitCredentialsSqliteBackend,
             GlobalReposSqliteBackend,
             GoldenRepoMetadataSqliteBackend,
+            HNSWOrphanSweepStateSqliteBackend,
             LogsSqliteBackend,
             MaintenanceSqliteBackend,
             NodeMetricsSqliteBackend,
@@ -228,6 +231,7 @@ class StorageFactory:
             ssh_keys=SSHKeysSqliteBackend(db_path),
             golden_repo_metadata=GoldenRepoMetadataSqliteBackend(db_path),
             dependency_map_tracking=DependencyMapTrackingBackend_(db_path),
+            hnsw_orphan_sweep_state=HNSWOrphanSweepStateSqliteBackend(db_path),
             git_credentials=GitCredentialsSqliteBackend(db_path),
             repo_category=RepoCategorySqliteBackend(db_path),
             groups=GroupAccessManager(groups_db_path),
@@ -307,6 +311,9 @@ class StorageFactory:
         )
         from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
             GoldenRepoMetadataPostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.hnsw_orphan_sweep_state_backend import (
+            HNSWOrphanSweepStatePostgresBackend,
         )
         from code_indexer.server.storage.postgres.dependency_map_tracking_backend import (
             DependencyMapTrackingPostgresBackend,
@@ -405,6 +412,7 @@ class StorageFactory:
             ssh_keys=SSHKeysPostgresBackend(pool),
             golden_repo_metadata=GoldenRepoMetadataPostgresBackend(pool),
             dependency_map_tracking=DependencyMapTrackingPostgresBackend(pool),
+            hnsw_orphan_sweep_state=HNSWOrphanSweepStatePostgresBackend(pool),
             git_credentials=GitCredentialsPostgresBackend(pool),
             repo_category=RepoCategoryPostgresBackend(pool),
             groups=GroupsPostgresBackend(pool),

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.45.0] - 2026-07-12
+
+### Added
+
+- **Epic #1333 -- Eliminate HNSW orphan nodes (silent recall loss)**: three stories closing a spike-confirmed gap where HNSW index elements could end up with zero inbound graph connections (unreachable by ANN search, silent recall loss) with no detection or repair anywhere in the system.
+  - **#1358**: fork-level `repair_orphans()` C++ method added to the custom hnswlib fork, using a pigeonhole-principle-proven anchor-selection strategy to force valid back-edges for orphaned elements. Ships with a committed synthetic-orphan corpus generator covering both measured orphan regimes (exact-tie multi-threaded race, near-tie deterministic pruning) plus real on-disk save/load round-trip fixtures across a size/regime/construction-shape matrix.
+  - **#1359**: wires detect -> repair -> re-verify into every HNSW build/finalize path (`build_index`, `rebuild_from_vectors`, incremental updates) so newly-built or updated indexes -- regular, temporal, multimodal -- self-heal before publish. `cidx health` / MCP `check_hnsw_health` / REST / Web now expose `orphan_count` as a strict zero-tolerance binary signal (any orphan is ERROR, no graded severity). Validated end-to-end against a real orphaned staging shard, now a permanent regression fixture.
+  - **#1360**: a paced, resumable, cluster-safe fleet sweep (`HNSWOrphanRepairSweepScheduler`) that walks all existing on-disk indexes (golden + activated, regular + temporal shards) and repairs the pre-existing backlog built before #1359's build-path fix existed. Stable string-key cursor (never a numeric offset) survives insertions/deletions of shards between ticks; repair reuses the exact same per-collection lock the build path takes, with a locked re-check immediately before writing. Ships enabled by default with conservative pacing (15 items/tick, 7-minute interval), both adjustable via the Web UI config screen; one short BackgroundJobManager job per tick, with cross-pass fleet stats on a dedicated admin endpoint.
+
 ## [11.44.0] - 2026-07-10
 
 ### Fixed

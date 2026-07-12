@@ -50,6 +50,13 @@ outputSchema:
         max_inbound:
           type: integer
           description: Maximum incoming connections across nodes
+        orphan_count:
+          type: integer
+          description: >-
+            Number of zero-inbound-connection (orphan) nodes. Zero-tolerance
+            binary signal (Story #1359): orphan_count == 0 is OK, any
+            orphan_count > 0 is ERROR (reflected in valid=false) -- there is
+            no intermediate WARNING tier and no configurable threshold.
         index_path:
           type: string
           description: Path to index file
