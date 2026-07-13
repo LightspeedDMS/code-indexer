@@ -1741,6 +1741,12 @@ class SSHKeysSqliteBackend:
         self._conn_manager.close_all()
 
 
+# Issue #1383: golden_repo_reconcile_auto_heal_event is a singleton-row
+# table (like golden_repo_reconcile_breaker_state) -- only the most recent
+# confirmed auto-removal event needs to be discoverable.
+_RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
+
+
 class GoldenRepoMetadataSqliteBackend:
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -1807,6 +1813,20 @@ class GoldenRepoMetadataSqliteBackend:
                     first_observed_at TEXT,
                     last_observed_at TEXT,
                     updated_at TEXT
+                )
+            """
+            )
+
+            # Issue #1383: singleton-row table persisting a discoverable
+            # trace of the most recent confirmed registry-reconcile
+            # auto-removal event -- survives the breaker-state reset above
+            # (see record_reconcile_auto_heal_event() below).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS golden_repo_reconcile_auto_heal_event (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    removed_aliases TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
                 )
             """
             )
@@ -2295,6 +2315,79 @@ class GoldenRepoMetadataSqliteBackend:
             "first_observed_at": row[2],
             "last_observed_at": row[3],
         }
+
+    def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None:
+        """
+        Persist a discoverable trace of a confirmed registry-reconcile
+        auto-removal event (Issue #1383).
+
+        Overwrites the singleton row (id=_RECONCILE_AUTO_HEAL_EVENT_ROW_ID)
+        -- only the MOST RECENT auto-heal event needs to be discoverable,
+        matching the golden_repo_reconcile_breaker_state convention. This
+        record deliberately survives reset_reconcile_breaker_state() and is
+        surfaced as the last_golden_repo_reconcile_auto_heal field on the
+        /health REST response (HealthCheckResponse), so an operator who
+        wasn't watching /health in real time can still discover after the
+        fact, through that field, that an automatic mass-removal occurred
+        and which repos were affected.
+
+        Args:
+            removed_aliases: The aliases actually removed this sweep
+                (result.orphans_removed -- never orphans_failed). Must be
+                a list of non-empty strings.
+
+        Raises:
+            ValueError: If removed_aliases is not a list, or contains a
+                non-string / empty element.
+        """
+        if not isinstance(removed_aliases, list):
+            raise ValueError(
+                f"removed_aliases must be a list, got: {type(removed_aliases)!r}"
+            )
+        for alias in removed_aliases:
+            if not isinstance(alias, str) or not alias:
+                raise ValueError(
+                    f"removed_aliases must contain only non-empty strings, "
+                    f"got: {alias!r}"
+                )
+
+        now = datetime.now(timezone.utc).isoformat()
+        removed_aliases_csv = ",".join(removed_aliases)
+
+        def operation(conn):
+            conn.execute(
+                "INSERT INTO golden_repo_reconcile_auto_heal_event "
+                "(id, removed_aliases, occurred_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "removed_aliases = excluded.removed_aliases, "
+                "occurred_at = excluded.occurred_at",
+                (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID, removed_aliases_csv, now),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the most recently persisted registry-reconcile auto-heal
+        event, or None if no confirmed auto-removal has ever fired (Issue
+        #1383).
+
+        Used as an independently queryable discovery surface -- reused by
+        HealthCheckService.get_golden_repo_reconcile_auto_heal_event() --
+        so this historical event is discoverable WITHOUT log-searching,
+        even after the breaker-state counter has been reset.
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT removed_aliases, occurred_at FROM "
+            "golden_repo_reconcile_auto_heal_event WHERE id = ?",
+            (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID,),
+        ).fetchone()
+        if row is None:
+            return None
+        removed_aliases_csv, occurred_at = row
+        removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
+        return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
 
     def close(self) -> None:
         """Close database connections."""

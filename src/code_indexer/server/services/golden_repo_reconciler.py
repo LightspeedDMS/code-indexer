@@ -226,6 +226,35 @@ def _reset_breaker_state(backend: Optional[Any]) -> None:
         )
 
 
+def _record_auto_heal_event(backend: Optional[Any], removed_aliases: List[str]) -> None:
+    """
+    Persist a discoverable trace of a confirmed circuit-breaker auto-
+    removal event (Issue #1383), so an operator who wasn't watching
+    /health in real time can still discover after the fact that an
+    automatic mass-removal occurred and which repos were affected -- this
+    record deliberately survives the _reset_breaker_state() call that
+    clears the confirmation counter.
+
+    A no-op when there is nothing to record (empty removed_aliases) or the
+    backend doesn't support it.
+
+    Fail-soft: any backend error here must never affect the removal result
+    that already happened -- this is a best-effort audit trail, not a gate
+    on the removal itself.
+    """
+    if not removed_aliases:
+        return
+    if backend is None or not hasattr(backend, "record_reconcile_auto_heal_event"):
+        return
+    try:
+        backend.record_reconcile_auto_heal_event(removed_aliases)
+    except Exception as record_error:  # noqa: BLE001 -- best-effort bookkeeping
+        logger.error(
+            "Bug #1383 reconcile: failed to persist auto-heal event record: %s",
+            record_error,
+        )
+
+
 def _parse_observed_at(value: Any) -> Optional[datetime]:
     """
     Normalize a persisted `last_observed_at` value into a tz-aware UTC
@@ -498,7 +527,13 @@ def _run_sweep(
                 fingerprint,
                 confirmed_count,
             )
-            _reset_breaker_state(breaker_backend)
+            # Issue #1383: do NOT reset the breaker state here anymore --
+            # wait until Pass 2 below actually confirms removal succeeded
+            # (result.orphans_removed non-empty). If every
+            # remove_golden_repo() call fails (e.g. a backend outage
+            # mid-sweep), the 3-restart confirmation investment must be
+            # preserved so the NEXT restart doesn't have to start counting
+            # from zero again -- see the post-Pass-2 gate below.
             # Fall through to Pass 2 below -- proceed exactly like a normal
             # within-threshold sweep.
         else:
@@ -540,6 +575,24 @@ def _run_sweep(
                 removal_error,
             )
             result.orphans_failed.append(alias)
+
+    # Issue #1383: only NOW -- after Pass 2 above proves the confirmed
+    # removal actually succeeded for at least one orphan -- clear the
+    # confirmed circuit-breaker state and record the discoverable
+    # auto-heal trace. Previously the reset happened BEFORE Pass 2 ran, so
+    # a total Pass-2 failure (e.g. a backend outage) silently discarded
+    # the 3-restart confirmation investment for nothing gained.
+    if result.circuit_breaker_confirmed_proceed:
+        if result.orphans_removed:
+            _reset_breaker_state(breaker_backend)
+            _record_auto_heal_event(breaker_backend, result.orphans_removed)
+        else:
+            logger.warning(
+                "Bug #1383 reconcile: circuit-breaker was confirmed but "
+                "ALL removal attempts failed this sweep -- preserving the "
+                "confirmation state so the next restart does not have to "
+                "start counting from zero again."
+            )
 
     # Pass 3: repair healthy global repos with a missing alias pointer (the
     # #1315 fallback symptom) -- clone/index intact, registry says global,
