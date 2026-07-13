@@ -277,52 +277,6 @@ class TemporalSearchService:
         else:
             return 5  # Very large limits: minimal headroom
 
-    def _reconstruct_full_commit_message(self, commit_hash: str) -> Optional[str]:
-        """Reconstruct the FULL commit message via git (Story #1290 AC11).
-
-        Used when the dedup-by-commit winner (top_chunk) is a non-head
-        chunk, whose payload commit_message is "" (AC5) -- the caller needs
-        the real message, not a silent guess.
-
-        Returns:
-            The full commit message (stripped) on success, or None on ANY
-            failure (missing hash, non-zero exit, timeout, shallow clone,
-            unreachable hash) -- callers MUST treat None as "reconstruction
-            failed" and explicitly flag the result as degraded rather than
-            silently substituting a capped copy.
-        """
-        if not commit_hash:
-            return None
-        try:
-            result_proc = subprocess.run(
-                ["git", "show", "-s", "--format=%B", commit_hash],
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                check=False,
-                timeout=30,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning(
-                "Full commit message reconstruction failed for %s: %s",
-                commit_hash[:8],
-                exc,
-            )
-            return None
-
-        if result_proc.returncode != 0:
-            logger.warning(
-                "git show failed reconstructing message for %s (exit %d): %s",
-                commit_hash[:8],
-                result_proc.returncode,
-                (result_proc.stderr or "")[:200],
-            )
-            return None
-
-        message = result_proc.stdout.strip()
-        return message if message else None
-
     def _reconstruct_temporal_content(self, metadata: Dict[str, Any]) -> str:
         """Reconstruct content from git for added/deleted files.
 
@@ -711,34 +665,28 @@ class TemporalSearchService:
 
         deduped_results = dedup_by_commit(temporal_results)
 
-        # Story #1290 AC11: fail-loud full-message reconstruction. When the
-        # dedup winner (top_chunk) is a non-head chunk, its payload
-        # commit_message is "" (AC5) -- reconstruct the FULL message via git.
-        # On success the full message replaces the empty/capped copy. On
-        # failure the short-capped head-chunk message is used AS AN
-        # EXPLICITLY FLAGGED degraded fallback (message_truncated=True) --
-        # never silently presented as if it were the full message.
+        # Bug #1380: per-candidate git-show message reconstruction REMOVED.
+        # It was 95-98% of wall-clock time on real indexes (65-93s warm
+        # queries) for a value dedup_by_commit() already stashes for free.
+        # Non-head winners now source their message from the group's
+        # short-capped head-chunk message (_head_commit_message, stashed by
+        # dedup_by_commit whenever the head chunk was co-retrieved in the
+        # same over-fetched batch; empty string when it wasn't -- falls back
+        # to the non-head chunk's own always-empty commit_message per AC5).
+        # message_truncated is unconditionally True for non-head winners:
+        # there is no full-message reconstruction path anymore, so this is
+        # never the complete message. Clients needing the full message can
+        # resolve it themselves from commit_hash.
         for result in deduped_results:
             is_head = bool(result.metadata.get("is_head"))
             if is_head:
                 result.temporal_context["message_truncated"] = False
                 continue
 
-            commit_hash = result.metadata.get("commit_hash", "")
-            full_message = self._reconstruct_full_commit_message(commit_hash)
-            if full_message is not None:
-                result.temporal_context["commit_message"] = full_message
-                result.temporal_context["message_truncated"] = False
-            else:
-                # Degraded: fall back to the group's short-capped head-chunk
-                # message (stashed by dedup_by_commit as _head_commit_message,
-                # since a non-head chunk's OWN commit_message is always ""
-                # per AC5) and flag it explicitly -- never silently present
-                # this as if it were the full message.
-                result.temporal_context["commit_message"] = result.metadata.get(
-                    "_head_commit_message"
-                ) or result.metadata.get("commit_message", "")
-                result.temporal_context["message_truncated"] = True
+            result.temporal_context["commit_message"] = result.metadata.get(
+                "_head_commit_message"
+            ) or result.metadata.get("commit_message", "")
+            result.temporal_context["message_truncated"] = True
 
         # Phase 3 (Bug #1299): truncate by RELEVANCE (score) first, then
         # re-sort ONLY the selected top-`limit` subset reverse

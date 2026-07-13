@@ -3,6 +3,7 @@ Test that CLI --clear flag removes temporal progress tracking file.
 """
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,8 +52,21 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
         This ensures that when users want a fresh temporal index, all progress
         tracking is also cleared to avoid inconsistencies.
         """
-        # Create the temporal progress file manually
-        temporal_dir = self.project_dir / ".code-indexer/index/temporal"
+        # Create the temporal progress file manually.
+        #
+        # Current on-disk convention (post Story #1171 quarterly sharding):
+        # temporal bookkeeping files live directly inside an embedder-named
+        # collection directory under .code-indexer/index/ (e.g.
+        # "code-indexer-temporal-voyage_context_4"), NOT under an
+        # intermediate "temporal/" subdirectory. clear_all_temporal_collections()
+        # (temporal_collection_naming.py) iterates index_dir.iterdir() directly
+        # and matches subdirs via is_temporal_collection(), so the fixture must
+        # use a "code-indexer-temporal-*" prefixed directory name to fall
+        # within scope of the real removal logic.
+        temporal_dir = (
+            self.project_dir
+            / ".code-indexer/index/code-indexer-temporal-voyage_context_4"
+        )
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
         progress_file = temporal_dir / "temporal_progress.json"
@@ -74,6 +88,21 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
             progress_file.exists(), "Progress file should exist before clear"
         )
         self.assertTrue(meta_file.exists(), "Meta file should exist before clear")
+
+        # CommandModeDetector checks for a REAL .code-indexer/config.json on
+        # disk to gate the "index" command to "local" mode -- it does not go
+        # through the mocked ConfigManager below. Without this, the CLI
+        # rejects the command as "uninitialized" before ever reaching the
+        # mocked --clear logic.
+        config_file = self.project_dir / ".code-indexer" / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "codebase_dir": str(self.project_dir),
+                    "embedding_provider": "voyage-ai",
+                }
+            )
+        )
 
         runner = CliRunner()
 
@@ -107,12 +136,22 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
                         commits_per_branch={},
                     )
 
-                    # Run the command with --clear and --index-commits
-                    result = runner.invoke(
-                        cli,
-                        ["index", "--index-commits", "--clear"],
-                        cwd=str(self.project_dir),
-                    )
+                    # Run the command with --clear and --index-commits.
+                    # click's CliRunner.invoke() does not accept a "cwd" kwarg
+                    # in the installed click version -- passing one silently
+                    # raised TypeError inside catch_exceptions=True, so the
+                    # CLI command never actually ran. Use os.chdir() around
+                    # the invoke instead (matches the established pattern in
+                    # tests/unit/cli/test_cli_temporal_initialization_bug.py).
+                    old_cwd = os.getcwd()
+                    os.chdir(str(self.project_dir))
+                    try:
+                        result = runner.invoke(
+                            cli,
+                            ["index", "--index-commits", "--clear"],
+                        )
+                    finally:
+                        os.chdir(old_cwd)
 
                     # Check that the command succeeded
                     if result.exit_code != 0:

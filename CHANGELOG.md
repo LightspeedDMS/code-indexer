@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.49.0] - 2026-07-12
+
+### Fixed
+
+- **#1380** (priority-1): temporal query recall spent 95-98% of wall-clock time (65-93s on warm-cache queries against a real 4-quarter index) in `_reconstruct_full_commit_message()`, a sequential `git show -s --format=%B <hash>` subprocess call issued once per deduped candidate commit whose winning chunk was non-head, per shard, BEFORE the final `limit` truncation (48-89 git calls observed for `limit=5`). Removed entirely; non-head dedup winners now source their message from `dedup_by_commit()`'s already-free `_head_commit_message` stash. Verified live against the real evolution golden repo's temporal index: warm queries dropped to 1.7-3.6s sequential, 24.6-29.7s for 15 concurrent (down from 43-95s concurrent). Zero git subprocess calls proven both structurally and via live `strace`.
+- **EVO-64244** (PR #1352): `HNSWIndexCache.get_or_load` negatively-cached a loader's `(None, id_mapping)` result (returned when `hnsw_index.bin` doesn't exist yet, e.g. a repo mid-(re)index) for the full TTL, so "HNSW index not found" persisted even after the index finished building. A `None` result is no longer stored. Also: the cache had no invalidation path for the common case of a repo reindexed via a background job or separate worker/CLI subprocess (only two narrow call sites existed: branch-isolation filtered rebuild, and the orphan-repair sweep) -- a multi-worker server could silently serve a stale, pre-rebuild HNSW index for up to the TTL after a normal reindex. `get_or_load` now takes an optional `index_file` path and invalidates a cache HIT when the on-disk file's mtime is newer than what was cached at load time.
+- **#1379**: two unit tests hardcoded the legacy pre-Story-#1171 temporal storage layout and failed against the current quarterly-sharded, per-embedder collection layout. Test-fixture-only fix; production code unaffected (confirmed via manual repro).
+- **#1381**: two test-infrastructure flakes found while validating the above under full-suite concurrent load (both passed reliably in isolation). `test_no_git_commands_for_non_git_repo` globally patched `subprocess.run`, exploitable by any unrelated concurrent thread spawning a real `git` subprocess (same class as #1375) -- fixed via a per-instance `RefreshScheduler._run_subprocess()` injection seam. `test_dispatch_parallel_with_jitter_zero_jitter_disables_jitter` asserted a hard real-wall-clock bound sensitive to CPU contention under concurrent chunked execution -- fixed via a deterministic `time.sleep`-never-called assertion scoped to the dispatcher module's own namespace.
+
 ## [11.48.0] - 2026-07-12
 
 ### Fixed
