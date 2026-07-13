@@ -77,6 +77,26 @@ outputSchema:
         from_cache:
           type: boolean
           description: Whether result was returned from cache
+    collections:
+      type: array
+      description: >-
+        Present ONLY when more than one real HNSW collection is discovered
+        for the repository (multi-provider embedding config and/or temporal
+        quarterly shards). Each entry reports one discovered collection so
+        none are silently dropped. When present, the top-level "health"
+        field mirrors collections[0]["health"] for backward compatibility;
+        callers that need every collection's status MUST read this field.
+      items:
+        type: object
+        properties:
+          collection_path:
+            type: string
+            description: >-
+              Path to the collection's hnsw_index.bin, relative to the
+              repository's clone root.
+          health:
+            type: object
+            description: Same shape as the top-level "health" object.
     error:
       type: string
       description: Error message if failed
@@ -88,6 +108,8 @@ Comprehensive HNSW vector index health check: file existence, readability, loada
 
 CACHING: Results cached for 5 minutes. Use force_refresh=true to bypass.
 
-TROUBLESHOOTING: valid=false -> check errors array. file_exists=false -> index not built, run indexing. loadable=false -> corrupted, rebuild required.
+TROUBLESHOOTING: valid=false -> check errors array. file_exists=false -> index not built, run indexing. loadable=false -> corrupted, rebuild required (real index filename is hnsw_index.bin).
+
+MULTIPLE COLLECTIONS: a repo with multiple embedding providers configured and/or temporal quarterly shards may have more than one real HNSW collection on disk. When that's the case, the response additionally includes a "collections" array with one entry per discovered collection -- check it (not just the top-level "health" field) to see every collection's status.
 
 USE INSTEAD OF repository_status for general repo info. This tool is specifically for HNSW vector index integrity.

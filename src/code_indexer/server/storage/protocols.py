@@ -479,6 +479,13 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def get_reconcile_breaker_state(self) -> Optional[Dict[str, Any]]: ...
 
+    # Issue #1383: persistent, discoverable trace of a confirmed
+    # registry-reconcile auto-removal event, surviving the breaker-state
+    # reset above (see golden_repo_reconciler.py / health_service.py).
+    def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None: ...
+
+    def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 

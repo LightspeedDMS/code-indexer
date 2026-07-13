@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.services.hnsw_health_service import HealthCheckResult
+from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
 
 @pytest.fixture
@@ -180,10 +181,16 @@ class TestCheckHnswHealthHandler:
                 call_kwargs = mock_service.check_health.call_args[1]
                 assert call_kwargs["force_refresh"] is False
 
-    def test_handler_constructs_correct_index_path(
+    def test_handler_constructs_fallback_index_path_when_no_real_collection_found(
         self, mock_regular_user, mock_health_result
     ):
-        """Test that handler constructs correct index path."""
+        """Bug #1387: when no real HNSW collection is discovered on disk
+        (clone_path here does not exist), the handler falls back to an
+        informational path using the CORRECT filename constant
+        (HNSWIndexManager.INDEX_FILENAME == "hnsw_index.bin"), not the old
+        hardcoded "index.bin" typo. The "default" directory segment is kept
+        only as a placeholder for the not-found case -- it no longer drives
+        real collection discovery (see iter_index_files_for_repo usage)."""
         from code_indexer.server.mcp.handlers import check_hnsw_health
 
         params = {"repository_alias": "test-repo", "force_refresh": False}
@@ -203,14 +210,14 @@ class TestCheckHnswHealthHandler:
 
                 check_hnsw_health(params, mock_regular_user)
 
-                # Verify correct index path construction
+                # Verify correct fallback index path construction
                 call_kwargs = mock_service.check_health.call_args[1]
                 expected_path = str(
                     Path(mock_repo.clone_path)
                     / ".code-indexer"
                     / "index"
                     / "default"
-                    / "index.bin"
+                    / HNSWIndexManager.INDEX_FILENAME
                 )
                 assert call_kwargs["index_path"] == expected_path
 

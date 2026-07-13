@@ -27,6 +27,11 @@ from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+# Issue #1383: golden_repo_reconcile_auto_heal_event is a singleton-row
+# table (like golden_repo_reconcile_breaker_state) -- only the most recent
+# confirmed auto-removal event needs to be discoverable.
+_RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
+
 
 class GoldenRepoMetadataPostgresBackend:
     """
@@ -512,6 +517,63 @@ class GoldenRepoMetadataPostgresBackend:
             "first_observed_at": row[2],
             "last_observed_at": row[3],
         }
+
+    def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None:
+        """
+        Persist a discoverable trace of a confirmed registry-reconcile
+        auto-removal event (Issue #1383). See
+        GoldenRepoMetadataSqliteBackend for the full contract -- this is
+        the drop-in PostgreSQL (cluster-mode) mirror.
+
+        Raises:
+            ValueError: If removed_aliases is not a list, or contains a
+                non-string / empty element.
+        """
+        if not isinstance(removed_aliases, list):
+            raise ValueError(
+                f"removed_aliases must be a list, got: {type(removed_aliases)!r}"
+            )
+        for alias in removed_aliases:
+            if not isinstance(alias, str) or not alias:
+                raise ValueError(
+                    f"removed_aliases must contain only non-empty strings, "
+                    f"got: {alias!r}"
+                )
+
+        now = datetime.now(timezone.utc)
+        removed_aliases_csv = ",".join(removed_aliases)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO golden_repo_reconcile_auto_heal_event "
+                    "(id, removed_aliases, occurred_at) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "removed_aliases = EXCLUDED.removed_aliases, "
+                    "occurred_at = EXCLUDED.occurred_at",
+                    (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID, removed_aliases_csv, now),
+                )
+            conn.commit()
+
+    def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]:
+        """Return the most recently persisted registry-reconcile auto-heal
+        event, or None if no confirmed auto-removal has ever fired (Issue
+        #1383). See GoldenRepoMetadataSqliteBackend for the full contract
+        -- this is the drop-in PostgreSQL (cluster-mode) mirror."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT removed_aliases, occurred_at FROM "
+                    "golden_repo_reconcile_auto_heal_event WHERE id = %s",
+                    (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID,),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+        removed_aliases_csv, occurred_at = row
+        removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
+        return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
 
     def close(self) -> None:
         """Close the underlying connection pool."""

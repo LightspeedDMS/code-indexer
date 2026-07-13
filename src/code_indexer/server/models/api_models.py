@@ -116,6 +116,17 @@ class HealthCheckResponse(BaseModel):
         description="List of failure reasons when status is DEGRADED or UNHEALTHY "
         "(Story #727 AC5). Limited to 3 entries with '+N more' indicator if more exist.",
     )
+    last_golden_repo_reconcile_auto_heal: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Issue #1383: informational-only record of the most recent "
+        "confirmed golden-repo registry-reconcile circuit-breaker auto-removal "
+        "event (removed_aliases + occurred_at ISO timestamp), or null if none "
+        "has ever fired. This is a HISTORICAL, already-resolved event -- it "
+        "deliberately does NOT factor into `status`/`failure_reasons` (those "
+        "report CURRENT, unresolved conditions). Populated from "
+        "HealthCheckService.get_golden_repo_reconcile_auto_heal_event() so an "
+        "operator can discover it via this /health field without log-searching.",
+    )
 
 
 class RepositoryFilesInfo(BaseModel):

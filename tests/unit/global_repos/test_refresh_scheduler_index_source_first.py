@@ -430,7 +430,11 @@ class TestExecuteRefreshCallSite:
         )
 
         def mock_index_source(
-            alias_name, source_path, progress_callback=None, force_reconcile=False
+            alias_name,
+            source_path,
+            progress_callback=None,
+            force_reconcile=False,
+            **kwargs,
         ):
             call_order.append("_index_source")
 

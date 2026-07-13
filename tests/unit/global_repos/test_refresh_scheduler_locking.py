@@ -115,7 +115,11 @@ def test_concurrent_refreshes_different_repos_no_interference(
         refresh_events = {"repo1": [], "repo2": []}  # type: ignore[var-annotated]
 
         def slow_index_source(
-            alias_name, source_path, progress_callback=None, force_reconcile=False
+            alias_name,
+            source_path,
+            progress_callback=None,
+            force_reconcile=False,
+            **kwargs,
         ):
             """Simulate slow indexing to test concurrency."""
             repo_key = "repo1" if "repo1" in alias_name else "repo2"
@@ -202,7 +206,11 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
         lock = threading.Lock()
 
         def slow_index_source(
-            alias_name, source_path, progress_callback=None, force_reconcile=False
+            alias_name,
+            source_path,
+            progress_callback=None,
+            force_reconcile=False,
+            **kwargs,
         ):
             """Simulate slow indexing to test serialization."""
             with lock:
@@ -291,7 +299,11 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
         call_count = [0]
 
         def index_source_with_exception(
-            alias_name, source_path, progress_callback=None, force_reconcile=False
+            alias_name,
+            source_path,
+            progress_callback=None,
+            force_reconcile=False,
+            **kwargs,
         ):
             call_count[0] += 1
             if call_count[0] == 1:
@@ -417,7 +429,11 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
         create_count = [0]
 
         def track_index_source(
-            alias_name, source_path, progress_callback=None, force_reconcile=False
+            alias_name,
+            source_path,
+            progress_callback=None,
+            force_reconcile=False,
+            **kwargs,
         ):
             create_count[0] += 1
             time.sleep(0.1)  # Simulate work

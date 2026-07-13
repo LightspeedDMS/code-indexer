@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,56 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Corruption helpers (Bug #1223 extension)
 # ---------------------------------------------------------------------------
+
+
+HNSW_ORPHAN_REPAIR_MARKER = "HNSW_ORPHAN_REPAIR_EVENT"
+"""Bug #1388: machine-readable marker prefix identifying an orphan
+detect+repair event, emitted as a plain, unbuffered line on the process's
+**stderr** (as opposed to the `logger.info`/`logger.error` calls in
+`_detect_and_repair_orphans`, which never surface outside a `cidx`
+subprocess -- the CLI's own `setup_logging()` sets the root logger to
+WARNING, and the SQLiteLogHandler that would otherwise persist INFO records
+to the server's logs.db is only installed during the SERVER's own lifespan
+startup, never inherited across a subprocess boundary).
+
+Bug #1388 remediation history: the first attempt threaded this marker
+through the `progress_callback`/--progress-json wire protocol as a
+`total=0` event. That was proven wrong by two independent, compounding
+real-boundary gates: (a) the real --progress-json child callback in
+cli.py drops every event where `total <= 0`, so the marker died inside the
+child before reaching stdout; (b) even if it had reached stdout, the
+parent's `run_with_popen_progress` monotonic high-water `_emit` guard would
+have suppressed it too, since HNSW finalize happens at the end of the
+semantic phase when the high-water mark is already near the phase's
+`range_end`. stderr is immune to both: it is not logging (so the WARNING
+filter never applies) and not the JSON progress wire (so neither gate
+applies). The parent-side scraping half of this fix lives in
+`progress_subprocess_runner.run_with_popen_progress`, which reads the
+child's captured stderr for lines with this prefix and forwards them to a
+dedicated `orphan_event_callback` -- never through the monotonic
+percentage channel. Callers on the server side (e.g.
+`golden_repo_manager.py`, `refresh_scheduler.py`) build that callback to
+re-log a forwarded marker line through the SERVER's own logger, which DOES
+reach logs.db. Import this constant rather than hardcoding the literal
+string (Messi Rule #4 anti-duplication)."""
+
+
+def _emit_hnsw_orphan_repair_stderr_event(
+    *, context: str, orphan_count: int, repaired: bool, remaining: Optional[int]
+) -> None:
+    """Bug #1388: print the orphan-repair marker as a plain, unbuffered
+    stderr line -- never through progress_callback/emit_progress_json (see
+    HNSW_ORPHAN_REPAIR_MARKER docstring for why that channel is unusable).
+    """
+    parts = [
+        HNSW_ORPHAN_REPAIR_MARKER + ":",
+        f"context={context}",
+        f"orphan_count={orphan_count}",
+        f"repaired={'true' if repaired else 'false'}",
+    ]
+    if remaining is not None:
+        parts.append(f"remaining={remaining}")
+    print(" ".join(parts), file=sys.stderr, flush=True)
 
 
 class HNSWIntegrityRepairError(RuntimeError):
@@ -168,6 +219,15 @@ class HNSWIndexManager:
         this does not trip the Story #1122 post-E2E log-audit gate on
         ordinary, successful rebuilds.
 
+        Bug #1388: the logger.info/logger.error calls above never surface
+        outside a `cidx` subprocess (see HNSW_ORPHAN_REPAIR_MARKER docstring
+        for why), so when orphan_count > 0 -- the one case actually worth
+        surfacing -- this also emits a single HNSW_ORPHAN_REPAIR_MARKER
+        line on stderr via `_emit_hnsw_orphan_repair_stderr_event`, printed
+        unconditionally (no caller-supplied callback required). The routine
+        orphan_count == 0 case does NOT use this channel -- proportionate:
+        only the interesting event is emitted.
+
         Args:
             index: hnswlib.Index instance with vectors already added, not
                 yet saved to disk.
@@ -207,6 +267,12 @@ class HNSWIndexManager:
                 context,
                 post_orphan_count,
             )
+            _emit_hnsw_orphan_repair_stderr_event(
+                context=context,
+                orphan_count=orphan_count,
+                repaired=False,
+                remaining=post_orphan_count,
+            )
             raise HNSWIntegrityRepairError(
                 f"HNSW orphan repair failed for {context}: "
                 f"{post_orphan_count} orphan(s) remain after repair_orphans()"
@@ -215,6 +281,12 @@ class HNSWIndexManager:
         logger.info(
             "HNSW finalize (%s): repair_orphans() succeeded, orphan_count now 0",
             context,
+        )
+        _emit_hnsw_orphan_repair_stderr_event(
+            context=context,
+            orphan_count=orphan_count,
+            repaired=True,
+            remaining=None,
         )
 
     def build_index(
@@ -283,7 +355,10 @@ class HNSWIndexManager:
 
         # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
         # persisted, so a freshly-built index never finalizes with orphans.
-        self._detect_and_repair_orphans(index, context=f"build_index:{collection_path}")
+        self._detect_and_repair_orphans(
+            index,
+            context=f"build_index:{collection_path}",
+        )
 
         # Report info message at completion
         if progress_callback:
@@ -653,7 +728,8 @@ class HNSWIndexManager:
             # is persisted. ONE shared code path serves regular, temporal,
             # and multimodal rebuilds (all converge on this method).
             self._detect_and_repair_orphans(
-                index, context=f"rebuild_from_vectors:{collection_path}"
+                index,
+                context=f"rebuild_from_vectors:{collection_path}",
             )
 
             # Save to temp file
@@ -1169,7 +1245,8 @@ class HNSWIndexManager:
         # running check_integrity() (O(elements)) on every single-point add,
         # which would be impractical for a per-point incremental operation.
         self._detect_and_repair_orphans(
-            index, context=f"incremental_update:{collection_path}"
+            index,
+            context=f"incremental_update:{collection_path}",
         )
 
         # Save index to disk atomically — temp file + rename prevents corruption on crash
