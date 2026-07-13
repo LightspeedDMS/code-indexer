@@ -187,6 +187,58 @@ class TestGoldenRepoManagerSameDirClone:
         assert (clone_path / "readme.txt").exists()
         assert (clone_path / "readme.txt").read_text() == "in-place content"
 
+    def test_in_place_registration_source_not_deleted_on_failure(self):
+        """
+        EVO-64228 (review MAJOR): the background worker registers clone_path for
+        failure cleanup so a partial clone/index gets rmtree'd. In index-in-place
+        mode clone_path IS the caller's source on the shared volume -- cidx did
+        not create it and must NOT delete it. The worker gates that registration
+        on `not _is_in_place_registration(...)`; this asserts the predicate that
+        gate depends on so a later indexing failure cannot destroy the source.
+        """
+        base_dir = self._create_temp_dir()
+        golden_repos_dir = base_dir / "golden_repos"
+        golden_repos_dir.mkdir()
+
+        # Source materialized directly at clone_path (workspace-mcp in-place).
+        clone_path = golden_repos_dir / "repos" / "in-place-repo"
+        clone_path.mkdir(parents=True)
+        (clone_path / "keep.txt").write_text("must survive")
+
+        # A DIFFERENT source dir that cidx really copied FROM (out-of-tree).
+        external_source = base_dir / "external-src"
+        external_source.mkdir()
+
+        manager = GoldenRepoManager(str(golden_repos_dir))
+
+        # In-place: source realpath == clone_path -> guarded (no cleanup).
+        assert (
+            manager._is_in_place_registration(f"file://{clone_path}", str(clone_path))
+            is True
+        )
+        assert (
+            manager._is_in_place_registration(str(clone_path), str(clone_path)) is True
+        )
+
+        # Real copy from an external source -> NOT in place, cleanup allowed.
+        assert (
+            manager._is_in_place_registration(
+                f"file://{external_source}", str(clone_path)
+            )
+            is False
+        )
+        # Remote and local:// scheme have no external source to protect.
+        assert (
+            manager._is_in_place_registration(
+                "https://example.com/x/y.git", str(clone_path)
+            )
+            is False
+        )
+        assert (
+            manager._is_in_place_registration("local://cidx-meta", str(clone_path))
+            is False
+        )
+
 
 class TestGoldenRepoManagerCleanupSymlink:
     """Test cases for cleanup unlinking symlinks instead of rmtree (EVO-64228)."""
