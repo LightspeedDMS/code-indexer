@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.51.0] - 2026-07-13
+
+### Fixed
+
+- **#1387**: `check_hnsw_health` MCP tool hardcoded `.code-indexer/index/default/index.bin`, so it reported "Index file not found" for every real repo even when healthy -- real collections are named after the resolved embedding model and use the `hnsw_index.bin` filename, neither of which is `default`/`index.bin`. Now reuses the existing `iter_index_files_for_repo` discovery primitive (Story #1360) to find the real collection(s); single-collection repos keep the original response shape, multi-collection repos (multi-provider/temporal) get an additive `collections` list instead of one silently winning.
+- **#1383** (follow-up to #1382): the `/health` DEGRADED message during circuit-breaker buildup reported only a bare consecutive-sweep count -- now includes the actual at-risk alias set and a "will auto-remove at N/N confirmations" framing. Separately, the moment auto-removal actually fired, the breaker-state reset erased all trace of it in the same tick; a new `golden_repo_reconcile_auto_heal_event` record (SQLite + PostgreSQL) now persists the removed-alias set + timestamp independently of that reset, exposed as an informational-only `last_golden_repo_reconcile_auto_heal` field on `GET /api/system/health`. Also: a confirmed sweep whose removals all fail no longer discards the accumulated confirmation count.
+- **#1388**: Epic #1333's HNSW finalize-time orphan detect+repair runs correctly inside the `cidx index` child subprocess spawned by golden-repo add/refresh, but its outcome never reached the server's admin-visible logs -- a subprocess never inherits the server's log handler, and the CLI's own logging setup separately filters the check's INFO-level line before it's written anywhere. The repair event now bypasses the percentage-based `--progress-json` wire protocol entirely (which two independent gates were silently dropping it through) via a dedicated stderr marker channel that the parent subprocess runner scrapes and re-logs through the server's own logger, alias-tagged, reaching `logs.db` for real.
+
 ## [11.50.0] - 2026-07-13
 
 ### Fixed
