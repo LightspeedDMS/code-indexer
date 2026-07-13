@@ -99,8 +99,16 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    def health_check(self) -> bool:
+    def health_check(self, *, test_api: bool = False) -> bool:
         """Check if the embedding provider is healthy and accessible.
+
+        Args:
+            test_api: If False (default), only perform a shallow configuration
+                check (e.g. verify a key/model/endpoint is present). If True,
+                make a real authenticated API call so an invalid credential is
+                detected up front. Concrete providers that cannot distinguish a
+                real auth probe may accept-and-ignore this flag and return their
+                existing health result.
 
         Returns:
             True if provider is healthy, False otherwise

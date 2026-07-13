@@ -317,6 +317,20 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 last_error = exc
                 response_obj = getattr(exc, "response", None)
                 status = getattr(response_obj, "status_code", None)
+                if status == HTTPStatus.UNAUTHORIZED:
+                    # Bug (EVO-64222): a 401 is an authentication failure, not a
+                    # transient error — it fails identically on every retry.
+                    # Raise immediately (before any back-off sleep) so a doomed
+                    # secondary-provider pass with an invalid key fails in
+                    # milliseconds per batch instead of sleeping max_retries ×
+                    # exponential backoff for every batch of every file.
+                    latency_ms = (time.time() - _start) * 1000
+                    ProviderHealthMonitor.get_instance().record_call(
+                        "cohere", latency_ms, success=False
+                    )
+                    raise ValueError(
+                        "Invalid Cohere API key. Check CO_API_KEY environment variable."
+                    )
                 if status == 429:
                     if not retry:
                         # Query path: propagate immediately so execute_with_backoff
@@ -364,16 +378,9 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         ProviderHealthMonitor.get_instance().record_call(
             "cohere", latency_ms, success=False
         )
-        if last_error is not None:
-            response_obj = getattr(last_error, "response", None)
-            if (
-                response_obj is not None
-                and getattr(response_obj, "status_code", None)
-                == HTTPStatus.UNAUTHORIZED
-            ):
-                raise ValueError(
-                    "Invalid Cohere API key. Check CO_API_KEY environment variable."
-                )
+        # NOTE: a 401 (HTTPStatus.UNAUTHORIZED) never reaches this fall-through —
+        # it is raised as a ValueError immediately inside the retry loop above
+        # (Bug EVO-64222), so only genuine transient failures land here.
         raise RuntimeError(
             f"Cohere API request failed after {max_attempts} attempts: {last_error}"
         )
