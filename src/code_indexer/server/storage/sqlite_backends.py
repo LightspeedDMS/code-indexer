@@ -1795,6 +1795,22 @@ class GoldenRepoMetadataSqliteBackend:
                         "Migrated golden_repos_metadata: added column %s", col_name
                     )
 
+            # Bug #1382: singleton-row table persisting the registry-reconcile
+            # circuit-breaker's cross-restart confirmation state (see
+            # record_reconcile_breaker_observation() below).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS golden_repo_reconcile_breaker_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    orphan_fingerprint TEXT,
+                    consecutive_count INTEGER NOT NULL DEFAULT 0,
+                    first_observed_at TEXT,
+                    last_observed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
 
     def add_repo(
@@ -2182,6 +2198,103 @@ class GoldenRepoMetadataSqliteBackend:
             )
 
         return result
+
+    def record_reconcile_breaker_observation(self, fingerprint: str) -> int:
+        """
+        Record one registry-reconcile circuit-breaker high-ratio observation
+        (Bug #1382).
+
+        If `fingerprint` (a stable, sorted identifier of the orphan-
+        candidate alias set) matches the previously recorded fingerprint,
+        the consecutive-observation count is incremented; otherwise (first
+        observation ever, or a DIFFERENT orphan set than last time) the
+        count resets to 1. Only a STABLE, repeated orphan-candidate set
+        across sweeps is corroborating evidence that a high absent-fraction
+        reflects real orphans rather than a one-off infra blip.
+
+        Returns:
+            The consecutive-observation count after recording this one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT orphan_fingerprint, consecutive_count "
+                "FROM golden_repo_reconcile_breaker_state WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO golden_repo_reconcile_breaker_state "
+                    "(id, orphan_fingerprint, consecutive_count, "
+                    "first_observed_at, last_observed_at, updated_at) "
+                    "VALUES (1, ?, 1, ?, ?, ?)",
+                    (fingerprint, now, now, now),
+                )
+                return 1
+
+            prev_fingerprint, prev_count = row
+            if prev_fingerprint == fingerprint:
+                new_count = prev_count + 1
+                conn.execute(
+                    "UPDATE golden_repo_reconcile_breaker_state "
+                    "SET consecutive_count = ?, last_observed_at = ?, "
+                    "updated_at = ? WHERE id = 1",
+                    (new_count, now, now),
+                )
+                return new_count
+
+            conn.execute(
+                "UPDATE golden_repo_reconcile_breaker_state "
+                "SET orphan_fingerprint = ?, consecutive_count = 1, "
+                "first_observed_at = ?, last_observed_at = ?, updated_at = ? "
+                "WHERE id = 1",
+                (fingerprint, now, now, now),
+            )
+            return 1
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_reconcile_breaker_state(self) -> None:
+        """
+        Clear the registry-reconcile circuit-breaker's persisted
+        confirmation state (Bug #1382).
+
+        Called whenever a sweep observes evidence AGAINST a stable-orphan
+        hypothesis: a normal (non-tripping) sweep, or a base-directory
+        health-check failure -- real infra flapping voids any prior
+        confirmations, since the whole point is to only auto-proceed when
+        the high ratio is consistently observed with a HEALTHY base
+        directory every single time.
+        """
+
+        def operation(conn):
+            conn.execute("DELETE FROM golden_repo_reconcile_breaker_state WHERE id = 1")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_reconcile_breaker_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the current registry-reconcile circuit-breaker state, or
+        None if the breaker has never tripped (or was reset since).
+
+        Used by the health-check escalation surface (Bug #1382) so a
+        persistently-tripped breaker is visible to admins rather than
+        buried in log-only WARNINGs.
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT orphan_fingerprint, consecutive_count, first_observed_at, "
+            "last_observed_at FROM golden_repo_reconcile_breaker_state "
+            "WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "orphan_fingerprint": row[0],
+            "consecutive_count": row[1],
+            "first_observed_at": row[2],
+            "last_observed_at": row[3],
+        }
 
     def close(self) -> None:
         """Close database connections."""
