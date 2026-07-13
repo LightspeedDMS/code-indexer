@@ -16,7 +16,11 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
+    iter_index_files_for_repo,
+)
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -394,16 +398,71 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         clone_path = Path(repo.clone_path)
-        index_path = clone_path / ".code-indexer" / "index" / "default" / "index.bin"
-
         health_service = _get_hnsw_health_service()
-        result = health_service.check_health(
-            index_path=str(index_path),
-            force_refresh=force_refresh,
-        )
+
+        # Discover the REAL on-disk HNSW collection(s) for this repo (Bug
+        # #1387) -- reuses the same structural discovery primitive the HNSW
+        # fleet orphan sweep uses (Story #1360), rather than hardcoding a
+        # collection directory name (real names are provider/model-derived,
+        # e.g. "voyage-code-3", never "default") or filename (real filename
+        # is HNSWIndexManager.INDEX_FILENAME == "hnsw_index.bin", not
+        # "index.bin").
+        relative_index_paths = list(iter_index_files_for_repo(clone_path))
+
+        if not relative_index_paths:
+            # No real collection found -- preserve today's not-found
+            # behavior/response shape. HNSWHealthService itself detects the
+            # missing file and reports valid=False/file_exists=False with a
+            # "not found" error; the exact fallback path we hand it only
+            # affects the informational index_path field.
+            fallback_index_path = (
+                clone_path
+                / ".code-indexer"
+                / "index"
+                / "default"
+                / HNSWIndexManager.INDEX_FILENAME
+            )
+            result = health_service.check_health(
+                index_path=str(fallback_index_path),
+                force_refresh=force_refresh,
+            )
+            return _mcp_response(
+                {"success": True, "health": result.model_dump(mode="json")}
+            )
+
+        if len(relative_index_paths) == 1:
+            index_path = clone_path / relative_index_paths[0]
+            result = health_service.check_health(
+                index_path=str(index_path),
+                force_refresh=force_refresh,
+            )
+            return _mcp_response(
+                {"success": True, "health": result.model_dump(mode="json")}
+            )
+
+        # Multiple real collections (multi-provider config and/or temporal
+        # quarterly shards) -- report ALL of them additively rather than
+        # silently picking one and hiding the rest.
+        collections = []
+        for relative_index_path in relative_index_paths:
+            index_path = clone_path / relative_index_path
+            result = health_service.check_health(
+                index_path=str(index_path),
+                force_refresh=force_refresh,
+            )
+            collections.append(
+                {
+                    "collection_path": str(relative_index_path),
+                    "health": result.model_dump(mode="json"),
+                }
+            )
 
         return _mcp_response(
-            {"success": True, "health": result.model_dump(mode="json")}
+            {
+                "success": True,
+                "health": collections[0]["health"],
+                "collections": collections,
+            }
         )
     except Exception as e:
         logger.exception(
