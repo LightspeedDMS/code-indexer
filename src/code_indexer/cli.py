@@ -4207,9 +4207,15 @@ def index(
             console.print(f"\n🔄 Indexing additional provider: {_extra_provider}")
             config.embedding_provider = _extra_provider  # type: ignore[assignment]
             _extra_embedding = EmbeddingProviderFactory.create(config, console)
-            if not _extra_embedding.health_check():
+            # Bug (EVO-64222): use a real authenticating probe (test_api=True)
+            # here rather than the shallow default (test_api=False, which passes
+            # whenever a key is merely present). A secondary provider with an
+            # invalid credential is skipped now, before its doomed pass would
+            # hang the already-complete primary index at ~99% retrying 401s.
+            if not _extra_embedding.health_check(test_api=True):
                 console.print(
-                    f"⚠️  {_extra_provider} health check failed — skipping",
+                    f"⚠️  {_extra_provider} health check failed "
+                    "(check its API credentials) — skipping",
                     style="yellow",
                 )
                 continue
@@ -8507,8 +8513,6 @@ def health(output_json: bool, quiet: bool, index_path: Optional[str]):
             console.print(f"  Min Inbound: {result.min_inbound}")
         if result.max_inbound is not None:
             console.print(f"  Max Inbound: {result.max_inbound}")
-        if result.orphan_count is not None:
-            console.print(f"  Orphan Count: {result.orphan_count}")
 
     # Errors (if any)
     if result.errors:
