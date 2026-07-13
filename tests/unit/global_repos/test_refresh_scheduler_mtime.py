@@ -307,14 +307,29 @@ class TestCreateNewIndexGitGuards:
         This validates that the existing git_dir.exists() guard in
         _create_new_index() correctly skips git update-index and git restore
         for non-git directories like cidx-meta.
+
+        Bug #1381: previously simulated the subprocess boundary by patching
+        the global `subprocess.run` (process-wide, via `unittest.mock.patch`
+        on the singleton `subprocess` module). Under full-suite concurrent
+        load, any unrelated background thread invoking a real `git` subprocess
+        during this test's patch window would also be intercepted by
+        mock_subprocess_run and trip its "raise on any git call" guard —
+        the same fragility class fixed for bug #1375 in
+        test_delta_merge_frontmatter.py. Fixed by injecting the fake runner
+        via RefreshScheduler's `_subprocess_runner` instance seam instead:
+        `_run_subprocess()` (see refresh_scheduler.py) only consults this
+        seam for calls made through THIS scheduler instance, so no other
+        thread or test can ever observe or trigger it.
         """
         source_path = Path(temp_golden_repos_dir) / "cidx-meta"
         source_path.mkdir(parents=True, exist_ok=True)
         (source_path / "repo.md").write_text("# content")
 
         git_calls = []
+        all_calls = []
 
         def mock_subprocess_run(cmd, **kwargs):
+            all_calls.append(cmd)
             if isinstance(cmd, list) and cmd[0] == "git":
                 git_calls.append(cmd)
                 raise AssertionError(
@@ -335,6 +350,8 @@ class TestCreateNewIndexGitGuards:
             }
         )
 
+        scheduler._subprocess_runner = mock_subprocess_run
+
         with patch(
             "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
             return_value=(0, 0),
@@ -343,14 +360,26 @@ class TestCreateNewIndexGitGuards:
                 "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
                 return_value=50,
             ):
-                with patch("subprocess.run", side_effect=mock_subprocess_run):
-                    # Index validation will fail (no real cidx), which raises RuntimeError.
-                    # That is expected — we only care that NO git commands were called.
-                    with pytest.raises(RuntimeError):
-                        scheduler._create_new_index(alias_name, str(source_path))
+                # Index validation will fail (no real cidx), which raises RuntimeError.
+                # That is expected — we only care that NO git commands were called.
+                with pytest.raises(RuntimeError):
+                    scheduler._create_new_index(alias_name, str(source_path))
 
         assert git_calls == [], (
             f"No git commands must run for non-git repos. Got: {git_calls}"
+        )
+        fix_config_calls = [
+            cmd
+            for cmd in all_calls
+            if isinstance(cmd, list) and cmd[:2] == ["cidx", "fix-config"]
+        ]
+        assert len(fix_config_calls) == 1, (
+            "Expected the injected _subprocess_runner seam to observe exactly "
+            "one 'cidx fix-config' call — got "
+            f"{len(fix_config_calls)} in all_calls={all_calls}. This proves "
+            "production code routes subprocess calls through the per-instance "
+            "seam instead of the real subprocess.run(), so no unrelated "
+            "concurrent thread's real subprocess call can ever be observed here."
         )
 
     def test_git_commands_run_for_git_repo(

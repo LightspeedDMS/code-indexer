@@ -14,7 +14,17 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NoReturn,
+    Optional,
+    Union,
+    TYPE_CHECKING,
+    cast,
+)
 
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
@@ -2523,6 +2533,26 @@ class RefreshScheduler:
                     f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
                 )
 
+    def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
+        """Run a subprocess, optionally through a per-instance injection seam.
+
+        Bug #1381 (mirrors bug #1375's DependencyMapAnalyzer.cli_dispatcher
+        pattern): defaults to the real `subprocess.run`, resolved dynamically
+        at call time via the module-level `subprocess` name so existing
+        tests that globally patch `subprocess.run` (e.g. via
+        `unittest.mock.patch("subprocess.run", ...)`) continue to work
+        unchanged. Tests that need a seam scoped to THIS scheduler instance
+        only — immune to cross-thread interference from unrelated
+        concurrently-running code under full-suite load — can set
+        `self._subprocess_runner` directly (an instance attribute, not a
+        constructor parameter, exactly like `analyzer._cli_dispatcher = ...`
+        in test_delta_merge_frontmatter.py).
+        """
+        runner: Optional[Callable[..., Any]] = getattr(self, "_subprocess_runner", None)
+        if runner is None:
+            runner = subprocess.run
+        return runner(*args, **kwargs)
+
     def _create_snapshot(self, alias_name: str, source_path: str) -> str:
         """
         Create a versioned CoW snapshot of the already-indexed source (Story #229).
@@ -2607,7 +2637,7 @@ class RefreshScheduler:
             if git_dir.exists():
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
-                    result = subprocess.run(
+                    result = self._run_subprocess(
                         ["git", "update-index", "--refresh"],
                         cwd=str(versioned_path),
                         capture_output=True,
@@ -2624,7 +2654,7 @@ class RefreshScheduler:
 
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
-                    result = subprocess.run(
+                    result = self._run_subprocess(
                         ["git", "restore", "."],
                         cwd=str(versioned_path),
                         capture_output=True,
@@ -2642,7 +2672,7 @@ class RefreshScheduler:
             # Step 4: Run cidx fix-config --force on CLONE only (never on source)
             logger.info("Running cidx fix-config --force on clone to update paths")
             try:
-                subprocess.run(
+                self._run_subprocess(
                     ["cidx", "fix-config", "--force"],
                     cwd=str(versioned_path),
                     capture_output=True,
