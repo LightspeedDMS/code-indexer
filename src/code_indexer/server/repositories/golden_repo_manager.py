@@ -488,7 +488,16 @@ class GoldenRepoManager:
             if not clone_path:
                 return
             try:
-                if os.path.exists(clone_path):
+                if os.path.islink(clone_path):
+                    # EVO-64228: a symlink must be unlinked, never rmtree'd —
+                    # rmtree raises on a symlink and (if followed) could delete
+                    # its target. Unlink removes the stale link cleanly.
+                    os.unlink(clone_path)
+                    logging.info(
+                        "Bug #1218: removed orphaned clone symlink '%s' after registration failure",
+                        clone_path,
+                    )
+                elif os.path.exists(clone_path):
                     shutil.rmtree(clone_path)
                     logging.info(
                         "Bug #1218: removed orphaned clone '%s' after registration failure",
@@ -1411,6 +1420,17 @@ class GoldenRepoManager:
                     )
                 return clone_path
 
+            if os.path.realpath(source_path) == os.path.realpath(clone_path):
+                # EVO-64228: the source has already been materialized at clone_path
+                # (workspace-mcp provisions golden repos directly into golden_repos_dir on
+                # the shared volume), so it is already in place inside golden_repos_dir —
+                # index it as-is instead of copying a directory onto itself.
+                logging.info(
+                    "Golden repo already at clone_path; indexing in place: %s",
+                    clone_path,
+                )
+                return clone_path
+
             # Always use regular copy for golden repository registration
             # This avoids cross-device link issues that occur with CoW cloning
             shutil.copytree(source_path, clone_path, symlinks=True)
@@ -1609,7 +1629,12 @@ class GoldenRepoManager:
             return None  # Directory already removed
 
         try:
-            shutil.rmtree(str(clone_path_obj))
+            if os.path.islink(str(clone_path_obj)):
+                # EVO-64228: a symlink must be unlinked, never rmtree'd — rmtree
+                # raises on a symlink and (if followed) could delete its target.
+                os.unlink(str(clone_path_obj))
+            else:
+                shutil.rmtree(str(clone_path_obj))
             logging.info(f"Successfully cleaned up repository files: {clone_path_obj}")
             return True
         except (PermissionError, OSError) as fs_error:
