@@ -291,6 +291,87 @@ class HealthCheckService:
             finally:
                 engine.dispose()
 
+    def _read_golden_repo_reconcile_breaker_state(
+        self,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Read the golden-repo registry-reconcile circuit-breaker's persisted
+        state (Bug #1382), written by golden_repo_reconciler.py via
+        GoldenRepoMetadataSqliteBackend/PostgresBackend.
+
+        Raises on any DB error (including "table does not exist yet") --
+        the caller is responsible for fail-open handling. Mirrors
+        _check_sqlite_connectivity/_check_pg_connectivity's storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return None
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                row = conn.execute(
+                    "SELECT orphan_fingerprint, consecutive_count FROM "
+                    "golden_repo_reconcile_breaker_state WHERE id = 1"
+                ).fetchone()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT orphan_fingerprint, consecutive_count FROM "
+                    "golden_repo_reconcile_breaker_state WHERE id = 1"
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+
+        if row is None:
+            return None
+        return {"orphan_fingerprint": row[0], "consecutive_count": row[1]}
+
+    def _collect_golden_repo_reconcile_breaker_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Bug #1382: surface a persistently-tripped golden-repo registry-
+        reconcile circuit-breaker as a DEGRADED health signal, so an admin
+        sees it immediately instead of the condition being buried in
+        log-only WARNINGs across months of restarts.
+
+        Fail-open: any error reading the breaker state (including "table
+        does not exist yet" on a fresh install, or the DB not being ready)
+        is treated as "nothing to report" -- this is a best-effort
+        visibility aid, never a source of false health alarms.
+        """
+        try:
+            state = self._read_golden_repo_reconcile_breaker_state()
+        except Exception as exc:
+            logger.debug("Golden-repo reconcile breaker health check skipped: %s", exc)
+            return False, False, []
+
+        if state is None:
+            return False, False, []
+
+        count = state.get("consecutive_count") or 0
+        if count <= 0:
+            return False, False, []
+
+        return (
+            True,
+            False,
+            [
+                f"Golden-repo reconcile: circuit-breaker held back cleanup "
+                f"for {count} consecutive sweep(s) -- needs admin review "
+                f"(Bug #1382)."
+            ],
+        )
+
     def _check_storage_health(self) -> ServiceHealthInfo:
         """
         Check storage system health and availability.
@@ -693,6 +774,15 @@ class HealthCheckService:
         has_warning = has_warning or res_warn
         has_error = has_error or res_err
         failure_reasons.extend(res_reasons)
+
+        # Bug #1382: golden-repo registry-reconcile circuit-breaker
+        # escalation (see module docstring in golden_repo_reconciler.py).
+        grb_warn, grb_err, grb_reasons = (
+            self._collect_golden_repo_reconcile_breaker_failures()
+        )
+        has_warning = has_warning or grb_warn
+        has_error = has_error or grb_err
+        failure_reasons.extend(grb_reasons)
 
         # Check individual service statuses (database, storage services)
         # Issue #3: Add error messages to failure_reasons when services fail

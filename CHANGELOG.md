@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.50.0] - 2026-07-13
+
+### Fixed
+
+- **#1382** (priority-1): the golden-repo registry-orphan reconcile circuit-breaker (#1317) had no recovery path -- a live staging incident showed a genuine, persistent orphan set (crash-recovery gap: DB restored, on-disk clones not) tripped the >50% abort threshold on EVERY restart for ~2 months with only a repeated log-only WARNING. Added a persisted, cross-restart confirmation counter (`golden_repo_reconcile_breaker_state` table, SQLite solo / PostgreSQL cluster): if the SAME orphan-candidate fingerprint is observed on 3 CONSECUTIVE sweeps, each with a healthy `golden_repos_dir` and at least 30 minutes apart (rolling-deploy hardening -- a single multi-node restart wave no longer counts as 3 "consecutive" confirmations), the sweep proceeds with removal instead of aborting forever. A base-dir-unhealthy event or a normal within-threshold sweep resets the counter, so real infra flapping can never accumulate toward confirmation. `HealthCheckService` now surfaces a currently-tripped breaker as a DEGRADED `/health` `failure_reasons` entry immediately, instead of only a startup log line.
+
 ## [11.49.0] - 2026-07-12
 
 ### Fixed

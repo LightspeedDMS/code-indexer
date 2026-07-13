@@ -501,9 +501,9 @@ def _deterministic_cli_console_singletons():
         if hasattr(module, "console"):
             modules.append(module)
 
-    originals = {module: module.console for module in modules}
+    originals = {module: getattr(module, "console") for module in modules}
     for module in modules:
-        module.console = Console(force_terminal=False, no_color=True)
+        setattr(module, "console", Console(force_terminal=False, no_color=True))
 
     had_force_color = _FORCE_COLOR_ENV_VAR in os.environ
     original_force_color = os.environ.pop(_FORCE_COLOR_ENV_VAR, None)
@@ -514,7 +514,7 @@ def _deterministic_cli_console_singletons():
     yield
 
     for module, original_console in originals.items():
-        module.console = original_console
+        setattr(module, "console", original_console)
 
     if had_force_color:
         os.environ[_FORCE_COLOR_ENV_VAR] = original_force_color  # type: ignore[assignment]
