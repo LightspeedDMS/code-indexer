@@ -49,6 +49,47 @@ from code_indexer.server.services.job_tracker import DuplicateJobError
 logger = logging.getLogger(__name__)
 
 
+def _make_hnsw_orphan_event_logger(alias: str):
+    """Bug #1388: build a callback that re-logs a forwarded HNSW
+    orphan-repair marker line through the SERVER's own logger (which
+    reaches logs.db), tagged with the golden repo alias for correlation.
+
+    A `cidx index` child subprocess's HNSWIndexManager prints this marker
+    as a plain line on its stderr when the finalize-time orphan
+    detect+repair safety net (Story #1359) actually detects and repairs
+    orphans (see storage/hnsw_index_manager.py's HNSW_ORPHAN_REPAIR_MARKER
+    docstring for the two independent real-boundary reasons the
+    --progress-json/percentage channel cannot carry this event). The
+    shared subprocess runner (progress_subprocess_runner.run_with_popen_
+    progress) scrapes the child's captured stderr for this exact prefix
+    and forwards each matching line, out of band, to whatever
+    `orphan_event_callback` the caller supplied -- this factory builds
+    that callback. The marker's own logger.info/logger.error calls inside
+    the child never reach logs.db (no SQLiteLogHandler crosses the
+    subprocess boundary, and the CLI's own setup_logging() pins the
+    child's root logger to WARNING), so this is the only channel this
+    event has to reach an admin-visible log store.
+
+    Args:
+        alias: Golden repo alias, included in the log message for
+            correlation with the specific repo being added/refreshed.
+
+    Returns:
+        A callable(line: str) -> None suitable for the
+        `orphan_event_callback` parameter of run_with_popen_progress.
+    """
+
+    def _log_event(line: str) -> None:
+        logger.info(
+            "Bug #1388: HNSW orphan repair event during add/refresh of "
+            "golden repo '%s': %s",
+            alias,
+            line,
+        )
+
+    return _log_event
+
+
 class GoldenRepoError(Exception):
     """Base exception for golden repository operations."""
 
@@ -481,12 +522,19 @@ class GoldenRepoManager:
                     default_branch = self._resolve_cloned_branch(clone_path)
 
                 # Execute post-clone workflow
+                # Bug #1388: pass an alias-bound orphan_event_callback so a
+                # marker line scraped from the child's stderr (see
+                # _make_hnsw_orphan_event_logger docstring) is re-logged
+                # tagged with this repo's alias -- a channel entirely
+                # separate from progress_callback, which is forwarded here
+                # unwrapped/unchanged.
                 self._execute_post_clone_workflow(
                     clone_path,
                     force_init=False,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
                     progress_callback=progress_callback,
+                    orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
                 )
 
                 # Create golden repository record
@@ -1654,6 +1702,7 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         progress_callback=None,
+        orphan_event_callback: Optional[Any] = None,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -1669,6 +1718,11 @@ class GoldenRepoManager:
             force_init: Whether to use --force flag with cidx init (for refresh operations)
             enable_temporal: Whether to enable temporal indexing (git history)
             temporal_options: Optional temporal indexing parameters (time_range, include/exclude paths, diff_context)
+            orphan_event_callback: Bug #1388 optional callable(line: str) for
+                HNSW orphan-repair marker lines scraped from the child
+                subprocess's stderr -- forwarded verbatim to
+                run_with_popen_progress. A channel entirely separate from
+                progress_callback (see _make_hnsw_orphan_event_logger).
 
         Raises:
             GitOperationError: If any workflow step fails
@@ -1794,6 +1848,11 @@ class GoldenRepoManager:
             )
             if env is not None:
                 _popen_kwargs["env"] = env
+            # Bug #1388: only pass orphan_event_callback when not None, for
+            # the same reason as env above -- defensive compatibility with
+            # any strict-signature mock of run_with_popen_progress.
+            if orphan_event_callback is not None:
+                _popen_kwargs["orphan_event_callback"] = orphan_event_callback
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:

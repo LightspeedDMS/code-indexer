@@ -38,6 +38,9 @@ from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.repositories.golden_repo_manager import (
+    _make_hnsw_orphan_event_logger,
+)
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     ClaudeConflictResolver,
@@ -2045,10 +2048,22 @@ class RefreshScheduler:
 
                     # Index source first, then create versioned snapshot (Story #229)
                     # Story #482 PATH C: Forward progress_callback into _index_source
+                    # Bug #1388: pass an alias-bound orphan_event_callback
+                    # (see _make_hnsw_orphan_event_logger docstring in
+                    # golden_repo_manager.py) so a marker line scraped from
+                    # the child's stderr is re-logged tagged with this
+                    # repo's alias -- a channel entirely separate from
+                    # progress_callback, which is forwarded unwrapped.
+                    # Reuses the SAME factory the golden-repo
+                    # add/registration path already applies -- never a
+                    # second, duplicated copy.
                     self._index_source(
                         alias_name=alias_name,
                         source_path=source_path,
                         progress_callback=progress_callback,
+                        orphan_event_callback=_make_hnsw_orphan_event_logger(
+                            alias_name
+                        ),
                         force_reconcile=force_reconcile,
                     )
                     new_index_path = self._create_snapshot(
@@ -2177,6 +2192,7 @@ class RefreshScheduler:
         source_path: str,
         progress_callback=None,
         force_reconcile: bool = False,
+        orphan_event_callback: Optional[Any] = None,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -2196,6 +2212,12 @@ class RefreshScheduler:
             force_reconcile: When True, forces --reconcile regardless of metadata status.
                 Story #1001: set by _execute_refresh() when extension drift is detected
                 and matching files exist in the repo.
+            orphan_event_callback: Bug #1388 optional callable(line: str) for
+                HNSW orphan-repair marker lines scraped from the child
+                subprocess's stderr -- forwarded verbatim to
+                run_with_popen_progress. A channel entirely separate from
+                progress_callback (see _make_hnsw_orphan_event_logger in
+                golden_repo_manager.py).
 
         Raises:
             RuntimeError: If any indexing step fails or times out
@@ -2358,6 +2380,12 @@ class RefreshScheduler:
             )
             if env is not None:
                 _popen_kwargs["env"] = env
+            # Bug #1388: only pass orphan_event_callback when not None, for
+            # the same reason as env above -- several pre-existing tests
+            # mock run_with_popen_progress with a strict signature lacking
+            # **kwargs.
+            if orphan_event_callback is not None:
+                _popen_kwargs["orphan_event_callback"] = orphan_event_callback
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
