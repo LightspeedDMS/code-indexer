@@ -92,6 +92,73 @@ class DescriptionResponse(BaseModel):
     )
 
 
+def _classify_index_type(collection_name: str) -> str:
+    """Classify a collection's index type from its directory name.
+
+    Args:
+        collection_name: Collection directory name (e.g. 'voyage-code-3').
+
+    Returns:
+        'temporal', 'multimodal', or 'semantic'.
+    """
+    name = collection_name.lower()
+    if "temporal" in name:
+        return "temporal"
+    if "multimodal" in name:
+        return "multimodal"
+    return "semantic"
+
+
+def collection_has_vector_shards(collection_dir: Path) -> bool:
+    """Return True if the collection contains at least one vector shard.
+
+    Vector shards are ``vector_*.json`` files written incrementally during
+    indexing (they may live in nested subdirectories, so rglob is used). Their
+    presence means the collection was populated by indexing — as opposed to a
+    genuinely empty / never-indexed collection directory, which has none.
+
+    Args:
+        collection_dir: Path to a single collection directory.
+
+    Returns:
+        True if any vector_*.json shard exists under collection_dir.
+    """
+    return next(collection_dir.rglob("vector_*.json"), None) is not None
+
+
+def build_incomplete_collection_result(
+    collection_dir: Path,
+) -> CollectionHealthResult:
+    """Build an unhealthy health result for a partially-built collection.
+
+    Used when a collection has vector shards on disk but no ``hnsw_index.bin``
+    (EVO-64245): indexing was interrupted after the shards were written but
+    before the HNSW graph was atomically renamed into place, leaving the
+    collection populated yet permanently unqueryable until rebuilt. Reporting
+    it as unhealthy surfaces the broken state instead of silently hiding it.
+
+    Args:
+        collection_dir: Path to the partially-built collection directory.
+
+    Returns:
+        A CollectionHealthResult with valid=False and a clear rebuild reason.
+    """
+    return CollectionHealthResult(
+        collection_name=collection_dir.name,
+        index_type=_classify_index_type(collection_dir.name),
+        valid=False,
+        file_exists=False,
+        readable=False,
+        loadable=False,
+        errors=[
+            "Vector shards present but HNSW graph missing (hnsw_index.bin) — "
+            "indexing was interrupted before the graph was built. "
+            "Rebuild needed: cidx index --rebuild-index"
+        ],
+        check_duration_ms=0.0,
+    )
+
+
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/repositories", tags=["repository-health"])
 
@@ -330,17 +397,22 @@ async def get_repository_health(
 
             hnsw_file = collection_dir / "hnsw_index.bin"
             if not hnsw_file.exists():
+                # EVO-64245: distinguish a partially-built collection (vector
+                # shards written, but the HNSW graph was never renamed into
+                # place — e.g. an OOM/crash/timeout during rebuild) from a
+                # genuinely empty / never-indexed collection. The former is
+                # populated yet unqueryable and MUST surface as unhealthy; the
+                # latter is skipped as before so we don't false-alarm.
+                if collection_has_vector_shards(collection_dir):
+                    collections.append(
+                        build_incomplete_collection_result(collection_dir)
+                    )
                 continue
 
             collection_name = collection_dir.name
 
             # Determine index type from collection name
-            if "temporal" in collection_name.lower():
-                index_type = "temporal"
-            elif "multimodal" in collection_name.lower():
-                index_type = "multimodal"
-            else:
-                index_type = "semantic"
+            index_type = _classify_index_type(collection_name)
 
             # Perform health check for this collection
             health_result = _health_service.check_health(
