@@ -23,7 +23,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -167,7 +167,7 @@ class _RecordingBackgroundJobManager:
 def _make_scheduler(
     config_service: _WindowConfigService,
     *,
-    background_job_manager: _RecordingBackgroundJobManager = None,
+    background_job_manager: Optional[_RecordingBackgroundJobManager] = None,
     now_fn=None,
 ) -> HNSWOrphanRepairSweepScheduler:
     kwargs: Dict[str, Any] = dict(
