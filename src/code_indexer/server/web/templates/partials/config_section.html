@@ -791,6 +791,95 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- HNSW Orphan-Repair Sweep Settings Section (Story #1397) -->
+<details class="config-section" id="section-hnsw-orphan-sweep">
+    <summary>
+        <h2>HNSW Orphan-Repair Sweep</h2>
+    </summary>
+    <p class="section-description">
+        Configures the background fleet sweep that detects and repairs orphaned HNSW index
+        nodes. The daily UTC operating-hours window lets the sweep's disk I/O run only during
+        off-peak hours; a start hour equal to the end hour means "always run" (24x7).
+        Changes take effect on the scheduler's next cycle -- no server restart is required.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-hnsw-orphan-sweep">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.hnsw_orphan_sweep.enabled else 'No' }}</td>
+                    <td class="config-description">Whether the sweep scheduler is active (default: Yes)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Operating Hours Start (UTC)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.operating_hours_start_utc }}</td>
+                    <td class="config-description">Hour 0-23; equal to end means always-on (default: 0)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Operating Hours End (UTC)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.operating_hours_end_utc }}</td>
+                    <td class="config-description">Hour 0-23; supports overnight wrap-around (default: 0)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Tick Interval (minutes)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.tick_interval_minutes }}</td>
+                    <td class="config-description">Minutes between ticks (default: 7)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Batch Size</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.batch_size }}</td>
+                    <td class="config-description">Indexes checked per tick (default: 15)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('hnsw-orphan-sweep')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-hnsw-orphan-sweep" method="post" action="/admin/config/hnsw_orphan_sweep" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.hnsw_orphan_sweep %}
+            <div class="validation-error">{{ validation_errors.hnsw_orphan_sweep }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="hnsw-orphan-sweep-enabled">
+                    Enabled
+                    <select id="hnsw-orphan-sweep-enabled" name="enabled">
+                        <option value="true" {% if config.hnsw_orphan_sweep.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.hnsw_orphan_sweep.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turn the fleet orphan-repair sweep on or off</small>
+                </label>
+                <label>
+                    Operating Hours Start (UTC)
+                    <input type="number" id="hnsw-orphan-sweep-start-hour" name="operating_hours_start_utc" value="{{ config.hnsw_orphan_sweep.operating_hours_start_utc }}" min="0" max="23">
+                    <small>Range: 0-23 (default: 0). Equal to end hour means always-on (24x7).</small>
+                </label>
+                <label>
+                    Operating Hours End (UTC)
+                    <input type="number" id="hnsw-orphan-sweep-end-hour" name="operating_hours_end_utc" value="{{ config.hnsw_orphan_sweep.operating_hours_end_utc }}" min="0" max="23">
+                    <small>Range: 0-23 (default: 0). Start &gt; end wraps overnight (e.g. 22 -&gt; 6).</small>
+                </label>
+                <label>
+                    Tick Interval (minutes)
+                    <input type="number" id="hnsw-orphan-sweep-tick-interval" name="tick_interval_minutes" value="{{ config.hnsw_orphan_sweep.tick_interval_minutes }}" min="1">
+                    <small>Minimum: 1 (default: 7). Minutes between ticks while inside the operating window.</small>
+                </label>
+                <label>
+                    Batch Size
+                    <input type="number" id="hnsw-orphan-sweep-batch-size" name="batch_size" value="{{ config.hnsw_orphan_sweep.batch_size }}" min="1">
+                    <small>Minimum: 1 (default: 15). Indexes checked per tick.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('hnsw-orphan-sweep')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- X-Ray Search Settings Section (Story #977) -->
 <details class="config-section" id="section-xray">
     <summary>
@@ -1853,7 +1942,7 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="cache-gov-swap-threshold">
                     Memory Governor Swap Pswpin Red Threshold
-                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{{ config.cache.memory_governor_swap_pswpin_red_threshold }}" min="0">
+                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{% if config.cache.memory_governor_swap_pswpin_red_threshold is none %}100{% else %}{{ config.cache.memory_governor_swap_pswpin_red_threshold }}{% endif %}" min="0">
                     <small>Min swap-in pages/interval to force RED (default 100; ignores idle noise, catches death-spirals)</small>
                 </label>
                 <label for="cache-gov-rss">

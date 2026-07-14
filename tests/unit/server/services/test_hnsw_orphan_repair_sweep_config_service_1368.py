@@ -173,6 +173,10 @@ class TestConfigServiceSqliteRoundTrip:
             "enabled": False,
             "batch_size": 99,
             "tick_interval_minutes": 42,
+            # Story #1397: operating-hours window fields, defaults preserved
+            # (this test only customized enabled/batch_size/tick_interval).
+            "operating_hours_start_utc": 0,
+            "operating_hours_end_utc": 0,
         }
 
 

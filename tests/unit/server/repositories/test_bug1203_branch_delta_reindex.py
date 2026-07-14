@@ -183,7 +183,12 @@ def _cow_clone_side_effect(golden_repo_path: str) -> Any:
     _do_activate_repository work correctly.
     """
 
-    def _do_clone(source_path: str, dest_path: str, cancel_check: Any = None) -> bool:
+    def _do_clone(
+        source_path: str,
+        dest_path: str,
+        cancel_check: Any = None,
+        golden_repo_alias: Any = None,
+    ) -> bool:
         subprocess.run(
             ["git", "clone", golden_repo_path, dest_path],
             check=True,

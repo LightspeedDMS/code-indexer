@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..services.job_tracker import DuplicateJobError
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
 
@@ -836,7 +837,9 @@ class ActivatedRepoManager:
                     )
                     # Reuse existing CoW clone method
                     success = self._clone_with_copy_on_write(
-                        str(golden_repo_actual_path), str(subrepo_path)
+                        str(golden_repo_actual_path),
+                        str(subrepo_path),
+                        golden_repo_alias=alias,
                     )
 
                     if not success:
@@ -2040,6 +2043,7 @@ class ActivatedRepoManager:
                     golden_repo_actual_path,
                     activated_repo_path,
                     cancel_check=cancel_check,
+                    golden_repo_alias=golden_repo_alias,
                 )
             except ActivatedRepoError:
                 # Bug #1345/#1349: a cancel (or any other failure) during the
@@ -2995,6 +2999,7 @@ class ActivatedRepoManager:
         source_path: str,
         dest_path: str,
         cancel_check: Optional[Callable[[], bool]] = None,
+        golden_repo_alias: Optional[str] = None,
     ) -> bool:
         """
         Clone repository using copy-on-write to preserve all files including .code-indexer/.
@@ -3029,13 +3034,73 @@ class ActivatedRepoManager:
                 existing except-Exception handler below treats like any
                 other clone failure -- cleaning up the partial dest_path
                 before re-raising as ActivatedRepoError.
+            golden_repo_alias: Bug #1393 -- bare golden repo alias (no
+                "-global" suffix) this clone reads FROM. When provided (both
+                real activation call sites always provide it) and the
+                manager's golden_repo_manager has a wired
+                RefreshScheduler (`_refresh_scheduler`), this clone
+                coordinates with concurrent global_repo_refresh cycles on
+                the same golden repo:
+                  1. Fails fast (ActivatedRepoError) if a refresh is
+                     ALREADY in flight for this alias (JobTracker-backed
+                     check -- the write lock alone cannot see this, since
+                     a running refresh never holds it itself).
+                  2. Acquires the WriteLockManager write lock
+                     (owner_name="activation_clone") before cloning and
+                     releases it in a finally, so any refresh that starts
+                     AFTER this point yields via its existing
+                     is_write_locked() check -- mirroring
+                     golden_repo_manager.change_branch's identical use of
+                     the same lock for the same kind of "touch the golden
+                     repo source tree" operation.
+                When None, or when no RefreshScheduler is wired (CLI/solo
+                mode, or legacy/test call sites), coordination is skipped
+                entirely -- the pre-#1393 behavior.
 
         Returns:
             True if cloning succeeded
 
         Raises:
-            ActivatedRepoError: If CoW clone or git setup fails
+            ActivatedRepoError: If CoW clone or git setup fails, the write
+                lock cannot be acquired, or a refresh is already in flight
+                for golden_repo_alias.
         """
+        scheduler = (
+            getattr(self.golden_repo_manager, "_refresh_scheduler", None)
+            if golden_repo_alias is not None
+            else None
+        )
+        _lock_acquired = False
+        if scheduler is not None:
+            # Bug #1393 direction 2: fail fast if a refresh is ALREADY
+            # executing for this golden repo. WriteLockManager alone cannot
+            # catch this because _execute_refresh() only CHECKS
+            # is_write_locked() -- it never holds the lock itself while
+            # running.
+            try:
+                scheduler.check_refresh_not_in_progress(golden_repo_alias)
+            except DuplicateJobError as e:
+                raise ActivatedRepoError(
+                    f"Cannot activate golden repository '{golden_repo_alias}': "
+                    f"a refresh is currently in progress for it ({e}). "
+                    "Retry activation once the refresh completes."
+                )
+
+            # Bug #1393 direction 1: become a write-lock HOLDER so a refresh
+            # that starts AFTER this point yields via its existing
+            # is_write_locked() check (refresh_scheduler.py), exactly like
+            # golden_repo_manager.change_branch already does for its own
+            # "touch the golden repo source tree" operation.
+            if not scheduler.acquire_write_lock(
+                golden_repo_alias, owner_name="activation_clone"
+            ):
+                raise ActivatedRepoError(
+                    f"Cannot clone golden repository '{golden_repo_alias}': "
+                    "write lock is already held by another writer. "
+                    "Retry activation once it completes."
+                )
+            _lock_acquired = True
+
         try:
             # Step 1: Perform CoW clone to copy EVERYTHING including .code-indexer/
             self.logger.info(
@@ -3285,6 +3350,14 @@ class ActivatedRepoManager:
             if os.path.exists(dest_path):
                 shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(f"Clone operation failed: {str(e)}")
+        finally:
+            # Bug #1393: always release a lock we acquired, regardless of
+            # success or failure -- mirrors golden_repo_manager.change_branch
+            # and every other WriteLockManager holder in this codebase.
+            if _lock_acquired and scheduler is not None:
+                scheduler.release_write_lock(
+                    golden_repo_alias, owner_name="activation_clone"
+                )
 
     def _setup_origin_remote_for_local_repo(
         self, source_path: str, dest_path: str

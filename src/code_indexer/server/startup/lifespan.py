@@ -624,6 +624,27 @@ def make_lifespan(
         # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
         # (See lines after GoldenRepoManager creation below)
 
+        # Startup: hnswlib fork-capability check (Bug #1392). Loud-log only,
+        # NEVER blocks startup -- hard-failing here would take down ALL
+        # query serving over a defect that leaves query serving unaffected
+        # (Query Is Everything invariant).
+        try:
+            from code_indexer.server.services.hnswlib_capability_check import (
+                run_hnswlib_capability_startup_check,
+            )
+
+            run_hnswlib_capability_startup_check()
+        except Exception as e:
+            # Log error but don't block server startup
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-1392",
+                    f"Failed to run hnswlib capability check on startup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                ),
+                exc_info=True,
+            )
+
         # Startup: Run SSH key migration (first-time auto-discovery)
         logger.info(
             "Server startup: Checking SSH key migration",

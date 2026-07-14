@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
@@ -42,13 +43,35 @@ logger = logging.getLogger(__name__)
 # mirrors ActivatedReaperScheduler's _TICK_SECONDS pattern.
 _TICK_SECONDS = 60
 
-# Poll cadence used while the sweep is disabled in config, so re-enabling it
-# takes effect promptly without a server restart.
+# Poll cadence used while the sweep is disabled/outside its operating-hours
+# window, so re-enabling it (or re-entering the window) takes effect
+# promptly without a server restart.
 _DISABLED_POLL_SECONDS = 60
 
 # Safe fallback cadence when config cannot be read.
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
+
+# Fail-open default operating-hours window: (0, 0) means "always on" (24x7),
+# matching the pre-#1397 default behavior.
+_DEFAULT_WINDOW_START_UTC = 0
+_DEFAULT_WINDOW_END_UTC = 0
+
+
+def _is_within_operating_window(current_hour_utc: int, start: int, end: int) -> bool:
+    """Pure, thread/clock-free UTC operating-hours window check (Story #1397).
+
+    All arguments are integers 0-23. ``start == end`` means "always run"
+    (24x7) -- this is the locked design decision and covers the (0, 0)
+    default. ``start < end`` is a same-day, half-open window
+    ``[start, end)``. ``start > end`` is an overnight wrap-around window
+    (e.g. 22 -> 6 includes hours 22, 23, 0, 1, ..., 5).
+    """
+    if start == end:
+        return True
+    if start < end:
+        return start <= current_hour_utc < end
+    return current_hour_utc >= start or current_hour_utc < end
 
 
 class HNSWOrphanRepairSweepScheduler:
@@ -74,6 +97,7 @@ class HNSWOrphanRepairSweepScheduler:
         background_job_manager: Optional[Any],
         config_service: Any,
         process_fn: Callable[[Any], SweepOutcome] = process_candidate,
+        now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         """
         Args:
@@ -94,6 +118,10 @@ class HNSWOrphanRepairSweepScheduler:
                 batch_size, tick_interval_minutes).
             process_fn: Injectable per-item processor (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
+            now_fn: Injectable clock hook returning the current time (defaults
+                to the real UTC wall clock). Used by the operating-hours
+                window gate (Story #1397) to determine the current UTC hour;
+                tests inject a fixed value for deterministic window checks.
         """
         self._golden_repo_manager = golden_repo_manager
         self._activated_repo_manager = activated_repo_manager
@@ -101,6 +129,7 @@ class HNSWOrphanRepairSweepScheduler:
         self._background_job_manager = background_job_manager
         self._config_service = config_service
         self._process_fn = process_fn
+        self._now_fn = now_fn
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -254,25 +283,49 @@ class HNSWOrphanRepairSweepScheduler:
     # Main loop
     # ------------------------------------------------------------------
 
-    def _loop(self) -> None:
-        """Main loop: submit a tick job (if enabled), then wait for the
-        configured interval, repeat. Re-reads enabled/interval from config
-        each cycle so Web UI changes take effect without a restart."""
-        while not self._stop_event.is_set():
-            try:
-                cfg = self._config_service.get_config().hnsw_orphan_repair_sweep_config
-                enabled = bool(cfg.enabled)
-                interval_minutes = int(cfg.tick_interval_minutes)
-            except Exception as exc:
-                logger.warning(
-                    "HNSWOrphanRepairSweepScheduler: failed to read config, "
-                    "using defaults: %s",
-                    exc,
-                )
-                enabled = True
-                interval_minutes = _DEFAULT_TICK_INTERVAL_MINUTES
+    def _read_cycle_config(self) -> Dict[str, Any]:
+        """Read enabled/interval/operating-hours-window from config for one
+        loop cycle. Fail-open (Story #1397 gotcha #2): if config cannot be
+        read, defaults to enabled=True, the default tick interval, and an
+        always-on (0, 0) window -- a transient config-read glitch must
+        never silently stop the sweep."""
+        try:
+            cfg = self._config_service.get_config().hnsw_orphan_repair_sweep_config
+            return {
+                "enabled": bool(cfg.enabled),
+                "interval_minutes": int(cfg.tick_interval_minutes),
+                "window_start": int(cfg.operating_hours_start_utc),
+                "window_end": int(cfg.operating_hours_end_utc),
+            }
+        except Exception as exc:
+            logger.warning(
+                "HNSWOrphanRepairSweepScheduler: failed to read config, "
+                "using defaults: %s",
+                exc,
+            )
+            return {
+                "enabled": True,
+                "interval_minutes": _DEFAULT_TICK_INTERVAL_MINUTES,
+                "window_start": _DEFAULT_WINDOW_START_UTC,
+                "window_end": _DEFAULT_WINDOW_END_UTC,
+            }
 
-            if enabled:
+    def _loop(self) -> None:
+        """Main loop: submit a tick job (if enabled AND within the
+        configured UTC operating-hours window), then wait for the
+        configured interval, repeat. Re-reads enabled/interval/window from
+        config each cycle so Web UI changes take effect without a restart
+        (Story #1397)."""
+        while not self._stop_event.is_set():
+            cycle_cfg = self._read_cycle_config()
+            enabled = cycle_cfg["enabled"]
+            interval_minutes = cycle_cfg["interval_minutes"]
+            current_hour = self._now_fn().hour
+            within_window = _is_within_operating_window(
+                current_hour, cycle_cfg["window_start"], cycle_cfg["window_end"]
+            )
+
+            if enabled and within_window:
                 try:
                     self.trigger_now()
                 except Exception as exc:

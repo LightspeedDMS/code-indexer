@@ -55,6 +55,25 @@ def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return hnsw_orphan_sweep settings dict from ServerConfig (Story #1397).
+
+    Surfaces all 5 fields of HNSWOrphanRepairSweepConfig for the Web UI
+    Config screen -- extends Story #1360's config object (enabled,
+    batch_size, tick_interval_minutes) with the new operating-hours window
+    fields.
+    """
+    sweep = config.hnsw_orphan_repair_sweep_config
+    assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": sweep.enabled,
+        "batch_size": sweep.batch_size,
+        "tick_interval_minutes": sweep.tick_interval_minutes,
+        "operating_hours_start_utc": sweep.operating_hours_start_utc,
+        "operating_hours_end_utc": sweep.operating_hours_end_utc,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -419,6 +438,7 @@ class ConfigService:
                 "memory_governor_sample_interval_seconds": config.cache_config.memory_governor_sample_interval_seconds,
                 "memory_governor_swap_forces_red": config.cache_config.memory_governor_swap_forces_red,
                 "memory_governor_rss_inflation_factor": config.cache_config.memory_governor_rss_inflation_factor,
+                "memory_governor_swap_pswpin_red_threshold": config.cache_config.memory_governor_swap_pswpin_red_threshold,
             },
             # Git operation timeouts
             "timeouts": {
@@ -678,6 +698,8 @@ class ConfigService:
             },
             # Story #967 - Activated repository reaper configuration
             "activated_reaper": _activated_reaper_settings(config),
+            # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+            "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -915,6 +937,9 @@ class ConfigService:
         # Story #967 - Activated repository reaper configuration
         elif category == "activated_reaper":
             self._update_activated_reaper_setting(config, key, value)
+        # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+        elif category == "hnsw_orphan_sweep":
+            self._update_hnsw_orphan_sweep_setting(config, key, value)
         # Story #977 - X-Ray precision AST-aware code search configuration
         elif category == "xray":
             self._update_xray_setting(config, key, value)
@@ -1012,29 +1037,57 @@ class ConfigService:
         """Update a cache setting."""
         cache = config.cache_config
         assert cache is not None  # Guaranteed by ServerConfig.__post_init__
+        # Bug #1396: blank means "no override, use default" for these
+        # fields, matching the size-cap fields' existing blank-tolerance
+        # idiom below (int(value) if value else None).
+        DEFAULT_CACHE_TTL_MINUTES = 10.0
+        DEFAULT_CACHE_CLEANUP_INTERVAL = 60
+        DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS = 2000
+        DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS = 5000
+        DEFAULT_PAYLOAD_CACHE_TTL_SECONDS = 900
+        DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS = 60
         if key == "index_cache_ttl_minutes":
-            cache.index_cache_ttl_minutes = float(value)
+            cache.index_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "index_cache_cleanup_interval":
-            cache.index_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.index_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "index_cache_max_size_mb":
             cache.index_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_ttl_minutes":
-            cache.fts_cache_ttl_minutes = float(value)
+            cache.fts_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "fts_cache_cleanup_interval":
-            cache.fts_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.fts_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
             cache.fts_cache_reload_on_access = bool(value)
-        # Payload cache settings (Story #679)
+        # Payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
-            cache.payload_preview_size_chars = int(value)
+            cache.payload_preview_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS
+            )
         elif key == "payload_max_fetch_size_chars":
-            cache.payload_max_fetch_size_chars = int(value)
+            cache.payload_max_fetch_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS
+            )
         elif key == "payload_cache_ttl_seconds":
-            cache.payload_cache_ttl_seconds = int(value)
+            cache.payload_cache_ttl_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CACHE_TTL_SECONDS
+            )
         elif key == "payload_cleanup_interval_seconds":
-            cache.payload_cleanup_interval_seconds = int(value)
+            cache.payload_cleanup_interval_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS
+            )
         # Story #1213 Story 2: Memory-governor runtime knobs (hot-reload).
         elif key == "memory_governor_enabled":
             cache.memory_governor_enabled = _parse_bool(value)
@@ -1082,12 +1135,20 @@ class ConfigService:
         elif key == "memory_governor_rss_inflation_factor":
             cache.memory_governor_rss_inflation_factor = float(value)
         elif key == "memory_governor_swap_pswpin_red_threshold":
-            new_thr = int(value)
-            if new_thr < 0:
-                raise ValueError(
-                    f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
-                    f"(non-negative), got {new_thr}"
-                )
+            # Bug #1396: blank means "no override" -- fall back to the
+            # CacheConfig dataclass default documented in config_manager.py
+            # (memory_governor_swap_pswpin_red_threshold: int = 100) instead
+            # of crashing on int('').
+            DEFAULT_SWAP_PSWPIN_RED_THRESHOLD = 100
+            if value:
+                new_thr = int(value)
+                if new_thr < 0:
+                    raise ValueError(
+                        f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
+                        f"(non-negative), got {new_thr}"
+                    )
+            else:
+                new_thr = DEFAULT_SWAP_PSWPIN_RED_THRESHOLD
             cache.memory_governor_swap_pswpin_red_threshold = new_thr
         else:
             raise ValueError(f"Unknown cache setting: {key}")
@@ -2076,6 +2137,32 @@ class ConfigService:
             reaper.cadence_hours = int(value)
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
+
+    def _update_hnsw_orphan_sweep_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an hnsw_orphan_sweep setting (Story #1397).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the Web
+        UI submits an explicit "true"/"false" string (boolean <select>, not
+        a checkbox), so `_parse_bool("false")` must persist False rather
+        than silently no-op (the "enabled-checkbox trap" the issue warns
+        about). The remaining 4 fields are plain integers.
+        """
+        sweep = config.hnsw_orphan_repair_sweep_config
+        assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            sweep.enabled = _parse_bool(value)
+        elif key == "batch_size":
+            sweep.batch_size = int(value)
+        elif key == "tick_interval_minutes":
+            sweep.tick_interval_minutes = int(value)
+        elif key == "operating_hours_start_utc":
+            sweep.operating_hours_start_utc = int(value)
+        elif key == "operating_hours_end_utc":
+            sweep.operating_hours_end_utc = int(value)
+        else:
+            raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""

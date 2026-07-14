@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.53.0] - 2026-07-14
+
+### Fixed
+
+- **#1391**: dashboard cache-metrics On-Mode Hit Rate ignored the Time Window selector (unwindowed lifetime aggregate), and Shadow Hit Rate used an operation-denominated source (`search_embed_event`) inconsistent with On-Mode's request-denominated one (`search_event_log`). Both cards now share the same windowed, request-denominated source.
+- **#1392**: server and CLI subprocess can run different Python environments, and a stock PyPI hnswlib silently lacking `check_integrity()`/`repair_orphans()` would pass an import-only probe. Adds a fail-loud runtime capability gate on build/finalize paths only, a non-fatal startup check, and makes the deploy-pipeline CLI-sync guards capability-aware (an import-only guard made the sync silently no-op when the server build already advanced the shared last-built-commit marker).
+- **#1393**: golden-repo activation's copy-on-write clone could race with a concurrent `RefreshScheduler` refresh of the same repo, corrupting the activated repo's initial state. Adds fail-fast + write-lock coordination, plus a wiring-gap fix (`GlobalReposLifecycleManager` never forwarded `job_tracker` into `RefreshScheduler`, making the fail-fast check a permanent no-op in production) found and closed via live manual E2E testing.
+- **#1394**: `GET /api/repositories/{alias}/health` ran a synchronous, serial per-collection HNSW integrity check inside an async route, causing HTTP 504 on large temporal repos and no per-collection exception isolation. Adds a bounded-concurrency, per-collection-isolated batch helper and new async `POST .../health/check` job endpoints across all four frontend call sites.
+- **#1396**: the Cache Settings Web UI form rejected the entire submission -- including unrelated field edits -- whenever `memory_governor_swap_pswpin_red_threshold` was blank. Fixed across three layers: validator blank-tolerance, ConfigService default-fallback, and a `get_all_settings()` serialization gap that left the template's pre-population guard inert.
+
+### Added
+
+- **#1397** (supersedes #1395): HNSW orphan-repair fleet sweep is now configurable from the Web UI -- `enabled`, `batch_size`, `tick_interval_minutes`, plus a new daily UTC operating-hours window (with overnight wrap-around, fail-open default) so the sweep's disk I/O can be confined to off-peak hours. Changes take effect live, no restart required.
+
 ## [11.52.0] - 2026-07-13
 
 ### Fixed

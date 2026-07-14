@@ -213,6 +213,8 @@ _VALID_CONFIG_SECTIONS = (
     "data_retention",
     # Story #967 - Activated repository reaper configuration
     "activated_reaper",
+    # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+    "hnsw_orphan_sweep",
     # Story #977 - X-Ray precision AST-aware code search configuration
     "xray",
     # Story #652 - Reranking configuration
@@ -888,19 +890,27 @@ def dashboard_api_metrics_partial(
 
 @web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
 def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400):
-    """Story #1109 (S5) / Story #1294: Query-embedding cache metrics partial.
+    """Story #1109 (S5) / Story #1294 / Bug #1391: Query-embedding cache
+    metrics partial.
 
     Returns an HTML fragment showing total cached entries plus windowed,
     cluster-aggregated cache statistics for the selected time window. Every
-    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT) and
-    On-Mode Hit Rate (Issue #1257, request-denominated from search_event_log)
-    is sourced from WindowedCacheMetrics — a GROUP BY (cache_mode, provider)
-    aggregation over the durable, phantom-free `search_embed_event` table
-    (Story #1293), computed for `[now - cache_window, now)`. This replaces
-    the old in-memory QueryEmbeddingCacheMetrics/CoalescerRegistry per-node,
-    volatile tallies (Story #1294) — the numbers are now durable, windowed,
-    and aggregated across every cluster node by construction (the backend
-    reads the shared store, never a per-node counter).
+    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT), Shadow
+    Hit Rate, and On-Mode Hit Rate is sourced from WindowedCacheMetrics — a
+    GROUP BY (cache_mode, provider) aggregation over the durable,
+    phantom-free `search_embed_event` table (Story #1293), computed for
+    `[now - cache_window, now)`. The two Hit Rate cards (Shadow and On-Mode)
+    are BOTH request-denominated (one row per user request) and windowed,
+    sourced from `search_event_log` via `get_hit_rate_counts(mode, from_ts,
+    to_ts)` (Issue #1257 introduced the request-denominated semantics for
+    On-Mode; Bug #1391 fixed On-Mode to respect the selected time window and
+    moved Shadow onto this same source/denominator for consistency — it was
+    previously operation-denominated from search_embed_event and always
+    unwindowed). This replaces the old in-memory
+    QueryEmbeddingCacheMetrics/CoalescerRegistry per-node, volatile tallies
+    (Story #1294) — the numbers are now durable, windowed, and aggregated
+    across every cluster node by construction (the backend reads the shared
+    store, never a per-node counter).
 
     Args:
         request: HTTP request.
@@ -952,8 +962,15 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
 
         shadow_agg = CacheMetricsAggregate()
 
-    shadow_hits = shadow_agg.hits
-    shadow_requests = shadow_agg.hits + shadow_agg.misses
+    # Bug #1391 Defect 2: Shadow Hit Rate is no longer sourced from this
+    # search_embed_event shadow_agg (operation-denominated -- one row per
+    # NEEDED embed per provider). It is computed below from search_event_log
+    # instead, alongside On-Mode, so both Hit Rate cards share the SAME
+    # request-denominated source/window. The cosine distribution fields
+    # below correctly REMAIN sourced from shadow_agg (per-sample
+    # distributions are operation-based by design).
+    shadow_hits = 0
+    shadow_requests = 0
     shadow_cosine_p50 = shadow_agg.shadow_cosine_p50
     shadow_cosine_p05 = shadow_agg.shadow_cosine_p05
     shadow_cosine_min = shadow_agg.shadow_cosine_min
@@ -968,24 +985,34 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     coalescer_dedup_savings = overall.dedup
     coalescer_provider_embed_calls = overall.provider_embed_calls
 
-    # Issue #1257: On-Mode Hit Rate must be REQUEST-denominated (one row per
-    # user request in search_event_log), NOT operation-denominated. This is
-    # UNCHANGED by Story #1294 — it stays sourced from search_event_log's
-    # get_hit_rate_counts, which aggregates REQUESTS (rows), matching the
-    # analytics denominator. Fail-open: on_hits/on_requests stay at 0 when
-    # the writer is not wired or the query fails.
+    # Issue #1257 / Bug #1391: Both Hit Rate cards are REQUEST-denominated
+    # (one row per user request in search_event_log), NOT
+    # operation-denominated, and BOTH now respect the selected cache_window
+    # (from_ts/to_ts) instead of one of them (On-Mode) aggregating the
+    # table's entire lifetime. Each call fails open independently: a failure
+    # on one mode's lookup must not suppress the other card.
     on_hits = 0
     on_requests = 0
     sel_writer = getattr(request.app.state, "search_event_log_writer", None)
     sel_backend = sel_writer.backend if sel_writer is not None else None
     if sel_backend is not None:
         try:
-            _on_counts = sel_backend.get_hit_rate_counts("on")
+            _on_counts = sel_backend.get_hit_rate_counts("on", from_ts, to_ts)
             on_hits = _on_counts.get("hits", 0)
             on_requests = _on_counts.get("requests", 0)
         except Exception as _exc:
             logger.warning(
-                "dashboard_cache_metrics_partial: get_hit_rate_counts failed: %s",
+                "dashboard_cache_metrics_partial: get_hit_rate_counts('on') failed: %s",
+                _exc,
+            )
+        try:
+            _shadow_counts = sel_backend.get_hit_rate_counts("shadow", from_ts, to_ts)
+            shadow_hits = _shadow_counts.get("hits", 0)
+            shadow_requests = _shadow_counts.get("requests", 0)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_hit_rate_counts('shadow') "
+                "failed: %s",
                 _exc,
             )
 
@@ -6201,6 +6228,8 @@ def _get_current_config() -> dict:
         DataRetentionConfig,
         # Story #967 - Activated repository reaper configuration
         ActivatedReaperConfig,
+        # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+        HNSWOrphanRepairSweepConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6423,6 +6452,10 @@ def _get_current_config() -> dict:
         "activated_reaper": settings.get(
             "activated_reaper", asdict(ActivatedReaperConfig())
         ),
+        # Story #1397: HNSW orphan-repair sweep operating-hours window config
+        "hnsw_orphan_sweep": settings.get(
+            "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
@@ -6513,10 +6546,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 return "JWT expiration must be a valid number"
 
     elif section == "cache":
-        # Validate cache TTL values
+        # Validate cache TTL values.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_ttl_minutes", "fts_cache_ttl_minutes"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_float = float(value)
                     if val_float <= 0:
@@ -6526,10 +6561,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate cleanup intervals
+        # Validate cleanup intervals.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_cleanup_interval", "fts_cache_cleanup_interval"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6552,7 +6589,9 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     return f"{field} must be empty or a positive integer (MB)"
 
-        # Validate payload cache settings (Story #679)
+        # Validate payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         for field in [
             "payload_preview_size_chars",
             "payload_max_fetch_size_chars",
@@ -6560,7 +6599,7 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "payload_cleanup_interval_seconds",
         ]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6570,9 +6609,11 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate memory governor swap-in threshold (Bug #1225)
+        # Validate memory governor swap-in threshold (Bug #1225).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
-        if swap_threshold is not None:
+        if swap_threshold is not None and str(swap_threshold).strip() != "":
             try:
                 val_int = int(swap_threshold)
                 if val_int < 0:
@@ -7260,6 +7301,40 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Cadence Hours must be between 1 and 168"
             except (ValueError, TypeError):
                 return "Cadence Hours must be a valid number"
+
+    elif section == "hnsw_orphan_sweep":
+        # Story #1397: HNSW orphan-repair sweep operating-hours window
+        # configuration validation.
+        for hour_field, label in (
+            ("operating_hours_start_utc", "Operating Hours Start"),
+            ("operating_hours_end_utc", "Operating Hours End"),
+        ):
+            hour_value = data.get(hour_field)
+            if hour_value is not None:
+                try:
+                    val_int = int(hour_value)
+                    if val_int < 0 or val_int > 23:
+                        return f"{label} must be between 0 and 23"
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
+        tick_interval_minutes = data.get("tick_interval_minutes")
+        if tick_interval_minutes is not None:
+            try:
+                val_int = int(tick_interval_minutes)
+                if val_int < 1:
+                    return "Tick Interval Minutes must be at least 1"
+            except (ValueError, TypeError):
+                return "Tick Interval Minutes must be a valid number"
+
+        batch_size = data.get("batch_size")
+        if batch_size is not None:
+            try:
+                val_int = int(batch_size)
+                if val_int < 1:
+                    return "Batch Size must be at least 1"
+            except (ValueError, TypeError):
+                return "Batch Size must be a valid number"
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation
