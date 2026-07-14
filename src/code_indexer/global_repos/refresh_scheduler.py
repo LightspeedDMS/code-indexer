@@ -1078,6 +1078,43 @@ class RefreshScheduler:
         """
         return self.write_lock_manager.is_locked(alias)
 
+    def check_refresh_not_in_progress(self, alias: str) -> None:
+        """
+        Raise DuplicateJobError if a global_repo_refresh job is currently
+        active (running or pending) for the given bare golden repo alias.
+
+        Bug #1393: WriteLockManager alone cannot signal "a refresh is
+        ALREADY executing" -- _execute_refresh() only CHECKS
+        is_write_locked(), it never HOLDS the write lock itself while
+        running (the lock is reserved for the enumerated external-writer
+        set: DependencyMapService, LangfuseTraceSyncService, branch_change,
+        etc -- Story #227). JobTracker is the cluster-visible signal for
+        "currently executing" instead, since _execute_refresh() registers
+        itself into it (Bug #935) under the alias_name form (bare alias +
+        "-global").
+
+        Callers should catch job_tracker.DuplicateJobError and translate it
+        into their own domain error with an actionable message. This
+        mirrors the register_job_if_no_conflict/DuplicateJobError fail-fast
+        convention already used elsewhere in this codebase for conflicting
+        operations, rather than blocking on an unbounded/long wait -- a
+        refresh can legitimately run for well over an hour on a very large
+        golden repo, and this method is called from within a caller's own
+        background-job thread, which should not be tied up indefinitely.
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "evolution").
+
+        Raises:
+            job_tracker.DuplicateJobError: If a global_repo_refresh job is
+                active for "{alias}-global".
+        """
+        if self._job_tracker is None:
+            return
+        self._job_tracker.check_operation_conflict(
+            "global_repo_refresh", repo_alias=f"{alias}-global"
+        )
+
     def write_lock(self, alias: str, owner_name: str = "refresh_scheduler"):
         """
         Context manager that acquires the write lock on entry and releases on exit.
