@@ -88,6 +88,85 @@ RESTART_REQUIRED_FIELDS = [
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
     "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
     "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
+    # Bug #1399 item 6: MODERATE-classified fields captured once at server
+    # startup (singleton/manager construction, module globals, or
+    # middleware wiring) and never re-consulted afterward. A Web UI change
+    # has no effect until the server is restarted; these entries only add
+    # the operator-visible hint -- they do NOT implement hot-reload.
+    # password_security.* — captured once at UserManager.__init__ /
+    # PasswordStrengthValidator construction.
+    "min_length",
+    "max_length",
+    "required_char_classes",
+    "min_entropy_bits",
+    # server.jwt_expiration_minutes — captured once at service_init.py JWT
+    # manager construction.
+    "jwt_expiration_minutes",
+    # health.* — written once to module globals at health_service.py
+    # construction; never re-invoked.
+    "memory_warning_threshold_percent",
+    "memory_critical_threshold_percent",
+    "disk_warning_threshold_percent",
+    "disk_critical_threshold_percent",
+    "cpu_sustained_threshold_percent",
+    # error_handling.* — baked into middleware at startup (app_wiring.py).
+    "max_retry_attempts",
+    "base_retry_delay_seconds",
+    "max_retry_delay_seconds",
+    # telemetry.* sub-fields — captured once into TracerProvider/
+    # MeterProvider/exporters at startup. telemetry_enabled (the kill
+    # switch) already has its own hint above; these are the sub-fields.
+    "collector_endpoint",
+    "collector_protocol",
+    "service_name",
+    "export_traces",
+    "export_metrics",
+    "machine_metrics_enabled",
+    "machine_metrics_interval_seconds",
+    "deployment_environment",
+    # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
+    # created client at startup). Pull-sync fields (pull_enabled, pull_host,
+    # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
+    # are correctly re-read live every sync cycle and are NOT listed here.
+    "public_key",
+    "secret_key",
+    "auto_trace_enabled",
+    # codex_integration.* PROVISIONING fields only (provisioned once at
+    # boot). `enabled`/`codex_weight` are correctly read live per dispatched
+    # dep-map job and are NOT listed here.
+    "credential_mode",
+    "api_key",
+    "lcp_url",
+    "lcp_vendor",
+    # scip_cleanup.scip_workspace_retention_days — thread pool sized once at
+    # service_init.py / workspace_cleanup_service.py construction.
+    "scip_workspace_retention_days",
+    # server.coalesce_k_min / coalesce_k_max — construction-scoped seed for
+    # the concurrency governor.
+    "coalesce_k_min",
+    "coalesce_k_max",
+    # golden_repos.analysis_model — SCHEDULER path only (captured once at
+    # startup). The interactive Research Assistant path reads it live and
+    # is unaffected; the flat list has no per-consumer split.
+    "analysis_model",
+    # multi_search timeout/limit fields — module singletons built once.
+    # multi_search_max_workers / scip_multi_max_workers already have hints
+    # above; these are the sibling timeout/limit fields that do not.
+    "multi_search_timeout_seconds",
+    "scip_multi_timeout_seconds",
+    "scip_reference_limit",
+    "scip_dependency_depth",
+    "scip_callchain_max_depth",
+    "scip_callchain_limit",
+    # claude_cli.scheduled_catchup_* — captured once in
+    # ScheduledCatchupService.__init__; loop uses the frozen value.
+    "scheduled_catchup_enabled",
+    "scheduled_catchup_interval_minutes",
+    # cache payload_* fields — snapshotted once at lifespan.py startup.
+    "payload_preview_size_chars",
+    "payload_max_fetch_size_chars",
+    "payload_cache_ttl_seconds",
+    "payload_cleanup_interval_seconds",
 ]
 
 
@@ -215,6 +294,8 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # Issue #1398 - Query & search timeouts configuration
+    "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
     "xray",
     # Story #652 - Reranking configuration
@@ -6230,6 +6311,8 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        # Issue #1398 - Query & search timeouts configuration
+        SearchTimeoutsConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6455,6 +6538,10 @@ def _get_current_config() -> dict:
         # Story #1397: HNSW orphan-repair sweep operating-hours window config
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
+        # Issue #1398: Query & search timeouts configuration
+        "search_timeouts": settings.get(
+            "search_timeouts", asdict(SearchTimeoutsConfig())
         ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
@@ -7335,6 +7422,47 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch Size must be at least 1"
             except (ValueError, TypeError):
                 return "Batch Size must be a valid number"
+
+    elif section == "search_timeouts":
+        # Issue #1398: Query & search timeouts configuration validation.
+        # Ranges mirror config_manager.validate_config's SearchTimeoutsConfig checks.
+        for field_name, label, min_val, max_val in (
+            (
+                "search_code_handler_timeout_seconds",
+                "Semantic/Temporal Search Tool Timeout",
+                30,
+                600,
+            ),
+            (
+                "default_handler_timeout_seconds",
+                "Default MCP Tool Timeout",
+                10,
+                300,
+            ),
+            (
+                "write_mode_handler_timeout_seconds",
+                "Write-Mode Refresh Timeout",
+                600,
+                3600,
+            ),
+            (
+                "embedding_provider_timeout_seconds",
+                "Embedding Provider HTTP Timeout",
+                5,
+                120,
+            ),
+            ("reranker_timeout_seconds", "Reranker HTTP Timeout", 5, 120),
+        ):
+            field_value = data.get(field_name)
+            if field_value is not None:
+                try:
+                    val_int = int(field_value)
+                    if val_int < min_val or val_int > max_val:
+                        return (
+                            f"{label} must be between {min_val} and {max_val} seconds"
+                        )
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation

@@ -2399,12 +2399,20 @@ def make_lifespan(
             from code_indexer.server.mcp.session_registry import get_session_registry
 
             session_registry = get_session_registry()
+            # Bug #1399: do NOT pass explicit ttl_seconds/cleanup_interval_seconds
+            # literals here -- start_background_cleanup()'s config-driven
+            # fallback (reads mcp_session_config from ConfigService) only
+            # activates when the argument is None. Passing literals silently
+            # bypassed the Web UI's mcp_session.session_ttl_seconds /
+            # cleanup_interval_seconds settings on every server startup.
             session_registry.start_background_cleanup(
-                ttl_seconds=3600,  # 1 hour
-                cleanup_interval_seconds=900,  # 15 minutes
+                ttl_seconds=None,
+                cleanup_interval_seconds=None,
             )
             logger.info(
-                "MCP Session cleanup task started (TTL=3600s, interval=900s)",
+                "MCP Session cleanup task started (TTL=%ds, interval=%ds)",
+                session_registry._ttl_seconds,
+                session_registry._cleanup_interval_seconds,
                 extra={"correlation_id": get_correlation_id()},
             )
 
@@ -3361,6 +3369,66 @@ def make_lifespan(
                                 "Bug #943: elevation timeout hot-reload on config change failed",
                                 exc_info=True,
                             )
+
+                        # Bug #1399 item 7: re-apply every live-reloadable cache-family
+                        # field (TTL x2, cleanup interval x2, size cap x2,
+                        # reload_on_access) onto THIS process's HNSW/FTS singletons.
+                        # _hot_reload_cache_size_cap/_hot_reload_cache_ttl_minutes/etc.
+                        # only patch the ONE worker that handled the Web UI POST;
+                        # under uvicorn --workers N or in a cluster, every sibling
+                        # worker/node runs its own PG-poll loop and must re-apply the
+                        # fresh values here on its own next tick (mirrors the Bug #943
+                        # pattern above: local synchronous call on the processing node
+                        # PLUS this PG-poll callback for siblings).
+                        try:
+                            from code_indexer.server.services.config_service import (
+                                get_config_service as _get_cs_cache,
+                            )
+
+                            _get_cs_cache().reapply_live_cache_hot_reload_fields(
+                                new_config
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Bug #1399: cache hot-reload on config change failed",
+                                exc_info=True,
+                            )
+
+                        # Bug #1399 item 8: re-wire nested config sub-objects that
+                        # SessionManager / GoldenRepoManager captured by reference at
+                        # construction time. check_config_update() replaces
+                        # self._config with a brand-new ServerConfig (fresh nested
+                        # sub-objects) on every version-diff PG-poll tick, so on any
+                        # node OTHER than the one that processed the POST, these
+                        # managers' cached references still point at the stale
+                        # pre-change sub-object indefinitely.
+                        try:
+                            from code_indexer.server.web.auth import (
+                                get_session_manager as _get_sm,
+                            )
+
+                            _get_sm()._web_security_config = (
+                                new_config.web_security_config
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Bug #1399: SessionManager web_security_config "
+                                "re-wire on config change skipped (not initialized "
+                                "yet or unavailable)",
+                                exc_info=True,
+                            )
+
+                        if golden_repo_manager is not None:
+                            try:
+                                golden_repo_manager.resource_config = (
+                                    new_config.resource_config
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Bug #1399: GoldenRepoManager resource_config "
+                                    "re-wire on config change failed",
+                                    exc_info=True,
+                                )
 
                     from code_indexer.server.services.config_service import (
                         get_config_service as _get_cs,

@@ -100,6 +100,24 @@ def _load_provider_models(config_service: Any) -> Tuple[str, str]:
     return rc.voyage_reranker_model, rc.cohere_reranker_model
 
 
+def _configured_reranker_timeout_seconds(config_service: Any) -> float:
+    """Return the Web-UI-configured reranker HTTP timeout (Issue #1398).
+
+    Reads config_service.get_config().search_timeouts_config directly
+    (matching _load_provider_models's parameter-injection pattern) rather
+    than the server's global get_config_service() singleton, since this
+    module is shared with the CLI's cli_search_funnel.py via a duck-typed
+    CliRerankConfigService shim that has no search_timeouts_config
+    attribute at all -- getattr() defaults to the pre-#1398 hardcoded 15.0
+    in that case, preserving CLI/solo behavior unchanged.
+    """
+    cfg = config_service.get_config()
+    search_timeouts = getattr(cfg, "search_timeouts_config", None)
+    if search_timeouts is None:
+        return 15.0
+    return float(search_timeouts.reranker_timeout_seconds)
+
+
 def _attempt_provider_rerank(
     provider_name: str,
     health_key: str,
@@ -109,11 +127,17 @@ def _attempt_provider_rerank(
     instruction: Optional[str],
     top_k: int,
     monitor: ProviderHealthMonitor,
+    timeout_seconds: float = 15.0,
 ) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str]]:
     """Try one reranker provider; return (scored_pairs, failure_reason).
 
     scored_pairs is a list of (original_index, relevance_score) tuples,
     ordered by score descending (as returned by the reranker client).
+
+    Args:
+        timeout_seconds: HTTP request timeout passed to client_cls (Issue
+            #1398). Defaults to 15.0 (pre-#1398 hardcoded value) so direct
+            callers that don't pass it keep the old behavior.
 
     Returns:
         (scored_pairs, None)  — success
@@ -146,7 +170,7 @@ def _attempt_provider_rerank(
             _factory = None
         from code_indexer.services.provider_backoff import execute_with_backoff
 
-        client = client_cls(http_client_factory=_factory)
+        client = client_cls(timeout=timeout_seconds, http_client_factory=_factory)
         # Bug #1078: gate the HTTP call through the concurrency governor AND wrap
         # with execute_with_backoff so 429 sleeps happen OUTSIDE the held slot.
         _budget = _RERANKER_BUDGET.get(client_cls, "voyage:rerank")
@@ -179,11 +203,17 @@ def _run_provider_chain(
     documents: List[str],
     instruction: Optional[str],
     top_k: int,
+    timeout_seconds: float = 15.0,
 ) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str], Optional[str], int]:
     """Run Voyage->Cohere chain; return (scored_pairs, provider_name, failure_reason, elapsed_ms).
 
     scored_pairs is a list of (original_index, relevance_score) tuples ordered
     by score descending. Carries scores so _apply_reranking_sync can attach them.
+
+    Args:
+        timeout_seconds: HTTP request timeout threaded to each provider's
+            client construction (Issue #1398). Defaults to 15.0 (pre-#1398
+            hardcoded value).
 
     Measures total chain elapsed time from first provider attempt to last.
     failure_reason is the worst-case reason across all providers:
@@ -201,7 +231,15 @@ def _run_provider_chain(
         if not model:
             continue
         scored_pairs, failure_reason = _attempt_provider_rerank(
-            name, hkey, cls, query, documents, instruction, top_k, monitor
+            name,
+            hkey,
+            cls,
+            query,
+            documents,
+            instruction,
+            top_k,
+            monitor,
+            timeout_seconds=timeout_seconds,
         )
         if scored_pairs is not None:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
@@ -243,6 +281,7 @@ def _apply_reranking_sync(
         )
         return results, meta
     voyage_model, cohere_model = _load_provider_models(config_service)
+    timeout_seconds = _configured_reranker_timeout_seconds(config_service)
     if not voyage_model and not cohere_model:
         meta = _build_metadata(False, "none", 0, _DISABLED_HINT)
         meta["reranker_status"] = _build_reranker_status(
@@ -258,7 +297,13 @@ def _apply_reranking_sync(
         )
         return results[:0], meta
     reranked_pairs, active_provider, failure_reason, elapsed_ms = _run_provider_chain(
-        voyage_model, cohere_model, rerank_query, documents, rerank_instruction, top_k
+        voyage_model,
+        cohere_model,
+        rerank_query,
+        documents,
+        rerank_instruction,
+        top_k,
+        timeout_seconds=timeout_seconds,
     )
     if reranked_pairs is None:
         logger.warning(

@@ -589,6 +589,26 @@ def _apply_rerank_and_filter(
 _MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
 
 
+def _configured_embedding_timeout_seconds() -> int:
+    """Return the Web-UI-configured embedding provider HTTP timeout
+    (Issue #1398), replacing the previously hardcoded VoyageAIConfig
+    default of 30s at the server-side query-embedding construction sites.
+
+    Fails open to 30 (the pre-#1398 hardcoded default) if
+    search_timeouts_config is unset or absent entirely -- ServerConfig
+    .__post_init__ guarantees it is always set on a real ServerConfig, but
+    getattr() is used defensively (matching reranking.py's
+    _configured_reranker_timeout_seconds) since many existing unit tests
+    stub get_config_service() with a minimal fake object that has no
+    search_timeouts_config attribute at all.
+    """
+    cfg = get_config_service().get_config()
+    search_timeouts = getattr(cfg, "search_timeouts_config", None)
+    if search_timeouts is None:
+        return 30
+    return search_timeouts.embedding_provider_timeout_seconds  # type: ignore[no-any-return]
+
+
 def _compute_memory_query_vector(
     query_text: str,
     no_embedding_cache_shortcut: bool = False,
@@ -637,7 +657,10 @@ def _compute_memory_query_vector(
             )
             _factory = None
 
-        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
+        provider = VoyageAIClient(
+            VoyageAIConfig(timeout=_configured_embedding_timeout_seconds()),
+            http_client_factory=_factory,
+        )
         vec, _embed_meta = coalesced_query_embedding(
             provider,
             query_text,
@@ -706,7 +729,10 @@ def _compute_shared_query_vector(
             )
             _factory = None
 
-        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
+        provider = VoyageAIClient(
+            VoyageAIConfig(timeout=_configured_embedding_timeout_seconds()),
+            http_client_factory=_factory,
+        )
         digest = _digest_for_provider(provider)
         vec, _embed_meta = coalesced_query_embedding(
             provider,
