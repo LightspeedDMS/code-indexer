@@ -41,6 +41,12 @@ from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
 )
+
+# JobTracker raises its OWN DuplicateJobError, distinct from the
+# background_jobs one imported above; alias it so the two cannot be confused.
+from code_indexer.server.services.job_tracker import (
+    DuplicateJobError as _TrackerDuplicateJobError,
+)
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     ClaudeConflictResolver,
@@ -1669,12 +1675,42 @@ class RefreshScheduler:
         # Guard with is not None — CLI mode has no tracker.
         _tracker_job_id = f"refresh-{alias_name}"
         if self._job_tracker is not None:
-            self._job_tracker.register_job(
-                _tracker_job_id,
-                operation_type="global_repo_refresh",
-                username="system",
-                repo_alias=alias_name,
-            )
+            try:
+                # EVO-64385: register through the cluster-atomic API. Every pod
+                # runs its own RefreshScheduler (not leader-gated), so two pods
+                # restarting together fire for the same repo at once. The
+                # partial unique index idx_active_job_per_repo lets exactly one
+                # win -- that IS the cross-pod dedup. The plain register_job()
+                # let the loser's UniqueViolation escape as a raw DB error,
+                # which propagated out of here and made BackgroundJobManager
+                # mark the whole refresh FAILED (and /health "degraded") for a
+                # dedup that worked as designed.
+                self._job_tracker.register_job_if_no_conflict(
+                    _tracker_job_id,
+                    operation_type="global_repo_refresh",
+                    username="system",
+                    repo_alias=alias_name,
+                )
+            except _TrackerDuplicateJobError:
+                # Another node already holds the refresh for this repo. Skip --
+                # the repo IS being refreshed, just not by us. Return BEFORE the
+                # try/finally below: _tracker_job_id is deterministic and hence
+                # SHARED across pods, so completing or failing it here would
+                # clobber the winner's in-flight job.
+                logger.info(
+                    "Refresh for %s already in progress on another cluster node; "
+                    "skipping this node's run",
+                    alias_name,
+                )
+                return {
+                    "success": True,
+                    "alias": alias_name,
+                    "skipped": True,
+                    "message": (
+                        f"Refresh for {alias_name} is already running on another "
+                        f"node; skipped"
+                    ),
+                }
             self._job_tracker.update_status(_tracker_job_id, status="running")
 
         # Bug #935: track whether the refresh raised so the finally block can

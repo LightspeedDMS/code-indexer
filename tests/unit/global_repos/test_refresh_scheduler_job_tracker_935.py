@@ -4,8 +4,9 @@ with JobTracker so the drain endpoint knows they exist.
 
 Tests verify:
 1. RefreshScheduler accepts and stores job_tracker parameter (defaults to None in CLI mode).
-2. When a refresh starts, register_job is called BEFORE update_status(running) — verified via
-   mock_calls ordering so the sequence cannot silently reverse.
+2. When a refresh starts, the job is registered BEFORE update_status(running) — verified via
+   mock_calls ordering so the sequence cannot silently reverse. (EVO-64385: registration now
+   goes through the cluster-atomic register_job_if_no_conflict().)
 3. When a refresh ends (success), complete_job is called and fail_job is not.
 4. When a refresh ends with an exception, fail_job is called in try/finally.
 5. When no job_tracker is configured (CLI mode), _execute_refresh works unchanged.
@@ -22,7 +23,6 @@ from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.config import ConfigManager
-
 
 # ---------------------------------------------------------------------------
 # Shared scheduler fixtures
@@ -55,7 +55,7 @@ def cleanup_manager(query_tracker):
 def mock_job_tracker():
     """Minimal mock of JobTracker with the methods called by RefreshScheduler."""
     tracker = MagicMock()
-    tracker.register_job = MagicMock(return_value=MagicMock())
+    tracker.register_job_if_no_conflict = MagicMock(return_value=MagicMock())
     tracker.update_status = MagicMock()
     tracker.complete_job = MagicMock()
     tracker.fail_job = MagicMock()
@@ -170,9 +170,15 @@ class TestJobRegisteredAtRefreshStart:
         cleanup_manager,
         mock_job_tracker,
     ):
-        """register_job must be called BEFORE update_status(status='running').
+        """Registration must happen BEFORE update_status(status='running').
 
         Verified via mock_calls ordering so a reversed sequence is caught.
+
+        EVO-64385: registration now goes through the cluster-atomic
+        register_job_if_no_conflict() rather than the plain register_job(),
+        whose UniqueViolation escaped as a raw DB error and failed the whole
+        refresh when another pod won the race. The ordering contract is
+        unchanged.
         """
         scheduler = _make_scheduler(
             golden_repos_dir,
@@ -188,18 +194,20 @@ class TestJobRegisteredAtRefreshStart:
         # Extract the names of all calls made on mock_job_tracker in order.
         call_names = [c[0] for c in mock_job_tracker.mock_calls]
 
-        # register_job must appear before update_status.
-        assert "register_job" in call_names, "register_job was never called"
+        # Registration must appear before update_status.
+        assert (
+            "register_job_if_no_conflict" in call_names
+        ), "register_job_if_no_conflict was never called"
         assert "update_status" in call_names, "update_status was never called"
-        register_idx = call_names.index("register_job")
+        register_idx = call_names.index("register_job_if_no_conflict")
         update_idx = call_names.index("update_status")
         assert register_idx < update_idx, (
-            f"register_job (pos {register_idx}) must precede "
+            f"register_job_if_no_conflict (pos {register_idx}) must precede "
             f"update_status (pos {update_idx})"
         )
 
         # The same job_id must flow through both calls.
-        registered_job_id = mock_job_tracker.register_job.call_args[0][0]
+        registered_job_id = mock_job_tracker.register_job_if_no_conflict.call_args[0][0]
         assert registered_job_id == "refresh-my-repo-global"
 
         update_args = mock_job_tracker.update_status.call_args
@@ -311,16 +319,16 @@ class TestJobTrackerDrainInterface:
     def test_get_running_jobs_count_method_exists(self):
         from code_indexer.server.services.job_tracker import JobTracker
 
-        assert hasattr(JobTracker, "get_running_jobs_count"), (
-            "JobTracker must have get_running_jobs_count() for MaintenanceState interface"
-        )
+        assert hasattr(
+            JobTracker, "get_running_jobs_count"
+        ), "JobTracker must have get_running_jobs_count() for MaintenanceState interface"
 
     def test_get_queued_jobs_count_method_exists(self):
         from code_indexer.server.services.job_tracker import JobTracker
 
-        assert hasattr(JobTracker, "get_queued_jobs_count"), (
-            "JobTracker must have get_queued_jobs_count() for MaintenanceState interface"
-        )
+        assert hasattr(
+            JobTracker, "get_queued_jobs_count"
+        ), "JobTracker must have get_queued_jobs_count() for MaintenanceState interface"
 
     def test_get_running_jobs_count_returns_zero_when_empty(self, job_tracker_db):
         """get_running_jobs_count() returns 0 when no jobs are registered."""
