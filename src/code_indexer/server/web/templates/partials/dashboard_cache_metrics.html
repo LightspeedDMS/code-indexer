@@ -1,8 +1,9 @@
 <!-- Story #1109 (S5): Query-embedding cache metrics partial -->
 <!-- Bug #1311: all cards on this panel are DB-sourced (shared store), so no
      per-card durability badge is shown. Cache Entries is a live
-     query_embedding_cache COUNT; On-Mode Hit Rate is sourced from
-     search_event_log request counts; every other card is sourced from
+     query_embedding_cache COUNT; Shadow Hit Rate and On-Mode Hit Rate are
+     BOTH sourced from search_event_log request counts, windowed to the
+     selected cache_window (Bug #1391); every other card is sourced from
      WindowedCacheMetrics over search_embed_event. There is no per-node
      in-memory tally left to distinguish, so the Story #1294 badge that used
      to mark shared-database-backed cards was removed as redundant noise. -->
@@ -30,7 +31,7 @@
                 --
             {% endif %}
         </div>
-        <footer><small><strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
+        <footer><small><strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users) &mdash; durable, request-denominated (one row per search from search_event_log; persists across restarts and aggregates across cluster nodes)</small></footer>
     </article>
     <article class="stat-card">
         <header><h3>On-Mode Hit Rate</h3></header>
