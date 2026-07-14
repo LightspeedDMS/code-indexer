@@ -3436,6 +3436,96 @@ class RefreshScheduler:
         )
         marker_file.write_text(f"Completed at {datetime.now().isoformat()}")
 
+    def _reconcile_global_repos_temporal(
+        self, global_alias: str, repo_info: Dict[str, Any], filesystem_temporal: bool
+    ) -> bool:
+        """Bug #1406: one-way (auto-DISABLE only) reconciliation of
+        global_repos.enable_temporal. True->False downgrades when the
+        filesystem shows no real data (Bug #1390's fix, preserved).
+        False->True is intentionally never applied -- an explicit operator
+        disable must never be silently overridden by restored/present data.
+
+        Returns True when this table's auto-enable was suppressed (stored
+        value False, filesystem shows real data) so the PARENT method
+        (`_reconcile_registry_with_filesystem`) can emit a single
+        consolidated suppression INFO log across both tables instead of one
+        per table (code-review remediation of #1406 fix-item #3).
+        """
+        registry_temporal = repo_info.get("enable_temporal", False)
+
+        if registry_temporal is True and filesystem_temporal is False:
+            logger.info(
+                f"Reconciling temporal flag for {global_alias}: "
+                f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
+            )
+            self.registry.update_enable_temporal(global_alias, False)
+        elif registry_temporal is False and filesystem_temporal is True:
+            return True
+        return False
+
+    def _reconcile_golden_metadata_temporal(
+        self, bare_alias: str, filesystem_temporal: bool
+    ) -> bool:
+        """Bug #1390 cross-table fix + Bug #1406 one-way (auto-DISABLE only)
+        rule for golden_repos_metadata.enable_temporal. Checked and updated
+        INDEPENDENTLY of the global_repos side -- the two tables can drift
+        independently, so global_repos already matching the filesystem must
+        not skip this check.
+
+        Returns True when this table's auto-enable was suppressed (stored
+        value False, filesystem shows real data) so the PARENT method can
+        emit a single consolidated suppression INFO log across both tables
+        instead of one per table (code-review remediation of #1406
+        fix-item #3).
+        """
+        try:
+            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
+        except Exception as exc:
+            logger.warning(
+                f"Reconciliation: could not read golden_repos_metadata for "
+                f"{bare_alias}: {type(exc).__name__}: {exc}"
+            )
+            return False
+
+        if golden_meta_info is None:
+            return False
+
+        golden_meta_temporal = golden_meta_info.get("enable_temporal", False)
+        if golden_meta_temporal is True and filesystem_temporal is False:
+            logger.info(
+                f"Reconciling temporal flag (golden_repos_metadata) for "
+                f"{bare_alias}: metadata={golden_meta_temporal} -> "
+                f"filesystem={filesystem_temporal}"
+            )
+            try:
+                self.golden_repo_metadata.update_enable_temporal(bare_alias, False)
+            except Exception as exc:
+                logger.error(
+                    f"Reconciliation: failed to update golden_repos_metadata "
+                    f"enable_temporal for {bare_alias}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        elif golden_meta_temporal is False and filesystem_temporal is True:
+            return True
+        return False
+
+    def _reconcile_scip_flag(
+        self, global_alias: str, repo_info: Dict[str, Any], detected: Dict[str, bool]
+    ) -> None:
+        """Reconcile SCIP flag -- global_repos only (no golden_repos_metadata
+        column). Explicitly OUT OF SCOPE for Bug #1406: stays bidirectional,
+        completely unchanged.
+        """
+        registry_scip = repo_info.get("enable_scip", False)
+        filesystem_scip = detected.get("scip", False)
+
+        if registry_scip != filesystem_scip:
+            logger.info(
+                f"Reconciling SCIP flag for {global_alias}: "
+                f"registry={registry_scip} -> filesystem={filesystem_scip}"
+            )
+            self.registry.update_enable_scip(global_alias, filesystem_scip)
+
     def _reconcile_registry_with_filesystem(
         self, alias_name: str, detected: Dict[str, bool]
     ) -> None:
@@ -3456,8 +3546,34 @@ class RefreshScheduler:
         (server/mcp/handlers/repos.py): `bare_alias` strips exactly one
         trailing "-global" suffix if present; `global_alias` is always
         re-derived from `bare_alias` (never assumed / blindly re-suffixed).
+
+        Bug #1406: enable_temporal reconciliation is ONE-WAY (auto-DISABLE
+        only), identically for both tables -- see
+        `_reconcile_global_repos_temporal` / `_reconcile_golden_metadata_temporal`.
+        A True->False downgrade (no real data on disk) is preserved from Bug
+        #1390. A False->True auto-enable (data restored/present while an
+        operator explicitly disabled the feature) is now NEVER applied --
+        that direction previously re-armed the scheduled-refresh temporal-
+        indexing trigger against operator intent (the production incident
+        this bug fixes). Each table's own stored value is still compared
+        independently against filesystem truth (the #1390 drift lesson) --
+        a True->False downgrade applies to whichever table(s) currently hold
+        True, even if the other already holds False.
+
         enable_scip has no golden_repos_metadata column and stays
-        registry-only, unchanged.
+        registry-only, bidirectional, and completely unchanged by Bug #1406
+        (see `_reconcile_scip_flag`).
+
+        Suppression-log cardinality (code-review remediation of #1406
+        fix-item #3): when the auto-enable direction is suppressed (stored
+        value False, filesystem shows real data), `_reconcile_global_repos_temporal`
+        / `_reconcile_golden_metadata_temporal` do NOT log independently --
+        each merely returns a bool signaling suppression. THIS method logs
+        exactly ONE consolidated INFO message per invocation if EITHER
+        table's auto-enable was suppressed, even when BOTH tables were
+        suppressed simultaneously (the exact incident-reproduction
+        scenario). The per-table True->False auto-disable log lines are
+        unaffected and remain inside each helper.
 
         Args:
             alias_name: Repository alias name -- called with the -global-
@@ -3479,57 +3595,17 @@ class RefreshScheduler:
             )
             return
 
-        # Reconcile temporal flag -- global_repos side
-        registry_temporal = repo_info.get("enable_temporal", False)
         filesystem_temporal = detected.get("temporal", False)
-
-        if registry_temporal != filesystem_temporal:
+        suppressed_global = self._reconcile_global_repos_temporal(
+            global_alias, repo_info, filesystem_temporal
+        )
+        suppressed_golden_meta = self._reconcile_golden_metadata_temporal(
+            bare_alias, filesystem_temporal
+        )
+        if suppressed_global or suppressed_golden_meta:
             logger.info(
-                f"Reconciling temporal flag for {global_alias}: "
-                f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
+                f"Temporal data present on disk for {global_alias} but "
+                f"enable_temporal is False -- honoring operator disable "
+                f"(Bug #1406), not auto-enabling"
             )
-            self.registry.update_enable_temporal(global_alias, filesystem_temporal)
-
-        # Bug #1390: reconcile temporal flag -- golden_repos_metadata side
-        # (bare alias). Checked and updated INDEPENDENTLY of the global_repos
-        # branch above -- the two tables can drift independently, so
-        # global_repos already matching the filesystem must not skip the
-        # golden_repos_metadata check.
-        try:
-            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
-        except Exception as exc:
-            logger.warning(
-                f"Reconciliation: could not read golden_repos_metadata for "
-                f"{bare_alias}: {type(exc).__name__}: {exc}"
-            )
-            golden_meta_info = None
-
-        if golden_meta_info is not None:
-            golden_meta_temporal = golden_meta_info.get("enable_temporal", False)
-            if golden_meta_temporal != filesystem_temporal:
-                logger.info(
-                    f"Reconciling temporal flag (golden_repos_metadata) for "
-                    f"{bare_alias}: metadata={golden_meta_temporal} -> "
-                    f"filesystem={filesystem_temporal}"
-                )
-                try:
-                    self.golden_repo_metadata.update_enable_temporal(
-                        bare_alias, filesystem_temporal
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"Reconciliation: failed to update golden_repos_metadata "
-                        f"enable_temporal for {bare_alias}: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-
-        # Reconcile SCIP flag -- global_repos only (no golden_repos_metadata column)
-        registry_scip = repo_info.get("enable_scip", False)
-        filesystem_scip = detected.get("scip", False)
-
-        if registry_scip != filesystem_scip:
-            logger.info(
-                f"Reconciling SCIP flag for {global_alias}: "
-                f"registry={registry_scip} -> filesystem={filesystem_scip}"
-            )
-            self.registry.update_enable_scip(global_alias, filesystem_scip)
+        self._reconcile_scip_flag(global_alias, repo_info, detected)

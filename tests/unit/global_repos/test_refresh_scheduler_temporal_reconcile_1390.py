@@ -271,9 +271,14 @@ class TestGoldenRepoMetadataPropertyResolution:
 
 
 class TestReconciliationUpdatesBothTables:
-    def test_reconcile_updates_both_tables_when_temporal_flips_true(
+    def test_reconcile_does_not_auto_enable_when_filesystem_true(
         self, tmp_path: Path
     ) -> None:
+        # Bug #1406: reconciliation is now ONE-WAY (auto-disable only). Both
+        # tables start False (explicit operator disable) and filesystem
+        # detection reports real data present (temporal=True) -- previously
+        # this flipped both tables to True (the exact production incident
+        # trigger); now both tables MUST remain False.
         registry = _make_real_registry(tmp_path)
         registry.register_global_repo(
             repo_name="myrepo",
@@ -298,8 +303,9 @@ class TestReconciliationUpdatesBothTables:
             "myrepo-global", {"temporal": True, "scip": False}
         )
 
-        assert registry.get_global_repo("myrepo-global")["enable_temporal"] is True
-        assert golden_meta.get_repo("myrepo")["enable_temporal"] is True
+        # Bug #1406: auto-enable direction removed -- both tables stay False.
+        assert registry.get_global_repo("myrepo-global")["enable_temporal"] is False
+        assert golden_meta.get_repo("myrepo")["enable_temporal"] is False
 
     def test_reconcile_updates_both_tables_when_temporal_flips_false(
         self, tmp_path: Path
@@ -337,14 +343,23 @@ class TestReconciliationUpdatesBothTables:
         """The defect's core symptom: golden_repos_metadata and global_repos
         can drift INDEPENDENTLY. Here global_repos already agrees with the
         filesystem (no update needed on that side) but golden_repos_metadata
-        is stale -- reconciliation must still correct it."""
+        is stale -- reconciliation must still correct it.
+
+        Bug #1406: re-expressed in the ALLOWED (auto-disable) direction. The
+        previous version of this test proved cross-table independence via
+        the now-removed auto-enable (False -> True) direction. Here registry
+        already matches filesystem (both False, no update needed on that
+        side) while golden_meta is stale True and filesystem is False --
+        golden_meta must still be corrected to False, independently of
+        registry needing no change.
+        """
         registry = _make_real_registry(tmp_path)
         registry.register_global_repo(
             repo_name="myrepo",
             alias_name="myrepo-global",
             repo_url="https://example.com/myrepo.git",
             index_path=str(tmp_path / "golden-repos" / "myrepo"),
-            enable_temporal=True,  # already correct
+            enable_temporal=False,  # already matches filesystem
         )
         golden_meta = _make_real_golden_meta(tmp_path)
         golden_meta.add_repo(
@@ -353,16 +368,18 @@ class TestReconciliationUpdatesBothTables:
             default_branch="main",
             clone_path=str(tmp_path / "golden-repos" / "myrepo"),
             created_at="2024-01-01T00:00:00Z",
-            enable_temporal=False,  # drifted/stale
+            enable_temporal=True,  # drifted/stale
         )
 
         scheduler = _make_scheduler_with_real_backends(tmp_path, registry, golden_meta)
 
         scheduler._reconcile_registry_with_filesystem(
-            "myrepo-global", {"temporal": True, "scip": False}
+            "myrepo-global", {"temporal": False, "scip": False}
         )
 
-        assert golden_meta.get_repo("myrepo")["enable_temporal"] is True
+        # Bug #1406: golden_meta's stale True must still be corrected to
+        # False even though registry needed no update.
+        assert golden_meta.get_repo("myrepo")["enable_temporal"] is False
 
     def test_reconcile_no_op_when_both_tables_already_match_filesystem(
         self, tmp_path: Path
@@ -402,14 +419,20 @@ class TestReconciliationUpdatesBothTables:
         blindly re-suffixed) -- proven here by calling reconcile with an
         alias_name that is ALREADY '-global'-suffixed (the real call-site
         shape) and confirming golden_repos_metadata is updated with the BARE
-        form while global_repos keeps the '-global' form."""
+        form while global_repos keeps the '-global' form.
+
+        Bug #1406: re-expressed using the True -> False (auto-disable)
+        direction since the auto-enable direction no longer applies. Both
+        tables start True; filesystem reports False -- both must be
+        reconciled down to False, using the bare/`-global` alias forms.
+        """
         registry = _make_real_registry(tmp_path)
         registry.register_global_repo(
             repo_name="evolution",
             alias_name="evolution-global",
             repo_url="https://example.com/evolution.git",
             index_path=str(tmp_path / "golden-repos" / "evolution"),
-            enable_temporal=False,
+            enable_temporal=True,
         )
         golden_meta = _make_real_golden_meta(tmp_path)
         golden_meta.add_repo(
@@ -418,18 +441,18 @@ class TestReconciliationUpdatesBothTables:
             default_branch="main",
             clone_path=str(tmp_path / "golden-repos" / "evolution"),
             created_at="2024-01-01T00:00:00Z",
-            enable_temporal=False,
+            enable_temporal=True,
         )
 
         scheduler = _make_scheduler_with_real_backends(tmp_path, registry, golden_meta)
 
         scheduler._reconcile_registry_with_filesystem(
-            "evolution-global", {"temporal": True, "scip": False}
+            "evolution-global", {"temporal": False, "scip": False}
         )
 
-        assert golden_meta.get_repo("evolution")["enable_temporal"] is True
+        assert golden_meta.get_repo("evolution")["enable_temporal"] is False
         assert golden_meta.get_repo("evolution-global") is None
-        assert registry.get_global_repo("evolution-global")["enable_temporal"] is True
+        assert registry.get_global_repo("evolution-global")["enable_temporal"] is False
 
 
 # ---------------------------------------------------------------------------
