@@ -17,21 +17,50 @@
 let openHealthDetailsSet = new Set();
 
 /**
- * Fetch health data for a repository.
+ * Submit an async health-check background job (Bug #1394).
  *
- * @param {string} repoAlias - Repository alias
- * @param {boolean} forceRefresh - Whether to bypass cache (Acceptance Criteria 7)
- * @returns {Promise<object>} Health check result
+ * Shared by all four health-check call sites (golden repo details,
+ * global-activated badge, global-activated details, activated repo
+ * details) -- endpointBase selects which router the job is submitted
+ * through.
+ *
+ * @param {string} endpointBase - '/api/repositories' or '/api/activated-repos'
+ * @param {string} repoAlias - Repository alias (golden repo alias or user alias)
+ * @param {boolean} forceRefresh - Whether to bypass cache
+ * @returns {Promise<object>} Parsed JSON body containing at least job_id
  */
-async function fetchHealthData(repoAlias, forceRefresh = false) {
-    const url = `/api/repositories/${repoAlias}/health${forceRefresh ? '?force_refresh=true' : ''}`;
+async function submitHealthCheckJob(endpointBase, repoAlias, forceRefresh = false) {
+    const csrfToken = document.querySelector('input[name="csrf_token"]')?.value || '';
+    const url = `${endpointBase}/${encodeURIComponent(repoAlias)}/health/check${forceRefresh ? '?force_refresh=true' : ''}`;
 
     const response = await fetch(url, {
-        credentials: 'same-origin'  // Include session cookies
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({})
     });
 
     if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // HTTP-status message, with the parsed server `detail` (when present)
+        // taking precedence -- matches the POST-submitter convention already
+        // used elsewhere in this codebase (e.g. activated_repo_management.js's
+        // add-index/reindex submitters).
+        let detail = null;
+        try {
+            const errorData = await response.json();
+            detail = errorData.detail;
+        } catch (parseError) {
+            // No JSON body to parse -- fall back to the HTTP-status message below.
+        }
+        const submitError = new Error(detail || `HTTP ${response.status}: ${response.statusText}`);
+        // Expose the raw status code so callers can branch on it reliably
+        // (e.g. 404 = "not indexed yet") without string-matching the message,
+        // which no longer always contains the status code once `detail` wins.
+        submitError.status = response.status;
+        throw submitError;
     }
 
     try {
@@ -39,6 +68,67 @@ async function fetchHealthData(repoAlias, forceRefresh = false) {
     } catch (error) {
         throw new Error(`Failed to parse response JSON: ${error.message}`);
     }
+}
+
+/**
+ * Poll a health-check background job until it reaches a terminal state.
+ *
+ * Callback-based (not hardcoded to any one DOM id scheme) so it can serve
+ * all four health-check call sites, each with different container ids.
+ *
+ * @param {string} jobId - Job ID to poll
+ * @param {object} callbacks - { onUpdate(jobStatus), onComplete(jobStatus), onError(error) }
+ */
+function pollHealthCheckJob(jobId, { onUpdate, onComplete, onError } = {}) {
+    const pollIntervalMs = 5000; // 5 seconds
+    const maxPolls = 360; // 30 minutes max
+    let pollCount = 0;
+
+    const poll = async () => {
+        pollCount++;
+
+        if (pollCount > maxPolls) {
+            if (onError) {
+                onError(new Error('Job polling timeout. Please refresh the page.'));
+            }
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/jobs/${jobId}`, {
+                credentials: 'same-origin'
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const jobStatus = await response.json();
+
+            if (onUpdate) {
+                onUpdate(jobStatus);
+            }
+
+            if (jobStatus.status === 'pending' || jobStatus.status === 'running') {
+                setTimeout(poll, pollIntervalMs);
+            } else if (jobStatus.status === 'completed') {
+                if (onComplete) {
+                    onComplete(jobStatus);
+                }
+            } else {
+                // failed / cancelled
+                if (onError) {
+                    onError(new Error(jobStatus.error || `Job ${jobStatus.status}`));
+                }
+            }
+        } catch (error) {
+            if (onError) {
+                onError(error);
+            }
+        }
+    };
+
+    poll();
 }
 
 /**
@@ -300,43 +390,88 @@ async function loadHealthDetails(repoAlias, forceRefresh = false) {
         return;
     }
 
-    try {
-        // Show loading spinner (Acceptance Criteria 8)
-        detailsContainer.innerHTML = `
-            <div class="health-loading">
-                <span class="spinner"></span> Loading health data...
-            </div>
-        `;
+    // Bug #1394: golden_repo_details.html already has a job-progress-{alias}
+    // container used by other operations (reindex, add-index) on this page --
+    // reuse it for the health-check job's spinner/status while polling, in
+    // addition to the existing health-loading placeholder below.
+    const jobProgressContainer = document.getElementById(`job-progress-${repoAlias}`);
+    const jobStatusText = document.getElementById(`job-status-text-${repoAlias}`);
+    const jobSpinner = document.getElementById(`job-spinner-${repoAlias}`);
+    const jobProgressDetails = document.getElementById(`job-progress-details-${repoAlias}`);
 
-        // Disable refresh button during load
-        if (refreshBtn) {
-            refreshBtn.disabled = true;
+    const showJobProgress = () => {
+        if (jobProgressContainer && jobStatusText && jobSpinner) {
+            jobProgressContainer.style.display = 'block';
+            jobStatusText.textContent = 'checking health...';
+            jobStatusText.style.color = 'var(--pico-color-blue-550)';
+            jobSpinner.style.display = 'inline-block';
+            if (jobProgressDetails) {
+                jobProgressDetails.innerHTML = '';
+            }
         }
+    };
 
-        // Fetch health data
-        const healthData = await fetchHealthData(repoAlias, forceRefresh);
-
-        // Render details
-        detailsContainer.innerHTML = renderHealthDetails(healthData);
-        detailsContainer.dataset.loaded = 'true';
-
-        // Update indicator if present
-        const indicatorContainer = document.getElementById(`health-indicator-${repoAlias}`);
-        if (indicatorContainer) {
-            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+    const hideJobProgress = () => {
+        if (jobProgressContainer) {
+            jobProgressContainer.style.display = 'none';
         }
+        if (jobSpinner) {
+            jobSpinner.style.display = 'none';
+        }
+    };
 
-    } catch (error) {
+    const handleError = (error) => {
         console.error(`Failed to load health data for ${repoAlias}:`, error);
         detailsContainer.innerHTML = `
             <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
             <button class="outline small" onclick="loadHealthDetails('${escapeHtml(repoAlias)}', false)">Retry</button>
         `;
-    } finally {
-        // Re-enable refresh button
+        hideJobProgress();
         if (refreshBtn) {
             refreshBtn.disabled = false;
         }
+    };
+
+    // Show loading spinner (Acceptance Criteria 8)
+    detailsContainer.innerHTML = `
+        <div class="health-loading">
+            <span class="spinner"></span> Loading health data...
+        </div>
+    `;
+
+    // Disable refresh button during load
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
+
+    showJobProgress();
+
+    try {
+        const submitResult = await submitHealthCheckJob('/api/repositories', repoAlias, forceRefresh);
+
+        pollHealthCheckJob(submitResult.job_id, {
+            onComplete: (jobStatus) => {
+                const healthData = jobStatus.result;
+
+                // Render details
+                detailsContainer.innerHTML = renderHealthDetails(healthData);
+                detailsContainer.dataset.loaded = 'true';
+
+                // Update indicator if present
+                const indicatorContainer = document.getElementById(`health-indicator-${repoAlias}`);
+                if (indicatorContainer) {
+                    indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+                }
+
+                hideJobProgress();
+                if (refreshBtn) {
+                    refreshBtn.disabled = false;
+                }
+            },
+            onError: handleError
+        });
+    } catch (error) {
+        handleError(error);
     }
 }
 
@@ -412,3 +547,5 @@ window.restoreOpenHealthDetails = restoreOpenHealthDetails;
 window.renderHealthIndicator = renderHealthIndicator;
 window.renderHealthDetails = renderHealthDetails;
 window.escapeHtml = escapeHtml;
+window.submitHealthCheckJob = submitHealthCheckJob;
+window.pollHealthCheckJob = pollHealthCheckJob;
