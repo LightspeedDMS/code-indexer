@@ -8,6 +8,7 @@ Verifies that debug_router is exported from debug_routes and that both
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.utils.route_registration import route_paths
 
 
 class TestDebugRouterRegistration:
@@ -55,10 +56,10 @@ class TestDebugRouterRegistration:
         """debug_router must be included in the FastAPI app."""
         from code_indexer.server.app import app
 
-        app_paths = {route.path for route in app.routes}
-        assert "/debug/memory-snapshot" in app_paths, (
-            f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
-        )
+        app_paths = route_paths(app)
+        assert (
+            "/debug/memory-snapshot" in app_paths
+        ), f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
 
 
 @pytest.mark.slow

@@ -31,7 +31,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi import status as http_status
 from fastapi.testclient import TestClient
-
+from tests.utils.route_registration import find_route
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -120,13 +120,10 @@ class TestResetStateRouteRegistered:
 
         Checks both path and method to reject misconfigured GET-only routes.
         """
-        matching = [
-            r
-            for r in app_with_router.routes
-            if getattr(r, "path", None) == "/admin/provider-health/reset-state"
-        ]
-        assert matching, "Route /admin/provider-health/reset-state is not registered"
-        route = matching[0]
+        route = find_route(app_with_router, "/admin/provider-health/reset-state")
+        assert (
+            route is not None
+        ), "Route /admin/provider-health/reset-state is not registered"
         assert "POST" in route.methods, (
             f"Route /admin/provider-health/reset-state is registered but not for POST; "
             f"methods={route.methods}"
