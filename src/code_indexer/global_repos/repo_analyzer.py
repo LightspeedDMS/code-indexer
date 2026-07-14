@@ -198,6 +198,22 @@ def invoke_claude_cli(
             f"shell_timeout_seconds ({shell_timeout_seconds})"
         )
 
+    # A deployment may substitute its own invocation backend -- e.g. one that
+    # hands the prompt to an external, sandboxed agent runner instead of
+    # executing the Claude CLI in this image. Checked AFTER validation (so a
+    # plugin gets the same guarantees the CLI does) and BEFORE anything that
+    # assumes a local CLI: MCP self-registration below shells out to `claude
+    # mcp`, which is exactly what a plugin deployment does not have.
+    # See llm_invoker_plugin for the contract and selection order.
+    from code_indexer.global_repos.llm_invoker_plugin import get_llm_invoker
+
+    _plugin = get_llm_invoker()
+    if _plugin is not None:
+        ok, out = _plugin(
+            repo_path, prompt, shell_timeout_seconds, outer_timeout_seconds
+        )
+        return ok, out
+
     # A10 (Story #885): centralized MCP self-registration at the subprocess boundary.
     # All Claude CLI call sites funnel through invoke_claude_cli, so registering here
     # guarantees exactly-once registration per process without duplicating the call
