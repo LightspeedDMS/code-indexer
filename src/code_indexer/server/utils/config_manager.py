@@ -843,6 +843,13 @@ class HNSWOrphanRepairSweepConfig:
     # Minutes between ticks (default: 7, settled range ~5-10).
     tick_interval_minutes: int = 7
 
+    # Daily UTC operating-hours window (Story #1397). Integers 0-23, with
+    # overnight wrap-around support (e.g. 22 -> 6). start == end means
+    # "always run" (24x7) -- the default (0, 0) therefore preserves the
+    # pre-#1397 24x7 behavior for backward compatibility.
+    operating_hours_start_utc: int = 0
+    operating_hours_end_utc: int = 0
+
 
 @dataclass
 class XRayConfig:

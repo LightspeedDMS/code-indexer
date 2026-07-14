@@ -213,6 +213,8 @@ _VALID_CONFIG_SECTIONS = (
     "data_retention",
     # Story #967 - Activated repository reaper configuration
     "activated_reaper",
+    # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+    "hnsw_orphan_sweep",
     # Story #977 - X-Ray precision AST-aware code search configuration
     "xray",
     # Story #652 - Reranking configuration
@@ -6226,6 +6228,8 @@ def _get_current_config() -> dict:
         DataRetentionConfig,
         # Story #967 - Activated repository reaper configuration
         ActivatedReaperConfig,
+        # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+        HNSWOrphanRepairSweepConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6447,6 +6451,10 @@ def _get_current_config() -> dict:
         # Story #967: Activated repository reaper configuration
         "activated_reaper": settings.get(
             "activated_reaper", asdict(ActivatedReaperConfig())
+        ),
+        # Story #1397: HNSW orphan-repair sweep operating-hours window config
+        "hnsw_orphan_sweep": settings.get(
+            "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
         ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
@@ -7293,6 +7301,40 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Cadence Hours must be between 1 and 168"
             except (ValueError, TypeError):
                 return "Cadence Hours must be a valid number"
+
+    elif section == "hnsw_orphan_sweep":
+        # Story #1397: HNSW orphan-repair sweep operating-hours window
+        # configuration validation.
+        for hour_field, label in (
+            ("operating_hours_start_utc", "Operating Hours Start"),
+            ("operating_hours_end_utc", "Operating Hours End"),
+        ):
+            hour_value = data.get(hour_field)
+            if hour_value is not None:
+                try:
+                    val_int = int(hour_value)
+                    if val_int < 0 or val_int > 23:
+                        return f"{label} must be between 0 and 23"
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
+        tick_interval_minutes = data.get("tick_interval_minutes")
+        if tick_interval_minutes is not None:
+            try:
+                val_int = int(tick_interval_minutes)
+                if val_int < 1:
+                    return "Tick Interval Minutes must be at least 1"
+            except (ValueError, TypeError):
+                return "Tick Interval Minutes must be a valid number"
+
+        batch_size = data.get("batch_size")
+        if batch_size is not None:
+            try:
+                val_int = int(batch_size)
+                if val_int < 1:
+                    return "Batch Size must be at least 1"
+            except (ValueError, TypeError):
+                return "Batch Size must be a valid number"
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation

@@ -55,6 +55,25 @@ def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return hnsw_orphan_sweep settings dict from ServerConfig (Story #1397).
+
+    Surfaces all 5 fields of HNSWOrphanRepairSweepConfig for the Web UI
+    Config screen -- extends Story #1360's config object (enabled,
+    batch_size, tick_interval_minutes) with the new operating-hours window
+    fields.
+    """
+    sweep = config.hnsw_orphan_repair_sweep_config
+    assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": sweep.enabled,
+        "batch_size": sweep.batch_size,
+        "tick_interval_minutes": sweep.tick_interval_minutes,
+        "operating_hours_start_utc": sweep.operating_hours_start_utc,
+        "operating_hours_end_utc": sweep.operating_hours_end_utc,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -679,6 +698,8 @@ class ConfigService:
             },
             # Story #967 - Activated repository reaper configuration
             "activated_reaper": _activated_reaper_settings(config),
+            # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+            "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -916,6 +937,9 @@ class ConfigService:
         # Story #967 - Activated repository reaper configuration
         elif category == "activated_reaper":
             self._update_activated_reaper_setting(config, key, value)
+        # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+        elif category == "hnsw_orphan_sweep":
+            self._update_hnsw_orphan_sweep_setting(config, key, value)
         # Story #977 - X-Ray precision AST-aware code search configuration
         elif category == "xray":
             self._update_xray_setting(config, key, value)
@@ -2113,6 +2137,32 @@ class ConfigService:
             reaper.cadence_hours = int(value)
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
+
+    def _update_hnsw_orphan_sweep_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an hnsw_orphan_sweep setting (Story #1397).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the Web
+        UI submits an explicit "true"/"false" string (boolean <select>, not
+        a checkbox), so `_parse_bool("false")` must persist False rather
+        than silently no-op (the "enabled-checkbox trap" the issue warns
+        about). The remaining 4 fields are plain integers.
+        """
+        sweep = config.hnsw_orphan_repair_sweep_config
+        assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            sweep.enabled = _parse_bool(value)
+        elif key == "batch_size":
+            sweep.batch_size = int(value)
+        elif key == "tick_interval_minutes":
+            sweep.tick_interval_minutes = int(value)
+        elif key == "operating_hours_start_utc":
+            sweep.operating_hours_start_utc = int(value)
+        elif key == "operating_hours_end_utc":
+            sweep.operating_hours_end_utc = int(value)
+        else:
+            raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""
