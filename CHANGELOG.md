@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.54.0] - 2026-07-14
+
+### Fixed
+
+- **#1401**: `regex_search`'s ripgrep/grep output parsing accepted subprocess-reported paths without verifying they stayed inside the repo root, so a `../`-relative path or an internal symlink escape could leak results from outside the intended repo. The repo root is now canonicalized once at construction, and every subprocess-reported path (absolute or relative) is resolved and containment-checked via `relative_to()` before acceptance -- anything that escapes is rejected outright, not silently absolutized.
+- **#1405**: `TemporalIndexer`'s legacy-collection blank-out ran unconditionally at the top of every `index_commits()` call and hard-deleted any temporal-prefixed directory lacking a v2 marker -- including the bare `code-indexer-temporal` bookkeeping directory, which anchors the single shared `TemporalMetadataStore` used by every quarterly shard across every embedder. That directory shares its bare name with a genuine pre-#1290 legacy monolith, so it was being amputated on every single run. Fixed via a data-presence discriminator (`_is_shared_bookkeeping_directory`): a bare-named directory is now skipped (never deleted) if it has neither `hnsw_index.bin` nor any nested `vector_*.json` -- the bookkeeping dir only ever holds metadata, never vector data.
+- **#1406** (companion to #1405, confirmed trigger of a production incident): `RefreshScheduler`'s filesystem-reconciliation for `enable_temporal` was bidirectional -- it could silently re-ENABLE temporal indexing when restored data appeared on disk, even after an operator had explicitly disabled it as part of a recovery procedure. Reconciliation is now one-way on both tracked tables: a stored `True` still downgrades to `False` when the filesystem shows no real data (preserving Bug #1390's fix), but a stored `False` is never flipped back to `True` -- an INFO log documents the honored operator disable instead.
+- **#1398**: five hardcoded, non-Web-UI-configurable timeout constants (search-handler, default-handler, write-mode-handler, embedding-provider, reranker) are consolidated into a new validated `SearchTimeoutsConfig` Web UI settings section, plus a new `.code-indexer/.remote-config` field (`api_read_timeout_seconds`) so the CLI's remote HTTP client timeout is durably configurable per deployment without a repeated `--timeout` flag.
+- **#1399**: several DB-backed Web UI settings (cache TTL/cleanup-interval/FTS-reload-on-access, memory-governor sample interval, `lifecycle_analysis` timeouts at both of its two consumer call sites, xray default timeout) persisted and echoed correctly but were never actually re-read by the live running process -- fixed with explicit hot-reload paths mirroring the existing cache-size-cap precedent, plus a `RESTART_REQUIRED_FIELDS` UI hint extended to the settings that still need a restart to take effect.
+- Two small regressions in the above, caught by full regression re-verification before this release: a doc-staleness false-positive trigger in `docs/architecture-invariants.md` (#1405 follow-up), and a missing bootstrap/runtime classification entry for the new `search_timeouts_config` field (#1398 follow-up).
+
 ## [11.53.0] - 2026-07-14
 
 ### Fixed
