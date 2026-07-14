@@ -1610,9 +1610,19 @@ class RefreshScheduler:
 
         # Story #482 PATH C: Use a named function (not a lambda) so
         # BackgroundJobManager can detect and inject progress_callback.
+        #
+        # EVO-64385: tracked_by_caller=True — submit_job() below claims
+        # (global_repo_refresh, alias_name) in the job tracker (Bug #1065), and
+        # that row holds the idx_active_job_per_repo slot for the whole run. The
+        # worker must NOT register a second job for the same pair or it collides
+        # with its own parent row and the refresh is marked failed before it
+        # starts.
         def _refresh_worker(progress_callback=None):
             return self._execute_refresh(
-                alias_name, force_reset=force_reset, progress_callback=progress_callback
+                alias_name,
+                force_reset=force_reset,
+                progress_callback=progress_callback,
+                tracked_by_caller=True,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -1637,7 +1647,11 @@ class RefreshScheduler:
         self._execute_refresh(alias_name)
 
     def _execute_refresh(
-        self, alias_name: str, force_reset: bool = False, progress_callback=None
+        self,
+        alias_name: str,
+        force_reset: bool = False,
+        progress_callback=None,
+        tracked_by_caller: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -1657,6 +1671,11 @@ class RefreshScheduler:
             force_reset: When True, skip change detection and call
                 updater.update(force_reset=True) to force-reset the repo to the
                 remote branch before indexing (Story #272 AC3/AC4).
+            tracked_by_caller: True when this refresh already runs under a
+                BackgroundJobManager job, whose submit_job() has ALREADY claimed
+                (global_repo_refresh, alias_name) in the job tracker. Registering
+                again here would insert a SECOND active row for the same pair --
+                see the EVO-64385 note below.
 
         Returns:
             Dict with success status and details for BackgroundJobManager tracking
@@ -1667,15 +1686,31 @@ class RefreshScheduler:
         # Bug #935: Register in-flight refresh with JobTracker so drain-status
         # sees it and the auto-updater waits before restarting.
         # Guard with is not None — CLI mode has no tracker.
+        #
+        # EVO-64385: ...but ONLY when nobody has registered us already. When this
+        # refresh runs under a BackgroundJobManager job, submit_job() (Bug #1065)
+        # has already called register_job_if_no_conflict() for the SAME
+        # (operation_type="global_repo_refresh", repo_alias=alias_name) pair, and
+        # that row occupies the idx_active_job_per_repo partial unique index. A
+        # second registration here collides with our own parent row: postgres
+        # raises 23505, the raw error escapes this function, and
+        # BackgroundJobManager marks the whole refresh FAILED -- so the refresh
+        # never runs at all (observed in cluster mode: every scheduled refresh
+        # failed and last_refresh froze for days). The outer job IS the
+        # cluster-visible active job Bug #935 wanted drain-status to see, so let
+        # it own the registration AND the complete/fail lifecycle below.
         _tracker_job_id = f"refresh-{alias_name}"
-        if self._job_tracker is not None:
-            self._job_tracker.register_job(
+        # The tracker WE own: None in CLI mode (no tracker at all) and None when
+        # the caller already registered this refresh (tracked_by_caller).
+        _tracker = None if tracked_by_caller else self._job_tracker
+        if _tracker is not None:
+            _tracker.register_job(
                 _tracker_job_id,
                 operation_type="global_repo_refresh",
                 username="system",
                 repo_alias=alias_name,
             )
-            self._job_tracker.update_status(_tracker_job_id, status="running")
+            _tracker.update_status(_tracker_job_id, status="running")
 
         # Bug #935: track whether the refresh raised so the finally block can
         # call fail_job (raised) vs complete_job (all normal exits incl. early returns).
@@ -2319,14 +2354,18 @@ class RefreshScheduler:
 
         finally:
             # Bug #935: always unregister from JobTracker (finally runs on return AND raise).
-            if self._job_tracker is not None:
+            # EVO-64385: only for the job WE registered. When tracked_by_caller,
+            # `refresh-{alias}` was never inserted by us and the outer
+            # BackgroundJobManager job owns its own completion -- completing or
+            # failing it here would touch a job that is not ours.
+            if _tracker is not None:
                 if _tracker_raised:
-                    self._job_tracker.fail_job(
+                    _tracker.fail_job(
                         _tracker_job_id,
                         error=f"refresh failed for {alias_name}",
                     )
                 else:
-                    self._job_tracker.complete_job(_tracker_job_id)
+                    _tracker.complete_job(_tracker_job_id)
 
     def _index_source(
         self,
