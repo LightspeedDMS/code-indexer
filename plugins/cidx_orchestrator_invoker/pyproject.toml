@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-orchestrator-invoker"
+version = "0.1.0"
+description = "Run cidx's LLM prompts as agent-orchestrator jobs instead of a local claude CLI subprocess"
+requires-python = ">=3.10"
+dependencies = []
+
+# Discovered automatically by cidx via the upstream plugin seam. Setting
+# CIDX_LLM_INVOKER=cidx_orchestrator_invoker:invoke is equivalent and takes
+# precedence; the entry point means the plugin works as soon as it is installed.
+[project.entry-points."code_indexer.llm_invoker"]
+orchestrator = "cidx_orchestrator_invoker:invoke"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cidx_orchestrator_invoker"]

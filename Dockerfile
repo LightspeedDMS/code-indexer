@@ -36,6 +36,16 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install ".[cluster,cohere]"
 
+# EVO: run cidx's LLM prompts as agent-orchestrator jobs instead of a local
+# `claude` subprocess. The CLI is deliberately NOT in this image -- LLM
+# execution belongs in the orchestrator's sandboxed worker, not in a
+# long-lived service pod. Without this plugin every lifecycle_registration job
+# dies with exit 127. The plugin registers itself on the upstream
+# `code_indexer.llm_invoker` entry point, so installing it is enough to enable
+# it (see plugins/cidx_orchestrator_invoker).
+COPY plugins/cidx_orchestrator_invoker ./plugins/cidx_orchestrator_invoker
+RUN pip install ./plugins/cidx_orchestrator_invoker
+
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm
 
