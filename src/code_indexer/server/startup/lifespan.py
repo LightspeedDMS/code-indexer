@@ -874,6 +874,15 @@ def make_lifespan(
                 resource_config=server_config.resource_config,
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
+                # Bug #1390: RefreshScheduler's filesystem reconciliation needs
+                # to update golden_repos_metadata (bare-alias-keyed) alongside
+                # global_repos -- without this, cluster mode would silently
+                # fall back to a per-node SQLite golden_repos_metadata backend.
+                golden_repo_metadata_backend=(
+                    backend_registry.golden_repo_metadata
+                    if backend_registry is not None
+                    else None
+                ),
             )
             global_lifecycle_manager.start()
 
