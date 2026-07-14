@@ -188,10 +188,13 @@ def get_server_global_registry(
     )
 
 
-def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any], bool]:
+def resolve_backend_registry_attr(
+    attr_name: str, caller_name: str = ""
+) -> Tuple[Optional[Any], bool]:
     """
     Inspect the running server's app.state to determine cluster (postgres)
-    mode and, if active, the shared global_repos backend.
+    mode and, if active, the shared BackendRegistry attribute named
+    *attr_name* (e.g. "global_repos", "golden_repo_metadata").
 
     Bug #1308: RefreshScheduler and GlobalActivator used to eagerly bind a
     per-node SQLite GlobalRegistry at construction time, which split-brained
@@ -202,6 +205,12 @@ def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any]
     request/access time -- by then app.state.backend_registry is guaranteed
     to be populated in postgres/cluster mode -- instead of duplicating the
     app.state introspection in every caller.
+
+    Bug #1390: generalized from the original global_repos-only
+    resolve_backend_registry_state() to accept any BackendRegistry attribute
+    name, so RefreshScheduler's golden_repo_metadata resolution (needed for
+    cross-table enable_temporal reconciliation) can reuse the exact same
+    deferred-resolution shape instead of duplicating it a second time.
 
     Bug #1308 remediation item #5 (CLI import cost): looks up
     code_indexer.server.app via `sys.modules.get()` -- a pure dict lookup --
@@ -215,14 +224,16 @@ def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any]
     fallback with zero import cost.
 
     Args:
+        attr_name: BackendRegistry attribute to read (e.g. "global_repos",
+            "golden_repo_metadata").
         caller_name: Optional label included in the startup-window WARNING,
             for diagnosability when multiple callers share this helper.
 
     Returns:
         Tuple of (backend, postgres_mode_without_backend):
-        - backend: the shared GlobalReposBackend in postgres/cluster mode, or
-          None in solo/CLI mode (no app.state) or if backend_registry is not
-          yet populated.
+        - backend: the shared backend in postgres/cluster mode, or None in
+          solo/CLI mode (no app.state) or if backend_registry is not yet
+          populated.
         - postgres_mode_without_backend: True when storage_mode=postgres but
           app.state.backend_registry is not yet set (transient startup
           window). Callers should NOT cache the SQLite fallback in this case
@@ -237,12 +248,73 @@ def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any]
     if _app_state and getattr(_app_state, "storage_mode", None) == "postgres":
         _br = getattr(_app_state, "backend_registry", None)
         if _br is not None:
-            backend = _br.global_repos
+            backend = getattr(_br, attr_name)
         else:
             postgres_mode_without_backend = True
             logger.warning(
                 "%s: storage_mode=postgres but backend_registry not set; "
                 "falling back to SQLite",
-                caller_name or "resolve_backend_registry_state",
+                caller_name or "resolve_backend_registry_attr",
             )
     return backend, postgres_mode_without_backend
+
+
+def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any], bool]:
+    """
+    Inspect the running server's app.state to determine cluster (postgres)
+    mode and, if active, the shared global_repos backend.
+
+    Thin convenience wrapper over :func:`resolve_backend_registry_attr` for
+    the "global_repos" attribute -- preserved as its own function (rather
+    than inlining the attr name at every call site) since it predates the
+    Bug #1390 generalization and existing callers already depend on this
+    exact name/signature.
+
+    Args:
+        caller_name: Optional label included in the startup-window WARNING,
+            for diagnosability when multiple callers share this helper.
+
+    Returns:
+        Tuple of (backend, postgres_mode_without_backend) -- see
+        :func:`resolve_backend_registry_attr` for the full contract.
+    """
+    return resolve_backend_registry_attr("global_repos", caller_name)
+
+
+def get_server_golden_repo_metadata_backend(
+    server_data_dir: str,
+    backend: Optional[Any] = None,
+) -> Any:
+    """
+    Return a GoldenRepoMetadataBackend instance configured for server mode.
+
+    Mirrors get_server_global_registry(): in postgres/cluster mode (backend
+    provided), the shared backend is returned AS-IS -- no adapter is needed
+    here (unlike GlobalRegistry/PostgresGlobalRegistryAdapter) because
+    GoldenRepoMetadataPostgresBackend and GoldenRepoMetadataSqliteBackend
+    already share the same get_repo()/update_enable_temporal() surface. In
+    SQLite/standalone mode (backend=None), constructs a per-node
+    GoldenRepoMetadataSqliteBackend against cidx_server.db (the same DB file
+    GlobalRegistry's SQLite fallback uses) and ensures its table exists.
+
+    Args:
+        server_data_dir: Path to server data directory (contains
+            cidx_server.db in solo mode). Ignored when backend is provided.
+        backend: Optional GoldenRepoMetadataBackend (postgres mode). When
+            supplied, returned unchanged.
+
+    Returns:
+        The provided backend (postgres mode) or a new
+        GoldenRepoMetadataSqliteBackend (sqlite mode).
+    """
+    if backend is not None:
+        return backend
+
+    from code_indexer.server.storage.sqlite_backends import (
+        GoldenRepoMetadataSqliteBackend,
+    )
+
+    db_path = str(Path(server_data_dir) / "cidx_server.db")
+    sqlite_backend = GoldenRepoMetadataSqliteBackend(db_path)
+    sqlite_backend.ensure_table_exists()
+    return sqlite_backend

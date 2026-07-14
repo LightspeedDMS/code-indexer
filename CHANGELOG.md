@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.52.0] - 2026-07-13
+
+### Fixed
+
+- **#1390** (priority-1): the filesystem-reconciliation mechanism for the `enable_temporal` flag had two independent defects that combined to trigger an unattended, hours-long full temporal reindex against operator intent. (1) `RefreshScheduler._reconcile_registry_with_filesystem` only updated the `global_repos` table (the one the scheduled-refresh trigger actually reads), never `golden_repos_metadata` -- the same logical repo's `enable_temporal` flag could permanently disagree between the two. (2) `_detect_existing_indexes`'s temporal check matched only on directory NAME (`code-indexer-temporal*`), never verifying real shard data was present -- a metadata-only leftover directory (real shard data removed for maintenance) was indistinguishable from a fully-populated index, and falsely reported "temporal exists." Fixed: reconciliation now updates both tables using the same alias-normalization already proven correct for Bug #1373; detection now requires a real `hnsw_index.bin`+`collection_meta.json` pair (reusing the existing `iter_index_files_for_repo` discovery primitive) rather than a name match. Directly reproduces and fixes a real incident: quarter-shard data pulled for maintenance, metadata directory left behind, reconciliation false-positived `enable_temporal=True`, re-arming the scheduler and triggering an unattended `cidx index --index-commits` run that redid 8 quarters from scratch over ~1.5 hours.
+
 ## [11.51.0] - 2026-07-13
 
 ### Fixed
