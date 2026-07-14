@@ -471,6 +471,21 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def list_repos_with_categories(self) -> List[Dict[str, Any]]: ...
 
+    # Bug #1382: registry-reconcile circuit-breaker cross-restart
+    # confirmation state (see golden_repo_reconciler.py).
+    def record_reconcile_breaker_observation(self, fingerprint: str) -> int: ...
+
+    def reset_reconcile_breaker_state(self) -> None: ...
+
+    def get_reconcile_breaker_state(self) -> Optional[Dict[str, Any]]: ...
+
+    # Issue #1383: persistent, discoverable trace of a confirmed
+    # registry-reconcile auto-removal event, surviving the breaker-state
+    # reset above (see golden_repo_reconciler.py / health_service.py).
+    def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None: ...
+
+    def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
@@ -501,6 +516,18 @@ class DependencyMapTrackingBackend(Protocol):
     def record_run_metrics(self, metrics: Dict[str, Any]) -> None: ...
 
     def get_run_history(self, limit: int = 5) -> List[Dict[str, Any]]: ...
+
+
+@runtime_checkable
+class HNSWOrphanSweepStateBackend(Protocol):
+    """Protocol for HNSW orphan repair fleet sweep durable state
+    (Story #1360, Epic #1333 S3)."""
+
+    def get_state(self) -> Dict[str, Any]: ...
+
+    def record_item_processed(self, key: str, outcome: str) -> None: ...
+
+    def complete_pass(self) -> None: ...
 
     def cleanup_old_history(self, cutoff_iso: str) -> int:
         """Delete dependency_map_run_history records older than cutoff_iso.

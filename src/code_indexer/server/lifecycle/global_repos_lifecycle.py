@@ -15,7 +15,7 @@ import logging
 import threading
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -52,6 +52,7 @@ class GlobalReposLifecycleManager:
         resource_config: Optional["ServerResourceConfig"] = None,
         job_tracker=None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
+        golden_repo_metadata_backend: Optional[Any] = None,
     ):
         """
         Initialize the lifecycle manager.
@@ -63,6 +64,11 @@ class GlobalReposLifecycleManager:
             job_tracker: Optional JobTracker for dashboard visibility (Story #314)
             snapshot_manager: Optional VersionedSnapshotManager for CoW snapshot coordination
                 (Commit 1 injection point — forwarded to RefreshScheduler).
+            golden_repo_metadata_backend: Optional GoldenRepoMetadataBackend
+                (Bug #1390) — forwarded to RefreshScheduler so filesystem
+                reconciliation can update golden_repos_metadata (bare-alias-keyed)
+                alongside global_repos. None (default) lets RefreshScheduler
+                resolve its own fallback lazily (solo mode / not yet available).
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -99,6 +105,7 @@ class GlobalReposLifecycleManager:
             background_job_manager=background_job_manager,
             resource_config=resource_config,
             snapshot_manager=snapshot_manager,
+            golden_repo_metadata_backend=golden_repo_metadata_backend,
         )
 
         # Track running state

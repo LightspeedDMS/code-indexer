@@ -33,6 +33,9 @@ from .database_health_service import (
 from .config_service import get_config_service
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.services.golden_repo_reconciler import (
+    CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +200,14 @@ class HealthCheckService:
             services, system_info, database_health
         )
 
+        # Issue #1383 Finding 1: surface the golden-repo reconcile auto-heal
+        # event (if any) directly on the /health response. This is
+        # deliberately kept OUT of overall_status/failure_reasons above --
+        # it is a historical, already-resolved record, not a current
+        # problem -- but it MUST be reachable through a real front door
+        # rather than only via the internal helper method.
+        auto_heal_event = self.get_golden_repo_reconcile_auto_heal_event()
+
         end_time = time.time()
         logger.info(
             f"Health check completed in {end_time - start_time:.3f} seconds",
@@ -209,6 +220,7 @@ class HealthCheckService:
             services=services,
             system=system_info,
             failure_reasons=failure_reasons,
+            last_golden_repo_reconcile_auto_heal=auto_heal_event,
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -290,6 +302,188 @@ class HealthCheckService:
                     connection.execute(text("SELECT 1"))
             finally:
                 engine.dispose()
+
+    def _read_golden_repo_reconcile_breaker_state(
+        self,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Read the golden-repo registry-reconcile circuit-breaker's persisted
+        state (Bug #1382), written by golden_repo_reconciler.py via
+        GoldenRepoMetadataSqliteBackend/PostgresBackend.
+
+        Raises on any DB error (including "table does not exist yet") --
+        the caller is responsible for fail-open handling. Mirrors
+        _check_sqlite_connectivity/_check_pg_connectivity's storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return None
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                row = conn.execute(
+                    "SELECT orphan_fingerprint, consecutive_count FROM "
+                    "golden_repo_reconcile_breaker_state WHERE id = 1"
+                ).fetchone()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT orphan_fingerprint, consecutive_count FROM "
+                    "golden_repo_reconcile_breaker_state WHERE id = 1"
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+
+        if row is None:
+            return None
+        return {"orphan_fingerprint": row[0], "consecutive_count": row[1]}
+
+    def _collect_golden_repo_reconcile_breaker_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Bug #1382: surface a persistently-tripped golden-repo registry-
+        reconcile circuit-breaker as a DEGRADED health signal, so an admin
+        sees it immediately instead of the condition being buried in
+        log-only WARNINGs across months of restarts.
+
+        Fail-open: any error reading the breaker state (including "table
+        does not exist yet" on a fresh install, or the DB not being ready)
+        is treated as "nothing to report" -- this is a best-effort
+        visibility aid, never a source of false health alarms.
+        """
+        try:
+            state = self._read_golden_repo_reconcile_breaker_state()
+        except Exception as exc:
+            logger.debug("Golden-repo reconcile breaker health check skipped: %s", exc)
+            return False, False, []
+
+        if state is None:
+            return False, False, []
+
+        count = state.get("consecutive_count") or 0
+        if count <= 0:
+            return False, False, []
+
+        # Issue #1383: enrich the buildup message with the actual at-risk
+        # alias set and a "will auto-remove at N/N" framing, so an admin
+        # has enough information to intervene manually before the
+        # circuit-breaker's confirmation threshold is reached -- a bare
+        # count alone doesn't say WHICH repos are at risk.
+        fingerprint = state.get("orphan_fingerprint") or ""
+        aliases = sorted(a for a in fingerprint.split(",") if a)
+        alias_list = ", ".join(aliases) if aliases else "unknown"
+
+        return (
+            True,
+            False,
+            [
+                f"Golden-repo reconcile: circuit-breaker held back cleanup "
+                f"for {count}/{CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD} "
+                f"consecutive sweep(s) -- at-risk golden repos: {alias_list} "
+                f"-- will auto-remove at "
+                f"{CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD}/"
+                f"{CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD} confirmations -- "
+                f"needs admin review (Bug #1382)."
+            ],
+        )
+
+    def _read_golden_repo_reconcile_auto_heal_event(
+        self,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Read the golden-repo registry-reconcile auto-heal event's persisted
+        trace (Issue #1383), written by golden_repo_reconciler.py via
+        GoldenRepoMetadataSqliteBackend/PostgresBackend after a confirmed
+        circuit-breaker auto-removal actually succeeds.
+
+        Raises on any DB error (including "table does not exist yet") --
+        the caller is responsible for fail-open handling. Mirrors
+        _read_golden_repo_reconcile_breaker_state's storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return None
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                row = conn.execute(
+                    "SELECT removed_aliases, occurred_at FROM "
+                    "golden_repo_reconcile_auto_heal_event WHERE id = 1"
+                ).fetchone()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT removed_aliases, occurred_at FROM "
+                    "golden_repo_reconcile_auto_heal_event WHERE id = 1"
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+
+        if row is None:
+            return None
+        removed_aliases_raw, occurred_at = row
+        removed_aliases = [a for a in (removed_aliases_raw or "").split(",") if a]
+        return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
+
+    def get_golden_repo_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]:
+        """
+        Issue #1383: independently queryable, INFORMATIONAL-ONLY surface
+        for discovering the most recent confirmed golden-repo reconcile
+        auto-removal event after the fact.
+
+        This deliberately does NOT feed into _calculate_overall_status /
+        failure_reasons -- unlike
+        _collect_golden_repo_reconcile_breaker_failures() (a CURRENT,
+        unresolved condition), this reports a HISTORICAL event that has
+        already been resolved by the auto-removal itself. Reporting it as
+        DEGRADED would mislabel an already-fixed situation as an ongoing
+        problem. It exists purely so an operator who wasn't watching
+        /health in real time can still discover, without log-searching,
+        that an automatic mass-removal occurred and which repos were
+        affected.
+
+        Fail-open: any error (including "table does not exist yet" on a
+        fresh install) returns None rather than raising.
+        """
+        try:
+            event = self._read_golden_repo_reconcile_auto_heal_event()
+        except Exception as exc:
+            logger.debug("Golden-repo reconcile auto-heal event read skipped: %s", exc)
+            return None
+
+        if event is None:
+            return event
+
+        # Normalize occurred_at to a JSON-serializable ISO string regardless
+        # of backend: SQLite already stores/returns an ISO string, while
+        # PostgreSQL's psycopg driver returns a native datetime object for a
+        # TIMESTAMPTZ column. This method is now surfaced directly on the
+        # /health response payload (Issue #1383 Finding 1 remediation), so
+        # both backends must produce the same representation there.
+        occurred_at = event.get("occurred_at")
+        if isinstance(occurred_at, datetime):
+            event["occurred_at"] = occurred_at.isoformat()
+
+        return event
 
     def _check_storage_health(self) -> ServiceHealthInfo:
         """
@@ -693,6 +887,15 @@ class HealthCheckService:
         has_warning = has_warning or res_warn
         has_error = has_error or res_err
         failure_reasons.extend(res_reasons)
+
+        # Bug #1382: golden-repo registry-reconcile circuit-breaker
+        # escalation (see module docstring in golden_repo_reconciler.py).
+        grb_warn, grb_err, grb_reasons = (
+            self._collect_golden_repo_reconcile_breaker_failures()
+        )
+        has_warning = has_warning or grb_warn
+        has_error = has_error or grb_err
+        failure_reasons.extend(grb_reasons)
 
         # Check individual service statuses (database, storage services)
         # Issue #3: Add error messages to failure_reasons when services fail

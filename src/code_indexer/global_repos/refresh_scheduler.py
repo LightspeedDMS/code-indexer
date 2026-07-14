@@ -14,7 +14,17 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NoReturn,
+    Optional,
+    Union,
+    TYPE_CHECKING,
+    cast,
+)
 
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
@@ -28,6 +38,9 @@ from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.repositories.golden_repo_manager import (
+    _make_hnsw_orphan_event_logger,
+)
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     ClaudeConflictResolver,
@@ -180,6 +193,7 @@ class RefreshScheduler:
         registry: Optional["GlobalRegistry"] = None,  # type: ignore[name-defined]  # noqa: F821
         job_tracker: Optional["JobTracker"] = None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
+        golden_repo_metadata_backend: Optional[Any] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -197,6 +211,14 @@ class RefreshScheduler:
                 When None (CLI mode), no registration occurs.
             snapshot_manager: Optional VersionedSnapshotManager for CoW snapshot coordination
                 (Commit 1 injection point — stored, used in later commits).
+            golden_repo_metadata_backend: Optional GoldenRepoMetadataBackend instance
+                (for testing/production wiring); if None, resolution is deferred to the
+                `golden_repo_metadata` property below (Bug #1390), mirroring `registry`'s
+                Bug #1308 deferred-resolution pattern. Needed so
+                _reconcile_registry_with_filesystem() can update the bare-alias-keyed
+                golden_repos_metadata table alongside the -global-alias-keyed
+                global_repos table (self.registry) -- the two are structurally separate
+                stores for the same logical repo and can otherwise drift independently.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -220,6 +242,12 @@ class RefreshScheduler:
         # at construction time during server startup.
         self._registry = registry
         self._registry_lock = threading.Lock()
+
+        # golden_repo_metadata resolution (Bug #1390): same deferred-resolution
+        # shape as `registry` above, for the structurally separate
+        # golden_repos_metadata table (bare-alias-keyed).
+        self._golden_repo_metadata_backend = golden_repo_metadata_backend
+        self._golden_repo_metadata_lock = threading.Lock()
 
         # Thread management
         self._running = False
@@ -336,6 +364,96 @@ class RefreshScheduler:
         """Allow explicit (re-)injection, e.g. by tests that set `.registry` post-construction."""
         with self._get_registry_lock():
             self._registry = value
+
+    def _get_golden_repo_metadata_lock(self) -> threading.Lock:
+        """
+        Return the golden_repo_metadata resolution lock, creating it lazily if absent.
+
+        Mirrors `_get_registry_lock()`: some tests construct RefreshScheduler via
+        `object.__new__(RefreshScheduler)` without running __init__, so
+        `_golden_repo_metadata_lock` may not exist as an instance attribute yet.
+        """
+        lock = getattr(self, "_golden_repo_metadata_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._golden_repo_metadata_lock = lock
+        return lock
+
+    @property
+    def golden_repo_metadata(self) -> Any:
+        """
+        Lazily resolve the golden_repos_metadata backend (bare-alias-keyed table).
+
+        Bug #1390: mirrors the `registry` property's Bug #1308-hardened deferred
+        resolution, for the structurally SEPARATE golden_repos_metadata table.
+        `_reconcile_registry_with_filesystem` must update BOTH this table
+        (bare alias) AND `self.registry`'s global_repos table (-global-suffixed
+        alias) for the same logical repo -- Bug #1373's `_set_enable_temporal_flag`
+        (server/mcp/handlers/repos.py) established this same dual-write
+        requirement for the explicit-enable path; this property gives the
+        filesystem-reconciliation path the same access.
+
+        An explicitly injected backend (test double, or production wiring via
+        `golden_repo_metadata_backend=` at construction) is returned as-is.
+        Otherwise resolution is deferred to first access (not __init__) for the
+        same reason as `registry`: app.state.backend_registry is not guaranteed
+        populated yet at server-startup construction time in postgres/cluster
+        mode. Falls back to a per-node SQLite GoldenRepoMetadataSqliteBackend in
+        solo/CLI mode (no app.state) or when postgres backend_registry is not yet
+        available -- in the latter case the result is NOT cached so the next
+        access re-checks (identical caching contract to `registry`).
+
+        Uses getattr(self, "_golden_repo_metadata_backend", None) rather than
+        assuming __init__ ran, matching `registry`'s tolerance of bare
+        object.__new__(RefreshScheduler) instances.
+        """
+        existing = getattr(self, "_golden_repo_metadata_backend", None)
+        if existing is not None:
+            return existing
+
+        with self._get_golden_repo_metadata_lock():
+            existing = getattr(self, "_golden_repo_metadata_backend", None)
+            if existing is not None:
+                return existing
+
+            # Lazy import to avoid circular dependency (mirrors `registry` above)
+            from code_indexer.server.utils.registry_factory import (
+                get_server_golden_repo_metadata_backend,
+                resolve_backend_registry_attr,
+            )
+
+            backend, postgres_mode_without_backend = resolve_backend_registry_attr(
+                "golden_repo_metadata", caller_name="RefreshScheduler"
+            )
+            golden_repos_dir = getattr(self, "golden_repos_dir", None)
+            if backend is None and golden_repos_dir is None:
+                raise RuntimeError(
+                    "RefreshScheduler.golden_repo_metadata accessed before "
+                    "initialization: no golden_repos_dir and no cluster backend "
+                    "available"
+                )
+            # Server data dir is the parent of golden_repos_dir (mirrors
+            # get_server_global_registry's own golden_repos_dir.parent
+            # derivation for the SQLite db path).
+            server_data_dir = (
+                str(Path(golden_repos_dir).parent)
+                if golden_repos_dir is not None
+                else ""
+            )
+            resolved = get_server_golden_repo_metadata_backend(
+                server_data_dir, backend=backend
+            )
+
+            if not postgres_mode_without_backend:
+                self._golden_repo_metadata_backend = resolved
+
+            return resolved
+
+    @golden_repo_metadata.setter
+    def golden_repo_metadata(self, value: Any) -> None:
+        """Allow explicit (re-)injection, e.g. by tests that set `.golden_repo_metadata` post-construction."""
+        with self._get_golden_repo_metadata_lock():
+            self._golden_repo_metadata_backend = value
 
     def _is_versioned_snapshot(self, path: str) -> bool:
         """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
@@ -2035,10 +2153,22 @@ class RefreshScheduler:
 
                     # Index source first, then create versioned snapshot (Story #229)
                     # Story #482 PATH C: Forward progress_callback into _index_source
+                    # Bug #1388: pass an alias-bound orphan_event_callback
+                    # (see _make_hnsw_orphan_event_logger docstring in
+                    # golden_repo_manager.py) so a marker line scraped from
+                    # the child's stderr is re-logged tagged with this
+                    # repo's alias -- a channel entirely separate from
+                    # progress_callback, which is forwarded unwrapped.
+                    # Reuses the SAME factory the golden-repo
+                    # add/registration path already applies -- never a
+                    # second, duplicated copy.
                     self._index_source(
                         alias_name=alias_name,
                         source_path=source_path,
                         progress_callback=progress_callback,
+                        orphan_event_callback=_make_hnsw_orphan_event_logger(
+                            alias_name
+                        ),
                         force_reconcile=force_reconcile,
                     )
                     new_index_path = self._create_snapshot(
@@ -2167,6 +2297,7 @@ class RefreshScheduler:
         source_path: str,
         progress_callback=None,
         force_reconcile: bool = False,
+        orphan_event_callback: Optional[Any] = None,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -2186,6 +2317,12 @@ class RefreshScheduler:
             force_reconcile: When True, forces --reconcile regardless of metadata status.
                 Story #1001: set by _execute_refresh() when extension drift is detected
                 and matching files exist in the repo.
+            orphan_event_callback: Bug #1388 optional callable(line: str) for
+                HNSW orphan-repair marker lines scraped from the child
+                subprocess's stderr -- forwarded verbatim to
+                run_with_popen_progress. A channel entirely separate from
+                progress_callback (see _make_hnsw_orphan_event_logger in
+                golden_repo_manager.py).
 
         Raises:
             RuntimeError: If any indexing step fails or times out
@@ -2348,6 +2485,12 @@ class RefreshScheduler:
             )
             if env is not None:
                 _popen_kwargs["env"] = env
+            # Bug #1388: only pass orphan_event_callback when not None, for
+            # the same reason as env above -- several pre-existing tests
+            # mock run_with_popen_progress with a strict signature lacking
+            # **kwargs.
+            if orphan_event_callback is not None:
+                _popen_kwargs["orphan_event_callback"] = orphan_event_callback
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
@@ -2523,6 +2666,26 @@ class RefreshScheduler:
                     f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
                 )
 
+    def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
+        """Run a subprocess, optionally through a per-instance injection seam.
+
+        Bug #1381 (mirrors bug #1375's DependencyMapAnalyzer.cli_dispatcher
+        pattern): defaults to the real `subprocess.run`, resolved dynamically
+        at call time via the module-level `subprocess` name so existing
+        tests that globally patch `subprocess.run` (e.g. via
+        `unittest.mock.patch("subprocess.run", ...)`) continue to work
+        unchanged. Tests that need a seam scoped to THIS scheduler instance
+        only — immune to cross-thread interference from unrelated
+        concurrently-running code under full-suite load — can set
+        `self._subprocess_runner` directly (an instance attribute, not a
+        constructor parameter, exactly like `analyzer._cli_dispatcher = ...`
+        in test_delta_merge_frontmatter.py).
+        """
+        runner: Optional[Callable[..., Any]] = getattr(self, "_subprocess_runner", None)
+        if runner is None:
+            runner = subprocess.run
+        return runner(*args, **kwargs)
+
     def _create_snapshot(self, alias_name: str, source_path: str) -> str:
         """
         Create a versioned CoW snapshot of the already-indexed source (Story #229).
@@ -2607,7 +2770,7 @@ class RefreshScheduler:
             if git_dir.exists():
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
-                    result = subprocess.run(
+                    result = self._run_subprocess(
                         ["git", "update-index", "--refresh"],
                         cwd=str(versioned_path),
                         capture_output=True,
@@ -2624,7 +2787,7 @@ class RefreshScheduler:
 
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
-                    result = subprocess.run(
+                    result = self._run_subprocess(
                         ["git", "restore", "."],
                         cwd=str(versioned_path),
                         capture_output=True,
@@ -2642,7 +2805,7 @@ class RefreshScheduler:
             # Step 4: Run cidx fix-config --force on CLONE only (never on source)
             logger.info("Running cidx fix-config --force on clone to update paths")
             try:
-                subprocess.run(
+                self._run_subprocess(
                     ["cidx", "fix-config", "--force"],
                     cwd=str(versioned_path),
                     capture_output=True,
@@ -2932,11 +3095,15 @@ class RefreshScheduler:
             Dictionary with index types as keys and existence as boolean values:
             - semantic: True if semantic vector index exists
             - fts: True if FTS (Tantivy) index exists
-            - temporal: True if temporal index exists
+            - temporal: True if a temporal collection exists WITH real shard data
+              (Bug #1390: name-match alone is not enough -- see below)
             - scip: True if SCIP code intelligence indexes exist
         """
         from code_indexer.services.temporal.temporal_collection_naming import (
             is_temporal_collection as _is_temporal,
+        )
+        from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
+            iter_index_files_for_repo,
         )
 
         code_indexer_dir = repo_path / ".code-indexer"
@@ -2958,15 +3125,23 @@ class RefreshScheduler:
         fts_index_dir = code_indexer_dir / "tantivy_index"
         fts_exists = fts_index_dir.exists() and fts_index_dir.is_dir()
 
-        # Check temporal index: any temporal collection directory under index (production path)
-        temporal_exists = (
-            semantic_index_dir.exists()
-            and semantic_index_dir.is_dir()
-            and any(
-                d.is_dir() and _is_temporal(d.name)
-                for d in semantic_index_dir.iterdir()
-            )
-        )
+        # Check temporal index: Bug #1390 -- a directory NAME match alone is
+        # not sufficient. A temporal-named directory can contain only the
+        # temporal metadata database (no real quarter-shard hnsw_index.bin /
+        # collection_meta.json), e.g. when shard data was relocated/sidelined
+        # for a maintenance operation while the metadata directory was left
+        # behind. Reuses iter_index_files_for_repo (Story #1360's HNSW-fleet-
+        # sweep discovery primitive) -- the same "hnsw_index.bin +
+        # collection_meta.json pair is a real HNSW collection" structural
+        # definition already used elsewhere in this codebase -- to confirm at
+        # least one temporal-named collection actually has real data, rather
+        # than trusting the name pattern alone.
+        temporal_exists = False
+        if semantic_index_dir.exists() and semantic_index_dir.is_dir():
+            for relpath in iter_index_files_for_repo(repo_path):
+                if _is_temporal(relpath.parent.name):
+                    temporal_exists = True
+                    break
 
         # Check SCIP indexes: delegate to _has_scip_indexes()
         scip_exists = self._has_scip_indexes(repo_path)
@@ -3234,36 +3409,90 @@ class RefreshScheduler:
         what actually exists on disk. This ensures registry state stays in sync
         with filesystem reality.
 
+        Bug #1390: enable_temporal is tracked in TWO structurally separate
+        tables for the same logical repo -- `golden_repos_metadata` (bare-
+        alias-keyed) and `global_repos` (-global-suffixed-alias-keyed, via
+        `self.registry`). This method used to update ONLY `self.registry`,
+        letting the two tables drift independently and permanently. Both
+        tables are now reconciled here, using the same bare/`-global` alias
+        normalization Bug #1373 established in `_set_enable_temporal_flag`
+        (server/mcp/handlers/repos.py): `bare_alias` strips exactly one
+        trailing "-global" suffix if present; `global_alias` is always
+        re-derived from `bare_alias` (never assumed / blindly re-suffixed).
+        enable_scip has no golden_repos_metadata column and stays
+        registry-only, unchanged.
+
         Args:
-            alias_name: Repository alias name (without -global suffix)
+            alias_name: Repository alias name -- called with the -global-
+                suffixed form at both existing call sites in
+                _execute_refresh(), but normalized defensively here (see
+                bare_alias/global_alias derivation) in case a bare alias is
+                ever passed instead.
             detected: Dictionary from _detect_existing_indexes() with existence flags
         """
-        # Get current registry state
-        repo_info = self.registry.get_global_repo(alias_name)
+        _GLOBAL_SUFFIX = "-global"
+        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
+        global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
+
+        # Get current registry state (global_repos, -global-suffixed alias)
+        repo_info = self.registry.get_global_repo(global_alias)
         if not repo_info:
             logger.warning(
-                f"Cannot reconcile registry for {alias_name}: repo not found in registry"
+                f"Cannot reconcile registry for {global_alias}: repo not found in registry"
             )
             return
 
-        # Reconcile temporal flag
+        # Reconcile temporal flag -- global_repos side
         registry_temporal = repo_info.get("enable_temporal", False)
         filesystem_temporal = detected.get("temporal", False)
 
         if registry_temporal != filesystem_temporal:
             logger.info(
-                f"Reconciling temporal flag for {alias_name}: "
+                f"Reconciling temporal flag for {global_alias}: "
                 f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
             )
-            self.registry.update_enable_temporal(alias_name, filesystem_temporal)
+            self.registry.update_enable_temporal(global_alias, filesystem_temporal)
 
-        # Reconcile SCIP flag
+        # Bug #1390: reconcile temporal flag -- golden_repos_metadata side
+        # (bare alias). Checked and updated INDEPENDENTLY of the global_repos
+        # branch above -- the two tables can drift independently, so
+        # global_repos already matching the filesystem must not skip the
+        # golden_repos_metadata check.
+        try:
+            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
+        except Exception as exc:
+            logger.warning(
+                f"Reconciliation: could not read golden_repos_metadata for "
+                f"{bare_alias}: {type(exc).__name__}: {exc}"
+            )
+            golden_meta_info = None
+
+        if golden_meta_info is not None:
+            golden_meta_temporal = golden_meta_info.get("enable_temporal", False)
+            if golden_meta_temporal != filesystem_temporal:
+                logger.info(
+                    f"Reconciling temporal flag (golden_repos_metadata) for "
+                    f"{bare_alias}: metadata={golden_meta_temporal} -> "
+                    f"filesystem={filesystem_temporal}"
+                )
+                try:
+                    self.golden_repo_metadata.update_enable_temporal(
+                        bare_alias, filesystem_temporal
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Reconciliation: failed to update golden_repos_metadata "
+                        f"enable_temporal for {bare_alias}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        # Reconcile SCIP flag -- global_repos only (no golden_repos_metadata column)
         registry_scip = repo_info.get("enable_scip", False)
         filesystem_scip = detected.get("scip", False)
 
         if registry_scip != filesystem_scip:
             logger.info(
-                f"Reconciling SCIP flag for {alias_name}: "
+                f"Reconciling SCIP flag for {global_alias}: "
                 f"registry={registry_scip} -> filesystem={filesystem_scip}"
             )
-            self.registry.update_enable_scip(alias_name, filesystem_scip)
+            self.registry.update_enable_scip(global_alias, filesystem_scip)

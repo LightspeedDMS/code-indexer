@@ -1741,6 +1741,12 @@ class SSHKeysSqliteBackend:
         self._conn_manager.close_all()
 
 
+# Issue #1383: golden_repo_reconcile_auto_heal_event is a singleton-row
+# table (like golden_repo_reconcile_breaker_state) -- only the most recent
+# confirmed auto-removal event needs to be discoverable.
+_RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
+
+
 class GoldenRepoMetadataSqliteBackend:
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -1794,6 +1800,36 @@ class GoldenRepoMetadataSqliteBackend:
                     logger.info(
                         "Migrated golden_repos_metadata: added column %s", col_name
                     )
+
+            # Bug #1382: singleton-row table persisting the registry-reconcile
+            # circuit-breaker's cross-restart confirmation state (see
+            # record_reconcile_breaker_observation() below).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS golden_repo_reconcile_breaker_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    orphan_fingerprint TEXT,
+                    consecutive_count INTEGER NOT NULL DEFAULT 0,
+                    first_observed_at TEXT,
+                    last_observed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
+            # Issue #1383: singleton-row table persisting a discoverable
+            # trace of the most recent confirmed registry-reconcile
+            # auto-removal event -- survives the breaker-state reset above
+            # (see record_reconcile_auto_heal_event() below).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS golden_repo_reconcile_auto_heal_event (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    removed_aliases TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                )
+            """
+            )
 
         self._conn_manager.execute_atomic(operation)
 
@@ -2182,6 +2218,176 @@ class GoldenRepoMetadataSqliteBackend:
             )
 
         return result
+
+    def record_reconcile_breaker_observation(self, fingerprint: str) -> int:
+        """
+        Record one registry-reconcile circuit-breaker high-ratio observation
+        (Bug #1382).
+
+        If `fingerprint` (a stable, sorted identifier of the orphan-
+        candidate alias set) matches the previously recorded fingerprint,
+        the consecutive-observation count is incremented; otherwise (first
+        observation ever, or a DIFFERENT orphan set than last time) the
+        count resets to 1. Only a STABLE, repeated orphan-candidate set
+        across sweeps is corroborating evidence that a high absent-fraction
+        reflects real orphans rather than a one-off infra blip.
+
+        Returns:
+            The consecutive-observation count after recording this one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT orphan_fingerprint, consecutive_count "
+                "FROM golden_repo_reconcile_breaker_state WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO golden_repo_reconcile_breaker_state "
+                    "(id, orphan_fingerprint, consecutive_count, "
+                    "first_observed_at, last_observed_at, updated_at) "
+                    "VALUES (1, ?, 1, ?, ?, ?)",
+                    (fingerprint, now, now, now),
+                )
+                return 1
+
+            prev_fingerprint, prev_count = row
+            if prev_fingerprint == fingerprint:
+                new_count = prev_count + 1
+                conn.execute(
+                    "UPDATE golden_repo_reconcile_breaker_state "
+                    "SET consecutive_count = ?, last_observed_at = ?, "
+                    "updated_at = ? WHERE id = 1",
+                    (new_count, now, now),
+                )
+                return new_count
+
+            conn.execute(
+                "UPDATE golden_repo_reconcile_breaker_state "
+                "SET orphan_fingerprint = ?, consecutive_count = 1, "
+                "first_observed_at = ?, last_observed_at = ?, updated_at = ? "
+                "WHERE id = 1",
+                (fingerprint, now, now, now),
+            )
+            return 1
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_reconcile_breaker_state(self) -> None:
+        """
+        Clear the registry-reconcile circuit-breaker's persisted
+        confirmation state (Bug #1382).
+
+        Called whenever a sweep observes evidence AGAINST a stable-orphan
+        hypothesis: a normal (non-tripping) sweep, or a base-directory
+        health-check failure -- real infra flapping voids any prior
+        confirmations, since the whole point is to only auto-proceed when
+        the high ratio is consistently observed with a HEALTHY base
+        directory every single time.
+        """
+
+        def operation(conn):
+            conn.execute("DELETE FROM golden_repo_reconcile_breaker_state WHERE id = 1")
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_reconcile_breaker_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the current registry-reconcile circuit-breaker state, or
+        None if the breaker has never tripped (or was reset since).
+
+        Used by the health-check escalation surface (Bug #1382) so a
+        persistently-tripped breaker is visible to admins rather than
+        buried in log-only WARNINGs.
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT orphan_fingerprint, consecutive_count, first_observed_at, "
+            "last_observed_at FROM golden_repo_reconcile_breaker_state "
+            "WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "orphan_fingerprint": row[0],
+            "consecutive_count": row[1],
+            "first_observed_at": row[2],
+            "last_observed_at": row[3],
+        }
+
+    def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None:
+        """
+        Persist a discoverable trace of a confirmed registry-reconcile
+        auto-removal event (Issue #1383).
+
+        Overwrites the singleton row (id=_RECONCILE_AUTO_HEAL_EVENT_ROW_ID)
+        -- only the MOST RECENT auto-heal event needs to be discoverable,
+        matching the golden_repo_reconcile_breaker_state convention. This
+        record deliberately survives reset_reconcile_breaker_state() and is
+        surfaced as the last_golden_repo_reconcile_auto_heal field on the
+        /health REST response (HealthCheckResponse), so an operator who
+        wasn't watching /health in real time can still discover after the
+        fact, through that field, that an automatic mass-removal occurred
+        and which repos were affected.
+
+        Args:
+            removed_aliases: The aliases actually removed this sweep
+                (result.orphans_removed -- never orphans_failed). Must be
+                a list of non-empty strings.
+
+        Raises:
+            ValueError: If removed_aliases is not a list, or contains a
+                non-string / empty element.
+        """
+        if not isinstance(removed_aliases, list):
+            raise ValueError(
+                f"removed_aliases must be a list, got: {type(removed_aliases)!r}"
+            )
+        for alias in removed_aliases:
+            if not isinstance(alias, str) or not alias:
+                raise ValueError(
+                    f"removed_aliases must contain only non-empty strings, "
+                    f"got: {alias!r}"
+                )
+
+        now = datetime.now(timezone.utc).isoformat()
+        removed_aliases_csv = ",".join(removed_aliases)
+
+        def operation(conn):
+            conn.execute(
+                "INSERT INTO golden_repo_reconcile_auto_heal_event "
+                "(id, removed_aliases, occurred_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "removed_aliases = excluded.removed_aliases, "
+                "occurred_at = excluded.occurred_at",
+                (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID, removed_aliases_csv, now),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the most recently persisted registry-reconcile auto-heal
+        event, or None if no confirmed auto-removal has ever fired (Issue
+        #1383).
+
+        Used as an independently queryable discovery surface -- reused by
+        HealthCheckService.get_golden_repo_reconcile_auto_heal_event() --
+        so this historical event is discoverable WITHOUT log-searching,
+        even after the breaker-state counter has been reset.
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT removed_aliases, occurred_at FROM "
+            "golden_repo_reconcile_auto_heal_event WHERE id = ?",
+            (_RECONCILE_AUTO_HEAL_EVENT_ROW_ID,),
+        ).fetchone()
+        if row is None:
+            return None
+        removed_aliases_csv, occurred_at = row
+        removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
+        return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
 
     def close(self) -> None:
         """Close database connections."""
@@ -7098,3 +7304,147 @@ class QueryEmbeddingCacheSqliteBackend:
         Idempotent: clearing an already-empty table is a no-op success.
         """
         self.clear()
+
+
+# Story #1360 (Epic #1333 S3): outcomes counted per sweep item -- kept in
+# sync with SweepOutcome in hnsw_orphan_sweep/repair_executor.py (that enum
+# is the source of truth; this is a plain str set so the backend has no
+# import dependency on the server-services layer).
+_HNSW_SWEEP_OUTCOMES = {"clean", "repaired", "transient_skip", "error"}
+
+# Columns bumped (by +1 each) for each outcome value, alongside
+# pass_indexes_checked which always bumps. "error" bumps pass_orphaned_found
+# too: process_candidate() only ever returns ERROR after orphans were
+# confirmed present under the lock (repair attempted but failed to converge,
+# or the post-repair persist/reload verification failed) -- so an ERROR
+# outcome IS an "orphan found" outcome, just one that wasn't successfully
+# fixed. Code review finding: without this, pass_orphaned_found silently
+# undercounted the true number of orphaned indexes discovered this pass.
+_HNSW_SWEEP_OUTCOME_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "repaired": ("pass_orphaned_found", "pass_repaired"),
+    "error": ("pass_orphaned_found", "pass_errors"),
+    "transient_skip": ("pass_transient_skips",),
+}
+
+
+class HNSWOrphanSweepStateSqliteBackend:
+    """SQLite backend for the HNSW orphan repair fleet sweep durable state
+    (Story #1360, Epic #1333 S3).
+
+    Singleton row (id=1), auto-created on first access. Tracks the current
+    pass's stable-key cursor (``last_completed_key``, a STRING -- never a
+    numeric offset, per the story's resume-correctness rationale) and
+    per-pass / lifetime statistics.
+    """
+
+    _ROW_ID = 1
+
+    def __init__(self, db_path: str) -> None:
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+    def _ensure_row(self, conn: Any) -> None:
+        """Create the singleton row on first access. pass_started_at is set
+        to "now" at creation time -- pass 1 begins the moment the row first
+        exists (code review finding: pass_started_at must reflect real
+        pass-start timing, never a dead always-NULL column)."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO hnsw_orphan_sweep_state (id, pass_started_at) "
+            "VALUES (?, ?)",
+            (self._ROW_ID, now_iso),
+        )
+
+    def get_state(self) -> Dict[str, Any]:
+        """Return the current durable sweep state, creating the default
+        singleton row on first access."""
+
+        def operation(conn: Any) -> Dict[str, Any]:
+            self._ensure_row(conn)
+            row = conn.execute(
+                """SELECT pass_id, last_completed_key, pass_started_at,
+                          pass_indexes_checked, pass_orphaned_found,
+                          pass_repaired, pass_errors, pass_transient_skips,
+                          last_full_pass_completed_at,
+                          total_orphans_repaired_lifetime
+                   FROM hnsw_orphan_sweep_state WHERE id = ?""",
+                (self._ROW_ID,),
+            ).fetchone()
+            return {
+                "pass_id": row[0],
+                "last_completed_key": row[1],
+                "pass_started_at": row[2],
+                "pass_indexes_checked": row[3],
+                "pass_orphaned_found": row[4],
+                "pass_repaired": row[5],
+                "pass_errors": row[6],
+                "pass_transient_skips": row[7],
+                "last_full_pass_completed_at": row[8],
+                "total_orphans_repaired_lifetime": row[9],
+            }
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def record_item_processed(self, key: str, outcome: str) -> None:
+        """Durably record one processed sweep item (AC1: persisted after
+        EACH item, not just at tick end).
+
+        Args:
+            key: The item's stable sort key -- becomes the new
+                ``last_completed_key`` cursor value.
+            outcome: One of "clean", "repaired", "transient_skip", "error".
+
+        Raises:
+            ValueError: If outcome is not a recognized value.
+        """
+        if outcome not in _HNSW_SWEEP_OUTCOMES:
+            raise ValueError(
+                f"Unknown HNSW sweep outcome '{outcome}'; expected one of "
+                f"{sorted(_HNSW_SWEEP_OUTCOMES)}"
+            )
+
+        extra_columns = _HNSW_SWEEP_OUTCOME_COLUMNS.get(outcome, ())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        extra_bumps = "".join(f", {col} = {col} + 1" for col in extra_columns)
+
+        def operation(conn: Any) -> None:
+            self._ensure_row(conn)
+            conn.execute(
+                f"""UPDATE hnsw_orphan_sweep_state
+                    SET last_completed_key = ?,
+                        pass_indexes_checked = pass_indexes_checked + 1,
+                        updated_at = ?
+                        {extra_bumps}
+                    WHERE id = ?""",
+                (key, now_iso, self._ROW_ID),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def complete_pass(self) -> None:
+        """Record a completed full pass: accrue the lifetime repaired total,
+        reset the cursor and per-pass counters, set a fresh pass_started_at
+        for the NEW pass (never NULL -- see _ensure_row docstring), and
+        increment pass_id."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: Any) -> None:
+            self._ensure_row(conn)
+            conn.execute(
+                """UPDATE hnsw_orphan_sweep_state
+                   SET total_orphans_repaired_lifetime =
+                           total_orphans_repaired_lifetime + pass_repaired,
+                       last_full_pass_completed_at = ?,
+                       pass_id = pass_id + 1,
+                       last_completed_key = NULL,
+                       pass_started_at = ?,
+                       pass_indexes_checked = 0,
+                       pass_orphaned_found = 0,
+                       pass_repaired = 0,
+                       pass_errors = 0,
+                       pass_transient_skips = 0,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (now_iso, now_iso, now_iso, self._ROW_ID),
+            )
+
+        self._conn_manager.execute_atomic(operation)

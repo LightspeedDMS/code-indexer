@@ -29,7 +29,7 @@ from typing import Iterator
 import httpx
 import pytest
 
-from tests.e2e.helpers import login
+from tests.e2e.helpers import login, sanitize_cli_subprocess_env
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ def e2e_cli_env(e2e_config: E2EConfig) -> dict[str, str]:
     else:
         pythonpath = src_dir
 
-    env = dict(os.environ)
+    env = sanitize_cli_subprocess_env(dict(os.environ))
     env["PYTHONPATH"] = pythonpath
 
     if e2e_config.voyage_api_key:

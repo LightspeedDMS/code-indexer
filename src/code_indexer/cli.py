@@ -8507,6 +8507,8 @@ def health(output_json: bool, quiet: bool, index_path: Optional[str]):
             console.print(f"  Min Inbound: {result.min_inbound}")
         if result.max_inbound is not None:
             console.print(f"  Max Inbound: {result.max_inbound}")
+        if result.orphan_count is not None:
+            console.print(f"  Orphan Count: {result.orphan_count}")
 
     # Errors (if any)
     if result.errors:

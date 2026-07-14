@@ -13,7 +13,10 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User
-from code_indexer.services.hnsw_health_service import HNSWHealthService
+from code_indexer.services.hnsw_health_service import (
+    HealthCheckResult,
+    HNSWHealthService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,13 @@ class CollectionHealthResult(BaseModel):
     connections_checked: Optional[int] = None
     min_inbound: Optional[int] = None
     max_inbound: Optional[int] = None
+    orphan_count: Optional[int] = Field(
+        None,
+        description=(
+            "Zero-tolerance orphan signal (Story #1359 AC4): 0 is OK, any "
+            "value > 0 is ERROR (reflected in `valid`) -- no WARNING tier."
+        ),
+    )
     file_size_bytes: Optional[int] = None
     errors: List[str] = Field(default_factory=list)
     check_duration_ms: float
@@ -89,6 +99,32 @@ class DescriptionResponse(BaseModel):
     repo_alias: str = Field(description="Repository alias")
     description: str = Field(
         description="Markdown body of the cidx-meta file with frontmatter stripped"
+    )
+
+
+def _to_collection_health_result(
+    collection_name: str, index_type: str, health_result: HealthCheckResult
+) -> CollectionHealthResult:
+    """Map an HNSWHealthService HealthCheckResult onto the REST
+    CollectionHealthResult model (Story #1359 AC4: propagates orphan_count
+    unmodified -- `valid` remains the single zero-tolerance signal, no
+    separate graded severity is introduced on this surface).
+    """
+    return CollectionHealthResult(
+        collection_name=collection_name,
+        index_type=index_type,
+        valid=health_result.valid,
+        file_exists=health_result.file_exists,
+        readable=health_result.readable,
+        loadable=health_result.loadable,
+        element_count=health_result.element_count,
+        connections_checked=health_result.connections_checked,
+        min_inbound=health_result.min_inbound,
+        max_inbound=health_result.max_inbound,
+        orphan_count=health_result.orphan_count,
+        file_size_bytes=health_result.file_size_bytes,
+        errors=health_result.errors,
+        check_duration_ms=health_result.check_duration_ms,
     )
 
 
@@ -352,21 +388,10 @@ async def get_repository_health(
             if health_result.from_cache:
                 any_from_cache = True
 
-            # Convert to CollectionHealthResult
-            collection_health = CollectionHealthResult(
-                collection_name=collection_name,
-                index_type=index_type,
-                valid=health_result.valid,
-                file_exists=health_result.file_exists,
-                readable=health_result.readable,
-                loadable=health_result.loadable,
-                element_count=health_result.element_count,
-                connections_checked=health_result.connections_checked,
-                min_inbound=health_result.min_inbound,
-                max_inbound=health_result.max_inbound,
-                file_size_bytes=health_result.file_size_bytes,
-                errors=health_result.errors,
-                check_duration_ms=health_result.check_duration_ms,
+            # Convert to CollectionHealthResult (Story #1359 AC4: propagates
+            # orphan_count via the shared mapping helper)
+            collection_health = _to_collection_health_result(
+                collection_name, index_type, health_result
             )
 
             collections.append(collection_health)

@@ -50,30 +50,44 @@ def test_dispatch_parallel_with_jitter_smooths_concurrent_submissions() -> None:
 
 
 def test_dispatch_parallel_with_jitter_zero_jitter_disables_jitter() -> None:
-    """base_jitter=0 must disable jitter — spread must be negligible (< 0.05s)."""
-    from code_indexer.server.services.jittered_dispatcher import (
-        dispatch_parallel_with_jitter,
-    )
+    """base_jitter=0 must disable jitter — time.sleep must never be invoked.
 
-    entry_times: List[float] = []
+    Bug #1381: previously asserted a hard real-wall-clock spread bound
+    (`< 0.05s`) across actual ThreadPoolExecutor worker entry timestamps,
+    which is inherently sensitive to CPU scheduling contention under
+    full-suite/full-chunk concurrent load (observed failure: `got 0.4636s`).
+    Replaced with a deterministic assertion on the dispatcher's own jitter
+    invariant: `_jittered()`'s `if jitter > 0` guard must never call
+    `time.sleep` at all when `base_jitter_seconds<=0`.
+
+    Proven by patching the `time` NAME binding inside the jittered_dispatcher
+    module's own namespace (`patch.object(jd_mod, "time", ...)`) rather than
+    an attribute on the shared global `time` module singleton (which would
+    reintroduce the exact same cross-thread interference fragility class
+    fixed for bug #1375/#1381 elsewhere) — no other concurrently-running
+    thread in the same pytest process can ever observe or trip this patch,
+    since only code that resolves `time` via jittered_dispatcher's own
+    module globals (i.e. `_jittered`'s `time.sleep(...)` call) is affected.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import code_indexer.server.services.jittered_dispatcher as jd_mod
 
     def recording_worker(item: int) -> int:
-        entry_times.append(time.monotonic())
         return item
 
-    futures = dispatch_parallel_with_jitter(
-        list(range(10)),
-        concurrency=10,
-        base_jitter_seconds=0.0,
-        worker_fn=recording_worker,
-    )
-    for _ in as_completed(futures):
-        pass
+    mock_time = MagicMock()
+    with patch.object(jd_mod, "time", mock_time):
+        futures = jd_mod.dispatch_parallel_with_jitter(
+            list(range(10)),
+            concurrency=10,
+            base_jitter_seconds=0.0,
+            worker_fn=recording_worker,
+        )
+        for _ in as_completed(futures):
+            pass
 
-    spread = max(entry_times) - min(entry_times)
-    assert spread < 0.05, (
-        f"Expected spread < 0.05s with zero jitter, got {spread:.4f}s."
-    )
+    mock_time.sleep.assert_not_called()
 
 
 def test_dispatch_parallel_with_jitter_preserves_input_order_of_futures() -> None:

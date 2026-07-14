@@ -38,38 +38,10 @@ CLAUDE_CLI_TIMEOUT_SECONDS = 1800  # 30 minute timeout
 GITHUB_ISSUE_FETCH_LIMIT = 100  # Fetch last 100 open issues for deduplication
 GITHUB_CLI_TIMEOUT_SECONDS = 30  # Reasonable timeout for GitHub API calls
 
-# JSON Schema for structured Claude output (forces valid JSON response)
-CLAUDE_RESPONSE_SCHEMA = json.dumps(
-    {
-        "type": "object",
-        "properties": {
-            "status": {"type": "string", "enum": ["SUCCESS", "FAILURE"]},
-            "max_log_id_processed": {"type": "integer"},
-            "issues_created": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "classification": {"type": "string"},
-                        "title": {"type": "string"},
-                        "body": {"type": "string"},
-                        "error_codes": {"type": "array", "items": {"type": "string"}},
-                        "source_log_ids": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                        },
-                        "source_files": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["classification", "title", "body"],
-                },
-            },
-            "duplicates_skipped": {"type": "integer"},
-            "potential_duplicates_commented": {"type": "integer"},
-            "error": {"type": "string"},
-        },
-        "required": ["status"],
-    }
-)
+# Bug #1369: a CLAUDE_RESPONSE_SCHEMA constant used to live here, intended for
+# --output-format json --json-schema. It was never wired into the invocation
+# (ClaudeInvoker._build_claude_command never passes those flags) and had zero
+# consumers -- removed per anti-orphan-code (Messi rule #12).
 
 
 class LogScanner:
@@ -461,14 +433,10 @@ class LogScanner:
         """
         Parse Claude JSON response for log analysis (AC6).
 
-        The Claude CLI with --output-format json returns a wrapper structure:
-        {
-            "type": "result",
-            "result": "<actual Claude response as string or object>",
-            ...
-        }
-
-        The actual response (in "result" field) should be:
+        The response is a direct JSON payload (never a --output-format json CLI
+        wrapper -- ClaudeInvoker's dispatcher path never passes that flag, so a
+        "type"/"result" wrapper never occurs on this invocation path; Bug #1369
+        removed the dead unwrapping branches that used to look for it):
         {
             "status": "SUCCESS",
             "max_log_id_processed": 250,
@@ -498,46 +466,9 @@ class LogScanner:
         # char 0. Strip that noise and extract the real JSON payload, while
         # still raising loudly on a genuinely empty/garbage response.
         try:
-            cli_response = extract_json_from_llm_response(response_str)
+            response = extract_json_from_llm_response(response_str)
         except (ValueError, TypeError) as e:
             raise ValueError(f"Invalid JSON response from Claude: {e}")
-
-        # Handle CLI wrapper format (--output-format json returns wrapper)
-        if isinstance(cli_response, dict):
-            # When using --json-schema, the structured response is in "structured_output"
-            if "structured_output" in cli_response:
-                response = cli_response["structured_output"]
-            elif "result" in cli_response:
-                # Fallback to "result" field for non-schema responses
-                result_content = cli_response["result"]
-
-                # The result might be a string (needs parsing) or already a dict
-                if isinstance(result_content, str):
-                    if not result_content.strip():
-                        raise ValueError(
-                            "Empty result from Claude - check if --json-schema "
-                            "is being used (response would be in structured_output)"
-                        )
-                    try:
-                        response = json.loads(result_content)
-                    except json.JSONDecodeError:
-                        # If result is not valid JSON, it's Claude's text response
-                        # This happens when Claude doesn't follow JSON format instructions
-                        raise ValueError(
-                            f"Claude response is not valid JSON: {result_content[:200]}..."
-                        )
-                elif isinstance(result_content, dict):
-                    response = result_content
-                else:
-                    raise ValueError(
-                        f"Unexpected result type in CLI response: {type(result_content)}"
-                    )
-            else:
-                # Direct JSON response (for testing or alternative invocation)
-                response = cli_response
-        else:
-            # Direct JSON response (for testing or alternative invocation)
-            response = cli_response
 
         # Validate required field
         if "status" not in response:

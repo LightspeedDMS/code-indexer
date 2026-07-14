@@ -874,6 +874,15 @@ def make_lifespan(
                 resource_config=server_config.resource_config,
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
+                # Bug #1390: RefreshScheduler's filesystem reconciliation needs
+                # to update golden_repos_metadata (bare-alias-keyed) alongside
+                # global_repos -- without this, cluster mode would silently
+                # fall back to a per-node SQLite golden_repos_metadata backend.
+                golden_repo_metadata_backend=(
+                    backend_registry.golden_repo_metadata
+                    if backend_registry is not None
+                    else None
+                ),
             )
             global_lifecycle_manager.start()
 
@@ -1797,6 +1806,53 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-036",
                     f"Failed to initialize activated reaper scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize HNSW Orphan Repair Fleet Sweep Scheduler
+        # (Story #1360, Epic #1333 S3)
+        hnsw_orphan_repair_sweep_scheduler = None
+        logger.info(
+            "Server startup: Initializing HNSW orphan repair sweep scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
+                HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if not (
+                hasattr(golden_repo_manager, "activated_repo_manager")
+                and golden_repo_manager.activated_repo_manager is not None
+            ):
+                raise RuntimeError(
+                    "golden_repo_manager.activated_repo_manager is not available"
+                )
+
+            hnsw_orphan_repair_sweep_scheduler = _HNSWOrphanRepairSweepScheduler(
+                golden_repo_manager=golden_repo_manager,
+                activated_repo_manager=golden_repo_manager.activated_repo_manager,
+                state_backend=backend_registry.hnsw_orphan_sweep_state,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            hnsw_orphan_repair_sweep_scheduler.start()
+            app.state.hnsw_orphan_repair_sweep_scheduler = (
+                hnsw_orphan_repair_sweep_scheduler
+            )
+            logger.info(
+                "HNSW orphan repair sweep scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-090",
+                    f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

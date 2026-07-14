@@ -411,6 +411,27 @@ class DatabaseSchema:
         )
     """
 
+    # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep durable
+    # cursor + pass-stats table (singleton row, id=1). last_completed_key is
+    # a STRING stable sort key (never a numeric offset) -- see
+    # SweepCandidate.sort_key in hnsw_orphan_sweep/discovery.py for why.
+    CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS hnsw_orphan_sweep_state (
+            id INTEGER PRIMARY KEY,
+            pass_id INTEGER NOT NULL DEFAULT 1,
+            last_completed_key TEXT,
+            pass_started_at TEXT,
+            pass_indexes_checked INTEGER NOT NULL DEFAULT 0,
+            pass_orphaned_found INTEGER NOT NULL DEFAULT 0,
+            pass_repaired INTEGER NOT NULL DEFAULT 0,
+            pass_errors INTEGER NOT NULL DEFAULT 0,
+            pass_transient_skips INTEGER NOT NULL DEFAULT 0,
+            last_full_pass_completed_at TEXT,
+            total_orphans_repaired_lifetime INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -816,6 +837,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
             # Story #192: Dependency Map Tracking
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
+            # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
+            conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)

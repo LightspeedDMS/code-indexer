@@ -7,7 +7,7 @@ import yaml  # type: ignore
 from pathlib import Path
 from typing import List, Optional, Any, Literal, Tuple, Dict
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,35 @@ def _reset_codebase_dir_warn_memo_for_tests() -> None:
     """Clear the per-config-path WARNING memo (test-only hook)."""
     with _codebase_dir_warn_lock:
         _codebase_dir_warned_paths.clear()
+
+
+# Bug #1376: Config.temporal WARNING de-spam.
+# A malformed "temporal" section (e.g. active_embedder not a member of
+# embedders) is tolerated by degrading to a disabled TemporalConfig rather
+# than failing the whole Config load. We still want a WARNING the first time
+# a given invalid shape is seen, but never a flood on every query -- mirrors
+# _should_warn_codebase_dir_mismatch above.
+_temporal_config_warned_signatures: "set[str]" = set()
+_temporal_config_warn_lock = _threading.Lock()
+
+
+def _should_warn_invalid_temporal_config(signature_key: str) -> bool:
+    """Return True the FIRST time a given invalid temporal shape is seen.
+
+    Thread-safe; subsequent calls for the same signature return False
+    (de-spam).
+    """
+    with _temporal_config_warn_lock:
+        if signature_key in _temporal_config_warned_signatures:
+            return False
+        _temporal_config_warned_signatures.add(signature_key)
+        return True
+
+
+def _reset_temporal_config_warn_memo_for_tests() -> None:
+    """Clear the per-signature temporal WARNING memo (test-only hook)."""
+    with _temporal_config_warn_lock:
+        _temporal_config_warned_signatures.clear()
 
 
 def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
@@ -440,9 +469,12 @@ class TemporalConfig(BaseModel):
             "(e.g. voyage-context-4, cohere-embed-v4)."
         ),
     )
-    active_embedder: str = Field(
+    active_embedder: Optional[str] = Field(
         default="voyage-context-4",
-        description="Embedder adapter name used for temporal recall by default.",
+        description=(
+            "Embedder adapter name used for temporal recall by default. "
+            "None means temporal is unconfigured/disabled for this repo."
+        ),
     )
     aggregation_chunk_chars: int = Field(
         default=4096,
@@ -467,7 +499,13 @@ class TemporalConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_active_embedder_is_member(self) -> "TemporalConfig":
-        """active_embedder must be a member of embedders."""
+        """active_embedder must be a member of embedders.
+
+        None is a valid sentinel meaning temporal is unconfigured/disabled
+        for this repo -- membership is only enforced for non-None values.
+        """
+        if self.active_embedder is None:
+            return self
         if self.active_embedder not in self.embedders:
             raise ValueError(
                 f"active_embedder {self.active_embedder!r} must be a member of "
@@ -763,6 +801,44 @@ class Config(BaseModel):
     def normalize_extensions(cls, v: List[str]) -> List[str]:
         """Remove dots from file extensions."""
         return [ext.lstrip(".") for ext in v]
+
+    @field_validator("temporal", mode="before")
+    @classmethod
+    def _tolerate_invalid_temporal_config(cls, v: Any) -> Any:
+        """Bug #1376: a malformed temporal section must never fail the
+        WHOLE Config load.
+
+        temporal is just one field on this monolithic model; letting a
+        defect in this optional subsystem (e.g. active_embedder=null or an
+        active_embedder not present in embedders) propagate as a
+        ValidationError takes down completely unrelated non-temporal config
+        loading (codebase_dir, embedding provider, etc.) for the entire
+        repo. Degrade to a valid, disabled TemporalConfig instead.
+        """
+        if v is None or isinstance(v, TemporalConfig):
+            return v
+        if isinstance(v, dict):
+            try:
+                return TemporalConfig(**v)
+            except (ValidationError, ValueError, TypeError) as e:
+                signature = repr(sorted(v.items()))
+                if _should_warn_invalid_temporal_config(signature):
+                    logger.warning(
+                        "Invalid temporal config section %r: %s. Disabling "
+                        "temporal for this load; non-temporal queries are "
+                        "unaffected.",
+                        v,
+                        e,
+                    )
+                embedders = v.get("embedders")
+                if not (
+                    isinstance(embedders, list)
+                    and embedders
+                    and all(isinstance(name, str) for name in embedders)
+                ):
+                    embedders = ["voyage-context-4"]
+                return TemporalConfig(embedders=embedders, active_embedder=None)
+        return v
 
 
 class ConfigManager:
