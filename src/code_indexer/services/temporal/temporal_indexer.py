@@ -392,11 +392,11 @@ class TemporalIndexer:
         # Story #1290 AC19/AC20: blank-out runs BEFORE any read/reconcile/write.
         self._blank_out_legacy_collections()
 
-        # Step 1: Get commit history (full repository history -- blank-out
-        # above unconditionally clears the base bookkeeping directory that
-        # would otherwise hold the last-indexed-commit cursor, so this is
-        # always a full fetch in practice; per-embedder skip logic is
-        # entirely reconcile_temporal_index's job, below).
+        # Step 1: Get commit history (full repository history -- the full
+        # git-log fetch is intentional and cheap on every run, independent
+        # of blank-out; there is no cursor-based skipping here. Per-embedder
+        # skip logic remains entirely reconcile_temporal_index's job, below,
+        # per the Epic #1289 design).
         commits_from_git = self._get_commit_history(
             all_branches, max_commits, since_date
         )
