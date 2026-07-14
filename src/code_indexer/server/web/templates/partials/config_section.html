@@ -1853,7 +1853,7 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="cache-gov-swap-threshold">
                     Memory Governor Swap Pswpin Red Threshold
-                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{{ config.cache.memory_governor_swap_pswpin_red_threshold }}" min="0">
+                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{% if config.cache.memory_governor_swap_pswpin_red_threshold is none %}100{% else %}{{ config.cache.memory_governor_swap_pswpin_red_threshold }}{% endif %}" min="0">
                     <small>Min swap-in pages/interval to force RED (default 100; ignores idle noise, catches death-spirals)</small>
                 </label>
                 <label for="cache-gov-rss">

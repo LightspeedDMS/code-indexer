@@ -419,6 +419,7 @@ class ConfigService:
                 "memory_governor_sample_interval_seconds": config.cache_config.memory_governor_sample_interval_seconds,
                 "memory_governor_swap_forces_red": config.cache_config.memory_governor_swap_forces_red,
                 "memory_governor_rss_inflation_factor": config.cache_config.memory_governor_rss_inflation_factor,
+                "memory_governor_swap_pswpin_red_threshold": config.cache_config.memory_governor_swap_pswpin_red_threshold,
             },
             # Git operation timeouts
             "timeouts": {
@@ -1012,29 +1013,57 @@ class ConfigService:
         """Update a cache setting."""
         cache = config.cache_config
         assert cache is not None  # Guaranteed by ServerConfig.__post_init__
+        # Bug #1396: blank means "no override, use default" for these
+        # fields, matching the size-cap fields' existing blank-tolerance
+        # idiom below (int(value) if value else None).
+        DEFAULT_CACHE_TTL_MINUTES = 10.0
+        DEFAULT_CACHE_CLEANUP_INTERVAL = 60
+        DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS = 2000
+        DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS = 5000
+        DEFAULT_PAYLOAD_CACHE_TTL_SECONDS = 900
+        DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS = 60
         if key == "index_cache_ttl_minutes":
-            cache.index_cache_ttl_minutes = float(value)
+            cache.index_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "index_cache_cleanup_interval":
-            cache.index_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.index_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "index_cache_max_size_mb":
             cache.index_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_ttl_minutes":
-            cache.fts_cache_ttl_minutes = float(value)
+            cache.fts_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "fts_cache_cleanup_interval":
-            cache.fts_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.fts_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
             cache.fts_cache_reload_on_access = bool(value)
-        # Payload cache settings (Story #679)
+        # Payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
-            cache.payload_preview_size_chars = int(value)
+            cache.payload_preview_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS
+            )
         elif key == "payload_max_fetch_size_chars":
-            cache.payload_max_fetch_size_chars = int(value)
+            cache.payload_max_fetch_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS
+            )
         elif key == "payload_cache_ttl_seconds":
-            cache.payload_cache_ttl_seconds = int(value)
+            cache.payload_cache_ttl_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CACHE_TTL_SECONDS
+            )
         elif key == "payload_cleanup_interval_seconds":
-            cache.payload_cleanup_interval_seconds = int(value)
+            cache.payload_cleanup_interval_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS
+            )
         # Story #1213 Story 2: Memory-governor runtime knobs (hot-reload).
         elif key == "memory_governor_enabled":
             cache.memory_governor_enabled = _parse_bool(value)
@@ -1082,12 +1111,20 @@ class ConfigService:
         elif key == "memory_governor_rss_inflation_factor":
             cache.memory_governor_rss_inflation_factor = float(value)
         elif key == "memory_governor_swap_pswpin_red_threshold":
-            new_thr = int(value)
-            if new_thr < 0:
-                raise ValueError(
-                    f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
-                    f"(non-negative), got {new_thr}"
-                )
+            # Bug #1396: blank means "no override" -- fall back to the
+            # CacheConfig dataclass default documented in config_manager.py
+            # (memory_governor_swap_pswpin_red_threshold: int = 100) instead
+            # of crashing on int('').
+            DEFAULT_SWAP_PSWPIN_RED_THRESHOLD = 100
+            if value:
+                new_thr = int(value)
+                if new_thr < 0:
+                    raise ValueError(
+                        f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
+                        f"(non-negative), got {new_thr}"
+                    )
+            else:
+                new_thr = DEFAULT_SWAP_PSWPIN_RED_THRESHOLD
             cache.memory_governor_swap_pswpin_red_threshold = new_thr
         else:
             raise ValueError(f"Unknown cache setting: {key}")

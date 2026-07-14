@@ -6538,10 +6538,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 return "JWT expiration must be a valid number"
 
     elif section == "cache":
-        # Validate cache TTL values
+        # Validate cache TTL values.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_ttl_minutes", "fts_cache_ttl_minutes"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_float = float(value)
                     if val_float <= 0:
@@ -6551,10 +6553,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate cleanup intervals
+        # Validate cleanup intervals.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_cleanup_interval", "fts_cache_cleanup_interval"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6577,7 +6581,9 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     return f"{field} must be empty or a positive integer (MB)"
 
-        # Validate payload cache settings (Story #679)
+        # Validate payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         for field in [
             "payload_preview_size_chars",
             "payload_max_fetch_size_chars",
@@ -6585,7 +6591,7 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "payload_cleanup_interval_seconds",
         ]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6595,9 +6601,11 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate memory governor swap-in threshold (Bug #1225)
+        # Validate memory governor swap-in threshold (Bug #1225).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
-        if swap_threshold is not None:
+        if swap_threshold is not None and str(swap_threshold).strip() != "":
             try:
                 val_int = int(swap_threshold)
                 if val_int < 0:

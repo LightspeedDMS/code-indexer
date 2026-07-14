@@ -439,3 +439,11 @@ class TestUpdateCacheSettingRoundTrip:
         f = _CacheSettingUpdater()
         with pytest.raises((ValueError, TypeError)):
             f.update("memory_governor_swap_pswpin_red_threshold", "abc")
+
+    def test_blank_falls_back_to_default(self):
+        """Bug #1396: blank string must NOT raise -- it must fall back to the
+        documented default (100), matching the size-cap fields' existing
+        blank-tolerance idiom rather than crashing on int('')."""
+        f = _CacheSettingUpdater()
+        f.update("memory_governor_swap_pswpin_red_threshold", "")
+        assert f.cache.memory_governor_swap_pswpin_red_threshold == 100
