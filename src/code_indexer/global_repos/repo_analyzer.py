@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import yaml
 
+from code_indexer.server.services.config_service import get_config_service
+
 if TYPE_CHECKING:
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
@@ -478,14 +480,19 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
 
             # Delegate to the shared invoke_claude_cli wrapper which handles
             # pseudo-TTY, environment filtering, output cleaning, and timeouts.
-            from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
-
-            _defaults = LifecycleAnalysisConfig()
+            #
+            # Bug #1399: read the SAVED lifecycle_analysis config at call time
+            # instead of constructing a fresh, default-valued
+            # LifecycleAnalysisConfig() -- the latter silently ignored any Web
+            # UI change to shell_timeout_seconds/outer_timeout_seconds
+            # (divergent consumer; mirrors the correct LifecycleClaudeCliInvoker
+            # reference path).
+            lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
             success, output = invoke_claude_cli(
                 str(self.repo_path),
                 prompt,
-                _defaults.shell_timeout_seconds,
-                _defaults.outer_timeout_seconds,
+                lifecycle_cfg.shell_timeout_seconds,
+                lifecycle_cfg.outer_timeout_seconds,
             )
             if not success:
                 logger.debug("Claude CLI failed: %s", output)

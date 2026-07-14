@@ -168,6 +168,7 @@ class TestAC1BootstrapKeysRemoved:
                 # Story #1360: HNSW orphan repair fleet sweep -- runtime Web
                 # UI setting (enable/disable, batch size, tick interval).
                 "hnsw_orphan_repair_sweep_config",
+                "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
             }
         )
 

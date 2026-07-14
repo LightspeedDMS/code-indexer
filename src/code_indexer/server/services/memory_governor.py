@@ -128,13 +128,23 @@ class MemoryGovernor:
                                        to force RED via the swap_forces_red path.
                                        Default 100: above idle OS noise (1-3) but
                                        well below a death-spiral (observed 3630).
-        rss_inflation_factor:          multiplier for LRU-cap inflation helper (default 2.0)
+        rss_inflation_factor:          multiplier for LRU-cap inflation helper (default 2.0).
+                                       Bug #1399: despite being echoed live in
+                                       get_snapshot(), this field has NO
+                                       behavioral consumer anywhere in the
+                                       codebase -- it is not read by _tick(),
+                                       _advance_band(), or evict_lru_to_floor().
+                                       It is exposed via the read-only
+                                       rss_inflation_factor property for any
+                                       future consumer, but currently inert.
         config_service:        Optional live-config provider.  When set, yellow_pct,
-                               red_pct, hysteresis_pct, swap_forces_red, enabled, and
-                               rss_inflation_factor are all read LIVE from
+                               red_pct, hysteresis_pct, swap_forces_red, and enabled
+                               are all read LIVE from
                                config_service.get_config().cache_config on every
                                _tick().  A read failure applies fail-safe RED.
-                               (Story #1213 Story 2 — hot-reload support)
+                               (Story #1213 Story 2 — hot-reload support;
+                               rss_inflation_factor deliberately excluded --
+                               see note above, Bug #1399.)
         time_fn:               injectable monotonic clock (default time.monotonic)
     """
 
@@ -819,11 +829,32 @@ class MemoryGovernor:
             self._band = MemoryBand.RED
             self._red_entry_time = self._time_fn()
 
+    def _resolve_sample_interval_seconds(self) -> float:
+        """Return the effective sampler sleep interval, read LIVE when possible.
+
+        Bug #1399 CRITICAL fix: mirrors the live-read pattern _tick() already
+        applies to yellow_pct/red_pct/hysteresis_pct/swap_forces_red/
+        swap_pswpin_threshold/red_min_dwell. Story #1213 Story 2 deliberately
+        left sample_interval_seconds frozen at the constructor default; this
+        closes that gap so a Web UI change takes effect on the very next
+        sleep cycle, matching what get_snapshot() already echoes as if it
+        were live.
+
+        Falls back to the constructor-frozen default when no config_service
+        is set (CLI/pre-init) or when the read fails (fail-soft -- a broken
+        config read here should not crash the sampler thread; _tick()'s own
+        fail-safe RED handling already covers the correctness-critical path).
+        """
+        live_cache = self._read_live_config()
+        if live_cache is not None:
+            return float(live_cache.memory_governor_sample_interval_seconds)
+        return self._sample_interval_seconds
+
     def _sampler_loop(self) -> None:
         """Background thread: sample memory every sample_interval_seconds."""
         while not self._stop_event.is_set():
             self._tick()
-            self._stop_event.wait(timeout=self._sample_interval_seconds)
+            self._stop_event.wait(timeout=self._resolve_sample_interval_seconds())
 
 
 # ---------------------------------------------------------------------------

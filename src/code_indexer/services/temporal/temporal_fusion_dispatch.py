@@ -61,8 +61,6 @@ class TemporalEmbedderUnavailableError(RuntimeError):
     """
 
 
-TEMPORAL_QUERY_TIMEOUT_SECONDS = 15
-
 # Story #1213 Story 3: Reduced per-shard overfetch multiplier under YELLOW memory pressure.
 # TEMPORAL_OVERFETCH_MULTIPLIER=3 is the normal value; YELLOW reduces this to 2 to lower
 # peak RAM usage while returning enough candidates for good RRF fusion quality.

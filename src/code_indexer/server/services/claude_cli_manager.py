@@ -24,6 +24,7 @@ from typing import Callable, Optional, List, Tuple
 
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -699,15 +700,20 @@ class ClaudeCliManager:
 
             # Story #847: route through CliDispatcher when one is wired.
             if self._cli_dispatcher is not None:
-                from code_indexer.server.utils.config_manager import (
-                    LifecycleAnalysisConfig,
+                # Bug #1399: read the SAVED lifecycle_analysis config at call
+                # time instead of constructing a fresh, default-valued
+                # LifecycleAnalysisConfig() -- the latter silently ignored any
+                # Web UI change to outer_timeout_seconds (divergent consumer;
+                # mirrors the correct LifecycleClaudeCliInvoker reference path).
+                lifecycle_cfg = (
+                    get_config_service().get_config().lifecycle_analysis_config
                 )
 
                 result = self._cli_dispatcher.dispatch(
                     flow="description_gen",
                     cwd=str(repo_path),
                     prompt=str(repo_path),
-                    timeout=LifecycleAnalysisConfig().outer_timeout_seconds,
+                    timeout=lifecycle_cfg.outer_timeout_seconds,
                 )
                 callback(result.success, result.output)
                 if result.success:

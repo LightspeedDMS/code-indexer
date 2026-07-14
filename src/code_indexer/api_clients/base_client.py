@@ -112,6 +112,7 @@ class CIDXRemoteAPIClient:
         credentials: Dict[str, Any],
         project_root: Optional[Path] = None,
         totp_provider: Optional[Callable[[], str]] = None,
+        read_timeout_seconds: Optional[float] = None,
     ):
         """Initialize base API client with persistent token management.
 
@@ -124,11 +125,20 @@ class CIDXRemoteAPIClient:
                 CLI use, wire ``lambda: click.prompt("Enter your TOTP code")``.
                 When None and MFA is required, AuthenticationError is raised
                 with an actionable message.
+            read_timeout_seconds: Issue #1398 -- overrides the hardcoded 30s
+                httpx read timeout for every request this client makes
+                (auth, job polling, query/temporal search alike). None
+                preserves the pre-#1398 default of 30.0. Resolved by
+                remote/query_execution.py from the project's
+                .code-indexer/.remote-config "api_read_timeout_seconds"
+                field, since this is CLI-side code that cannot read the
+                server's Web-UI-configurable SearchTimeoutsConfig.
         """
         self.server_url = server_url.rstrip("/")
         self.credentials = credentials
         self.project_root = project_root
         self._totp_provider = totp_provider
+        self._read_timeout_seconds = read_timeout_seconds
         self.jwt_manager = JWTTokenManager()
         self._session: Optional[httpx.Client] = None
         self._current_token: Optional[str] = None
@@ -193,7 +203,13 @@ class CIDXRemoteAPIClient:
             # Configure timeouts according to requirements
             timeouts = httpx.Timeout(
                 connect=10.0,  # 10s connect timeout
-                read=30.0,  # 30s read timeout
+                # Issue #1398: operator-overridable read timeout (default 30s
+                # unchanged). See __init__'s read_timeout_seconds docstring.
+                read=(
+                    self._read_timeout_seconds
+                    if self._read_timeout_seconds is not None
+                    else 30.0
+                ),
                 write=10.0,  # 10s write timeout
                 pool=5.0,  # 5s pool timeout
             )

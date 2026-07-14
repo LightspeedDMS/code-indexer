@@ -74,6 +74,25 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return search_timeouts settings dict from ServerConfig (Issue #1398).
+
+    Surfaces all 5 fields of SearchTimeoutsConfig for the Web UI Config
+    screen -- consolidates the previously hardcoded MCP handler timeouts
+    (search_code / default / write_mode) and the embedding-provider /
+    reranker HTTP timeouts into one validated, editable section.
+    """
+    st = config.search_timeouts_config
+    assert st is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "search_code_handler_timeout_seconds": st.search_code_handler_timeout_seconds,
+        "default_handler_timeout_seconds": st.default_handler_timeout_seconds,
+        "write_mode_handler_timeout_seconds": st.write_mode_handler_timeout_seconds,
+        "embedding_provider_timeout_seconds": st.embedding_provider_timeout_seconds,
+        "reranker_timeout_seconds": st.reranker_timeout_seconds,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -700,6 +719,8 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            # Issue #1398 - Query & search timeouts Web UI configuration
+            "search_timeouts": _search_timeouts_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -940,6 +961,9 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Issue #1398 - Query & search timeouts Web UI configuration
+        elif category == "search_timeouts":
+            self._update_search_timeouts_setting(config, key, value)
         # Story #977 - X-Ray precision AST-aware code search configuration
         elif category == "xray":
             self._update_xray_setting(config, key, value)
@@ -1158,9 +1182,12 @@ class ConfigService:
         # runtime without a server restart. Fix B.1 seats a default cap at
         # init time; Fix B.2 lets that cap change dynamically.
         #
-        # Only the two size-cap keys trigger hot-reload. All other cache
-        # settings write through to config only (by design -- see test
-        # TestHotReloadScopeIsolation).
+        # Bug #1399: extends the same hot-reload pattern to the 4 other
+        # CRITICAL cache-family keys (TTL x2, cleanup interval x2) plus
+        # fts_cache_reload_on_access. All other cache settings (payload
+        # cache, memory-governor watermarks handled by their own live-read
+        # path) write through to config only (by design -- see test
+        # TestHotReloadScopeIsolation / TestNewHotReloadScopeIsolation).
         if key == "index_cache_max_size_mb":
             self._hot_reload_cache_size_cap(
                 cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
@@ -1169,6 +1196,45 @@ class ConfigService:
             self._hot_reload_cache_size_cap(
                 cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
             )
+        elif key == "index_cache_ttl_minutes":
+            self._hot_reload_cache_ttl_minutes(
+                cache_kind="HNSW", new_ttl_minutes=cache.index_cache_ttl_minutes
+            )
+        elif key == "fts_cache_ttl_minutes":
+            self._hot_reload_cache_ttl_minutes(
+                cache_kind="FTS", new_ttl_minutes=cache.fts_cache_ttl_minutes
+            )
+        elif key == "index_cache_cleanup_interval":
+            self._hot_reload_cache_cleanup_interval(
+                cache_kind="HNSW",
+                new_interval_seconds=cache.index_cache_cleanup_interval,
+            )
+        elif key == "fts_cache_cleanup_interval":
+            self._hot_reload_cache_cleanup_interval(
+                cache_kind="FTS",
+                new_interval_seconds=cache.fts_cache_cleanup_interval,
+            )
+        elif key == "fts_cache_reload_on_access":
+            self._hot_reload_fts_reload_on_access(cache.fts_cache_reload_on_access)
+
+    @staticmethod
+    def _resolve_live_cache(cache_kind: str) -> Any:
+        """Return the live HNSW or FTS cache singleton for *cache_kind*.
+
+        Shared by all cache-family hot-reload helpers (Bug #1399 anti-
+        duplication: 5 call sites now need this same singleton lookup that
+        previously existed only once, inline, in _hot_reload_cache_size_cap).
+
+        Raises:
+            ValueError: cache_kind is neither "HNSW" nor "FTS".
+        """
+        from code_indexer.server.cache import get_global_cache, get_global_fts_cache
+
+        if cache_kind == "HNSW":
+            return get_global_cache()
+        elif cache_kind == "FTS":
+            return get_global_fts_cache()
+        raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
 
     def _hot_reload_cache_size_cap(
         self, cache_kind: str, new_size_mb: Optional[int]
@@ -1191,18 +1257,9 @@ class ConfigService:
             new_size_mb: New cap in MB, or ``None`` to disable the cap.
         """
         try:
-            from code_indexer.server.cache import (
-                DEFAULT_MAX_CACHE_SIZE_MB,
-                get_global_cache,
-                get_global_fts_cache,
-            )
+            from code_indexer.server.cache import DEFAULT_MAX_CACHE_SIZE_MB
 
-            if cache_kind == "HNSW":
-                cache = get_global_cache()
-            elif cache_kind == "FTS":
-                cache = get_global_fts_cache()
-            else:
-                raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
+            cache = self._resolve_live_cache(cache_kind)
 
             # Bug #880: when DB value is None (operator cleared the field to
             # "use default"), re-apply the 4096 MiB safety floor to the live
@@ -1232,6 +1289,159 @@ class ConfigService:
                 exc,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _hot_reload_cache_ttl_minutes(
+        self, cache_kind: str, new_ttl_minutes: float
+    ) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate an ``index_cache_ttl_minutes`` /
+        ``fts_cache_ttl_minutes`` change to the live HNSW or FTS cache
+        singleton.
+
+        Design decision (documented per the issue): already-cached entries'
+        ``ttl_minutes`` is rewritten EAGERLY under the cache lock, mirroring
+        the size-cap fix's eager ``_enforce_size_limit()`` call -- not left
+        to apply only to entries loaded after the change. This directly
+        addresses the original production incident: an operator lowering
+        the TTL to stop repeated cold-reload storms needs already-hot
+        repositories to start respecting the new, shorter TTL immediately.
+
+        Swallows and logs (WARNING) any failure, matching the established
+        fail-soft contract of _hot_reload_cache_size_cap -- config
+        persistence has already happened by the time this runs.
+        """
+        try:
+            cache = self._resolve_live_cache(cache_kind)
+            with cache._cache_lock:
+                cache.config.ttl_minutes = new_ttl_minutes
+                for entry in cache._cache.values():
+                    entry.ttl_minutes = new_ttl_minutes
+
+            logger.info(
+                "Hot-reloaded %s cache ttl_minutes=%s (%d cached entries rewritten)",
+                cache_kind,
+                new_ttl_minutes,
+                len(cache._cache),
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache ttl_minutes=%s: %s",
+                cache_kind,
+                new_ttl_minutes,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _hot_reload_cache_cleanup_interval(
+        self, cache_kind: str, new_interval_seconds: int
+    ) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate an ``index_cache_cleanup_interval``
+        / ``fts_cache_cleanup_interval`` change to the live HNSW or FTS cache
+        singleton.
+
+        Design decision: unlike TTL, there is no per-entry state to rewrite
+        here -- the background cleanup thread reads
+        ``self.config.cleanup_interval_seconds`` fresh on every loop
+        iteration (see ``start_background_cleanup``'s ``cleanup_loop()`` in
+        hnsw_index_cache.py / fts_index_cache.py). Writing the new value
+        onto ``cache.config`` is therefore sufficient: the CURRENT sleep
+        (already in progress under the old interval) finishes on schedule,
+        and every SUBSEQUENT cycle uses the new interval -- no restart
+        required, effective within at most one old-interval-length window.
+        """
+        try:
+            cache = self._resolve_live_cache(cache_kind)
+            with cache._cache_lock:
+                cache.config.cleanup_interval_seconds = new_interval_seconds
+
+            logger.info(
+                "Hot-reloaded %s cache cleanup_interval_seconds=%s",
+                cache_kind,
+                new_interval_seconds,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache cleanup_interval_seconds=%s: %s",
+                cache_kind,
+                new_interval_seconds,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _hot_reload_fts_reload_on_access(self, new_value: bool) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate ``fts_cache_reload_on_access`` to
+        the live FTS cache singleton.
+
+        The FTS cache HIT path reads ``self.config.reload_on_access`` fresh
+        on every access (see ``FTSIndexCache.get_or_load``), so mutating
+        ``cache.config`` under the cache lock is sufficient -- the change
+        takes effect on the very next FTS cache access.
+        """
+        try:
+            cache = self._resolve_live_cache("FTS")
+            with cache._cache_lock:
+                cache.config.reload_on_access = new_value
+
+            logger.info(
+                "Hot-reloaded FTS cache reload_on_access=%s",
+                new_value,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload FTS cache reload_on_access=%s: %s",
+                new_value,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def reapply_live_cache_hot_reload_fields(self, config: "ServerConfig") -> None:
+        """
+        Bug #1399 item 7 (multi-worker/cluster gap): re-apply every
+        live-reloadable cache-family field from *config* onto the live
+        HNSW/FTS singletons in THIS process.
+
+        ``_hot_reload_cache_size_cap`` (and the new TTL/cleanup/reload
+        helpers above) only patch the singleton in the ONE worker process
+        that handled the Web UI POST. Under ``uvicorn --workers N`` or in a
+        cluster, sibling workers/nodes each run their own
+        ``ConfigService.start_config_reload`` PG-poll loop and their own
+        cache singletons -- without this method they keep the stale value
+        indefinitely (even across a restart, since cache keys never reach
+        config.json -- see BOOTSTRAP_KEYS).
+
+        This method is registered as a PG config-change callback (mirrors
+        Bug #943's ``update_totp_elevation_atomic`` pattern: a local
+        synchronous hot-reload call on the processing node, PLUS this
+        PG-poll callback so every sibling worker/node re-applies the same
+        fresh values on its own next poll tick). Never raises -- each
+        per-field helper already swallows its own failures.
+        """
+        cache = config.cache_config
+        assert cache is not None  # Guaranteed by ServerConfig.__post_init__
+        self._hot_reload_cache_size_cap(
+            cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
+        )
+        self._hot_reload_cache_size_cap(
+            cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
+        )
+        self._hot_reload_cache_ttl_minutes(
+            cache_kind="HNSW", new_ttl_minutes=cache.index_cache_ttl_minutes
+        )
+        self._hot_reload_cache_ttl_minutes(
+            cache_kind="FTS", new_ttl_minutes=cache.fts_cache_ttl_minutes
+        )
+        self._hot_reload_cache_cleanup_interval(
+            cache_kind="HNSW", new_interval_seconds=cache.index_cache_cleanup_interval
+        )
+        self._hot_reload_cache_cleanup_interval(
+            cache_kind="FTS", new_interval_seconds=cache.fts_cache_cleanup_interval
+        )
+        self._hot_reload_fts_reload_on_access(cache.fts_cache_reload_on_access)
 
     def _update_timeout_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2163,6 +2373,31 @@ class ConfigService:
             sweep.operating_hours_end_utc = int(value)
         else:
             raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
+    def _update_search_timeouts_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a search_timeouts setting (Issue #1398).
+
+        All 5 fields are plain integers (seconds). Range validation happens
+        later in config_manager.validate_config(), called by update_setting()
+        after this method returns (unless skip_validation=True for batch
+        updates).
+        """
+        st = config.search_timeouts_config
+        assert st is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "search_code_handler_timeout_seconds":
+            st.search_code_handler_timeout_seconds = int(value)
+        elif key == "default_handler_timeout_seconds":
+            st.default_handler_timeout_seconds = int(value)
+        elif key == "write_mode_handler_timeout_seconds":
+            st.write_mode_handler_timeout_seconds = int(value)
+        elif key == "embedding_provider_timeout_seconds":
+            st.embedding_provider_timeout_seconds = int(value)
+        elif key == "reranker_timeout_seconds":
+            st.reranker_timeout_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown search_timeouts setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""
