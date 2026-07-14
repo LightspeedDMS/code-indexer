@@ -261,7 +261,8 @@ class TestGoldenRepoDetailsPartial200:
             "templates.TemplateResponse must be called for a valid alias."
         )
         # cast: MagicMock.call_args is typed Any; narrowing to fixture contract
-        return _cast(dict, mock_tmpl.TemplateResponse.call_args[0][1])
+        # Starlette 1.x-safe signature: TemplateResponse(request, name, context)
+        return _cast(dict, mock_tmpl.TemplateResponse.call_args[0][2])
 
     def test_response_status_200(self, invoke_result: tuple):
         """AC2: Handler returns HTTP 200 for a valid alias."""
@@ -271,7 +272,8 @@ class TestGoldenRepoDetailsPartial200:
     def test_template_name_contains_golden_repo_details(self, invoke_result: tuple):
         """templates.TemplateResponse must be called with the details partial template."""
         _, _, mock_tmpl = invoke_result
-        template_name = mock_tmpl.TemplateResponse.call_args[0][0]
+        # Starlette 1.x-safe signature: TemplateResponse(request, name, context)
+        template_name = mock_tmpl.TemplateResponse.call_args[0][1]
         assert "golden_repo_details" in template_name, (
             f"Expected 'golden_repo_details' in template name, got: {template_name}"
         )

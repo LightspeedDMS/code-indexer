@@ -165,6 +165,9 @@ class TestAC1BootstrapKeysRemoved:
                 # False) and read from the merged config at app-wiring time,
                 # not needed pre-DB -- runtime, not bootstrap.
                 "admission_control_config",
+                # Story #1360: HNSW orphan repair fleet sweep -- runtime Web
+                # UI setting (enable/disable, batch size, tick interval).
+                "hnsw_orphan_repair_sweep_config",
             }
         )
 

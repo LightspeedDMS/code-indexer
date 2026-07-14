@@ -1,11 +1,15 @@
 """Tests for Story #1290 recall pipeline: coalesce-before-truncate + dedup-by-commit.
 
-Covers AC10 (dedup-by-commit pipeline order), AC11 (fail-loud full-message
-reconstruction), AC12 (canonical chunk_type mapping), AC13 (filters + default
-reverse-chronological order), AC14 (query embedding purpose/lane/cache key).
+Covers AC10 (dedup-by-commit pipeline order), AC12 (canonical chunk_type
+mapping), AC13 (filters + default reverse-chronological order), AC14 (query
+embedding purpose/lane/cache key).
+
+AC11 (originally "fail-loud full-message reconstruction" via a per-candidate
+`git show` subprocess) was REMOVED by Bug #1380 -- see
+test_temporal_message_reconstruction_removed_1380.py for the tests covering
+current non-head-winner message-sourcing behavior.
 """
 
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -333,138 +337,11 @@ class TestQueryTemporalDedupPipeline:
 
 
 # ---------------------------------------------------------------------------
-# AC11: fail-loud full-message reconstruction for non-head top match
+# AC11 (Bug #1380 removed the git-based reconstruction this class used to
+# cover -- see test_temporal_message_reconstruction_removed_1380.py for the
+# tests covering current non-head-winner message-sourcing behavior, plus the
+# regression guard asserting query_temporal() never invokes subprocess.run).
 # ---------------------------------------------------------------------------
-
-
-class TestFullMessageReconstruction:
-    def test_non_head_top_match_reconstructs_full_message_on_success(self, service):
-        service.vector_store_client.collection_exists.return_value = True
-        service.vector_store_client.__class__.__name__ = "FilesystemClient"
-        service.vector_store_client.search.return_value = [
-            _mock_hit(
-                _payload("abc123", True, "a.py", ["a.py"], 1704153600, "Short cap"),
-                0.5,
-                "head chunk",
-            ),
-            _mock_hit(
-                _payload("abc123", False, "b.py", ["b.py"], 1704153600),
-                0.95,
-                "diff chunk beats head on score",
-            ),
-        ]
-        service.embedding_provider.get_embedding.return_value = [0.1] * 1024
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="Full multi-line\ncommit message body\n"
-            )
-            results = service.query_temporal(
-                query="x",
-                time_range=("2024-01-01", "2024-12-31"),
-                limit=10,
-            )
-
-        assert len(results.results) == 1
-        top = results.results[0]
-        assert (
-            top.temporal_context["commit_message"]
-            == "Full multi-line\ncommit message body"
-        )
-        assert top.temporal_context.get("message_truncated") is False
-
-    def test_non_head_top_match_flags_degraded_on_git_failure(self, service):
-        service.vector_store_client.collection_exists.return_value = True
-        service.vector_store_client.__class__.__name__ = "FilesystemClient"
-        service.vector_store_client.search.return_value = [
-            _mock_hit(
-                _payload("abc123", True, "a.py", ["a.py"], 1704153600, "Short cap"),
-                0.5,
-                "head chunk",
-            ),
-            _mock_hit(
-                _payload("abc123", False, "b.py", ["b.py"], 1704153600),
-                0.95,
-                "diff chunk beats head on score",
-            ),
-        ]
-        service.embedding_provider.get_embedding.return_value = [0.1] * 1024
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=128, stdout="", stderr="fatal: bad object"
-            )
-            results = service.query_temporal(
-                query="x",
-                time_range=("2024-01-01", "2024-12-31"),
-                limit=10,
-            )
-
-        assert len(results.results) == 1
-        top = results.results[0]
-        # never silently substitutes the capped copy as if it were the full message
-        assert top.temporal_context.get("message_truncated") is True
-        assert top.temporal_context["commit_message"] == "Short cap"
-
-    def test_non_head_top_match_flags_degraded_on_git_timeout(self, service):
-        """AC11: a `git show` subprocess.TimeoutExpired must produce the SAME
-        explicitly-flagged degraded result as any other reconstruction
-        failure -- never a silent/unflagged substitution, and never an
-        uncaught exception propagating out of query_temporal."""
-        service.vector_store_client.collection_exists.return_value = True
-        service.vector_store_client.__class__.__name__ = "FilesystemClient"
-        service.vector_store_client.search.return_value = [
-            _mock_hit(
-                _payload("abc123", True, "a.py", ["a.py"], 1704153600, "Short cap"),
-                0.5,
-                "head chunk",
-            ),
-            _mock_hit(
-                _payload("abc123", False, "b.py", ["b.py"], 1704153600),
-                0.95,
-                "diff chunk beats head on score",
-            ),
-        ]
-        service.embedding_provider.get_embedding.return_value = [0.1] * 1024
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(
-                cmd=["git", "show", "-s", "--format=%B", "abc123"], timeout=30
-            )
-            results = service.query_temporal(
-                query="x",
-                time_range=("2024-01-01", "2024-12-31"),
-                limit=10,
-            )
-
-        assert len(results.results) == 1
-        top = results.results[0]
-        # never silently substitutes the capped copy as if it were the full message
-        assert top.temporal_context.get("message_truncated") is True
-        assert top.temporal_context["commit_message"] == "Short cap"
-
-    def test_head_top_match_does_not_attempt_reconstruction(self, service):
-        service.vector_store_client.collection_exists.return_value = True
-        service.vector_store_client.__class__.__name__ = "FilesystemClient"
-        service.vector_store_client.search.return_value = [
-            _mock_hit(
-                _payload("abc123", True, "a.py", ["a.py"], 1704153600, "Head msg"),
-                0.9,
-                "head chunk",
-            ),
-        ]
-        service.embedding_provider.get_embedding.return_value = [0.1] * 1024
-
-        with patch("subprocess.run") as mock_run:
-            results = service.query_temporal(
-                query="x",
-                time_range=("2024-01-01", "2024-12-31"),
-                limit=10,
-            )
-            mock_run.assert_not_called()
-
-        assert results.results[0].temporal_context["commit_message"] == "Head msg"
-        assert results.results[0].temporal_context.get("message_truncated") is False
 
 
 # ---------------------------------------------------------------------------

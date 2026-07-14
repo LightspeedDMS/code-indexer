@@ -498,32 +498,17 @@ async function loadGlobalActivatedIndexes(repoAlias, globalAlias) {
  * @param {string} globalAlias - Global activated alias
  */
 async function loadGlobalActivatedHealthIndicator(repoAlias, globalAlias) {
-    try {
-        // Use new /api/repositories/{repo_alias}/health endpoint (Story #161)
-        // This endpoint supports multi-strategy resolution (golden repos, -global suffix, activated repos)
-        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health`;
+    const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
 
-        const response = await fetch(url, {
-            credentials: 'same-origin'
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const healthData = await response.json();
-
-        // Update health indicator using renderHealthIndicator from repo_health.js
-        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
-        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
-            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
-        }
-    } catch (error) {
+    const handleError = (error) => {
         console.error(`Failed to load global activated health for ${globalAlias}:`, error);
 
-        // Check if it's a 404 (repo not found/indexed) or other error
-        const is404 = error.message && error.message.includes('404');
-        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+        // Bug #1394 follow-up: 404 detection uses the explicit .status property
+        // submitHealthCheckJob attaches to its thrown Error (same convention as
+        // loadGlobalHealthDetails's handleError below) -- string-matching "404"
+        // in the message is not reliable once the message prefers the server's
+        // parsed `detail` text over the raw HTTP status.
+        const is404 = error.status === 404;
 
         if (indicatorContainer) {
             if (is404) {
@@ -534,6 +519,30 @@ async function loadGlobalActivatedHealthIndicator(repoAlias, globalAlias) {
                 indicatorContainer.innerHTML = '<span class="health-status health-unknown">Error loading health</span>';
             }
         }
+    };
+
+    try {
+        // Bug #1394 follow-up: use the same async job-submit-and-poll flow as
+        // loadGlobalHealthDetails below (submitHealthCheckJob + pollHealthCheckJob,
+        // shared helpers from repo_health.js) instead of a blocking GET /health
+        // fetch -- on a large temporal repo (many shards) with a cold/expired
+        // cache, the synchronous multi-collection health computation can exceed
+        // typical HTTP gateway timeouts and reproduce the original 504.
+        const submitResult = await submitHealthCheckJob('/api/repositories', globalAlias, false);
+
+        pollHealthCheckJob(submitResult.job_id, {
+            onComplete: (jobStatus) => {
+                const healthData = jobStatus.result;
+
+                // Update health indicator using renderHealthIndicator from repo_health.js
+                if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+                    indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+                }
+            },
+            onError: handleError
+        });
+    } catch (error) {
+        handleError(error);
     }
 }
 
@@ -592,51 +601,30 @@ async function loadGlobalHealthDetails(repoAlias, globalAlias, forceRefresh = fa
         return;
     }
 
-    try {
-        // Show loading spinner
-        detailsContainer.innerHTML = `
-            <div class="health-loading">
-                <span class="spinner"></span> Loading health data...
-            </div>
-        `;
+    // Bug #1394: no job-progress-{alias} container exists on this page, so
+    // reuse the existing health-loading spinner already shown inside
+    // global-health-details-{repoAlias} while the health-check job is
+    // submitted and polled (was previously shown only during the direct
+    // fetch, now spans submit+poll instead).
+    detailsContainer.innerHTML = `
+        <div class="health-loading">
+            <span class="spinner"></span> Checking health...
+        </div>
+    `;
 
-        // Disable refresh button during load
-        if (refreshBtn) {
-            refreshBtn.disabled = true;
-        }
+    // Disable refresh button during load
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
 
-        // Fetch health data using /api/repositories/{repo_alias}/health endpoint (Story #161)
-        const url = `/api/repositories/${encodeURIComponent(globalAlias)}/health${forceRefresh ? '?force_refresh=true' : ''}`;
-
-        const response = await fetch(url, {
-            credentials: 'same-origin'
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const healthData = await response.json();
-
-        // Render details using renderHealthDetails from repo_health.js
-        if (typeof renderHealthDetails === 'function') {
-            detailsContainer.innerHTML = renderHealthDetails(healthData);
-        } else {
-            detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
-        }
-        detailsContainer.dataset.loaded = 'true';
-
-        // Update indicator if present
-        const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
-        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
-            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
-        }
-
-    } catch (error) {
+    const handleError = (error) => {
         console.error(`Failed to load global health details for ${globalAlias}:`, error);
 
-        // Check if it's a 404 (repo not found/indexed) or other error
-        const is404 = error.message && error.message.includes('404');
+        // Bug #1394: 404 detection now uses the explicit .status property
+        // submitHealthCheckJob attaches to its thrown Error -- string-matching
+        // "404" in the message no longer works reliably since the message now
+        // prefers the server's parsed `detail` text over the raw HTTP status.
+        const is404 = error.status === 404;
 
         if (is404) {
             // Neutral message for missing/unindexed repo
@@ -652,11 +640,41 @@ async function loadGlobalHealthDetails(repoAlias, globalAlias, forceRefresh = fa
                 <button class="outline small" onclick="loadGlobalHealthDetails('${escapeHtml(repoAlias)}', '${escapeHtml(globalAlias)}', false)">Retry</button>
             `;
         }
-    } finally {
-        // Re-enable refresh button
+
         if (refreshBtn) {
             refreshBtn.disabled = false;
         }
+    };
+
+    try {
+        const submitResult = await submitHealthCheckJob('/api/repositories', globalAlias, forceRefresh);
+
+        pollHealthCheckJob(submitResult.job_id, {
+            onComplete: (jobStatus) => {
+                const healthData = jobStatus.result;
+
+                // Render details using renderHealthDetails from repo_health.js
+                if (typeof renderHealthDetails === 'function') {
+                    detailsContainer.innerHTML = renderHealthDetails(healthData);
+                } else {
+                    detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
+                }
+                detailsContainer.dataset.loaded = 'true';
+
+                // Update indicator if present
+                const indicatorContainer = document.getElementById(`global-health-indicator-${repoAlias}`);
+                if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+                    indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+                }
+
+                if (refreshBtn) {
+                    refreshBtn.disabled = false;
+                }
+            },
+            onError: handleError
+        });
+    } catch (error) {
+        handleError(error);
     }
 }
 

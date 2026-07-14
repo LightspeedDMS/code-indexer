@@ -8,6 +8,9 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.server.utils.cancellable_subprocess import (
+    SubprocessCancelledError,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -15,6 +18,7 @@ import os
 import shutil
 import subprocess
 import logging
+import time
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
@@ -28,6 +32,7 @@ from pydantic import BaseModel
 from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..services.job_tracker import DuplicateJobError
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
 
@@ -60,6 +65,68 @@ class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
 
     pass
+
+
+# Bug #1346: bound on how many __cause__/__context__ links _is_cancellation_chain
+# will follow before giving up. Real chains here are 1-2 deep (ActivatedRepoError
+# wrapping a SubprocessCancelledError); this is a defensive ceiling, not a
+# tuned/expected value.
+_MAX_EXCEPTION_CHAIN_DEPTH = 10
+
+# Bug #1349/#1350: bounded grace-period retry constants for clone-phase
+# orphan cleanup after a clone-phase failure/cancellation. A single-instant
+# os.path.exists() check can miss a partial clone directory that an
+# async/NFS-backed clone backend (e.g. the CoW Storage Daemon) is still
+# materializing a beat after the exception has already propagated. This
+# is NOT a timeout on the indexing job itself (Bug #1218 forbids that) --
+# it is a short, fixed-iteration-count local retry loop around an
+# already-failed/cancelled path, analogous to the SIGTERM->grace->SIGKILL
+# bounded wait in cancellable_subprocess.py.
+#
+# Bug #1350: the original #1349 bound (attempts=5, sleep=0.3s -- worst
+# case (5-1)*0.3s = 1.2s) was empirically proven too short on staging:
+# 3/3 clone-phase cancellations left PERMANENT orphan clone directories
+# because the real CoW-daemon/NFS materialization lag exceeded 1.2s (the
+# decisive evidence was the total ABSENCE of the "Removing orphaned
+# clone..." WARNING below, proving the loop ran to exhaustion without
+# ever observing the directory). Only a LOWER BOUND (>1.2s) was proven --
+# the true materialization delay was never measured, so this widened
+# ~12s total bound -- (attempts - 1) * sleep_seconds = (13-1) * 1.0s = 12s
+# -- is a larger mitigation window, not a proven-sufficient ceiling. It
+# remains a fixed, provably-terminating loop (Rule #14); the permanent
+# fix is a startup/periodic reconcile sweep for registry-orphan clone
+# dirs (mirroring the golden-repo reconciler, Bug #1317) which removes
+# the dependency on guessing a materialization deadline entirely.
+_ORPHAN_CLEANUP_RETRY_ATTEMPTS = 13
+_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS = 1.0
+
+
+def _is_cancellation_chain(exc: BaseException) -> bool:
+    """Bug #1346: detect whether *exc* (or anything it was raised from) is a
+    user-initiated SubprocessCancelledError, as opposed to a genuine failure.
+
+    Both _clone_with_copy_on_write and _run_branch_delta_index re-wrap the
+    original SubprocessCancelledError into an ActivatedRepoError before it
+    reaches _do_activate_repository's outer exception handler -- one path
+    chains explicitly (`raise ... from exc`, setting __cause__), the other
+    implicitly (a bare `raise` inside an `except Exception as e:` block,
+    which Python sets as __context__). This walks both links, bounded to
+    avoid an unbounded loop on a pathological/cyclic chain.
+    """
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while (
+        current is not None
+        and depth < _MAX_EXCEPTION_CHAIN_DEPTH
+        and id(current) not in seen
+    ):
+        if isinstance(current, SubprocessCancelledError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return False
 
 
 class ActivatedRepo(BaseModel):
@@ -770,7 +837,9 @@ class ActivatedRepoManager:
                     )
                     # Reuse existing CoW clone method
                     success = self._clone_with_copy_on_write(
-                        str(golden_repo_actual_path), str(subrepo_path)
+                        str(golden_repo_actual_path),
+                        str(subrepo_path),
+                        golden_repo_alias=alias,
                     )
 
                     if not success:
@@ -1826,6 +1895,81 @@ class ActivatedRepoManager:
         metadata["wiki_enabled"] = enabled
         self._save_metadata(username, user_alias, metadata)
 
+    def _cleanup_orphaned_clone_after_failure(
+        self, activated_repo_path: str, user_alias: str
+    ) -> None:
+        """Bug #1349: best-effort, BOUNDED-retry removal of a clone-phase
+        orphan directory after a clone-phase failure/cancellation.
+
+        A single-instant os.path.exists() check (the #1345 fix) can miss a
+        partial clone directory that an async/NFS-backed clone backend
+        (e.g. the CoW Storage Daemon) is still materializing a beat after
+        the failure/cancellation exception has already propagated past
+        the check -- the daemon then finishes the reflink copy afterward,
+        leaving a permanent, unregistered orphan on shared storage.
+
+        shutil.rmtree(path, ignore_errors=True) is a safe no-op when the
+        path does not exist yet, so the first attempt is unconditional --
+        no exists() gate needed (and none is a race). A short, FIXED
+        iteration-count retry loop (_ORPHAN_CLEANUP_RETRY_ATTEMPTS,
+        provably terminating) then gives late materialization a brief
+        grace period to settle: it re-checks and, only if the path has
+        reappeared, re-attempts rmtree. In the common (non-racy) case the
+        path is already gone after the first rmtree, so the loop exits
+        immediately on the first check with NO sleep -- this is a grace
+        period on an already-failed/cancelled cleanup path, not a timeout
+        on the indexing job itself (Bug #1218 invariant).
+        """
+        existed_before_cleanup = os.path.exists(activated_repo_path)
+        shutil.rmtree(activated_repo_path, ignore_errors=True)
+        removed_something = existed_before_cleanup
+        retry_attempt_that_removed = 0  # 0 == removed on the immediate attempt
+
+        # Only poll-and-retry when the path was NOT yet visible at the
+        # initial check -- that is exactly the "async backend hasn't
+        # materialized it yet" state this loop exists to wait out. When
+        # it WAS already visible, the unconditional rmtree above already
+        # removed it, so looping further would only add needless latency
+        # to the common, non-racy case.
+        if not existed_before_cleanup:
+            for attempt in range(1, _ORPHAN_CLEANUP_RETRY_ATTEMPTS):
+                time.sleep(_ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS)
+                if os.path.exists(activated_repo_path):
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                    removed_something = True
+                    retry_attempt_that_removed = attempt
+                    break
+
+        if removed_something:
+            # Bug #1349 diagnostic: logging which attempt actually caught the
+            # late materialization lets us size _ORPHAN_CLEANUP_RETRY_ATTEMPTS/
+            # _ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS against real observed
+            # NFS/CoW-daemon lag instead of guessing.
+            self.logger.warning(
+                f"Removing orphaned clone at '{activated_repo_path}' "
+                f"after clone-phase failure/cancellation for '{user_alias}' "
+                f"(retry_attempt={retry_attempt_that_removed} of "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            # Bug #1350 diagnostic: the #1349 loop was previously silent on
+            # exhaustion, which is exactly why the real staging orphan leak
+            # required manual disk inspection to detect instead of showing
+            # up in logs. This is a WARNING (not ERROR) because exhaustion
+            # is ambiguous: it may be a genuine no-op (the clone truly never
+            # wrote anything to disk) or a late-materializing async clone
+            # still in flight beyond even this widened window -- either
+            # way, it is now directly observable.
+            self.logger.warning(
+                f"Clone-phase cleanup for '{user_alias}' at "
+                f"'{activated_repo_path}' exhausted "
+                f"{_ORPHAN_CLEANUP_RETRY_ATTEMPTS} attempts without "
+                "observing/removing the directory; a late-materializing "
+                "async clone may still be in flight.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def _do_activate_repository(
         self,
         username: str,
@@ -1833,6 +1977,7 @@ class ActivatedRepoManager:
         branch_name: str,
         user_alias: str,
         progress_callback: Optional[Callable[[int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Perform actual repository activation (called by background job).
@@ -1843,6 +1988,14 @@ class ActivatedRepoManager:
             branch_name: Branch to activate
             user_alias: User's alias for the repo
             progress_callback: Optional callback for progress updates (0-100)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. This parameter
+                is signature-injected by BackgroundJobManager._execute_job
+                (mirroring progress_callback) and threaded into the clone
+                step (_clone_with_copy_on_write) and the branch-delta
+                reindex step (_run_branch_delta_index) so a cancelled
+                activation kills its long-running subprocess promptly
+                instead of blocking to completion.
 
         Returns:
             Result dictionary with success status and message
@@ -1885,9 +2038,31 @@ class ActivatedRepoManager:
                 golden_repo_alias
             )
             update_progress(40, f"Cloning repository from {golden_repo_actual_path}")
-            success = self._clone_with_copy_on_write(
-                golden_repo_actual_path, activated_repo_path
-            )
+            try:
+                success = self._clone_with_copy_on_write(
+                    golden_repo_actual_path,
+                    activated_repo_path,
+                    cancel_check=cancel_check,
+                    golden_repo_alias=golden_repo_alias,
+                )
+            except ActivatedRepoError:
+                # Bug #1345/#1349: a cancel (or any other failure) during the
+                # CLONE phase must not leave an orphaned partial clone
+                # directory on disk, mirroring the reindex-phase cleanup
+                # below. This is a SECOND, defense-in-depth cleanup attempt:
+                # _clone_with_copy_on_write's own except-Exception handler
+                # already attempts removal, but a network/NFS-backed clone
+                # backend (e.g. the CoW Storage Daemon) can still be
+                # materializing the partial directory a beat AFTER that
+                # inner cleanup ran -- a single-instant os.path.exists()
+                # check (the original #1345 fix) can miss it. The bounded
+                # retry loop in _cleanup_orphaned_clone_after_failure gives
+                # that late materialization a short, fixed grace period to
+                # settle before giving up (Bug #1349).
+                self._cleanup_orphaned_clone_after_failure(
+                    activated_repo_path, user_alias
+                )
+                raise
 
             if not success:
                 raise ActivatedRepoError("Failed to clone repository")
@@ -1981,7 +2156,11 @@ class ActivatedRepoManager:
             if branch_name != golden_repo.default_branch:
                 update_progress(88, f"Reindexing branch '{branch_name}' (branch-delta)")
                 try:
-                    self._run_branch_delta_index(activated_repo_path, user_alias)
+                    self._run_branch_delta_index(
+                        activated_repo_path,
+                        user_alias,
+                        cancel_check=cancel_check,
+                    )
                 except ActivatedRepoError:
                     # Bug #1203 MEDIUM 2: reindex failed BEFORE metadata was written.
                     # Remove the orphaned CoW clone so a failed activation does not
@@ -2032,8 +2211,25 @@ class ActivatedRepoManager:
             }
 
         except Exception as e:
-            error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
-            self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # possibly wrapped as an ActivatedRepoError by
+            # _clone_with_copy_on_write / _run_branch_delta_index) is NOT a
+            # genuine failure -- log it at INFO with a "cancelled by user"
+            # framing instead of ERROR, so it does not read as an incident.
+            # Genuine failures keep logging ERROR unchanged.
+            if _is_cancellation_chain(e):
+                error_msg = (
+                    f"Activation of '{user_alias}' for user '{username}' "
+                    f"was cancelled by user: {str(e)}"
+                )
+                self.logger.info(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
+            else:
+                error_msg = f"Failed to activate repository '{user_alias}' for user '{username}': {str(e)}"
+                self.logger.error(
+                    error_msg, extra={"correlation_id": get_correlation_id()}
+                )
 
             # Report failure through progress callback
             if progress_callback:
@@ -2798,7 +2994,13 @@ class ActivatedRepoManager:
 
         return leaks
 
-    def _clone_with_copy_on_write(self, source_path: str, dest_path: str) -> bool:
+    def _clone_with_copy_on_write(
+        self,
+        source_path: str,
+        dest_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        golden_repo_alias: Optional[str] = None,
+    ) -> bool:
         """
         Clone repository using copy-on-write to preserve all files including .code-indexer/.
 
@@ -2807,23 +3009,98 @@ class ActivatedRepoManager:
         - CoW clone copies EVERYTHING including indexes
         - Ensures search works immediately without manual indexing
 
-        Post-clone workflow (from claude-server CowCloneOperationsService.cs):
-        1. cp --reflink=auto -r (CoW clone - copies .code-indexer/)
-        2. git update-index --refresh (fix timestamp mismatches)
-        3. git restore . (undo timestamp changes)
-        4. cidx fix-config --force (update paths in cloned config)
-        5. Configure git structure (remotes, fetch)
+        Post-clone workflow (from claude-server CowCloneOperationsService.cs,
+        refined by Bug #1343):
+        1. cp --reflink=auto -a (CoW clone, mtimes preserved - copies .code-indexer/)
+        2. git config core.checkStat minimal (mtime+size only; a reflink copy
+           always allocates a new inode/ctime, which git's DEFAULT checkStat
+           would treat as stat-dirty and re-hash the whole tree)
+        3. git update-index --refresh (O(1) stat pass, not a re-hash, given 1+2)
+        4. git status --porcelain sanity check (logs a WARNING, never restores
+           -- a byte-identical clone is already clean; blindly running
+           `git restore .` would silently discard genuinely different content)
+        5. cidx fix-config --force (update paths in cloned config)
+        6. Configure git structure (remotes, fetch)
 
         Args:
             source_path: Source repository path (golden repository)
             dest_path: Destination repository path (activated repository)
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the clone backend so a cancelled activation kills the CoW
+                clone (local `cp` process group or remote CoW daemon job)
+                promptly instead of blocking to completion. On cancellation
+                the backend raises SubprocessCancelledError, which the
+                existing except-Exception handler below treats like any
+                other clone failure -- cleaning up the partial dest_path
+                before re-raising as ActivatedRepoError.
+            golden_repo_alias: Bug #1393 -- bare golden repo alias (no
+                "-global" suffix) this clone reads FROM. When provided (both
+                real activation call sites always provide it) and the
+                manager's golden_repo_manager has a wired
+                RefreshScheduler (`_refresh_scheduler`), this clone
+                coordinates with concurrent global_repo_refresh cycles on
+                the same golden repo:
+                  1. Fails fast (ActivatedRepoError) if a refresh is
+                     ALREADY in flight for this alias (JobTracker-backed
+                     check -- the write lock alone cannot see this, since
+                     a running refresh never holds it itself).
+                  2. Acquires the WriteLockManager write lock
+                     (owner_name="activation_clone") before cloning and
+                     releases it in a finally, so any refresh that starts
+                     AFTER this point yields via its existing
+                     is_write_locked() check -- mirroring
+                     golden_repo_manager.change_branch's identical use of
+                     the same lock for the same kind of "touch the golden
+                     repo source tree" operation.
+                When None, or when no RefreshScheduler is wired (CLI/solo
+                mode, or legacy/test call sites), coordination is skipped
+                entirely -- the pre-#1393 behavior.
 
         Returns:
             True if cloning succeeded
 
         Raises:
-            ActivatedRepoError: If CoW clone or git setup fails
+            ActivatedRepoError: If CoW clone or git setup fails, the write
+                lock cannot be acquired, or a refresh is already in flight
+                for golden_repo_alias.
         """
+        scheduler = (
+            getattr(self.golden_repo_manager, "_refresh_scheduler", None)
+            if golden_repo_alias is not None
+            else None
+        )
+        _lock_acquired = False
+        if scheduler is not None:
+            # Bug #1393 direction 2: fail fast if a refresh is ALREADY
+            # executing for this golden repo. WriteLockManager alone cannot
+            # catch this because _execute_refresh() only CHECKS
+            # is_write_locked() -- it never holds the lock itself while
+            # running.
+            try:
+                scheduler.check_refresh_not_in_progress(golden_repo_alias)
+            except DuplicateJobError as e:
+                raise ActivatedRepoError(
+                    f"Cannot activate golden repository '{golden_repo_alias}': "
+                    f"a refresh is currently in progress for it ({e}). "
+                    "Retry activation once the refresh completes."
+                )
+
+            # Bug #1393 direction 1: become a write-lock HOLDER so a refresh
+            # that starts AFTER this point yields via its existing
+            # is_write_locked() check (refresh_scheduler.py), exactly like
+            # golden_repo_manager.change_branch already does for its own
+            # "touch the golden repo source tree" operation.
+            if not scheduler.acquire_write_lock(
+                golden_repo_alias, owner_name="activation_clone"
+            ):
+                raise ActivatedRepoError(
+                    f"Cannot clone golden repository '{golden_repo_alias}': "
+                    "write lock is already held by another writer. "
+                    "Retry activation once it completes."
+                )
+            _lock_acquired = True
+
         try:
             # Step 1: Perform CoW clone to copy EVERYTHING including .code-indexer/
             self.logger.info(
@@ -2854,8 +3131,9 @@ class ActivatedRepoManager:
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
-                preserve_attrs=False,
+                preserve_attrs=True,
                 timeout=clone_timeout,
+                cancel_check=cancel_check,
             )
 
             self.logger.info(
@@ -2938,6 +3216,30 @@ class ActivatedRepoManager:
             # Step 3: Fix git status for CoW cloned files (only if git repo)
             git_dir = os.path.join(dest_path, ".git")
             if os.path.exists(git_dir):
+                # Bug #1343: `cp --reflink` ALWAYS allocates a new inode (and
+                # ctime) for every copied file, even with preserve_attrs=True
+                # (mtime preserved). Git's DEFAULT core.checkStat compares
+                # inode/ctime/dev/uid/gid in addition to mtime+size, so the
+                # inode change alone stat-invalidates the copied .git/index
+                # and forces update-index/status to open+hash every tracked
+                # file. core.checkStat=minimal (mtime+size only) is the
+                # decisive lever -- set it BEFORE the refresh below AND
+                # before _configure_git_structure's `git status` (persisted
+                # in dest_path/.git/config, read by both call sites).
+                checkstat_result = subprocess.run(
+                    ["git", "config", "--local", "core.checkStat", "minimal"],
+                    cwd=dest_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if checkstat_result.returncode != 0:
+                    self.logger.warning(
+                        "git config core.checkStat=minimal failed (non-fatal): "
+                        f"{checkstat_result.stderr}"
+                    )
+
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
                 self.logger.info(
                     "Running git update-index --refresh to fix CoW clone timestamps"
@@ -2955,22 +3257,46 @@ class ActivatedRepoManager:
                         f"git update-index --refresh failed (non-fatal): {result.stderr}"
                     )
 
-                # Step 2b: Run git restore . to clean up any remaining modified files
-                self.logger.info(
-                    "Running git restore . to clean up CoW clone timestamp changes"
-                )
-                result = subprocess.run(
-                    ["git", "restore", "."],
+                # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
+                # unconditionally to "clean up" CoW clone timestamp changes.
+                # That was compensating for stat-noise caused by the OLD
+                # default core.checkStat flagging inode/ctime churn as a
+                # modification even when content was byte-identical. Now that
+                # core.checkStat=minimal + preserve_attrs=True make the
+                # refresh above a pure stat pass, a byte-identical clone is
+                # already clean and there is nothing to restore. Blindly
+                # calling `git restore .` unconditionally would SILENTLY
+                # DISCARD any genuinely different content -- a real content
+                # difference immediately after a CoW clone would be abnormal,
+                # so surface it with a WARNING instead of destroying it.
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
                     cwd=dest_path,
                     capture_output=True,
                     text=True,
                     timeout=60,
                 )
 
-                if result.returncode != 0:
-                    self.logger.warning(
-                        f"git restore . failed (non-fatal): {result.stderr}"
-                    )
+                if status_result.returncode == 0:
+                    # Bug #1347: `git status --porcelain` always reports the
+                    # untracked `.code-indexer/` index directory (`??` lines)
+                    # after every activation -- that is expected, normal
+                    # state, not a sign of trouble. `git restore` only ever
+                    # affects TRACKED files, so an untracked entry was never
+                    # at risk of being discarded. Filter out untracked (`??`)
+                    # lines and warn ONLY on genuine tracked-change lines.
+                    tracked_lines = [
+                        line
+                        for line in status_result.stdout.splitlines()
+                        if line.strip() and not line.startswith("??")
+                    ]
+                    if tracked_lines:
+                        self.logger.warning(
+                            "git status reports unexpected TRACKED changes "
+                            "after CoW clone refresh; NOT running git "
+                            "restore (would discard content): "
+                            + "; ".join(tracked_lines)
+                        )
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
             code_indexer_dir = os.path.join(dest_path, ".code-indexer")
@@ -3024,6 +3350,14 @@ class ActivatedRepoManager:
             if os.path.exists(dest_path):
                 shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(f"Clone operation failed: {str(e)}")
+        finally:
+            # Bug #1393: always release a lock we acquired, regardless of
+            # success or failure -- mirrors golden_repo_manager.change_branch
+            # and every other WriteLockManager holder in this codebase.
+            if _lock_acquired and scheduler is not None:
+                scheduler.release_write_lock(
+                    golden_repo_alias, owner_name="activation_clone"
+                )
 
     def _setup_origin_remote_for_local_repo(
         self, source_path: str, dest_path: str
@@ -3368,7 +3702,12 @@ class ActivatedRepoManager:
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
 
-    def _run_branch_delta_index(self, repo_path: str, user_alias: str) -> None:
+    def _run_branch_delta_index(
+        self,
+        repo_path: str,
+        user_alias: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """
         Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
 
@@ -3384,6 +3723,13 @@ class ActivatedRepoManager:
         Args:
             repo_path: Filesystem path of the activated repository clone.
             user_alias: User's alias for the repository.
+            cancel_check: Bug #1342 -- optional zero-arg callable returning
+                True when the owning job has been cancelled. Forwarded to
+                the index manager so a cancelled activation/switch/sync
+                kills the `cidx index` branch-delta reindex subprocess
+                promptly instead of blocking to completion. A cancellation
+                surfaces here as a RuntimeError (same as any other reindex
+                failure), so the except clause below is unchanged.
 
         Raises:
             ActivatedRepoError: If indexing fails (correctness-first: the
@@ -3402,8 +3748,22 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
-            self._index_manager.run_branch_delta_index(repo_path)
+            self._index_manager.run_branch_delta_index(
+                repo_path, cancel_check=cancel_check
+            )
         except RuntimeError as exc:
+            # Bug #1346: a user-initiated cancel (SubprocessCancelledError,
+            # a RuntimeError subclass) is NOT a genuine reindex failure --
+            # log it at INFO with a "cancelled by user" framing instead of
+            # ERROR. Genuine reindex failures keep logging ERROR unchanged.
+            if isinstance(exc, SubprocessCancelledError):
+                cancel_msg = (
+                    f"Branch-delta reindex cancelled by user for '{user_alias}': {exc}"
+                )
+                self.logger.info(
+                    cancel_msg, extra={"correlation_id": get_correlation_id()}
+                )
+                raise ActivatedRepoError(cancel_msg) from exc
             error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
             self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
             raise ActivatedRepoError(error_msg) from exc

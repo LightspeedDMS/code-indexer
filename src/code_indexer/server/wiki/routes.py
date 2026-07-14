@@ -294,6 +294,7 @@ def serve_user_wiki_root(
                 or None
             )
             return wiki_templates.TemplateResponse(
+                request,
                 "article.html",
                 {
                     "request": request,
@@ -330,6 +331,7 @@ def serve_user_wiki_root(
             or None
         )
         return wiki_templates.TemplateResponse(
+            request,
             "article.html",
             {
                 "request": request,
@@ -352,6 +354,7 @@ def serve_user_wiki_root(
         stem = md_file.stem.replace("-", " ").replace("_", " ").title()
         articles.append({"path": str(rel.with_suffix("")), "title": stem})
     return wiki_templates.TemplateResponse(
+        request,
         "index.html",
         {
             "request": request,
@@ -423,6 +426,7 @@ def serve_user_wiki_article(
             or None
         )
         return wiki_templates.TemplateResponse(
+            request,
             "article.html",
             {
                 "request": request,
@@ -466,6 +470,7 @@ def serve_user_wiki_article(
     )
 
     return wiki_templates.TemplateResponse(
+        request,
         "article.html",
         {
             "request": request,
@@ -542,6 +547,7 @@ def serve_wiki_root(
                 or None
             )
             return wiki_templates.TemplateResponse(
+                request,
                 "article.html",
                 {
                     "request": request,
@@ -578,6 +584,7 @@ def serve_wiki_root(
             or None
         )
         return wiki_templates.TemplateResponse(
+            request,
             "article.html",
             {
                 "request": request,
@@ -607,6 +614,7 @@ def serve_wiki_root(
         content = "<p>No articles found in this wiki.</p>"
     breadcrumbs = _wiki_service.build_breadcrumbs("", repo_alias)
     return wiki_templates.TemplateResponse(
+        request,
         "article.html",
         {
             "request": request,
@@ -750,6 +758,7 @@ def serve_wiki_article(
             or None
         )
         return wiki_templates.TemplateResponse(
+            request,
             "article.html",
             {
                 "request": request,
@@ -793,6 +802,7 @@ def serve_wiki_article(
     )
 
     return wiki_templates.TemplateResponse(
+        request,
         "article.html",
         {
             "request": request,

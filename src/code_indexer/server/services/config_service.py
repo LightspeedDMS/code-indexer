@@ -55,6 +55,25 @@ def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return hnsw_orphan_sweep settings dict from ServerConfig (Story #1397).
+
+    Surfaces all 5 fields of HNSWOrphanRepairSweepConfig for the Web UI
+    Config screen -- extends Story #1360's config object (enabled,
+    batch_size, tick_interval_minutes) with the new operating-hours window
+    fields.
+    """
+    sweep = config.hnsw_orphan_repair_sweep_config
+    assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": sweep.enabled,
+        "batch_size": sweep.batch_size,
+        "tick_interval_minutes": sweep.tick_interval_minutes,
+        "operating_hours_start_utc": sweep.operating_hours_start_utc,
+        "operating_hours_end_utc": sweep.operating_hours_end_utc,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -178,6 +197,12 @@ class ConfigService:
         # DEBUG follow-ups instead of logging a fresh traceback every tick.
         # Shared across both try/except blocks in start_config_reload's poll loop.
         self._db_throttle = DbOutageThrottle(service_name="ConfigService")
+        # Bug #1335: memoized raw config.json snapshot captured the FIRST time
+        # _backfill_launch_keys_from_execstart runs -- i.e. BEFORE
+        # _strip_config_file_to_bootstrap has ever had a chance to strip
+        # host/port/workers off disk within this process. None means "not
+        # captured yet"; a captured value is a dict (possibly empty).
+        self._bootstrap_launch_keys_snapshot: Optional[Dict[str, Any]] = None
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -413,6 +438,7 @@ class ConfigService:
                 "memory_governor_sample_interval_seconds": config.cache_config.memory_governor_sample_interval_seconds,
                 "memory_governor_swap_forces_red": config.cache_config.memory_governor_swap_forces_red,
                 "memory_governor_rss_inflation_factor": config.cache_config.memory_governor_rss_inflation_factor,
+                "memory_governor_swap_pswpin_red_threshold": config.cache_config.memory_governor_swap_pswpin_red_threshold,
             },
             # Git operation timeouts
             "timeouts": {
@@ -672,6 +698,8 @@ class ConfigService:
             },
             # Story #967 - Activated repository reaper configuration
             "activated_reaper": _activated_reaper_settings(config),
+            # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+            "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -909,6 +937,9 @@ class ConfigService:
         # Story #967 - Activated repository reaper configuration
         elif category == "activated_reaper":
             self._update_activated_reaper_setting(config, key, value)
+        # Story #1397 - HNSW orphan-repair sweep Web UI configuration
+        elif category == "hnsw_orphan_sweep":
+            self._update_hnsw_orphan_sweep_setting(config, key, value)
         # Story #977 - X-Ray precision AST-aware code search configuration
         elif category == "xray":
             self._update_xray_setting(config, key, value)
@@ -1006,29 +1037,57 @@ class ConfigService:
         """Update a cache setting."""
         cache = config.cache_config
         assert cache is not None  # Guaranteed by ServerConfig.__post_init__
+        # Bug #1396: blank means "no override, use default" for these
+        # fields, matching the size-cap fields' existing blank-tolerance
+        # idiom below (int(value) if value else None).
+        DEFAULT_CACHE_TTL_MINUTES = 10.0
+        DEFAULT_CACHE_CLEANUP_INTERVAL = 60
+        DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS = 2000
+        DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS = 5000
+        DEFAULT_PAYLOAD_CACHE_TTL_SECONDS = 900
+        DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS = 60
         if key == "index_cache_ttl_minutes":
-            cache.index_cache_ttl_minutes = float(value)
+            cache.index_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "index_cache_cleanup_interval":
-            cache.index_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.index_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "index_cache_max_size_mb":
             cache.index_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_ttl_minutes":
-            cache.fts_cache_ttl_minutes = float(value)
+            cache.fts_cache_ttl_minutes = (
+                float(value) if value else DEFAULT_CACHE_TTL_MINUTES
+            )
         elif key == "fts_cache_cleanup_interval":
-            cache.fts_cache_cleanup_interval = int(value)
+            # Bug #1396: blank means "no override, use default".
+            cache.fts_cache_cleanup_interval = (
+                int(value) if value else DEFAULT_CACHE_CLEANUP_INTERVAL
+            )
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
             cache.fts_cache_reload_on_access = bool(value)
-        # Payload cache settings (Story #679)
+        # Payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
-            cache.payload_preview_size_chars = int(value)
+            cache.payload_preview_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_PREVIEW_SIZE_CHARS
+            )
         elif key == "payload_max_fetch_size_chars":
-            cache.payload_max_fetch_size_chars = int(value)
+            cache.payload_max_fetch_size_chars = (
+                int(value) if value else DEFAULT_PAYLOAD_MAX_FETCH_SIZE_CHARS
+            )
         elif key == "payload_cache_ttl_seconds":
-            cache.payload_cache_ttl_seconds = int(value)
+            cache.payload_cache_ttl_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CACHE_TTL_SECONDS
+            )
         elif key == "payload_cleanup_interval_seconds":
-            cache.payload_cleanup_interval_seconds = int(value)
+            cache.payload_cleanup_interval_seconds = (
+                int(value) if value else DEFAULT_PAYLOAD_CLEANUP_INTERVAL_SECONDS
+            )
         # Story #1213 Story 2: Memory-governor runtime knobs (hot-reload).
         elif key == "memory_governor_enabled":
             cache.memory_governor_enabled = _parse_bool(value)
@@ -1076,12 +1135,20 @@ class ConfigService:
         elif key == "memory_governor_rss_inflation_factor":
             cache.memory_governor_rss_inflation_factor = float(value)
         elif key == "memory_governor_swap_pswpin_red_threshold":
-            new_thr = int(value)
-            if new_thr < 0:
-                raise ValueError(
-                    f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
-                    f"(non-negative), got {new_thr}"
-                )
+            # Bug #1396: blank means "no override" -- fall back to the
+            # CacheConfig dataclass default documented in config_manager.py
+            # (memory_governor_swap_pswpin_red_threshold: int = 100) instead
+            # of crashing on int('').
+            DEFAULT_SWAP_PSWPIN_RED_THRESHOLD = 100
+            if value:
+                new_thr = int(value)
+                if new_thr < 0:
+                    raise ValueError(
+                        f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
+                        f"(non-negative), got {new_thr}"
+                    )
+            else:
+                new_thr = DEFAULT_SWAP_PSWPIN_RED_THRESHOLD
             cache.memory_governor_swap_pswpin_red_threshold = new_thr
         else:
             raise ValueError(f"Unknown cache setting: {key}")
@@ -2071,6 +2138,32 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
 
+    def _update_hnsw_orphan_sweep_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an hnsw_orphan_sweep setting (Story #1397).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the Web
+        UI submits an explicit "true"/"false" string (boolean <select>, not
+        a checkbox), so `_parse_bool("false")` must persist False rather
+        than silently no-op (the "enabled-checkbox trap" the issue warns
+        about). The remaining 4 fields are plain integers.
+        """
+        sweep = config.hnsw_orphan_repair_sweep_config
+        assert sweep is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            sweep.enabled = _parse_bool(value)
+        elif key == "batch_size":
+            sweep.batch_size = int(value)
+        elif key == "tick_interval_minutes":
+            sweep.tick_interval_minutes = int(value)
+        elif key == "operating_hours_start_utc":
+            sweep.operating_hours_start_utc = int(value)
+        elif key == "operating_hours_end_utc":
+            sweep.operating_hours_end_utc = int(value)
+        else:
+            raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""
         xray = config.xray_config
@@ -2469,6 +2562,46 @@ class ConfigService:
             )
         return 0
 
+    def _capture_bootstrap_launch_keys_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return (and memoize) config.json's raw content as it was BEFORE any
+        first-boot stripping (Bug #1335).
+
+        _backfill_launch_keys_from_execstart is invoked up to twice in a
+        single first-boot sequence: once from initialize_runtime_db while
+        config.json still holds the operator's explicit launch keys, and
+        again later from _seed_runtime_to_pg -- by which time
+        _strip_config_file_to_bootstrap has ALREADY removed those keys from
+        disk. Re-reading config.json on that second call would always see
+        the keys as "absent" and wrongly gap-fill them from an unrelated
+        systemd unit's ExecStart flags (the #1324 symptom).
+
+        Memoizing the FIRST read on this ConfigService instance -- which
+        always precedes any strip within one process's lifetime, since both
+        callers read config.json (directly or via this snapshot) before
+        _strip_config_file_to_bootstrap ever runs -- preserves the true
+        bootstrap intent for every later call.
+
+        Returns None if config.json could not be read (missing/corrupt) on
+        the first attempt; callers must skip the gap-fill entirely in that
+        case, matching the pre-#1335 error-handling behavior.
+        """
+        if self._bootstrap_launch_keys_snapshot is not None:
+            return self._bootstrap_launch_keys_snapshot
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            raw_config = (
+                json.loads(config_path.read_text()) if config_path.exists() else {}
+            )
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
+                exc,
+            )
+            return None
+        self._bootstrap_launch_keys_snapshot = raw_config
+        return raw_config
+
     def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
         """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
 
@@ -2480,21 +2613,18 @@ class ConfigService:
           2. key absent from config.json → fill from live ExecStart when available.
           3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
 
+        Bug #1335: "present in config.json" is answered from the memoized
+        bootstrap snapshot (_capture_bootstrap_launch_keys_snapshot), NOT a
+        fresh disk read -- a prior _strip_config_file_to_bootstrap() call in
+        this same process may have already removed these keys from disk,
+        which must not be misread as "operator never set them."
+
         Mutates the passed config object AND self._config so that the subsequent
         _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
         (which re-reads via get_config()) both see the corrected values.
         """
-        raw_config: dict = {}
-        try:
-            config_path = Path(self.config_manager.config_file_path)
-            if config_path.exists():
-                raw_config = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "ConfigService: unable to read raw config.json for ExecStart "
-                "backfill at first-boot seed; skipping gap-fill: %s",
-                exc,
-            )
+        raw_config = self._capture_bootstrap_launch_keys_snapshot()
+        if raw_config is None:
             return
 
         execstart = read_execstart_flags()

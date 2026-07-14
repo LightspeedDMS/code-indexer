@@ -17,7 +17,7 @@ inputSchema:
   - name
 ---
 
-TL;DR: Create a new custom group for organizing users and repository access. Custom groups can be assigned users and granted access to specific repositories. Default groups (admins, powerusers, users) cannot be created - they exist automatically.
+TL;DR: Create a new custom group for organizing users and repository access. Requires MCP elevation (TOTP step-up). Custom groups can be assigned users and granted access to specific repositories. Default groups (admins, powerusers, users) cannot be created - they exist automatically.
 
 INPUTS:
 - name (required): Unique group name (1-100 chars, alphanumeric with hyphens/underscores)
@@ -28,6 +28,8 @@ RETURNS:
 - name: Name of the created group
 
 ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 - 'Group name already exists': Name must be unique
 - 'Invalid group name': Name contains invalid characters
 

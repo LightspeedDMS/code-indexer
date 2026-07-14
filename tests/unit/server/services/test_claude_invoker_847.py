@@ -305,6 +305,49 @@ class TestClaudeInvokerSuccessPath:
 
 
 # ---------------------------------------------------------------------------
+# Bug #1369: shared _normalize_claude_output must never truncate output on a
+# trailing '---' line. The YAML-frontmatter-stripping heuristic that used to
+# discard everything before the first '---' was dead weight inherited from a
+# pre-JSON description-generation format with zero live consumers (verified:
+# no flow's downstream parser expects it) and it destroyed self-monitoring's
+# JSON payload whenever Claude's trailing prose contained a horizontal rule.
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeInvokerNoFrontmatterTruncation:
+    def test_json_payload_before_trailing_dash_dash_dash_not_truncated(self):
+        """Bug #1369 repro: a JSON payload followed by a '---' line in trailing
+        prose must survive intact so self_monitoring's LogScanner can parse it."""
+        raw = (
+            '{"status": "SUCCESS", "max_log_id_processed": 42}\n\n'
+            "Some trailing prose about what was analyzed.\n"
+            "---\n"
+            "A section separator after the JSON."
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout=raw)
+            invoker = _make_invoker()
+            result = invoker.invoke(
+                flow="self_monitoring_scan", cwd="/tmp", prompt="p", timeout=30
+            )
+            assert result.output.startswith('{"status": "SUCCESS"')
+            assert "max_log_id_processed" in result.output
+
+    def test_leading_prose_before_dash_dash_dash_is_preserved(self):
+        """No flow should have leading text discarded on a '---' line — the
+        frontmatter heuristic must not exist for any caller, not just
+        self-monitoring (it has zero live consumers)."""
+        raw = "Chain of thought preamble text.\n---\ntitle: Foo\n---\nBody text."
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout=raw)
+            invoker = _make_invoker()
+            result = invoker.invoke(
+                flow="repo_lifecycle", cwd="/tmp", prompt="p", timeout=30
+            )
+            assert result.output.startswith("Chain of thought preamble text.")
+
+
+# ---------------------------------------------------------------------------
 # Failure classification
 # ---------------------------------------------------------------------------
 

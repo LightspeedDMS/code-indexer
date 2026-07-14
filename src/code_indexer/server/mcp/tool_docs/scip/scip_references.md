@@ -93,7 +93,7 @@ outputSchema:
         - kind
     query_metadata:
       type: object
-      description: Reranking telemetry when rerank_query is provided
+      description: Reranking telemetry, always present regardless of whether rerank_query is provided
       properties:
         reranker_used:
           type: boolean
@@ -151,7 +151,7 @@ Reranking does not change the set of symbols searched or bypass SCIP index queri
 
 #### Returned Telemetry
 
-When reranking is requested, the response includes query_metadata with:
+The response always includes query_metadata, regardless of whether reranking is requested, with:
 - reranker_used
 - reranker_provider
 - rerank_time_ms

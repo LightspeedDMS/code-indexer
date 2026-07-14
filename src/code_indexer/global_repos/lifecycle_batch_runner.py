@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import yaml
 
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.unified_response_parser import (
     CURRENT_LIFECYCLE_SCHEMA_VERSION,
 )
@@ -749,12 +750,39 @@ class LifecycleBatchRunner:
             la = pre_fm.get("last_analyzed") if pre_fm else None
             existing_last_analyzed = str(la) if la is not None else None
 
-        result = self._claude_cli_invoker(
-            alias,
-            repo_path,
-            existing_description=existing_description,
-            last_analyzed=existing_last_analyzed,
-        )
+        try:
+            result = self._claude_cli_invoker(
+                alias,
+                repo_path,
+                existing_description=existing_description,
+                last_analyzed=existing_last_analyzed,
+            )
+        except OrphanedRepoError as orphan_exc:
+            # Bug #1336 (hardened by #1338): an orphaned golden alias
+            # (registry row present, on-disk clone directory absent at
+            # repo_path) makes LifecycleClaudeCliInvoker._validate_repo_inputs()
+            # raise the typed OrphanedRepoError. Before #1336, this exception
+            # propagated as a per-alias failure -- when ALL aliases in a
+            # sub-batch/run() call are orphaned (the common startup-sweep
+            # case), run()'s all-failed threshold fired job_tracker.fail_job(),
+            # failing the whole lifecycle_backfill/description_refresh job.
+            # Skip gracefully instead: log a WARNING, write nothing, do not
+            # re-raise. Orphan CLEANUP (removing the stale registry row) is
+            # delegated to the #1317 reconciler -- this runner only skips.
+            #
+            # #1338: caught by TYPE (OrphanedRepoError, a ValueError
+            # subclass), never by message-substring matching -- any OTHER
+            # ValueError (e.g. a genuine Claude CLI/parsing failure) is a
+            # plain ValueError, not this type, so it is unaffected by this
+            # except clause and still propagates as a real per-alias failure.
+            _logger.warning(
+                "lifecycle-runner: alias %r appears orphaned (registry row "
+                "present, clone missing at %s): %s; skipping",
+                alias,
+                repo_path,
+                orphan_exc,
+            )
+            return
 
         # Bug #940: acquire the per-alias write lock BEFORE reading the existing
         # frontmatter so the entire read-merge-write sequence is atomic.

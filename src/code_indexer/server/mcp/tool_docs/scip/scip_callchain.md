@@ -16,13 +16,7 @@ inputSchema:
     max_depth:
       type: integer
       default: 10
-      description: Maximum chain length to search. Default 10. Max 20. Higher values find longer chains but slower query.
-    project:
-      type:
-      - string
-      - 'null'
-      default: null
-      description: Optional project filter to limit search to specific project
+      description: Maximum chain length to search. Default 10. Max 10. Higher values find longer chains but slower query.
     repository_alias:
       type:
       - string
@@ -102,11 +96,11 @@ outputSchema:
 
 Trace the call chain between two symbols, showing how execution flows from caller to callee through intermediate functions.
 
-Pass simple symbol names (e.g., 'UserService'). Fuzzy match by default ('User' matches 'UserService', 'UserManager'). Use exact=true for precise match. Requires SCIP indexes (cidx scip generate).
+Pass simple symbol names (e.g., 'UserService'). Fuzzy match by default ('User' matches 'UserService', 'UserManager'). Requires SCIP indexes (cidx scip generate).
 
 KNOWN LIMITATION: FastAPI route decorators (@app.get, @router.post) are not tracked as call sites. Call chains through FastAPI endpoints may show gaps. Use scip_references to find route handler registrations instead.
 
 USE FOR: Tracing execution paths, understanding how A calls B (directly or transitively), debugging call flows.
 NOT FOR: Finding all usages (scip_references), impact analysis of changes (scip_impact).
 
-EXAMPLE: scip_callchain(from_symbol='handle_request', to_symbol='execute_query') -> [{caller, callee, file, line}, ...]
+EXAMPLE: scip_callchain(from_symbol='handle_request', to_symbol='execute_query') -> {success, from_symbol, to_symbol, total_chains_found, truncated, max_depth_reached, chains: [{length, path: [{symbol, file_path, line, column, call_type}, ...]}, ...]}

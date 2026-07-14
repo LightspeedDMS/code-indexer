@@ -19,21 +19,22 @@ inputSchema:
       - string
       - 'null'
       enum:
-      - search
-      - scip
-      - git_exploration
-      - git_operations
+      - admin
+      - cicd
+      - depmap
       - files
-      - repo_management
-      - golden_repos
-      - system
-      - user_management
-      - ssh_keys
-      - meta
+      - git
+      - guides
+      - memory
+      - repos
+      - scip
+      - search
+      - ssh
+      - tracing
       - null
       default: null
-      description: 'Optional category filter. null/omitted returns all tools. Ignored when tool parameter is present. Options: search,
-        scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta.'
+      description: 'Optional category filter. null/omitted returns all tools. Ignored when tool parameter is present. Options: admin,
+        cicd, depmap, files, git, guides, memory, repos, scip, search, ssh, tracing.'
   required: []
 outputSchema:
   type: object
@@ -41,44 +42,48 @@ outputSchema:
     success:
       type: boolean
       description: Whether the operation succeeded
+    server_identity:
+      type: string
+      description: Identity line, e.g. "This server is CIDX (a.k.a. <display_name>)."
     total_tools:
       type: integer
       description: Total number of tools returned
     category_filter:
-      type:
-      - string
-      - 'null'
-      description: Category filter applied (null if showing all)
-    tools:
-      type: array
-      description: List of tool summaries
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Tool name
-          category:
-            type: string
-            description: Tool category
-          summary:
-            type: string
-            description: TL;DR summary from tool description
-          required_permission:
-            type: string
-            description: Permission required to use this tool
-        required:
-        - name
-        - category
-        - summary
-        - required_permission
+      type: string
+      description: Category filter applied. Omitted entirely from the response when no filter was requested.
+    tools_by_category:
+      type: object
+      description: Tools grouped by category name. Each key is a category (e.g. "search", "git"); each value is an array of tool summaries.
+      additionalProperties:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+              description: Tool name
+            tl_dr:
+              type: string
+              description: Truncated (max 30 chars) TL;DR summary from tool frontmatter
+          required:
+          - name
+          - tl_dr
+    discovery:
+      type: string
+      description: Compact reminder of the cidx-meta-global cross-repo discovery workflow
+    dependency_map:
+      type: string
+      description: Optional dependency-map index section, present only when a dependency-map directory exists for this server
+    langfuse_trace_search:
+      type: string
+      description: Optional Langfuse trace-search guidance section, present only when Langfuse pull is enabled
     error:
       type: string
       description: Error message if operation failed
   required:
   - success
   - total_tools
-  - tools
+  - tools_by_category
 ---
 
 Quick reference card for CIDX tools with decision guidance. Returns dynamic content based on optional category filter.
@@ -109,7 +114,7 @@ DEPENDENCY MAP WORKFLOW:
 
 IF cidx-meta-global IS NOT AVAILABLE: Fall back to list_global_repos() to see all repos, then search the most likely candidates.
 
-CATEGORIES: search, scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta, tracing
+CATEGORIES: admin, cicd, depmap, files, git, guides, memory, repos, scip, search, ssh, tracing
 
 MULTI-REPO: Pass array to repository_alias. aggregation_mode='global' for best matches, 'per_repo' for balanced representation. limit=10 with 3 repos returns 10 TOTAL (not 30).
 

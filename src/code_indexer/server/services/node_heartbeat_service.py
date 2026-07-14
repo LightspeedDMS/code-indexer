@@ -40,15 +40,6 @@ logger = logging.getLogger(__name__)
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
 _THREAD_JOIN_GRACE_SECONDS = 5
 
-# DDL to create the cluster_nodes table if absent (idempotent).
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS cluster_nodes (
-    node_id        TEXT PRIMARY KEY,
-    status         TEXT NOT NULL DEFAULT 'online',
-    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"""
-
 
 class NodeHeartbeatService:
     """

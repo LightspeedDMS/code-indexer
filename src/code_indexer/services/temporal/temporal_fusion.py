@@ -227,9 +227,10 @@ def dedup_by_commit(results: List[Any]) -> List[Any]:
             best.metadata["paths"] = union_paths
             # AC11: when the winning chunk is itself non-head, its OWN
             # commit_message field is "" (AC5) -- stash the group's
-            # head-chunk short-capped message so query_temporal's degraded
-            # fallback (git reconstruction failure) has something real to
-            # surface instead of an empty string.
+            # head-chunk short-capped message as the message source for
+            # non-head dedup winners (Bug #1380 removed the per-candidate
+            # git-show reconstruction that previously overrode this stash;
+            # this is now the primary/only message source, not a fallback).
             if not best.metadata.get("is_head"):
                 best.metadata["_head_commit_message"] = head_commit_message
 

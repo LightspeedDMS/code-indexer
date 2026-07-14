@@ -519,3 +519,56 @@ class TestXraySearchToolDocEvaluatorOptional:
         assert required_col == "no", (
             f"evaluator_code parameter table row Required column must be 'no', got {required_col!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1356 AC1 (supersedes Bug #1355 AC1): OwnedNode.text() is a METHOD, not a
+# field. Tool-doc example Rust code must never call it as a field access
+# (`node.text` / `c.text` without parentheses) -- that is invalid Rust and
+# would fail to compile if a user copy-pasted the snippet. Scan the ENTIRE
+# tool_docs corpus (not just xray docs) so this defect class cannot silently
+# reappear in any of the 151 tool docs.
+# ---------------------------------------------------------------------------
+
+ALL_TOOL_DOCS_DIR = TOOL_DOCS_DIR.parent
+
+# Variable names used in evaluator-code examples for an OwnedNode-typed value.
+# Restricting to these avoids false positives on unrelated prose that happens
+# to contain the substring ".text" for some other purpose (verified empirically:
+# a corpus-wide grep for `\.text\b` not followed by `(` currently only matches
+# these OwnedNode-context occurrences -- see Bug #1356 investigation).
+_OWNED_NODE_FIELD_ACCESS_TEXT_PATTERN = re.compile(r"\b\w+(?:\[\d+\])?\.text\b(?!\()")
+
+
+def _find_broken_text_field_access(content: str) -> list[str]:
+    """Return the matched substrings where `.text` is used as a field access.
+
+    `OwnedNode::text(&self) -> &str` is a method; `.text` (no parens) is
+    invalid Rust. `.text()` is the correct, already-fixed form and must not
+    match.
+    """
+    return _OWNED_NODE_FIELD_ACCESS_TEXT_PATTERN.findall(content)
+
+
+def test_no_tool_doc_uses_text_as_field_access_not_method_call():
+    """Bug #1356 AC1 / Bug #1355 AC1: no tool_docs/**/*.md may show `.text`
+    (without parentheses) as if OwnedNode::text() were a field.
+
+    Regression guard across ALL 151 tool docs, not just the xray family --
+    any future doc that pastes example Rust evaluator code referencing
+    `node.text`, `c.text`, `children[0].text`, etc. without calling it as a
+    method must fail this test.
+    """
+    violations: dict[str, list[str]] = {}
+    for md_file in sorted(ALL_TOOL_DOCS_DIR.rglob("*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        matches = _find_broken_text_field_access(content)
+        if matches:
+            violations[str(md_file.relative_to(ALL_TOOL_DOCS_DIR))] = matches
+
+    assert not violations, (
+        "Found `.text` used as field access (missing parentheses) instead of "
+        "the OwnedNode::text() method call in tool_docs markdown -- this is "
+        "invalid Rust if copy-pasted by a user. Violations by file:\n"
+        + "\n".join(f"  {f}: {m}" for f, m in violations.items())
+    )

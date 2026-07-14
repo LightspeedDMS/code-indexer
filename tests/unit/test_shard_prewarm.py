@@ -1,5 +1,7 @@
 """Unit tests for C6 rebalance pre-warming (ShardPrewarmService.run_once)."""
 
+from typing import List
+
 from code_indexer.server.services.shard_prewarm_service import ShardPrewarmService
 
 
@@ -12,7 +14,7 @@ class _Own:
 
 
 def test_warms_owned_repos_only_once():
-    warmed = []
+    warmed: List[str] = []
     svc = ShardPrewarmService(_Own(["a", "b"]), lambda: ["a", "b", "c"], warmed.append)
     svc.run_once()
     assert sorted(warmed) == ["a", "b"]  # 'c' not owned -> not warmed
@@ -21,7 +23,7 @@ def test_warms_owned_repos_only_once():
 
 
 def test_membership_change_warms_newly_owned():
-    warmed = []
+    warmed: List[str] = []
     own = _Own(["a"])
     svc = ShardPrewarmService(own, lambda: ["a", "b"], warmed.append)
     svc.run_once()
@@ -32,7 +34,7 @@ def test_membership_change_warms_newly_owned():
 
 
 def test_drops_no_longer_owned_and_rewarms_on_return():
-    warmed = []
+    warmed: List[str] = []
     own = _Own(["a"])
     svc = ShardPrewarmService(own, lambda: ["a"], warmed.append)
     svc.run_once()
@@ -46,7 +48,7 @@ def test_drops_no_longer_owned_and_rewarms_on_return():
 
 
 def test_solo_mode_is_noop():
-    warmed = []
+    warmed: List[str] = []
     ShardPrewarmService(None, lambda: ["a"], warmed.append).run_once()
     assert warmed == []
 

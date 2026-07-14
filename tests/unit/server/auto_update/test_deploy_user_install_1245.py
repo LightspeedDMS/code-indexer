@@ -385,12 +385,22 @@ class TestGetHnswlibSubmoduleCommit:
 
 
 class TestRebuildSkip:
-    """Test skip logic: importable + commit unchanged -> skip rebuild."""
+    """Test skip logic: full fork capability present + commit unchanged ->
+    skip rebuild.
+
+    Bug #1392 remediation: build_custom_hnswlib()'s skip-rebuild guard now
+    gates on _hnswlib_has_full_capability() (fork-capability-aware) rather
+    than the plain-import-only _hnswlib_importable() -- these tests are
+    repatched accordingly so they honestly exercise the real predicate the
+    production code now calls (previously the patched _hnswlib_importable
+    mock had become a no-op, with the observed outcome only coincidentally
+    unchanged because an unrelated generic subprocess stub returns rc=0).
+    """
 
     def test_rebuild_skipped_when_importable_and_commit_unchanged(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """Importable + current commit == last built -> skip, return True, no pip invoked."""
+        """Full capability + current commit == last built -> skip, return True, no pip invoked."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
         calls: list = []
 
@@ -403,7 +413,7 @@ class TestRebuildSkip:
                 executor, "_get_server_python", return_value="/usr/bin/python3"
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
-            patch.object(executor, "_hnswlib_importable", return_value=True),
+            patch.object(executor, "_hnswlib_has_full_capability", return_value=True),
             patch.object(
                 executor, "_get_hnswlib_submodule_commit", return_value="abc123"
             ),
@@ -423,7 +433,7 @@ class TestRebuildSkip:
     def test_rebuild_attempted_when_submodule_commit_changed(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """Importable but commit changed -> rebuild must be attempted."""
+        """Full capability present but commit changed -> rebuild must be attempted."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
         calls: list = []
 
@@ -432,7 +442,7 @@ class TestRebuildSkip:
                 executor, "_get_server_python", return_value="/usr/bin/python3"
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
-            patch.object(executor, "_hnswlib_importable", return_value=True),
+            patch.object(executor, "_hnswlib_has_full_capability", return_value=True),
             patch.object(
                 executor, "_get_hnswlib_submodule_commit", return_value="new123"
             ),
@@ -451,7 +461,7 @@ class TestRebuildSkip:
     def test_rebuild_attempted_when_no_prior_build_record(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """Importable but no prior build record (last_built=None) -> rebuild must be attempted."""
+        """Full capability present but no prior build record (last_built=None) -> rebuild must be attempted."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
         calls: list = []
 
@@ -460,7 +470,7 @@ class TestRebuildSkip:
                 executor, "_get_server_python", return_value="/usr/bin/python3"
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
-            patch.object(executor, "_hnswlib_importable", return_value=True),
+            patch.object(executor, "_hnswlib_has_full_capability", return_value=True),
             patch.object(
                 executor, "_get_hnswlib_submodule_commit", return_value="abc123"
             ),
@@ -479,7 +489,7 @@ class TestRebuildSkip:
     def test_rebuild_attempted_when_commit_indeterminate(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """Importable but current commit unknown (None) -> rebuild (cannot confirm unchanged)."""
+        """Full capability present but current commit unknown (None) -> rebuild (cannot confirm unchanged)."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
         calls: list = []
 
@@ -488,7 +498,7 @@ class TestRebuildSkip:
                 executor, "_get_server_python", return_value="/usr/bin/python3"
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
-            patch.object(executor, "_hnswlib_importable", return_value=True),
+            patch.object(executor, "_hnswlib_has_full_capability", return_value=True),
             patch.object(executor, "_get_hnswlib_submodule_commit", return_value=None),
             patch.object(
                 executor, "_get_last_built_hnswlib_commit", return_value="abc123"
@@ -741,12 +751,25 @@ class TestBuildCommandShape:
 
 
 class TestNonFatalRebuildFailure:
-    """Test that a failed rebuild is non-fatal when hnswlib is still importable."""
+    """Test that a failed rebuild is non-fatal when hnswlib still has the
+    fork's capability.
+
+    Bug #1392 remediation: both build_custom_hnswlib() call sites (the
+    skip-rebuild guard and this demote-to-WARNING check) now gate on
+    _hnswlib_has_full_capability() (probes for check_integrity/repair_orphans)
+    rather than the plain-import-only _hnswlib_importable() -- a stock PyPI
+    hnswlib is importable too, so gating on mere importability could not
+    distinguish "the fork is genuinely still there" from "some hnswlib
+    happens to still import", which is exactly the drift #1392 exists to
+    catch. These two tests are repatched accordingly (still directly patching
+    a collaborator method the method-under-test calls exactly twice, matching
+    this file's own established interaction-testing convention).
+    """
 
     def test_nonfatal_when_rebuild_fails_but_hnswlib_importable(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """hnswlib install rc=1 + hnswlib still importable (2nd probe) -> return True."""
+        """hnswlib install rc=1 + fork capability still present (2nd probe) -> return True."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
 
         def dispatch(cmd: list, **kw: object) -> Mock:
@@ -767,7 +790,9 @@ class TestNonFatalRebuildFailure:
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
             # First call (skip check) -> False; second call (failure branch) -> True (non-fatal)
-            patch.object(executor, "_hnswlib_importable", side_effect=[False, True]),
+            patch.object(
+                executor, "_hnswlib_has_full_capability", side_effect=[False, True]
+            ),
             patch.object(executor, "_get_hnswlib_submodule_commit", return_value=None),
             patch.object(executor, "_get_last_built_hnswlib_commit", return_value=None),
             patch.object(executor, "_is_user_install", return_value=False),
@@ -776,13 +801,13 @@ class TestNonFatalRebuildFailure:
             result = executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
 
         assert result is True, (
-            "Non-fatal: hnswlib still importable after failed rebuild -> must return True"
+            "Non-fatal: fork capability still present after failed rebuild -> must return True"
         )
 
     def test_fatal_when_rebuild_fails_and_hnswlib_not_importable(
         self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
     ) -> None:
-        """hnswlib install rc=1 + hnswlib NOT importable (2nd probe) -> return False."""
+        """hnswlib install rc=1 + fork capability NOT present (2nd probe) -> return False."""
         hnswlib_path = _make_hnswlib_path(tmp_path)
 
         def dispatch(cmd: list, **kw: object) -> Mock:
@@ -801,8 +826,11 @@ class TestNonFatalRebuildFailure:
                 executor, "_get_server_python", return_value="/usr/bin/python3"
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
-            # Both calls return False: skip check fails, failure branch confirms not importable
-            patch.object(executor, "_hnswlib_importable", side_effect=[False, False]),
+            # Both calls return False: skip check fails, failure branch confirms
+            # fork capability is genuinely absent.
+            patch.object(
+                executor, "_hnswlib_has_full_capability", side_effect=[False, False]
+            ),
             patch.object(executor, "_get_hnswlib_submodule_commit", return_value=None),
             patch.object(executor, "_get_last_built_hnswlib_commit", return_value=None),
             patch.object(executor, "_is_user_install", return_value=False),
@@ -811,7 +839,7 @@ class TestNonFatalRebuildFailure:
             result = executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
 
         assert result is False, (
-            "Fatal: hnswlib not importable after failed rebuild -> must return False"
+            "Fatal: fork capability not present after failed rebuild -> must return False"
         )
 
 

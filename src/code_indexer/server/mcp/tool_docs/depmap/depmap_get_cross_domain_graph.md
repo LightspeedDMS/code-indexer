@@ -120,11 +120,20 @@ Response structure:
                          always non-empty (AC-F6 guarantees this)
     anomalies: list of {file, error} for any parse or consistency issues
                encountered during the scan; empty when all files are healthy
+    parser_anomalies: list of anomaly entries raised by the domain-file parser
+                       (e.g., malformed YAML frontmatter, unreadable sections);
+                       empty when all files parse cleanly
+    data_anomalies: list of anomaly entries raised by data-quality checks
+                    (e.g., bidirectional mismatches, AC-F6 dropped edges,
+                    path-traversal rejections); empty when no data-quality
+                    issues are found
 
   success=false (resolution=invalid_input, dep_map_path missing):
     error: human-readable message
     edges: []
     anomalies: []
+    parser_anomalies: []
+    data_anomalies: []
 
 ### See also
 

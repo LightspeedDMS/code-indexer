@@ -7,6 +7,184 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.53.0] - 2026-07-14
+
+### Fixed
+
+- **#1391**: dashboard cache-metrics On-Mode Hit Rate ignored the Time Window selector (unwindowed lifetime aggregate), and Shadow Hit Rate used an operation-denominated source (`search_embed_event`) inconsistent with On-Mode's request-denominated one (`search_event_log`). Both cards now share the same windowed, request-denominated source.
+- **#1392**: server and CLI subprocess can run different Python environments, and a stock PyPI hnswlib silently lacking `check_integrity()`/`repair_orphans()` would pass an import-only probe. Adds a fail-loud runtime capability gate on build/finalize paths only, a non-fatal startup check, and makes the deploy-pipeline CLI-sync guards capability-aware (an import-only guard made the sync silently no-op when the server build already advanced the shared last-built-commit marker).
+- **#1393**: golden-repo activation's copy-on-write clone could race with a concurrent `RefreshScheduler` refresh of the same repo, corrupting the activated repo's initial state. Adds fail-fast + write-lock coordination, plus a wiring-gap fix (`GlobalReposLifecycleManager` never forwarded `job_tracker` into `RefreshScheduler`, making the fail-fast check a permanent no-op in production) found and closed via live manual E2E testing.
+- **#1394**: `GET /api/repositories/{alias}/health` ran a synchronous, serial per-collection HNSW integrity check inside an async route, causing HTTP 504 on large temporal repos and no per-collection exception isolation. Adds a bounded-concurrency, per-collection-isolated batch helper and new async `POST .../health/check` job endpoints across all four frontend call sites.
+- **#1396**: the Cache Settings Web UI form rejected the entire submission -- including unrelated field edits -- whenever `memory_governor_swap_pswpin_red_threshold` was blank. Fixed across three layers: validator blank-tolerance, ConfigService default-fallback, and a `get_all_settings()` serialization gap that left the template's pre-population guard inert.
+
+### Added
+
+- **#1397** (supersedes #1395): HNSW orphan-repair fleet sweep is now configurable from the Web UI -- `enabled`, `batch_size`, `tick_interval_minutes`, plus a new daily UTC operating-hours window (with overnight wrap-around, fail-open default) so the sweep's disk I/O can be confined to off-peak hours. Changes take effect live, no restart required.
+
+## [11.52.0] - 2026-07-13
+
+### Fixed
+
+- **#1390** (priority-1): the filesystem-reconciliation mechanism for the `enable_temporal` flag had two independent defects that combined to trigger an unattended, hours-long full temporal reindex against operator intent. (1) `RefreshScheduler._reconcile_registry_with_filesystem` only updated the `global_repos` table (the one the scheduled-refresh trigger actually reads), never `golden_repos_metadata` -- the same logical repo's `enable_temporal` flag could permanently disagree between the two. (2) `_detect_existing_indexes`'s temporal check matched only on directory NAME (`code-indexer-temporal*`), never verifying real shard data was present -- a metadata-only leftover directory (real shard data removed for maintenance) was indistinguishable from a fully-populated index, and falsely reported "temporal exists." Fixed: reconciliation now updates both tables using the same alias-normalization already proven correct for Bug #1373; detection now requires a real `hnsw_index.bin`+`collection_meta.json` pair (reusing the existing `iter_index_files_for_repo` discovery primitive) rather than a name match. Directly reproduces and fixes a real incident: quarter-shard data pulled for maintenance, metadata directory left behind, reconciliation false-positived `enable_temporal=True`, re-arming the scheduler and triggering an unattended `cidx index --index-commits` run that redid 8 quarters from scratch over ~1.5 hours.
+
+## [11.51.0] - 2026-07-13
+
+### Fixed
+
+- **#1387**: `check_hnsw_health` MCP tool hardcoded `.code-indexer/index/default/index.bin`, so it reported "Index file not found" for every real repo even when healthy -- real collections are named after the resolved embedding model and use the `hnsw_index.bin` filename, neither of which is `default`/`index.bin`. Now reuses the existing `iter_index_files_for_repo` discovery primitive (Story #1360) to find the real collection(s); single-collection repos keep the original response shape, multi-collection repos (multi-provider/temporal) get an additive `collections` list instead of one silently winning.
+- **#1383** (follow-up to #1382): the `/health` DEGRADED message during circuit-breaker buildup reported only a bare consecutive-sweep count -- now includes the actual at-risk alias set and a "will auto-remove at N/N confirmations" framing. Separately, the moment auto-removal actually fired, the breaker-state reset erased all trace of it in the same tick; a new `golden_repo_reconcile_auto_heal_event` record (SQLite + PostgreSQL) now persists the removed-alias set + timestamp independently of that reset, exposed as an informational-only `last_golden_repo_reconcile_auto_heal` field on `GET /api/system/health`. Also: a confirmed sweep whose removals all fail no longer discards the accumulated confirmation count.
+- **#1388**: Epic #1333's HNSW finalize-time orphan detect+repair runs correctly inside the `cidx index` child subprocess spawned by golden-repo add/refresh, but its outcome never reached the server's admin-visible logs -- a subprocess never inherits the server's log handler, and the CLI's own logging setup separately filters the check's INFO-level line before it's written anywhere. The repair event now bypasses the percentage-based `--progress-json` wire protocol entirely (which two independent gates were silently dropping it through) via a dedicated stderr marker channel that the parent subprocess runner scrapes and re-logs through the server's own logger, alias-tagged, reaching `logs.db` for real.
+
+## [11.50.0] - 2026-07-13
+
+### Fixed
+
+- **#1382** (priority-1): the golden-repo registry-orphan reconcile circuit-breaker (#1317) had no recovery path -- a live staging incident showed a genuine, persistent orphan set (crash-recovery gap: DB restored, on-disk clones not) tripped the >50% abort threshold on EVERY restart for ~2 months with only a repeated log-only WARNING. Added a persisted, cross-restart confirmation counter (`golden_repo_reconcile_breaker_state` table, SQLite solo / PostgreSQL cluster): if the SAME orphan-candidate fingerprint is observed on 3 CONSECUTIVE sweeps, each with a healthy `golden_repos_dir` and at least 30 minutes apart (rolling-deploy hardening -- a single multi-node restart wave no longer counts as 3 "consecutive" confirmations), the sweep proceeds with removal instead of aborting forever. A base-dir-unhealthy event or a normal within-threshold sweep resets the counter, so real infra flapping can never accumulate toward confirmation. `HealthCheckService` now surfaces a currently-tripped breaker as a DEGRADED `/health` `failure_reasons` entry immediately, instead of only a startup log line.
+
+## [11.49.0] - 2026-07-12
+
+### Fixed
+
+- **#1380** (priority-1): temporal query recall spent 95-98% of wall-clock time (65-93s on warm-cache queries against a real 4-quarter index) in `_reconstruct_full_commit_message()`, a sequential `git show -s --format=%B <hash>` subprocess call issued once per deduped candidate commit whose winning chunk was non-head, per shard, BEFORE the final `limit` truncation (48-89 git calls observed for `limit=5`). Removed entirely; non-head dedup winners now source their message from `dedup_by_commit()`'s already-free `_head_commit_message` stash. Verified live against the real evolution golden repo's temporal index: warm queries dropped to 1.7-3.6s sequential, 24.6-29.7s for 15 concurrent (down from 43-95s concurrent). Zero git subprocess calls proven both structurally and via live `strace`.
+- **EVO-64244** (PR #1352): `HNSWIndexCache.get_or_load` negatively-cached a loader's `(None, id_mapping)` result (returned when `hnsw_index.bin` doesn't exist yet, e.g. a repo mid-(re)index) for the full TTL, so "HNSW index not found" persisted even after the index finished building. A `None` result is no longer stored. Also: the cache had no invalidation path for the common case of a repo reindexed via a background job or separate worker/CLI subprocess (only two narrow call sites existed: branch-isolation filtered rebuild, and the orphan-repair sweep) -- a multi-worker server could silently serve a stale, pre-rebuild HNSW index for up to the TTL after a normal reindex. `get_or_load` now takes an optional `index_file` path and invalidates a cache HIT when the on-disk file's mtime is newer than what was cached at load time.
+- **#1379**: two unit tests hardcoded the legacy pre-Story-#1171 temporal storage layout and failed against the current quarterly-sharded, per-embedder collection layout. Test-fixture-only fix; production code unaffected (confirmed via manual repro).
+- **#1381**: two test-infrastructure flakes found while validating the above under full-suite concurrent load (both passed reliably in isolation). `test_no_git_commands_for_non_git_repo` globally patched `subprocess.run`, exploitable by any unrelated concurrent thread spawning a real `git` subprocess (same class as #1375) -- fixed via a per-instance `RefreshScheduler._run_subprocess()` injection seam. `test_dispatch_parallel_with_jitter_zero_jitter_disables_jitter` asserted a hard real-wall-clock bound sensitive to CPU contention under concurrent chunked execution -- fixed via a deterministic `time.sleep`-never-called assertion scoped to the dispatcher module's own namespace.
+
+## [11.48.0] - 2026-07-12
+
+### Fixed
+
+- **#1377** (priority-1): `HNSWIndexCache`/`FTSIndexCache._enforce_size_limit()` evicted the ENTIRE cache (including the just-loaded entry itself) whenever a single index exceeded the per-worker cap, since LRU always evicts oldest-first and the newest entry (with nowhere to go) was evicted last -- destroying every other repo's cached indexes for zero benefit and making oversized indexes permanently uncacheable. Individually-oversized entries are now evicted first and in isolation, before normal LRU runs on the remainder. Directly explains production temporal-query timeouts and non-growing memory usage on repos with large quarterly shards.
+- **#1374**: the memory governor's `swap_forces_red` heuristic forced and HELD the RED band on swap-in rate alone, with no corroboration from actual memory usage -- pinning RED for days on hosts with abundant free memory, forcing `evict_after_use` on every temporal quarter-shard. Now requires `used_pct >= yellow_pct` too, while preserving Bug #1225's legitimate death-spiral guard.
+- **#1373**: `enable_temporal` never persisted after a successful temporal index build because `_set_enable_temporal_flag()` received an already-`-global`-suffixed alias and double-suffixed it (`evolution-global-global`) for one DB write path while under-suffixing the other -- both silently no-op'd. Alias normalization is now unconditional and unambiguous (a bare golden-repo alias can never itself end in `-global`); the silent no-op is now a loud ERROR.
+- **#1376**: a null `temporal.active_embedder` in a repo's `config.json` failed pydantic validation for the WHOLE `Config` model, so even completely unrelated non-temporal queries hard-errored. `active_embedder` is now `Optional[str]`; an invalid temporal section degrades to disabled-temporal with a de-duplicated warning instead of invalidating the whole config.
+- **#1378**: temporal indexing's progress bar/ETA and the `X/Y commits` counter used different denominators -- the temporal indexer reset its progress to per-shard values every quarter, and separately `MultiThreadedProgressManager`/`AggregateProgressDisplay` only set Rich's internal `task.total` on the first tick, freezing the bar/ETA at whatever the first quarter reported (observed: bar pegged at 100% with 174/8008 commits actually done). Both now consistently use the whole-run total.
+- **#1369**: `ClaudeInvoker`'s shared frontmatter-stripping logic (discarding everything before the first `---` line) had zero legitimate consumers across any flow routed through it, but actively corrupted self-monitoring scan JSON payloads whenever Claude's trailing prose happened to contain a markdown horizontal rule. Removed entirely as dead/harmful code.
+- **#1370 / #1372**: two test-infrastructure-only bugs found while running `e2e-automation.sh`/`fast-automation.sh` as the final regression gate for Epic #1333. No production `code_indexer.cli` runtime behavior changed for either.
+  - **#1370**: 14 modules (`cli.py` and 13 siblings) each construct a module-level `rich.Console()` singleton that caches color/terminal detection at import time; a single pytest process running hundreds of Click `CliRunner`-based tests reused whichever test's import ran first, corrupting plain-text output assertions with stray ANSI codes in ~23 unrelated CLI test files. A dual import-path issue (`code_indexer.cli` vs `src.code_indexer.cli` loading as separate module objects) and Rich reading `FORCE_COLOR`/`NO_COLOR` live off `os.environ` on every color check (not just at construction) compounded the effect. Fixed via one autouse pytest fixture that resets all singletons and normalizes the environment per test -- order-independence proven for all 23 originally-failing node IDs.
+  - **#1372**: `e2e_cli_env` and two sibling CLI-env builders leaked ambient `FORCE_COLOR` into every real `cidx` subprocess invocation, breaking plain-text e2e output assertions in environments (like an interactive Claude Code session) that set it. Fixed with a shared `sanitize_cli_subprocess_env()` helper.
+  - **#1371 / #1375**: two pre-existing, order-dependent unit-test flakes found and fixed along the way -- a Click `CliRunner.isolated_filesystem` cwd misuse in `test_status_multimodal.py`, and a process-wide `subprocess.run` mock-patch in `test_delta_merge_frontmatter.py` that could be hijacked by an unrelated background thread under full-suite load.
+
+## [11.47.0] - 2026-07-12
+
+### Fixed
+
+- **#1370 / #1372**: two test-infrastructure-only bugs found while running `e2e-automation.sh`/`fast-automation.sh` as the final regression gate for Epic #1333. No production `code_indexer.cli` runtime behavior changed for either.
+  - **#1370**: 14 modules (`cli.py` and 13 siblings) each construct a module-level `rich.Console()` singleton that caches color/terminal detection at import time; a single pytest process running hundreds of Click `CliRunner`-based tests reused whichever test's import ran first, corrupting plain-text output assertions with stray ANSI codes in ~23 unrelated CLI test files. A dual import-path issue (`code_indexer.cli` vs `src.code_indexer.cli` loading as separate module objects) and Rich reading `FORCE_COLOR`/`NO_COLOR` live off `os.environ` on every color check (not just at construction) compounded the effect. Fixed via one autouse pytest fixture that resets all singletons and normalizes the environment per test -- order-independence proven for all 23 originally-failing node IDs.
+  - **#1372**: `tests/e2e/conftest.py`'s `e2e_cli_env` fixture (and two sibling CLI-env builders under `tests/e2e/phase5_resiliency/`) blindly copied the full ambient environment into every real `cidx` subprocess invocation, so a `FORCE_COLOR` set in the shell running pytest (e.g. an interactive session) forced color output even on piped/captured stdout, breaking `e2e-automation.sh` Phase 1's plain-text result-count regex. Fixed with a shared `sanitize_cli_subprocess_env()` helper; confirmed `FORCE_COLOR=0` does not work (Rich treats any present value as "force on") -- the key must be removed entirely.
+
+## [11.46.0] - 2026-07-12
+
+### Fixed
+
+- **#1368**: found via live E2E validation of Epic #1333 S3 on the staging cluster -- `HNSWOrphanRepairSweepScheduler` raised `AttributeError` ('dict' object has no attribute 'enabled'/'batch_size') on every real SQLite AND PostgreSQL config load, because `hnsw_orphan_repair_sweep_config` was the one nested-dataclass `ServerConfig` field missing its dict-to-dataclass conversion block in `_dict_to_server_config` (every sibling section, e.g. `data_retention_config`/`activated_reaper_config`, already had one). The scheduler's defensive fallback masked this functionally (fallback values happened to match the story's intended defaults), but it meant any Web-UI change to the sweep's enable/batch-size/tick-interval settings had zero effect. Added the missing conversion block; regression coverage now drives the real SQLite seed-then-restart cycle and a live-PostgreSQL round trip against the actual `server_config` schema, not a hand-constructed config object injected in-process (the unfaithful-mock gap that let this through undetected).
+
+## [11.45.0] - 2026-07-12
+
+### Added
+
+- **Epic #1333 -- Eliminate HNSW orphan nodes (silent recall loss)**: three stories closing a spike-confirmed gap where HNSW index elements could end up with zero inbound graph connections (unreachable by ANN search, silent recall loss) with no detection or repair anywhere in the system.
+  - **#1358**: fork-level `repair_orphans()` C++ method added to the custom hnswlib fork, using a pigeonhole-principle-proven anchor-selection strategy to force valid back-edges for orphaned elements. Ships with a committed synthetic-orphan corpus generator covering both measured orphan regimes (exact-tie multi-threaded race, near-tie deterministic pruning) plus real on-disk save/load round-trip fixtures across a size/regime/construction-shape matrix.
+  - **#1359**: wires detect -> repair -> re-verify into every HNSW build/finalize path (`build_index`, `rebuild_from_vectors`, incremental updates) so newly-built or updated indexes -- regular, temporal, multimodal -- self-heal before publish. `cidx health` / MCP `check_hnsw_health` / REST / Web now expose `orphan_count` as a strict zero-tolerance binary signal (any orphan is ERROR, no graded severity). Validated end-to-end against a real orphaned staging shard, now a permanent regression fixture.
+  - **#1360**: a paced, resumable, cluster-safe fleet sweep (`HNSWOrphanRepairSweepScheduler`) that walks all existing on-disk indexes (golden + activated, regular + temporal shards) and repairs the pre-existing backlog built before #1359's build-path fix existed. Stable string-key cursor (never a numeric offset) survives insertions/deletions of shards between ticks; repair reuses the exact same per-collection lock the build path takes, with a locked re-check immediately before writing. Ships enabled by default with conservative pacing (15 items/tick, 7-minute interval), both adjustable via the Web UI config screen; one short BackgroundJobManager job per tick, with cross-pass fleet stats on a dedicated admin endpoint.
+
+## [11.44.0] - 2026-07-10
+
+### Fixed
+
+- **#1355/#1356**: Two-pass audit (independent fact-check + adversarial verification) of all 151 MCP tool docs against their handler code found 35 confirmed inaccuracies. Fixed across 40 doc files: a `node.text` field-vs-method Rust compile bug (the method is `.text()`, not a field) that would break copy-pasted X-Ray evaluator examples in `xray_search.md`, `store_xray_pattern.md`, and `xray_explore.md`, with a new regression test guarding against recurrence; SCIP tool docs claiming unsupported `project`/`exact` filters on `scip_callchain`/`scip_impact`/`scip_context`, a wrong `max_depth` cap, and example return shapes that didn't match actual handler output; Git tool docs with a wrong `git_push` output field name, a non-functional `git_commit` `author_email` param, a non-functional `git_log` `aggregation_mode` param, overclaimed `git_status` fields, a false `git_amend` write-mode-gating implication, and undocumented `git_diff`/`switch_branch`/`get_branches` parameters; and Repos/Admin/Guides doc mismatches including wrong response-shape claims on `list_global_repos`/`authenticate`/`cidx_quick_reference`/`poll_delegation_job`/`update_group`, a missing elevation-required error across 11 admin tools, and several wrong tool-name/example/field references. `discover_repositories.md` was deliberately left unchanged -- its documented behavior (discovering not-yet-indexed external repos) looks like a real missing feature rather than a doc bug, flagged separately for a product decision. Documentation-only; zero application code changed.
+
+## [11.43.0] - 2026-07-10
+
+### Fixed
+
+- **#1354**: Discovered during live ChatGPT MCP connector validation of #1351/#1353 -- the connector completed the full OAuth PKCE flow and successfully called `POST /mcp` (initialize, notifications/initialized, tools/list all 200/202), then still reported "Disconnected" after a brief delay. Root cause (proven via manual protocol replay against staging, with cluster node affinity independently ruled out via cookie-jar testing): `mcp_endpoint`'s session-ID resolution only checked a `session_id` query parameter that no client populates, never the `Mcp-Session-Id` request header that MCP clients (including ChatGPT's) use to convey session continuity after `initialize` -- so a brand-new session ID was minted on every single request, even when hitting the identical cluster node. Added header lookup as the primary source (query param kept as a legacy fallback tier, `str(uuid.uuid4())` as the final fallback for brand-new sessions) -- restores `get_or_create_session`'s originally intended cross-call session persistence. The separate, unauthenticated `/mcp-public` endpoint was confirmed unreachable from ChatGPT's flow and left untouched.
+
+## [11.42.0] - 2026-07-10
+
+### Fixed
+
+- **#1353**: Follow-up to #1351 -- live staging validation showed the ChatGPT MCP connector still failed OAuth authorization even with #1351's discovery-metadata fix live. Root cause (proven via staging `journalctl` logs): the connector requests `GET /.well-known/oauth-authorization-server/mcp` (path-suffixed with the MCP resource's own path segment) rather than the root-level discovery URL, and only the root path was registered, so the suffixed request 404'd and the client fell back to assuming PKCE was unsupported. Added a path-suffixed alias route (`/.well-known/oauth-authorization-server/mcp`) that serves the identical discovery metadata from the same existing handler -- zero behavior change to the pre-existing root route relied on by Claude Code/Claude.ai, verified via runtime route-table inspection to be a non-overlapping literal path with no precedence/collision risk.
+
+## [11.41.0] - 2026-07-10
+
+### Fixed
+
+- **#1351**: OAuth authorization-server discovery metadata (`/.well-known/oauth-authorization-server`) omitted `code_challenge_methods_supported`, so RFC 8414-compliant clients (e.g. ChatGPT's MCP connector) assumed PKCE was unsupported and omitted `code_challenge` when building their `/oauth/authorize` request, which the server's required `code_challenge` parameter then rejected with a 422 ("Field required"). Claude Code/Claude.ai were unaffected because they send `code_challenge` unconditionally. Discovery metadata now advertises `code_challenge_methods_supported: ["S256"]` and `token_endpoint_auth_methods_supported: ["none", "client_secret_basic"]` (pure metadata addition -- PKCE enforcement itself is unchanged). Also corrected a stale comment in `routes.py` that incorrectly warned against adding `/.well-known/oauth-protected-resource`, which already exists and is required by the current MCP auth spec.
+
+## [11.40.0] - 2026-07-10
+
+### Added
+
+- **Cluster-mode hardening (PR #1339, external contribution + review-driven fixes)**: opt-in HRW (rendezvous-hash) repo sharding for cluster mode (`cluster.sharding_enabled`, default off; fail-open and byte-for-byte unchanged when disabled — independently verified), a trigram-index-assisted regex pre-filter for large NFS-backed repos (with a fixed cross-line multiline correctness gap and additional non-ASCII/concurrent-build-safety fixes from the author), and six independent correctness fixes: `scip_impact` scoping (48s→39ms, plus a latent access-control fix), ripgrep-in-image for regex search, a recursive/depth-bounded repo-file-listing endpoint, an activated-repos storage-locality startup warning, and golden-repo clone-URL credential masking.
+
+### Fixed
+
+- Completed the Starlette 1.x `TemplateResponse` call-signature migration across the remaining 29 call sites the PR left unmigrated (`wiki/routes.py`, `web/dependency_map_routes.py`, `web/repo_category_routes.py`, `web/elevation_web_routes.py`, `auth/oauth/routes.py`), with a permanent AST-based regression guard against reintroducing the old signature anywhere in the server tree.
+
+## [11.39.0] - 2026-07-10
+
+### Fixed
+
+- **#1350**: Follow-up to #1349 — live re-validation on staging proved the bounded-retry window for clone-phase activation-cancel orphan cleanup (worst case 1.2s) was too short for real CoW-daemon/NFS materialization lag, still leaving permanent orphan clone directories in 3/3 reproductions. Widened the bound to ~12s (still a fixed, provably-terminating loop) and added a WARNING when the retry loop exhausts without removing anything, so any residual case is now visible in logs instead of requiring manual disk inspection.
+
+## [11.38.0] - 2026-07-10
+
+### Fixed
+
+- **#1349**: Follow-up to #1345 — the clone-phase activation-cancel orphan cleanup used a single-instant `os.path.exists()` check, which could miss a partial clone directory that the CoW Storage Daemon (over NFS) was still materializing a beat after the cancellation/failure exception had already propagated. This let a complete, unregistered orphan clone permanently leak on the CoW-daemon/NFS backend (reproduced 4/4 on live staging). Cleanup now does an unconditional removal attempt first, then a short, fixed-iteration-count bounded retry (worst case ~1.2s) to catch late materialization, with zero added latency in the common non-racy case.
+
+## [11.37.0] - 2026-07-10
+
+### Fixed
+
+- **#1344**: Guard `BackgroundJobManager` job persistence so a stale out-of-lock `running` snapshot can no longer overwrite an already-terminal (`completed`/`completed_partial`/`failed`/`cancelled`) job row, on both the SQLite and PostgreSQL backends. This was a root cause of cancelled/killed jobs appearing to never leave the dashboard (the persisted row could revert to `running` after the worker's terminal write).
+- **#1345**: A user cancel during the CoW clone phase of activation (before branch-delta reindex) now cleans up the partial activated-repo clone directory, matching the existing reindex-phase cleanup.
+- **#1346**: User-initiated activation cancellations now log at INFO ("cancelled by user") instead of ERROR; genuine failures still log ERROR.
+- **#1348**: Extended the #1344 terminal-status guard to `JobTracker._upsert_job` (both its backend `update_job()` call and its raw SQLite `UPDATE`), closing the second, uncovered path to the same stale-`running`-revert race. Also fixed a `_TERMINAL_JOB_STATUSES` divergence in `JobTracker` (was missing `completed_partial`). Together with #1342 and #1344, this completes the fix for cancelled/killed jobs persisting on the dashboard across both in-memory and persisted-row read paths.
+
+## [11.36.0] - 2026-07-09
+
+### Fixed
+
+- **#1347**: The #1343 warn-only `git status --porcelain` sanity check in `ActivatedRepoManager._clone_with_copy_on_write` no longer false-warns on the expected untracked `.code-indexer/` index directory. Porcelain output includes untracked (`??`) entries, so `?? .code-indexer/` fired a WARNING on every activation and tripped the Phase 3 (server in-process) POST-E2E log-audit gate. The check now filters out untracked lines and warns only on tracked-file drift (which `git restore` could actually discard). Still warn-only; `git restore` is never invoked. No CoW-clone/`checkStat`/`preserve_attrs`/timeout behavior changed.
+
+## [11.35.0] - 2026-07-09
+
+### Fixed
+
+- **#1342**: Activation-job cancellation now actually terminates the running clone/index subprocess. Previously an unbounded blocking subprocess ignored user cancels and the dashboard left a zombie RUNNING job. A new cancellable subprocess helper (own process group; SIGTERM -> grace -> SIGKILL; stdout/stderr drained on daemon threads) plus a `cancel_check` callback threaded from `BackgroundJobManager` through the clone backend, branch-delta reindex, and the telemetry subprocess runner now kill the process group on cancel, best-effort clean up CoW-daemon leftovers, and mark the job CANCELLED cross-node (backend + dashboard). No wall-clock/job/per-file timeout added (Bug #1218 invariant); termination is user-cancel-driven only.
+- **#1343**: Activation CoW clone no longer re-hashes the whole tree. The clone now preserves file attributes and sets `git config --local core.checkStat minimal` so git treats CoW-copied files as clean, turning non-default-branch activation into a fast branch-delta reindex instead of a full re-index.
+
+## [11.34.0] - 2026-07-09
+
+### Fixed
+
+- **Permanent git-fetch errors no longer trigger an unbounded retry/re-clone flood (#1341).** A permanent GitLab `project you were looking for could not be found or you don't have permission` error also emits the generic `fatal: Could not read from remote repository.` line, which matched a TRANSIENT pattern — so `classify_fetch_error()` returned `transient` and the golden-repo refresh scheduler retried and auto-re-cloned the repo every cycle forever, flooding the logs. A `PERMANENT` category (project-not-found / no-permission / repository-not-found / `remote: Not Found`) is now checked before the transient patterns. On a permanent classification the scheduler no longer re-clones (cloning an inaccessible/nonexistent repo cannot succeed) but still retries the fetch later via **non-terminal exponential backoff** (base 5m, cap 6h); transient errors keep today's immediate-retry behavior below the threshold, then back off (cap 1h). The repo is NEVER removed from scheduling or quarantined — it keeps retrying at a slower cadence and recovers automatically if access is restored (a successful fetch resets to normal cadence). ERROR logging is throttled to power-of-two failure milestones, ending the flood. Transient auth/token-rotation blips (`HTTP Basic: Access denied` / `Authentication failed`) correctly remain transient.
+
+## [11.33.0] - 2026-07-09
+
+### Fixed
+
+- **Fresh cow-daemon cluster provisioning is now correct (#1337 completion).** A cluster node's `daemon_storage_path` is derived at startup from the NFS mount source of `mount_point` (`findmnt` / `/proc/mounts`; the export path after the host prefix, robust to hostname / IPv4 / bracketed-IPv6 forms) when it is empty — so NFS-client nodes self-configure (the co-located daemon config file only exists on the CoW host). The installer now provisions `activated-repos` as a node-aware symlink into the CoW storage (like `golden-repos`), so per-user reflink activation's DESTINATION also resolves on the CoW XFS. Startup placement validation is generalized to WARN (never disable `snapshot_manager`) for both `golden-repos` and `activated-repos`. No migration logic; the solo/local path (`clone_backend != cow-daemon`, i.e. production) is byte-for-byte unchanged. Together with the earlier v11.31.0/v11.32.0 work, per-user activation now works end-to-end on a cow-daemon cluster.
+- **Typed `OrphanedRepoError` replaces brittle error-message string matching (#1338).** #1336 detected orphaned golden aliases by matching raised error-message substrings across module boundaries, so a reworded message would silently re-break orphan-skip. A dedicated `OrphanedRepoError(ValueError)` is now raised only at the two orphaned-clone source sites (missing clone for a registered alias) and caught by type at both skip sites; other `ValueError`s (empty alias, bad path, real Claude/git failures) still propagate and fail the job. Message-drift-proof tests drive the real invoker/updater.
+- **Missing `wiki_article_views` SQLite migration (#1340).** Removing a golden repo logged an ERROR (`no such table: wiki_article_views`) on SQLite nodes where no wiki page had ever been viewed — the startup SQLite init created the other wiki tables but not this one (it was created eagerly for PostgreSQL, lazily for SQLite on first wiki route). An idempotent `CREATE TABLE IF NOT EXISTS` is now part of `DatabaseSchema.initialize_database` (additive, backward compatible, repairs existing DBs), so golden-repo removal no longer errors.
+
+## [11.32.0] - 2026-07-09
+
+### Fixed
+
+- **#1337 startup validation no longer disables snapshot_manager on NFS-mounted golden-repos (staging regression fix).** The v11.31.0 #1337 startup check raised `RuntimeError` (caught -> `snapshot_manager=None`) when `realpath(golden_repos_dir)` was not under the CoW `mount_point`/`daemon_storage_path`. On a real cow-daemon cluster golden-repos is an NFS mount of the CoW host's storage, and `os.path.realpath()` does not follow NFS mounts -> it returns the mount-point path, tripping the check even though the storage is correct and reflink-capable. That degraded per-user activation AND versioned snapshots on every NFS-client node. The not-under-root case now logs a prominent WARNING (with the exact symlink-migration remediation) and returns; `snapshot_manager` stays functional. Per-user activation still fails at translate time until golden-repos is symlinked into the CoW tree — surfaced by the warning, not by disabling snapshots server-wide. Installer/auto-updater symlink provisioning unchanged.
+
+## [11.31.0] - 2026-07-09
+
+### Fixed
+
+- **Per-user activation on the CoW-daemon cluster (#1337).** Per-user activation reflink-clones the golden repo, which requires the golden bytes to live on the CoW-managed filesystem; registration placed clones in a plain `<data>/golden-repos` dir outside the CoW mount, so `CowDaemonBackend` could not translate the path (`... is not under mount_point ... cannot translate to daemon view`). The installer AND the auto-updater (Step 14.7) now idempotently provision `golden-repos` as a node-aware symlink into the CoW storage (empty dir -> auto-convert; non-empty dir -> WARNING with exact migration steps, never moved unattended). Startup validation fails loud on a plain-dir misconfig but degrades (no worker crash) on a dangling symlink / NFS host down. Docs corrected: a plain bind mount gives query visibility but does NOT satisfy `realpath`-based daemon translation — a symlink (or a path physically under the CoW mount) is required.
+- **First-boot PG seed preserves bootstrap host/port/workers (#1335).** `ConfigService`'s first-boot PostgreSQL runtime seed gap-filled the now-runtime-only `host`/`port`/`workers` by re-reading an already-stripped `config.json`, always seeing them absent and falling back to an UNRELATED `cidx-server.service` systemd unit on the host (which flipped `should_use_secure_cookies` on a freshly provisioned node). The intent check now consults an in-memory bootstrap snapshot captured BEFORE the strip; only truly-absent values fall back to ExecStart. Makes the #1324 harness `SYSTEMD_UNIT_DIR` workaround unnecessary.
+- **Orphaned golden aliases are skipped, not fatal, in lifecycle_backfill / global_repo_refresh (#1336).** An orphaned alias (registry row present, on-disk clone absent) raised `ValueError` and failed the whole job. It is now skipped with a WARNING (narrow per-call-site catch; a genuine non-orphan `ValueError` still fails the job), so valid aliases process and the job succeeds. Orphan cleanup stays delegated to the #1317 reconciler. (Typed-exception hardening tracked as #1338.)
+- **Atomic token-bucket decrement eliminates cross-node rate-limit overshoot (#1334).** `TokenBucketManager._pg_consume` replaced its non-atomic SELECT-then-UPDATE with a single conditional `UPDATE` (refill+decrement inline; allow/deny read from `rowcount`). PostgreSQL EvalPlanQual re-evaluates the guard and SET against the winner's committed tuple, so simultaneous cross-node consumers on one key can no longer both pass at the boundary. Applies to both the auth login limiter and `PerConsumerRateLimiter`; refill semantics preserved; proven by a real-PG concurrency test (was 100/100 allowed, now strict capacity).
+
 ## [11.30.0] - 2026-07-09
 
 ### Fixed

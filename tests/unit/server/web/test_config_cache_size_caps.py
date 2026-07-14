@@ -545,3 +545,365 @@ def test_post_rejects_invalid_cap_value(
 
     # DB value must be unchanged — verified via round-trip from storage
     _assert_round_trip_db_value(tmpdir_path, config_attr, None)
+
+
+# ---------------------------------------------------------------------------
+# Bug #1396: blank memory_governor_swap_pswpin_red_threshold must not reject
+# the ENTIRE cache form when the admin only changed an unrelated field.
+# ---------------------------------------------------------------------------
+
+_SWAP_THRESHOLD_FIELD = "memory_governor_swap_pswpin_red_threshold"
+_SWAP_THRESHOLD_INVALID_FRAGMENT = (
+    "Memory Governor Swap Pswpin Red Threshold must be a valid integer"
+)
+_SWAP_THRESHOLD_DEFAULT = 100
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+def test_swap_threshold_blank_does_not_reject_unrelated_field_change(
+    tmpdir_path,
+    client,
+    admin_session,
+    cache_csrf_token,
+):
+    """Bug #1396 primary repro: an admin who only changed
+    index_cache_max_size_mb, leaving memory_governor_swap_pswpin_red_threshold
+    blank, must have BOTH the unrelated edit persisted AND the blank field fall
+    back to its documented default (100) -- not have the whole submission
+    rejected.
+    """
+    resp = _post_cache_form(
+        client,
+        admin_session,
+        cache_csrf_token,
+        {
+            _SWAP_THRESHOLD_FIELD: "",
+            "index_cache_max_size_mb": str(_EXPLICIT_CAP_MB),
+        },
+    )
+    assert resp.status_code == 200, f"POST failed: HTTP {resp.status_code}"
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    assert error_div_content == "", (
+        f"Blank swap threshold must not produce any validation error. "
+        f"Div content: {error_div_content!r}"
+    )
+
+    _assert_round_trip_db_value(
+        tmpdir_path, "index_cache_max_size_mb", _EXPLICIT_CAP_MB
+    )
+    _assert_round_trip_db_value(
+        tmpdir_path,
+        "memory_governor_swap_pswpin_red_threshold",
+        _SWAP_THRESHOLD_DEFAULT,
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+def test_swap_threshold_invalid_value_still_rejected(
+    client,
+    admin_session,
+    cache_csrf_token,
+):
+    """Regression: a genuinely invalid (non-numeric) swap threshold must still
+    be rejected with the existing validation message -- only blank/empty is
+    tolerated, not garbage input."""
+    resp = _post_cache_form(
+        client,
+        admin_session,
+        cache_csrf_token,
+        {_SWAP_THRESHOLD_FIELD: "abc"},
+    )
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    assert _SWAP_THRESHOLD_INVALID_FRAGMENT in error_div_content, (
+        f"Expected {_SWAP_THRESHOLD_INVALID_FRAGMENT!r} inside "
+        f"class='validation-error' div (HTTP {resp.status_code}). "
+        f"Div content: {error_div_content!r}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+def test_rendered_edit_form_swap_threshold_prepopulates_default_when_none(
+    client, admin_session
+):
+    """Bug #1396 remaining gap: get_all_settings() must include
+    memory_governor_swap_pswpin_red_threshold in its "cache" dict so the
+    template's `is none` guard (proven correct in isolation by
+    test_swap_threshold_template_prepopulates_default) actually fires at
+    render time.
+
+    Before the fix: the key is absent from get_all_settings()'s "cache"
+    dict entirely (unlike its sibling memory_governor_* fields, which are
+    all present). Jinja then sees Undefined (not None) for
+    config.cache.memory_governor_swap_pswpin_red_threshold; `Undefined is
+    none` evaluates False, so the `else` branch fires and the rendered
+    input's value attribute is "" instead of the documented default "100"
+    -- on a genuinely fresh DB (attribute never set, real None end-to-end).
+
+    This drives the REAL get_all_settings() call path via a live TestClient
+    GET /admin/config request, not a hand-built settings dict, so it
+    actually exercises the serialization gap rather than assuming it away.
+    """
+    resp = client.get("/admin/config", cookies=admin_session)
+    assert resp.status_code == 200
+    form_block = _edit_form_cache_block(resp.text)
+    context = _context_around(
+        form_block, _SWAP_THRESHOLD_FIELD, window=_INPUT_CONTEXT_WINDOW
+    )
+    match = re.search(
+        r'name="' + re.escape(_SWAP_THRESHOLD_FIELD) + r'"[^>]*value="([^"]*)"',
+        context,
+    )
+    assert match is not None, (
+        f"Could not find rendered value attribute for {_SWAP_THRESHOLD_FIELD!r} "
+        f"input. Context: {context!r}"
+    )
+    assert match.group(1) == str(_SWAP_THRESHOLD_DEFAULT), (
+        f"Expected rendered input value={str(_SWAP_THRESHOLD_DEFAULT)!r} when the "
+        f"DB value is None (fresh DB), got {match.group(1)!r}. This proves "
+        f"get_all_settings() must include memory_governor_swap_pswpin_red_threshold "
+        f"in its 'cache' dict so the template's `is none` guard actually fires."
+    )
+
+
+def test_swap_threshold_template_prepopulates_default(template_html):
+    """Bug #1396 Layer 3: unlike the size-cap fields (which render blank when
+    None), the swap-threshold input must pre-populate the literal default
+    (100) when the underlying config value is None -- for operator
+    visibility, belt-and-suspenders on top of the Layer 1/2 backend fix."""
+    form_block = _edit_form_cache_block(template_html)
+    context = _context_around(
+        form_block, _SWAP_THRESHOLD_FIELD, window=_INPUT_CONTEXT_WINDOW
+    )
+    guard_fragment = f"{_SWAP_THRESHOLD_FIELD} is none"
+    assert guard_fragment in context, (
+        f"Expected {guard_fragment!r} guard in swap-threshold input. "
+        f"Context: {context!r}"
+    )
+    guard_idx = context.find(guard_fragment)
+    after_guard = context[guard_idx : guard_idx + _INPUT_CONTEXT_WINDOW]
+    assert str(_SWAP_THRESHOLD_DEFAULT) in after_guard, (
+        f"Expected literal default {_SWAP_THRESHOLD_DEFAULT} pre-populated "
+        f"inside the 'is none' guard. Context: {after_guard!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1396 audit: TTL field group (index_cache_ttl_minutes,
+# fts_cache_ttl_minutes) must also tolerate blank -> documented default (10.0).
+# ---------------------------------------------------------------------------
+
+_TTL_FIELDS_ROUTE = [
+    pytest.param(
+        "index_cache_ttl_minutes", "Index Cache Ttl Minutes", 10.0, id="index_ttl"
+    ),
+    pytest.param("fts_cache_ttl_minutes", "Fts Cache Ttl Minutes", 10.0, id="fts_ttl"),
+]
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("field_name, error_label, expected_default", _TTL_FIELDS_ROUTE)
+def test_ttl_field_blank_does_not_reject_form(
+    tmpdir_path,
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Bug #1396 audit: blank TTL field must not reject the form; falls back
+    to the documented default (10.0)."""
+    resp = _post_cache_form(client, admin_session, cache_csrf_token, {field_name: ""})
+    assert resp.status_code == 200, f"POST failed: HTTP {resp.status_code}"
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    assert error_div_content == "", (
+        f"Blank {field_name} must not produce any validation error. "
+        f"Div content: {error_div_content!r}"
+    )
+
+    _assert_round_trip_db_value(tmpdir_path, field_name, expected_default)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("field_name, error_label, expected_default", _TTL_FIELDS_ROUTE)
+def test_ttl_field_invalid_still_rejected(
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Regression: non-numeric TTL value must still be rejected."""
+    resp = _post_cache_form(
+        client, admin_session, cache_csrf_token, {field_name: "abc"}
+    )
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    expected_fragment = f"{error_label} must be a valid number"
+    assert expected_fragment in error_div_content, (
+        f"Expected {expected_fragment!r} inside class='validation-error' div "
+        f"(HTTP {resp.status_code}). Div content: {error_div_content!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1396 audit: cleanup-interval field group (index_cache_cleanup_interval,
+# fts_cache_cleanup_interval) must also tolerate blank -> documented default (60).
+# ---------------------------------------------------------------------------
+
+_CLEANUP_INTERVAL_FIELDS_ROUTE = [
+    pytest.param(
+        "index_cache_cleanup_interval",
+        "Index Cache Cleanup Interval",
+        60,
+        id="index_cleanup",
+    ),
+    pytest.param(
+        "fts_cache_cleanup_interval", "Fts Cache Cleanup Interval", 60, id="fts_cleanup"
+    ),
+]
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "field_name, error_label, expected_default", _CLEANUP_INTERVAL_FIELDS_ROUTE
+)
+def test_cleanup_interval_field_blank_does_not_reject_form(
+    tmpdir_path,
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Bug #1396 audit: blank cleanup-interval field must not reject the
+    form; falls back to the documented default (60)."""
+    resp = _post_cache_form(client, admin_session, cache_csrf_token, {field_name: ""})
+    assert resp.status_code == 200, f"POST failed: HTTP {resp.status_code}"
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    assert error_div_content == "", (
+        f"Blank {field_name} must not produce any validation error. "
+        f"Div content: {error_div_content!r}"
+    )
+
+    _assert_round_trip_db_value(tmpdir_path, field_name, expected_default)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "field_name, error_label, expected_default", _CLEANUP_INTERVAL_FIELDS_ROUTE
+)
+def test_cleanup_interval_field_invalid_still_rejected(
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Regression: non-numeric cleanup-interval value must still be rejected."""
+    resp = _post_cache_form(
+        client, admin_session, cache_csrf_token, {field_name: "abc"}
+    )
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    expected_fragment = f"{error_label} must be a valid number"
+    assert expected_fragment in error_div_content, (
+        f"Expected {expected_fragment!r} inside class='validation-error' div "
+        f"(HTTP {resp.status_code}). Div content: {error_div_content!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1396 audit: payload cache field group (payload_preview_size_chars,
+# payload_max_fetch_size_chars, payload_cache_ttl_seconds,
+# payload_cleanup_interval_seconds) must also tolerate blank -> defaults.
+# ---------------------------------------------------------------------------
+
+_PAYLOAD_FIELDS_ROUTE = [
+    pytest.param(
+        "payload_preview_size_chars", "Payload Preview Size Chars", 2000, id="preview"
+    ),
+    pytest.param(
+        "payload_max_fetch_size_chars",
+        "Payload Max Fetch Size Chars",
+        5000,
+        id="max_fetch",
+    ),
+    pytest.param(
+        "payload_cache_ttl_seconds", "Payload Cache Ttl Seconds", 900, id="ttl"
+    ),
+    pytest.param(
+        "payload_cleanup_interval_seconds",
+        "Payload Cleanup Interval Seconds",
+        60,
+        id="cleanup",
+    ),
+]
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "field_name, error_label, expected_default", _PAYLOAD_FIELDS_ROUTE
+)
+def test_payload_field_blank_does_not_reject_form(
+    tmpdir_path,
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Bug #1396 audit: blank payload field must not reject the form; falls
+    back to the documented default."""
+    resp = _post_cache_form(client, admin_session, cache_csrf_token, {field_name: ""})
+    assert resp.status_code == 200, f"POST failed: HTTP {resp.status_code}"
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    assert error_div_content == "", (
+        f"Blank {field_name} must not produce any validation error. "
+        f"Div content: {error_div_content!r}"
+    )
+
+    _assert_round_trip_db_value(tmpdir_path, field_name, expected_default)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize(
+    "field_name, error_label, expected_default", _PAYLOAD_FIELDS_ROUTE
+)
+def test_payload_field_invalid_still_rejected(
+    client,
+    admin_session,
+    cache_csrf_token,
+    field_name,
+    error_label,
+    expected_default,
+):
+    """Regression: non-numeric payload field value must still be rejected."""
+    resp = _post_cache_form(
+        client, admin_session, cache_csrf_token, {field_name: "abc"}
+    )
+
+    error_div_content = _find_validation_error_div_content(resp.text)
+    expected_fragment = f"{error_label} must be a valid number"
+    assert expected_fragment in error_div_content, (
+        f"Expected {expected_fragment!r} inside class='validation-error' div "
+        f"(HTTP {resp.status_code}). Div content: {error_div_content!r}"
+    )

@@ -20,10 +20,13 @@ THINGS YOU MUST NOT DO:
    - FastAPI handles .well-known/* at root automatically
    - Creating a separate discovery_router will BREAK everything
 
-3. DO NOT add /.well-known/oauth-protected-resource endpoints
-   - MCP servers use WWW-Authenticate headers for resource metadata
-   - Protected resource discovery happens via 401 responses, not .well-known
-   - See src/code_indexer/server/auth/dependencies.py for WWW-Authenticate
+3. /.well-known/oauth-protected-resource IS REQUIRED - DO NOT REMOVE
+   - This endpoint already exists (see src/code_indexer/server/routers/inline_misc.py)
+   - It is required by the current MCP auth spec so clients (e.g. ChatGPT) can
+     locate the authorization server via WWW-Authenticate + protected-resource
+     metadata on a 401 response
+   - See src/code_indexer/server/auth/dependencies.py for the WWW-Authenticate
+     header that points clients at this endpoint's discovery_url
 
 4. DO NOT change the router prefix from "/oauth"
    - All OAuth endpoints (/register, /authorize, /token, /revoke) use this prefix
@@ -260,6 +263,7 @@ def get_authorize_form(
         "state": state,  # None is a valid value; template handles empty state gracefully
     }
     return templates.TemplateResponse(
+        request,
         "oauth_authorize_consent.html",
         template_context,
     )

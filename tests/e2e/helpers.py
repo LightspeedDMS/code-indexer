@@ -419,6 +419,49 @@ def run_cidx(
 
 
 # ---------------------------------------------------------------------------
+# CLI subprocess color-forcing env sanitization (Bug #1372)
+# ---------------------------------------------------------------------------
+
+
+def sanitize_cli_subprocess_env(env: dict[str, str]) -> dict[str, str]:
+    """Return a copy of ``env`` with color-forcing variables neutralized.
+
+    E2E tests spawn ``cidx`` as a real subprocess (via ``run_cidx``) and
+    parse its captured plain-text stdout (e.g. the ``^N. `` result-header
+    regex in ``tests/e2e/cli_standalone/test_02_query.py``). Rich (the
+    CLI's console library) normally auto-disables ANSI color when stdout
+    is not a TTY, but an explicit ``FORCE_COLOR`` env var in the ambient
+    shell that invoked pytest overrides that auto-detection and leaks
+    real ANSI escape codes into the captured output, breaking those
+    plain-text assertions/regexes (Bug #1372).
+
+    Setting ``FORCE_COLOR=0`` does NOT fix this: Rich's
+    ``Console.is_terminal`` treats any *present* value (including the
+    string ``"0"``) as "force terminal on" -- only an absent key or an
+    explicit empty string falls through to real TTY auto-detection
+    (verified against rich's ``console.py`` source and empirically). The
+    only reliable fix is removing the key entirely. ``NO_COLOR`` is also
+    set as a defense-in-depth signal for any other color-aware tooling
+    invoked transitively by the cidx subprocess.
+
+    This function is scoped purely to E2E test-harness subprocess
+    environment construction -- it does not alter the CLI's production
+    color-detection logic (``cli.py`` is untouched).
+
+    Args:
+        env: Source environment mapping. Not mutated.
+
+    Returns:
+        A new dict with FORCE_COLOR removed and NO_COLOR="1" set. All
+        other keys/values are passed through unchanged.
+    """
+    sanitized = dict(env)
+    sanitized.pop("FORCE_COLOR", None)
+    sanitized["NO_COLOR"] = "1"
+    return sanitized
+
+
+# ---------------------------------------------------------------------------
 # Authentication helper
 # ---------------------------------------------------------------------------
 

@@ -97,7 +97,7 @@ inputSchema:
       description: "Competitive mode: number of parallel approaches (2-10, default 3)."
     min_success_threshold:
       type: integer
-      description: "Competitive mode: minimum successful approaches needed (1 to approach_count, default 3)."
+      description: "Competitive mode: minimum successful approaches needed (1 to approach_count). Optional -- if omitted, CIDX applies no default and does not send this field to Claude Server at all; Claude Server then applies its own default. Range validation (1 to approach_count) only occurs when a value is explicitly provided."
     approach_timeout_seconds:
       type: integer
       description: "Competitive mode: timeout per approach in seconds."
@@ -200,7 +200,7 @@ COMPETITIVE MODE DETAILS:
 - engines: List of engines that will compete on the task
 - distribution_strategy: "round-robin" distributes evenly, "decomposer-decides" lets decomposer choose
 - approach_count: Number of parallel approaches (2-10, default 3)
-- min_success_threshold: Minimum approaches that must succeed (default: approach_count)
+- min_success_threshold: Minimum approaches that must succeed. Optional -- CIDX applies no default of its own; if omitted, the field is not sent to Claude Server, which then applies its own default. Validated (1 to approach_count) only when explicitly provided.
 - decomposer/judge: Optional engine config for decomposition and judging steps
 
 REPOSITORY READINESS:

@@ -59,6 +59,17 @@ class HealthCheckResult(BaseModel):
     max_inbound: Optional[int] = Field(
         None, description="Maximum incoming connections across nodes"
     )
+    orphan_count: Optional[int] = Field(
+        None,
+        description=(
+            "Number of zero-inbound-connection (orphan) nodes detected by "
+            "check_integrity(). Zero-tolerance binary status (Story #1359 "
+            "AC4): orphan_count == 0 is OK, any orphan_count > 0 is ERROR "
+            "(reflected in `valid`) -- there is no intermediate WARNING tier "
+            "and no configurable threshold. Every orphan is real, current "
+            "recall loss on the core query product."
+        ),
+    )
 
     # File metadata
     index_path: str = Field(description="Path to index file")
@@ -283,7 +294,10 @@ class HNSWHealthService:
 
         # Level 4: Integrity check
         try:
+            from code_indexer.storage.hnsw_index_manager import count_orphan_errors
+
             integrity_result = index.check_integrity()
+            orphan_count = count_orphan_errors(integrity_result)
 
             elapsed_ms = (time.time() - start_time) * 1000
 
@@ -297,6 +311,7 @@ class HNSWHealthService:
                 connections_checked=integrity_result["connections_checked"],
                 min_inbound=integrity_result["min_inbound"],
                 max_inbound=integrity_result["max_inbound"],
+                orphan_count=orphan_count,
                 index_path=index_path,
                 file_size_bytes=file_size,
                 last_modified=file_mtime,
@@ -370,6 +385,90 @@ class HNSWHealthService:
             self._cache[index_path] = _CachedResult(
                 result=result, cached_at=time.time(), file_mtime=file_mtime
             )
+
+
+def check_health_batch(
+    service: HNSWHealthService,
+    index_paths: List[str],
+    *,
+    force_refresh: bool = False,
+    max_workers: int = 4,
+) -> Dict[str, HealthCheckResult]:
+    """
+    Check health of multiple HNSW indexes with bounded concurrency.
+
+    Bug #1394: GET /api/repositories/{alias}/health iterated every collection
+    serially inside an `async def` route, blocking the event loop for the
+    full duration (on repos with dozens of temporal shards this exceeds the
+    reverse-proxy timeout -> HTTP 504). This helper runs the checks across a
+    small, dedicated ThreadPoolExecutor instead of unbounded parallelism --
+    each hnswlib load_index() transiently holds a whole shard in RAM
+    (~900MB observed on large quarterly shards), so max_workers defaults to
+    a deliberately small 4.
+
+    Each collection's check is fully isolated: if check_health() raises for
+    one path, that failure is caught and synthesized into an error
+    HealthCheckResult for THAT path only. No exception from any single
+    path's check is allowed to propagate out of this function or affect any
+    other path's result.
+
+    Args:
+        service: HNSWHealthService instance to use for each check.
+        index_paths: List of HNSW index file paths to check.
+        force_refresh: If True, bypass cache for every check.
+        max_workers: Maximum number of concurrent health checks (default: 4).
+
+    Returns:
+        Dict mapping index_path -> HealthCheckResult, one entry per input
+        path (no particular ordering guarantee -- it's a dict, not a list).
+
+    Raises:
+        ValueError: If index_paths is None or max_workers < 1.
+    """
+    if index_paths is None:
+        raise ValueError("index_paths must not be None")
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1, got {max_workers}")
+
+    results: Dict[str, HealthCheckResult] = {}
+    if not index_paths:
+        return results
+
+    def _check_one(index_path: str) -> HealthCheckResult:
+        start_time = time.time()
+        try:
+            return service.check_health(index_path, force_refresh)
+        except Exception as exc:
+            elapsed_ms = (time.time() - start_time) * 1000
+            file_exists = False
+            try:
+                file_exists = os.path.exists(index_path)
+            except Exception:
+                file_exists = False
+            logger.warning(
+                "check_health_batch: health check raised for %s: %s",
+                index_path,
+                exc,
+            )
+            return HealthCheckResult(  # type: ignore[call-arg]
+                valid=False,
+                file_exists=file_exists,
+                readable=False,
+                loadable=False,
+                index_path=index_path,
+                errors=[f"Health check raised: {exc}"],
+                check_duration_ms=elapsed_ms,
+            )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {
+            executor.submit(_check_one, path): path for path in index_paths
+        }
+        for future in future_to_path:
+            path = future_to_path[future]
+            results[path] = future.result()
+
+    return results
 
 
 async def check_health_async(

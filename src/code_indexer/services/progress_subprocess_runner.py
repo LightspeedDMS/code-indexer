@@ -41,7 +41,31 @@ import threading
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from code_indexer.storage.hnsw_index_manager import HNSW_ORPHAN_REPAIR_MARKER
+
 logger = logging.getLogger(__name__)
+
+_HNSW_ORPHAN_MARKER_PREFIX = HNSW_ORPHAN_REPAIR_MARKER + ":"
+
+
+def _forward_hnsw_orphan_events(
+    stderr_text: str, callback: Optional[Callable[[str], None]]
+) -> None:
+    """Bug #1388: scan a subprocess's captured stderr text for
+    HNSW_ORPHAN_REPAIR_MARKER-prefixed lines and forward each one, verbatim,
+    to `callback`. This is a channel entirely separate from the percentage
+    `progress_callback`/`_emit` machinery below -- it is never subject to
+    the monotonic high-water-mark suppression, so it survives even when the
+    percentage channel would drop a same-moment event (see module/class
+    docstrings on `_emit` and `HNSW_ORPHAN_REPAIR_MARKER` for the full
+    rationale). A no-op when callback is None (default: most callers don't
+    care about this event).
+    """
+    if callback is None:
+        return
+    for line in stderr_text.splitlines():
+        if line.startswith(_HNSW_ORPHAN_MARKER_PREFIX):
+            callback(line)
 
 
 def _get_fd(stream) -> "Optional[int]":
@@ -161,6 +185,7 @@ def run_with_popen_progress(
     error_label: Optional[str] = None,
     last_reported: Optional[int] = None,
     env: Optional[dict] = None,
+    orphan_event_callback: Optional[Callable[[str], None]] = None,
 ) -> int:
     """
     Run a command with Popen, reading JSON progress lines from stdout.
@@ -199,6 +224,18 @@ def run_with_popen_progress(
                        (no suppression). Returns the highest value reported this call.
         env: Optional environment dict passed to subprocess.Popen. If None,
              the subprocess inherits the current process environment.
+        orphan_event_callback: Optional callable(line: str) for Bug #1388
+             HNSW orphan-repair marker lines. This is a channel entirely
+             separate from progress_callback/_emit -- it is NEVER subject
+             to the monotonic high-water-mark suppression described above,
+             because that percentage channel silently drops a same-moment
+             total=0 event once the phase is nearly complete (the root
+             cause of the first, rejected #1388 fix attempt). The
+             subprocess's captured stderr is scanned for
+             HNSW_ORPHAN_REPAIR_MARKER-prefixed lines after it exits, and
+             each matching line is forwarded verbatim to this callback.
+             Defaults to None (no-op; most callers don't care about this
+             event).
 
     Returns:
         The highest progress value reported during this call (or last_reported if
@@ -278,6 +315,7 @@ def run_with_popen_progress(
         if process.stderr is not None:
             stderr_output = "".join(process.stderr.readlines())
         all_stderr.append(stderr_output)
+        _forward_hnsw_orphan_events(stderr_output, orphan_event_callback)
 
         process.wait()
 
@@ -507,6 +545,7 @@ def run_with_popen_progress(
 
     stderr_output = "".join(stderr_lines)
     all_stderr.append(stderr_output)
+    _forward_hnsw_orphan_events(stderr_output, orphan_event_callback)
 
     if process.returncode != 0:
         stdout_output = "".join(all_stdout)

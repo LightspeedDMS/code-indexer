@@ -55,7 +55,34 @@ class TestPswpinRateDelta:
     """§3.1 — swap-IN rate is a DELTA per sample, not an absolute counter."""
 
     def test_delta_positive_forces_red(self, MemoryGovernor, MemoryBand):
-        """pswpin increases between samples => band forced to RED."""
+        """pswpin increases between samples at/above yellow_pct usage => band
+        forced to RED (Bug #1374: swap alone is no longer sufficient — the
+        host must also be at/above the YELLOW watermark, i.e. genuine memory
+        pressure corroborated by swap-in activity).
+        """
+        # Comfortably above yellow_pct (not the exact boundary, which is
+        # covered precisely by test_governor_swap_used_pct_corroboration_1374.py)
+        # to avoid int()-truncation epsilon issues.
+        yellow_pressure_used = int(DEFAULT_HOST_TOTAL * (YELLOW_PCT + 5.0) / 100.0)
+        readers = FakeMemoryReaders(
+            host_total=DEFAULT_HOST_TOTAL,
+            host_used=yellow_pressure_used,
+            pswpin=PSWPIN_BASELINE,
+        )
+        gov = _swap_gov(readers, MemoryGovernor, swap_forces_red=True)
+        gov._tick()  # baseline established
+        readers.pswpin = PSWPIN_AFTER_SWAP_ACTIVITY  # delta > 0
+        gov._tick()
+
+        assert gov.band == MemoryBand.RED
+
+    def test_delta_positive_at_low_used_pct_does_not_force_red(
+        self, MemoryGovernor, MemoryBand
+    ):
+        """Bug #1374 regression guard: at the default 25% used_pct fixture
+        (well below yellow_pct=70), a swap-in delta >= threshold must NOT
+        force RED — used_pct corroboration is required.
+        """
         readers = FakeMemoryReaders(
             host_total=DEFAULT_HOST_TOTAL,
             host_used=DEFAULT_HOST_USED,
@@ -66,7 +93,7 @@ class TestPswpinRateDelta:
         readers.pswpin = PSWPIN_AFTER_SWAP_ACTIVITY  # delta > 0
         gov._tick()
 
-        assert gov.band == MemoryBand.RED
+        assert gov.band == MemoryBand.GREEN
 
     def test_stable_high_absolute_does_not_force_red(self, MemoryGovernor, MemoryBand):
         """High absolute pswpin with zero delta must NOT force RED."""

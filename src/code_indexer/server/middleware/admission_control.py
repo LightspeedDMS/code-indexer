@@ -107,10 +107,11 @@ class PerConsumerRateLimiter:
       (never the auth login-limiter's ``token_bucket_state``, which would
       co-mingle hashed non-identity keys with real usernames), so ALL
       workers/nodes sharing that pool consume from the SAME row. One consumer
-      is bounded by the configured rate fleet-wide; a small transient
-      overshoot is possible under simultaneous cross-node bursts (the PG path
-      is SELECT-then-UPDATE under a per-process lock, not a single atomic
-      decrement -- same mechanism as the auth login limiter).
+      is STRICTLY bounded by the configured rate fleet-wide with ZERO
+      overshoot possible under simultaneous cross-node bursts (Bug #1334: the
+      PG path is a single atomic conditional ``UPDATE ... WHERE ...``
+      decrement -- not the old non-atomic read-then-write pattern -- so there
+      is no race window; same mechanism as the auth login limiter).
     * **No pool attached** (solo/SQLite, or cluster mode before wiring) —
       buckets are per-process in-memory. Each worker process enforces the
       configured rate independently, so the real effective rate across N
@@ -142,11 +143,12 @@ class PerConsumerRateLimiter:
         real effective rate is ``configured x workers x nodes`` -- NOT the
         configured rate. When a pool is attached (cluster/postgres mode),
         all workers/nodes sharing the pool consume from the SAME row in
-        ``consumer_rate_limit_state``, so the configured rate bounds one
-        consumer fleet-wide (a small transient overshoot is possible under
-        simultaneous cross-node bursts -- same SELECT-then-UPDATE mechanism
-        as the auth login limiter). In solo/SQLite mode no pool is attached
-        and per-process buckets are correct (there is only one process).
+        ``consumer_rate_limit_state``, so the configured rate STRICTLY
+        bounds one consumer fleet-wide with ZERO overshoot (Bug #1334: a
+        single atomic conditional ``UPDATE ... WHERE ...`` decrement -- not
+        the old non-atomic read-then-write pattern -- same mechanism as the
+        auth login limiter). In solo/SQLite mode no pool is attached and
+        per-process buckets are correct (there is only one process).
         """
         self._manager.set_connection_pool(pool)
 

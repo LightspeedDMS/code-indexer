@@ -137,47 +137,80 @@ class TokenBucketManager:
         conn.commit()
 
     def _pg_consume(self, username: str) -> Tuple[bool, float]:
-        """PG consume: ensure row, refill, decrement by _TOKEN_COST if available.
+        """PG consume: ensure row, then atomically refill-and-decrement in a
+        single conditional UPDATE (Bug #1334) -- no SELECT-then-UPDATE race
+        window.
+
+        PostgreSQL's row-level MVCC locking for a single-table UPDATE whose
+        SET/WHERE expressions reference only the row's own ``tokens``/
+        ``last_refill`` columns guarantees those expressions are (re-)
+        evaluated against the latest committed tuple for any transaction
+        that must wait on the row lock (EvalPlanQual re-check under READ
+        COMMITTED): two concurrent callers on the same key can never both
+        observe "sufficient tokens" and both decrement -- the loser's
+        UPDATE re-evaluates its WHERE clause against the winner's
+        already-committed (decremented) value. ``cur.rowcount`` reports
+        whether the WHERE clause matched: 1 => allowed and decremented
+        atomically; 0 => insufficient tokens even after refill => denied.
+        No ``RETURNING`` clause is needed since only the allow/deny outcome
+        is consumed. The inline refill expression
+        ``LEAST(capacity, tokens + GREATEST(0, now - last_refill) *
+        refill_rate)`` mirrors ``TokenBucket._refill()``'s Python arithmetic
+        exactly (elapsed-time refill, capacity clamp).
 
         Called under self._lock. Returns (allowed, retry_after_seconds).
         """
         assert self._pool is not None
         now = time.time()
+        capacity = float(self.capacity)
+        refilled_expr = "LEAST(%s, tokens + GREATEST(0, %s - last_refill) * %s)"
         with self._pool.connection() as conn:
             self._pg_ensure_row(conn, username, now)
+            cur = conn.execute(
+                f"UPDATE {self._table_name} "
+                f"SET tokens = {refilled_expr} - %s, "
+                "last_refill = %s, last_access = %s "
+                f"WHERE {self._key_column} = %s "
+                f"AND {refilled_expr} >= %s",
+                (
+                    capacity,
+                    now,
+                    self.refill_rate,
+                    _TOKEN_COST,
+                    now,
+                    now,
+                    username,
+                    capacity,
+                    now,
+                    self.refill_rate,
+                    _TOKEN_COST,
+                ),
+            )
+            conn.commit()
+            if cur.rowcount == 1:
+                return True, 0.0
+
+            # Denied: the atomic UPDATE above already made the decision (its
+            # WHERE clause matched zero rows). This read is advisory only --
+            # it computes a Retry-After hint and cannot reopen the race
+            # window, since no decision is made from it.
             cursor_kwargs: dict = {}
             if _psycopg_tuple_row is not None:
                 cursor_kwargs["row_factory"] = _psycopg_tuple_row
-            with conn.cursor(**cursor_kwargs) as cur:
-                cur.execute(
+            with conn.cursor(**cursor_kwargs) as read_cur:
+                read_cur.execute(
                     f"SELECT tokens, last_refill FROM {self._table_name} "
                     f"WHERE {self._key_column} = %s",
                     (username,),
                 )
-                row = cur.fetchone()
-            if row is None:
-                tokens, last_refill = float(self.capacity), now
+                current = read_cur.fetchone()
+            if current is None:
+                tokens_now = 0.0
             else:
-                tokens, last_refill = row[0], row[1]
-            elapsed = max(0.0, now - last_refill)
-            tokens = min(float(self.capacity), tokens + elapsed * self.refill_rate)
-            if tokens >= _TOKEN_COST:
-                conn.execute(
-                    f"UPDATE {self._table_name} "
-                    "SET tokens = %s, last_refill = %s, last_access = %s "
-                    f"WHERE {self._key_column} = %s",
-                    (tokens - _TOKEN_COST, now, now, username),
-                )
-                conn.commit()
-                return True, 0.0
-            conn.execute(
-                f"UPDATE {self._table_name} "
-                "SET tokens = %s, last_refill = %s, last_access = %s "
-                f"WHERE {self._key_column} = %s",
-                (tokens, now, now, username),
-            )
-            conn.commit()
-            needed = max(0.0, _TOKEN_COST - tokens)
+                tokens_stored, last_refill_stored = current[0], current[1]
+                elapsed = max(0.0, now - last_refill_stored)
+                tokens_now = min(capacity, tokens_stored + elapsed * self.refill_rate)
+            needed = max(0.0, _TOKEN_COST - tokens_now)
             retry_after = (
                 needed / self.refill_rate if self.refill_rate > 0 else float("inf")
             )

@@ -411,6 +411,27 @@ class DatabaseSchema:
         )
     """
 
+    # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep durable
+    # cursor + pass-stats table (singleton row, id=1). last_completed_key is
+    # a STRING stable sort key (never a numeric offset) -- see
+    # SweepCandidate.sort_key in hnsw_orphan_sweep/discovery.py for why.
+    CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE = """
+        CREATE TABLE IF NOT EXISTS hnsw_orphan_sweep_state (
+            id INTEGER PRIMARY KEY,
+            pass_id INTEGER NOT NULL DEFAULT 1,
+            last_completed_key TEXT,
+            pass_started_at TEXT,
+            pass_indexes_checked INTEGER NOT NULL DEFAULT 0,
+            pass_orphaned_found INTEGER NOT NULL DEFAULT 0,
+            pass_repaired INTEGER NOT NULL DEFAULT 0,
+            pass_errors INTEGER NOT NULL DEFAULT 0,
+            pass_transient_skips INTEGER NOT NULL DEFAULT 0,
+            last_full_pass_completed_at TEXT,
+            total_orphans_repaired_lifetime INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        )
+    """
+
     # Story #283: Wiki render cache tables
     CREATE_WIKI_CACHE_TABLE = """
         CREATE TABLE IF NOT EXISTS wiki_cache (
@@ -431,6 +452,22 @@ class DatabaseSchema:
             sidebar_json TEXT NOT NULL,
             max_mtime REAL NOT NULL,
             built_at TEXT NOT NULL
+        )
+    """
+
+    # Story #287 / Bug #1340: wiki article view-count tracking table DDL.
+    # Used by a new _migrate_wiki_article_views_table() migration method
+    # (added next, invoked from initialize_database()'s migration block)
+    # so the table exists at every server startup instead of only being
+    # created lazily on the first wiki HTTP route hit.
+    CREATE_WIKI_ARTICLE_VIEWS_TABLE = """
+        CREATE TABLE IF NOT EXISTS wiki_article_views (
+            repo_alias TEXT NOT NULL,
+            article_path TEXT NOT NULL,
+            real_views INTEGER DEFAULT 0,
+            first_viewed_at TIMESTAMP,
+            last_viewed_at TIMESTAMP,
+            PRIMARY KEY (repo_alias, article_path)
         )
     """
 
@@ -800,6 +837,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_DESCRIPTION_REFRESH_TRACKING_TABLE)
             # Story #192: Dependency Map Tracking
             conn.execute(self.CREATE_DEPENDENCY_MAP_TRACKING_TABLE)
+            # Story #1360 (Epic #1333 S3): HNSW orphan repair fleet sweep state
+            conn.execute(self.CREATE_HNSW_ORPHAN_SWEEP_STATE_TABLE)
             # Story #283: Wiki render cache tables
             conn.execute(self.CREATE_WIKI_CACHE_TABLE)
             conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
@@ -868,6 +907,9 @@ class DatabaseSchema:
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
             self._migrate_wiki_cache_tables(conn)
+            # Story #287 / Bug #1340: wiki_article_views must exist at
+            # startup, not only after the first wiki HTTP route hit.
+            self._migrate_wiki_article_views_table(conn)
             # Epic #261: JobTracker schema additions
             self._migrate_background_jobs_job_tracker(conn)
             # Bug fix: Add current_phase and phase_detail columns for progress persistence
@@ -1322,6 +1364,23 @@ class DatabaseSchema:
         """
         conn.execute(self.CREATE_WIKI_CACHE_TABLE)
         conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
+        conn.commit()
+
+    def _migrate_wiki_article_views_table(self, conn: sqlite3.Connection) -> None:
+        """Create the wiki_article_views table for existing databases (Story #287, Bug #1340).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+
+        Previously this table was created ONLY lazily via
+        WikiCache.ensure_tables(), invoked exclusively from the first wiki
+        HTTP route hit. Registering the creation here guarantees the table
+        exists at every server startup, so the golden-repo-removal wiki
+        cleanup hook (which constructs its own WikiCache without ever
+        calling ensure_tables()) does not fail with "no such table:
+        wiki_article_views" when a golden repo is removed before any wiki
+        page has ever been viewed on that node/process.
+        """
+        conn.execute(self.CREATE_WIKI_ARTICLE_VIEWS_TABLE)
         conn.commit()
 
     def _migrate_server_config_table(self, conn: sqlite3.Connection) -> None:

@@ -16,7 +16,11 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.services.hnsw_health_service import HNSWHealthService
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.services.repository_health_aggregator import (
+    compute_repository_health,
+    get_shared_health_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,15 @@ class HealthCheckResponse(BaseModel):
     collections: List[Dict[str, Any]] = Field(
         description="Per-collection health details"
     )
+
+
+class HealthCheckJobResponse(BaseModel):
+    """Response for POST /api/activated-repos/{user_alias}/health/check (Bug #1394)."""
+
+    job_id: str = Field(
+        description="Background job ID to poll via GET /api/jobs/{job_id}"
+    )
+    message: str = Field(description="Human-readable submission confirmation")
 
 
 class SyncRequest(BaseModel):
@@ -588,93 +601,27 @@ async def get_health(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Run health check
-        health_service = HNSWHealthService()
+        # Bug #1394: shared aggregator (bounded-concurrency batch checks +
+        # per-collection exception isolation), reusing the SAME shared
+        # HNSWHealthService singleton the golden-repo health router uses
+        # instead of building a fresh, cache-less instance per request.
         index_dir = repo_path_obj / ".code-indexer" / "index"
+        result = compute_repository_health(
+            user_alias,
+            index_dir,
+            get_shared_health_service(),
+            force_refresh=False,
+        )
 
-        # Check if index directory exists
-        if not index_dir.exists():
-            return HealthCheckResponse(
-                user_alias=user_alias,
-                overall_healthy=True,
-                status="healthy",
-                total_collections=0,
-                healthy_count=0,
-                unhealthy_count=0,
-                collections=[],
-            )
-
-        # Iterate through collection directories
-        collections: List[Dict[str, Any]] = []
-
-        for collection_dir in index_dir.iterdir():
-            if not collection_dir.is_dir():
-                continue
-
-            hnsw_file = collection_dir / "hnsw_index.bin"
-            if not hnsw_file.exists():
-                continue
-
-            collection_name = collection_dir.name
-
-            # Determine index type from collection name
-            if "temporal" in collection_name.lower():
-                index_type = "temporal"
-            elif "multimodal" in collection_name.lower():
-                index_type = "multimodal"
-            else:
-                index_type = "semantic"
-
-            # Perform health check for this collection
-            health_result = health_service.check_health(
-                index_path=str(hnsw_file),
-                force_refresh=False,
-            )
-
-            # Convert to collection health dict
-            collection_health = {
-                "collection_name": collection_name,
-                "index_type": index_type,
-                "valid": health_result.valid,
-                "file_exists": health_result.file_exists,
-                "readable": health_result.readable,
-                "loadable": health_result.loadable,
-                "element_count": health_result.element_count,
-                "connections_checked": health_result.connections_checked,
-                "min_inbound": health_result.min_inbound,
-                "max_inbound": health_result.max_inbound,
-                "file_size_bytes": health_result.file_size_bytes,
-                "errors": health_result.errors,
-                "check_duration_ms": health_result.check_duration_ms,
-            }
-            collections.append(collection_health)
-
-        # If no collections found, return empty result
-        if not collections:
-            return HealthCheckResponse(
-                user_alias=user_alias,
-                overall_healthy=True,
-                status="healthy",
-                total_collections=0,
-                healthy_count=0,
-                unhealthy_count=0,
-                collections=[],
-            )
-
-        # Aggregate results
-        healthy_count = sum(1 for c in collections if c["valid"])
-        unhealthy_count = len(collections) - healthy_count
-        overall_healthy = unhealthy_count == 0
-        health_status = "healthy" if overall_healthy else "unhealthy"
-
+        health_status = "healthy" if result.overall_healthy else "unhealthy"
         return HealthCheckResponse(
             user_alias=user_alias,
-            overall_healthy=overall_healthy,
+            overall_healthy=result.overall_healthy,
             status=health_status,
-            total_collections=len(collections),
-            healthy_count=healthy_count,
-            unhealthy_count=unhealthy_count,
-            collections=collections,
+            total_collections=result.total_collections,
+            healthy_count=result.healthy_count,
+            unhealthy_count=result.unhealthy_count,
+            collections=[c.model_dump() for c in result.collections],
         )
 
     except HTTPException:
@@ -684,6 +631,104 @@ async def get_health(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to check health: {str(e)}",
+        )
+
+
+@router.post(
+    "/{user_alias}/health/check",
+    response_model=HealthCheckJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Health check job started"},
+        404: {"description": "Activated repository not found"},
+        409: {
+            "description": "A health check job is already running for this repository"
+        },
+        500: {"description": "Failed to start health check job"},
+    },
+)
+async def check_activated_repo_health_async(
+    user_alias: str,
+    force_refresh: bool = Query(
+        default=False, description="Bypass cache and perform fresh check"
+    ),
+    current_user: User = Depends(get_current_user_hybrid),
+) -> HealthCheckJobResponse:
+    """
+    Submit a background job to check HNSW index health for an activated repo.
+
+    Bug #1394: unlike GET /{user_alias}/health (which runs synchronously and
+    can exceed the reverse-proxy timeout on repositories with dozens of
+    temporal shards), this endpoint submits a background job and returns
+    immediately with a job_id to poll via GET /api/jobs/{job_id}. The job's
+    result is the canonical RepositoryHealthResult shape (NOT the legacy
+    HealthCheckResponse wrapper the synchronous GET endpoint returns), since
+    nothing currently depends on the job's result shape and this keeps
+    renderHealthIndicator/renderHealthDetails on the frontend working
+    unmodified.
+
+    Args:
+        user_alias: User's alias for the activated repository
+        force_refresh: If True, bypass cache and perform fresh check
+        current_user: Authenticated user (injected by auth dependency)
+
+    Returns:
+        HealthCheckJobResponse with job_id to poll
+
+    Raises:
+        HTTPException 404: Repository not found
+        HTTPException 409: A health check job is already running for this repo
+        HTTPException 500: Failed to start health check job
+    """
+    try:
+        activated_manager = _get_activated_repo_manager()
+        repo_path = activated_manager.get_activated_repo_path(
+            current_user.username, user_alias
+        )
+
+        repo_path_obj = Path(repo_path)
+        if not repo_path_obj.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Activated repository '{user_alias}' not found",
+            )
+
+        index_dir = repo_path_obj / ".code-indexer" / "index"
+        background_job_manager = _get_background_job_manager()
+
+        def health_check_job() -> dict:
+            result = compute_repository_health(
+                user_alias,
+                index_dir,
+                get_shared_health_service(),
+                force_refresh=force_refresh,
+            )
+            return result.model_dump()  # type: ignore[no-any-return]
+
+        job_id = background_job_manager.submit_job(
+            "activated_repo_health_check",
+            health_check_job,
+            submitter_username=current_user.username,
+            repo_alias=user_alias,
+        )
+
+        return HealthCheckJobResponse(
+            job_id=job_id,
+            message="Health check job started",
+        )
+
+    except HTTPException:
+        raise
+    except DuplicateJobError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Failed to start health check job for {user_alias}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start health check job: {str(e)}",
         )
 
 

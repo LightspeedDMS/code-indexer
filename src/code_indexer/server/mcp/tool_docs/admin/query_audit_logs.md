@@ -28,7 +28,7 @@ inputSchema:
   required: []
 ---
 
-Query security audit logs with optional filtering (admin only). Returns audit log entries for authentication, authorization, and administrative actions.
+Query security audit logs with optional filtering (admin only). Requires MCP elevation (TOTP step-up). Returns audit log entries for authentication, authorization, and administrative actions.
 
 USE CASES:
 - Investigate security incidents
@@ -47,3 +47,7 @@ RETURNS:
 - entries: Array of audit log entries with timestamp, user, action, resource, and details fields
 
 PERMISSIONS: Requires manage_users (admin only).
+
+ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)

@@ -905,6 +905,164 @@ class TestStreamableHTTPTransport:
         finally:
             app.dependency_overrides.clear()
 
+    def test_post_mcp_uses_header_session_id(self):
+        """Bug #1354: POST /mcp must echo back the Mcp-Session-Id REQUEST header
+        (per MCP Streamable HTTP transport spec) instead of always minting a
+        fresh UUID."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            sent_session_id = "client-supplied-session-abc123"
+            response = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+                headers={"Mcp-Session-Id": sent_session_id},
+            )
+
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            )
+            assert response.headers["mcp-session-id"] == sent_session_id, (
+                "Expected the response to echo back the request's Mcp-Session-Id "
+                f"header ({sent_session_id!r}), got {response.headers['mcp-session-id']!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_uses_query_param_session_id_when_no_header(self):
+        """Bug #1354: existing query-param fallback must be preserved when no
+        Mcp-Session-Id header is sent."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            query_session_id = "query-param-session-xyz789"
+            response = client.post(
+                f"/mcp?session_id={query_session_id}",
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+            )
+
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            )
+            assert response.headers["mcp-session-id"] == query_session_id, (
+                "Expected the response to echo back the session_id query param "
+                f"({query_session_id!r}) when no header is sent, got "
+                f"{response.headers['mcp-session-id']!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_mints_new_session_id_when_neither_present(self):
+        """Bug #1354: when neither header nor query param is present, a fresh
+        UUID must still be minted (existing new-session behavior preserved)."""
+        import uuid
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            response = client.post(
+                "/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+            )
+
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            )
+            session_id = response.headers["mcp-session-id"]
+            assert len(session_id) > 0, "Session ID should not be empty"
+
+            # Must be a valid UUID (new-session minting behavior preserved)
+            uuid.UUID(session_id)
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_header_takes_priority_over_query_param(self):
+        """Bug #1354: when BOTH header and query param are present with
+        different values, the header must win (priority order)."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            header_session_id = "header-wins-session-111"
+            query_session_id = "query-loses-session-222"
+            response = client.post(
+                f"/mcp?session_id={query_session_id}",
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+                headers={"Mcp-Session-Id": header_session_id},
+            )
+
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            )
+            assert response.headers["mcp-session-id"] == header_session_id, (
+                "Expected the header value to take priority over the query "
+                f"param when both are present, got "
+                f"{response.headers['mcp-session-id']!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
     def test_get_mcp_with_invalid_bearer_token_returns_401(self):
         """Test GET /mcp returns 401 for invalid Bearer token."""
         from fastapi.testclient import TestClient

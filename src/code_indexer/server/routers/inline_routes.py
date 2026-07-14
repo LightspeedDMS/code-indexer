@@ -61,6 +61,7 @@ from ..routers.repository_health import router as repository_health_router
 from ..routers.activated_repos import router as activated_repos_router
 from ..routers.provider_indexes import router as provider_indexes_router
 from ..routers.admin_provider_health import router as admin_provider_health_router
+from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_router
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -274,6 +275,7 @@ def register_inline_routes(
     app.include_router(activated_repos_router)
     app.include_router(provider_indexes_router)
     app.include_router(admin_provider_health_router)
+    app.include_router(hnsw_orphan_sweep_admin_router)  # Story #1360
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
     app.include_router(xray_router)  # Story #974

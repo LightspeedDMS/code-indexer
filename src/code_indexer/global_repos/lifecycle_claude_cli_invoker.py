@@ -44,6 +44,7 @@ import logging
 import re
 from pathlib import Path
 
+from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.global_repos.repo_analyzer import invoke_claude_cli  # noqa: F401 — kept for backward-compat test patching
 from code_indexer.global_repos.unified_response_parser import (
     UnifiedResponseParser,
@@ -292,7 +293,11 @@ class LifecycleClaudeCliInvoker:
             raise ValueError("repo_path must not be None")
         path_obj = Path(repo_path)
         if not path_obj.exists():
-            raise ValueError(
+            # Bug #1338: this is the ORPHAN case (registry row present, clone
+            # missing on disk) -- raise the typed OrphanedRepoError, not a
+            # plain ValueError, so the skip sites can catch it by TYPE
+            # instead of matching this message's text.
+            raise OrphanedRepoError(
                 f"repo_path does not exist for alias {alias!r}: {path_obj}"
             )
         if not path_obj.is_dir():

@@ -59,10 +59,17 @@ outputSchema:
   properties:
     status:
       type: string
-      description: 'Trace status: "active" if trace started successfully, "disabled" if Langfuse is not configured'
+      enum:
+      - active
+      - disabled
+      - error
+      description: 'Trace status: "active" if trace started successfully, "disabled" if Langfuse is not configured, "error" if trace creation failed (e.g. missing name, no session context, internal error)'
     trace_id:
       type: string
       description: Unique identifier for the started trace (only present when status is "active")
+    session_id:
+      type: string
+      description: The MCP session ID the trace was started under (only present when status is "active")
     message:
       type: string
       description: Human-readable status message

@@ -16,6 +16,30 @@ import subprocess
 from pathlib import Path
 import tempfile
 
+from code_indexer.services.temporal.temporal_collection_naming import (
+    is_temporal_collection,
+)
+
+
+def _count_temporal_vectors(index_dir: Path) -> int:
+    """Sum vector_*.json files across ALL temporal collection dirs.
+
+    Story #1171 introduced quarterly-sharded, per-embedder temporal
+    collection directories (e.g. "code-indexer-temporal-voyage_context_4-
+    2026Q3"), so vectors are no longer guaranteed to live under the single
+    legacy "code-indexer-temporal" directory -- that legacy dir may exist
+    but only hold "temporal_metadata.db" bookkeeping, no vector files.
+    """
+    if not index_dir.is_dir():
+        return 0
+    count = 0
+    for entry in index_dir.iterdir():
+        if entry.is_dir() and is_temporal_collection(entry.name):
+            count += len(
+                [f for f in entry.glob("**/*.json") if f.name.startswith("vector_")]
+            )
+    return count
+
 
 def test_index_commits_clear_does_not_wipe_regular_index():
     """Test that --index-commits --clear only clears temporal index, NOT regular index."""
@@ -77,7 +101,7 @@ def test_index_commits_clear_does_not_wipe_regular_index():
 
         # Find the semantic collection (should be model-based name like "voyage-code-3")
         semantic_collections = [
-            c for c in collections_before if c != "code-indexer-temporal"
+            c for c in collections_before if not is_temporal_collection(c)
         ]
         assert len(semantic_collections) >= 1, (
             f"No semantic collection found! Collections: {collections_before}"
@@ -110,20 +134,19 @@ def test_index_commits_clear_does_not_wipe_regular_index():
             f"cidx index --index-commits failed: {temporal_index_result.stderr}"
         )
 
-        # STEP 5: Verify temporal index exists
-        temporal_collection_path = index_dir / "code-indexer-temporal"
-        assert temporal_collection_path.exists(), "Temporal index not created!"
+        # STEP 5: Verify temporal index exists (quarterly-sharded, per-embedder
+        # collection directory -- not a single fixed "code-indexer-temporal" dir)
+        assert any(
+            is_temporal_collection(d.name) for d in index_dir.iterdir() if d.is_dir()
+        ), "Temporal index not created!"
 
-        temporal_vectors_before = list(temporal_collection_path.glob("**/*.json"))
-        temporal_vector_count_before = len(
-            [f for f in temporal_vectors_before if f.name.startswith("vector_")]
-        )
+        temporal_vector_count_before = _count_temporal_vectors(index_dir)
 
         assert temporal_vector_count_before > 0, (
             "Temporal index has no vectors after indexing!"
         )
 
-        print("✓ Temporal index created: code-indexer-temporal")
+        print("✓ Temporal index created")
         print(f"✓ Temporal vectors: {temporal_vector_count_before}")
 
         # STEP 6: Run the buggy command: cidx index --index-commits --clear
@@ -157,13 +180,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
 
         # STEP 8: Check temporal index SHOULD BE CLEARED AND RE-INDEXED
         # Note: --clear means "clear and rebuild", not "clear and leave empty"
-        if temporal_collection_path.exists():
-            temporal_vectors_after = list(temporal_collection_path.glob("**/*.json"))
-            temporal_vector_count_after = len(
-                [f for f in temporal_vectors_after if f.name.startswith("vector_")]
-            )
-        else:
-            temporal_vector_count_after = 0
+        # _count_temporal_vectors() returns 0 if no temporal dirs exist, so no
+        # separate existence check is needed here.
+        temporal_vector_count_after = _count_temporal_vectors(index_dir)
 
         print(f"  Temporal vectors BEFORE clear: {temporal_vector_count_before}")
         print(f"  Temporal vectors AFTER clear:  {temporal_vector_count_after}")

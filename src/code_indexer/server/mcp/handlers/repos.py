@@ -16,7 +16,11 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
+    iter_index_files_for_repo,
+)
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -394,16 +398,71 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         clone_path = Path(repo.clone_path)
-        index_path = clone_path / ".code-indexer" / "index" / "default" / "index.bin"
-
         health_service = _get_hnsw_health_service()
-        result = health_service.check_health(
-            index_path=str(index_path),
-            force_refresh=force_refresh,
-        )
+
+        # Discover the REAL on-disk HNSW collection(s) for this repo (Bug
+        # #1387) -- reuses the same structural discovery primitive the HNSW
+        # fleet orphan sweep uses (Story #1360), rather than hardcoding a
+        # collection directory name (real names are provider/model-derived,
+        # e.g. "voyage-code-3", never "default") or filename (real filename
+        # is HNSWIndexManager.INDEX_FILENAME == "hnsw_index.bin", not
+        # "index.bin").
+        relative_index_paths = list(iter_index_files_for_repo(clone_path))
+
+        if not relative_index_paths:
+            # No real collection found -- preserve today's not-found
+            # behavior/response shape. HNSWHealthService itself detects the
+            # missing file and reports valid=False/file_exists=False with a
+            # "not found" error; the exact fallback path we hand it only
+            # affects the informational index_path field.
+            fallback_index_path = (
+                clone_path
+                / ".code-indexer"
+                / "index"
+                / "default"
+                / HNSWIndexManager.INDEX_FILENAME
+            )
+            result = health_service.check_health(
+                index_path=str(fallback_index_path),
+                force_refresh=force_refresh,
+            )
+            return _mcp_response(
+                {"success": True, "health": result.model_dump(mode="json")}
+            )
+
+        if len(relative_index_paths) == 1:
+            index_path = clone_path / relative_index_paths[0]
+            result = health_service.check_health(
+                index_path=str(index_path),
+                force_refresh=force_refresh,
+            )
+            return _mcp_response(
+                {"success": True, "health": result.model_dump(mode="json")}
+            )
+
+        # Multiple real collections (multi-provider config and/or temporal
+        # quarterly shards) -- report ALL of them additively rather than
+        # silently picking one and hiding the rest.
+        collections = []
+        for relative_index_path in relative_index_paths:
+            index_path = clone_path / relative_index_path
+            result = health_service.check_health(
+                index_path=str(index_path),
+                force_refresh=force_refresh,
+            )
+            collections.append(
+                {
+                    "collection_path": str(relative_index_path),
+                    "health": result.model_dump(mode="json"),
+                }
+            )
 
         return _mcp_response(
-            {"success": True, "health": result.model_dump(mode="json")}
+            {
+                "success": True,
+                "health": collections[0]["health"],
+                "collections": collections,
+            }
         )
     except Exception as e:
         logger.exception(
@@ -1678,7 +1737,19 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     """Set enable_temporal=True in the SQLite backend and in-memory golden_repo_manager.
 
     Called after _provider_temporal_index_job succeeds to persist the flag.
-    Degrades gracefully: logs a warning on any failure rather than raising.
+    Degrades gracefully: logs an error on any failure rather than raising
+    (except the global_repos exception path below, which re-raises by
+    pre-existing design).
+
+    Bug #1373: repo_alias may arrive already _GLOBAL_SUFFIX-suffixed --
+    _provider_temporal_index_job is invoked with the route-level alias,
+    which is the "-global" form when the admin targets the global repo.
+    Normalize once: bare_alias for golden_repos_metadata (bare-keyed table
+    and in-memory cache), global_alias for global_repos (exactly one
+    "-global" suffix). A golden repo's bare alias can never itself end in
+    "-global" (rejected at registration time in add_golden_repo), so
+    stripping a trailing suffix is unambiguous for both bare and
+    already-suffixed callers.
     """
     if not repo_alias:
         return
@@ -1692,23 +1763,31 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
         )
         return
 
+    bare_alias = (
+        repo_alias[: -len(_GLOBAL_SUFFIX)]
+        if repo_alias.endswith(_GLOBAL_SUFFIX)
+        else repo_alias
+    )
+
     try:
-        if grm._sqlite_backend.update_enable_temporal(repo_alias, True):
-            repo_meta = grm.golden_repos.get(repo_alias)
+        if grm._sqlite_backend.update_enable_temporal(bare_alias, True):
+            repo_meta = grm.golden_repos.get(bare_alias)
             if repo_meta is not None:
                 repo_meta.enable_temporal = True
             logger.info(
-                "Set enable_temporal=True for %s in golden_repos_metadata", repo_alias
+                "Set enable_temporal=True for %s in golden_repos_metadata", bare_alias
             )
         else:
-            logger.warning(
-                "Failed to set enable_temporal=True for %s in golden_repos_metadata",
-                repo_alias,
+            logger.error(
+                "Failed to set enable_temporal=True for %s in golden_repos_metadata "
+                "(0 rows matched) -- temporal index exists but readiness status is "
+                "now permanently wrong until manually corrected",
+                bare_alias,
             )
     except Exception as exc:
-        logger.warning("Error setting enable_temporal for %s: %s", repo_alias, exc)
+        logger.error("Error setting enable_temporal for %s: %s", bare_alias, exc)
 
-    global_alias = f"{repo_alias}-global"
+    global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
     try:
         _app_state = getattr(_utils.app_module.app, "state", None)
         _storage_mode = (
@@ -1724,8 +1803,10 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
                         global_alias,
                     )
                 else:
-                    logger.warning(
-                        "Failed to set enable_temporal=True for %s in global_repos (PG)",
+                    logger.error(
+                        "Failed to set enable_temporal=True for %s in global_repos (PG) "
+                        "(0 rows matched) -- temporal index exists but readiness status "
+                        "is now permanently wrong until manually corrected",
                         global_alias,
                     )
             else:
@@ -1752,8 +1833,10 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
                     "Set enable_temporal=True for %s in global_repos", global_alias
                 )
             else:
-                logger.warning(
-                    "Failed to set enable_temporal=True for %s in global_repos",
+                logger.error(
+                    "Failed to set enable_temporal=True for %s in global_repos "
+                    "(0 rows matched) -- temporal index exists but readiness status "
+                    "is now permanently wrong until manually corrected",
                     global_alias,
                 )
     except Exception as exc:

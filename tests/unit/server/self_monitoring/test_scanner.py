@@ -514,6 +514,35 @@ class TestClaudeResponseParsing:
         with pytest.raises(ValueError, match="Invalid JSON response from Claude"):
             scanner.parse_claude_response("§ △0.0 ◎surg ■other ◇1.0 ↻1")
 
+    def test_claude_response_schema_constant_removed(self):
+        """Bug #1369: CLAUDE_RESPONSE_SCHEMA was dead code -- ClaudeInvoker never
+        passes --output-format json/--json-schema, so nothing ever consumed this
+        constant. Removed per anti-orphan-code (Messi rule #12)."""
+        import code_indexer.server.self_monitoring.scanner as scanner_module
+
+        assert not hasattr(scanner_module, "CLAUDE_RESPONSE_SCHEMA")
+
+    def test_parse_claude_response_result_key_not_unwrapped_as_cli_wrapper(
+        self, scanner
+    ):
+        """A direct JSON response with an incidental top-level 'result' string
+        field must be returned as-is, not misinterpreted as a
+        --output-format json CLI wrapper (that wrapper format never occurs on
+        this invocation path, so the unwrapping branches were dead code)."""
+        response_json = {
+            "status": "SUCCESS",
+            "max_log_id_processed": 5,
+            "result": "some unrelated string field, not a nested JSON payload",
+        }
+
+        result = scanner.parse_claude_response(json.dumps(response_json))
+
+        assert result["status"] == "SUCCESS"
+        assert result["max_log_id_processed"] == 5
+        assert result["result"] == (
+            "some unrelated string field, not a nested JSON payload"
+        )
+
 
 class TestIssueClassification:
     """Test issue classification prefixes (AC4)."""

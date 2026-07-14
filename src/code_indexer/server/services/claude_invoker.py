@@ -114,9 +114,22 @@ def _normalize_claude_output(raw: str) -> str:
     """
     Strip terminal control sequences and normalise line endings from stdout.
 
-    Removes CSI, OSC and bare ESC sequences emitted by the ``script`` wrapper,
-    normalises CR/LF line endings, and trims chain-of-thought text before
-    the opening ``---`` YAML frontmatter delimiter.
+    Removes CSI, OSC and bare ESC sequences emitted by the ``script`` wrapper
+    and normalises CR/LF line endings.
+
+    Bug #1369: this function used to also strip everything before the first
+    ``^---$`` line, on the theory that Claude's response was YAML-frontmatter
+    markdown and any text before the frontmatter was discardable
+    chain-of-thought. That heuristic had zero live consumers (verified: the
+    live description-generation flow — flow="repo_lifecycle" via
+    LifecycleClaudeCliInvoker — parses a strict JSON payload via
+    UnifiedResponseParser, and description_refresh_scheduler.py's own copy of
+    this same heuristic was never called from anywhere in that module) and it
+    silently destroyed the JSON payload for flow="self_monitoring_scan"
+    whenever Claude's trailing prose happened to contain a markdown
+    horizontal-rule / section-separator ``---`` line. Do not reintroduce
+    unscoped ``---``-based trimming here — it is dead weight for every current
+    caller and actively harmful for JSON-response flows.
 
     Args:
         raw: Raw stdout string from the subprocess.
@@ -138,10 +151,6 @@ def _normalize_claude_output(raw: str) -> str:
     # Normalize line endings
     output = output.replace("\r\n", "\n").replace("\r", "")
     output = output.strip()
-    # Strip chain-of-thought text before YAML frontmatter
-    frontmatter_match = re.search(r"^---\s*$", output, re.MULTILINE)
-    if frontmatter_match and frontmatter_match.start() > 0:
-        output = output[frontmatter_match.start() :]
     return output
 
 

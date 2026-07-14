@@ -655,6 +655,7 @@ class MemoryGovernor:
         if (
             swap_forces_red_cfg
             and sample.pswpin_rate >= swap_pswpin_threshold
+            and sample.used_pct >= yellow_pct
             and self.band == MemoryBand.RED
         ):
             logger.warning(
@@ -729,11 +730,13 @@ class MemoryGovernor:
             red_min_dwell if red_min_dwell is not None else self._red_min_dwell_seconds
         )
 
-        swap_forces_red = (
-            _swap_forces_red and sample.pswpin_rate >= _swap_pswpin_threshold
-        )
         used_pct = sample.used_pct
         now = self._time_fn()
+        swap_forces_red = (
+            _swap_forces_red
+            and sample.pswpin_rate >= _swap_pswpin_threshold
+            and used_pct >= _yellow_pct
+        )
         yellow_exit = _yellow_pct - _hysteresis_pct
         red_exit = _red_pct - _hysteresis_pct
 

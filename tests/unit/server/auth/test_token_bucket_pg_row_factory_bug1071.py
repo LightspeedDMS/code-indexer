@@ -75,6 +75,10 @@ class _DictCursorResult:
     def __init__(self, cursor: sqlite3.Cursor) -> None:
         self._cursor = cursor
 
+    @property
+    def rowcount(self) -> int:
+        return self._cursor.rowcount
+
     def fetchone(self) -> Optional[dict]:
         row = self._cursor.fetchone()
         if row is None:
@@ -137,6 +141,7 @@ def _translate_sql(sql: str) -> str:
         sql = sql.replace("ON CONFLICT (username) DO NOTHING", "")
         sql = sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)
     sql = sql.replace("LEAST(", "MIN(")
+    sql = sql.replace("GREATEST(", "MAX(")
     return sql
 
 

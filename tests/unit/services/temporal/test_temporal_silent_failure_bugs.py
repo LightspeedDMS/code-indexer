@@ -66,11 +66,14 @@ class TestBug2NoExceptionHandling:
         with open(source_file, "r") as f:
             source_lines = f.readlines()
 
-        # Find the worker function (around line 529-800; upper bound widened for growth)
+        # Find the worker function (around line 529-921; upper bound widened
+        # for growth -- Bug #1378 added a module-level progress-wrapping
+        # helper + comments above _index_one_embedder, shifting worker()
+        # from line 870 to line 921)
         worker_start_line = None
         for i, line in enumerate(source_lines):
             # More flexible search - look for def worker() near expected location
-            if "def worker():" in line and i > 500 and i < 900:
+            if "def worker():" in line and i > 500 and i < 1100:
                 # Verify next few lines have worker-related content
                 next_lines = "".join(source_lines[i : i + 10])
                 if (

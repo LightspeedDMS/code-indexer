@@ -1,6 +1,7 @@
 """Unit tests for the C6 Phase 1 internal shard router."""
 
 from contextlib import contextmanager
+from typing import Any, Dict
 
 import pytest
 
@@ -106,7 +107,7 @@ def test_address_provider_error_serves_locally():
 
 
 def test_forward_posts_with_loopguard_and_auth_and_returns_json():
-    record = {}
+    record: Dict[str, Any] = {}
     resp = FakeResponse({"results": [], "total_results": 0})
     r = _router(FakeOwnership(False, ["peer"]), {"peer": "2.2.2.2:8090"}, resp, record)
     out = r.forward("2.2.2.2:8090", {"query_text": "x"}, "Bearer tok")
@@ -125,7 +126,7 @@ def test_forward_propagates_http_error():
 
 
 def test_forward_omits_auth_when_absent():
-    record = {}
+    record: Dict[str, Any] = {}
     resp = FakeResponse({"ok": True})
     r = _router(FakeOwnership(False, ["peer"]), {"peer": "2.2.2.2:8090"}, resp, record)
     r.forward("2.2.2.2:8090", {}, None)
@@ -134,7 +135,7 @@ def test_forward_omits_auth_when_absent():
 
 
 def test_forward_uses_path_param():
-    record = {}
+    record: Dict[str, Any] = {}
     resp = FakeResponse({"ok": True})
     r = _router(FakeOwnership(False, ["peer"]), {"peer": "2.2.2.2:8090"}, resp, record)
     r.forward("2.2.2.2:8090", {}, None, path="/api/query/multi")

@@ -277,3 +277,35 @@ class TestOAuthManagerComplete:
         assert metadata["authorization_endpoint"] == f"{test_issuer}/oauth/authorize"
         assert metadata["token_endpoint"] == f"{test_issuer}/oauth/token"
         assert metadata["registration_endpoint"] == f"{test_issuer}/oauth/register"
+
+    # Story #1351: Discovery metadata must advertise PKCE (S256) support and
+    # public-client token-auth support so RFC 8414-compliant clients (e.g.
+    # ChatGPT) include code_challenge when building their /oauth/authorize
+    # request instead of omitting it.
+    def test_discovery_metadata_advertises_pkce_and_auth_methods(self, oauth_manager):
+        """Discovery metadata advertises S256 PKCE and public-client auth."""
+        metadata = oauth_manager.get_discovery_metadata()
+
+        assert metadata["code_challenge_methods_supported"] == ["S256"]
+        assert metadata["token_endpoint_auth_methods_supported"] == [
+            "none",
+            "client_secret_basic",
+        ]
+
+        # Pure addition: previously-present fields must be unchanged.
+        assert metadata["issuer"] == oauth_manager.issuer
+        assert (
+            metadata["authorization_endpoint"]
+            == f"{oauth_manager.issuer}/oauth/authorize"
+        )
+        assert metadata["token_endpoint"] == f"{oauth_manager.issuer}/oauth/token"
+        assert (
+            metadata["registration_endpoint"]
+            == f"{oauth_manager.issuer}/oauth/register"
+        )
+        assert metadata["response_types_supported"] == ["code"]
+        assert metadata["grant_types_supported"] == [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials",
+        ]

@@ -553,6 +553,215 @@ class TestGetHitRateCounts:
 
 
 # ---------------------------------------------------------------------------
+# get_hit_rate_counts windowing (Bug #1391 Defect 1)
+# ---------------------------------------------------------------------------
+
+
+class TestGetHitRateCountsWindowing:
+    """Bug #1391: get_hit_rate_counts must respect an optional half-open
+    [from_ts, to_ts) time window, matching the windowing semantics already
+    used by get_windowed_metrics elsewhere on the dashboard. The On-Mode Hit
+    Rate card previously ignored the Time Window selector entirely because
+    this method had no time filter at all. Passing no bounds preserves the
+    original whole-table behavior (backward compatible).
+    """
+
+    def test_no_bounds_returns_whole_table_counts(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [
+                _record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=100.0),
+                _record(
+                    voyage_cache_mode="on", voyage_cache_hit=False, timestamp=200.0
+                ),
+            ]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on")
+        assert counts == {"hits": 1, "requests": 2}
+
+    def test_row_before_window_excluded(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=100.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=300.0)
+        assert counts == {"hits": 0, "requests": 0}
+
+    def test_row_after_window_excluded(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=400.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=300.0)
+        assert counts == {"hits": 0, "requests": 0}
+
+    def test_row_inside_window_included(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=250.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=300.0)
+        assert counts == {"hits": 1, "requests": 1}
+
+    def test_boundary_from_ts_is_included(self, sqlite_backend):
+        """A row with timestamp exactly == from_ts is INCLUDED (half-open, >=)."""
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=200.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=300.0)
+        assert counts == {"hits": 1, "requests": 1}
+
+    def test_boundary_to_ts_is_excluded(self, sqlite_backend):
+        """A row with timestamp exactly == to_ts is EXCLUDED (half-open, <)."""
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=300.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=300.0)
+        assert counts == {"hits": 0, "requests": 0}
+
+    def test_windowing_applies_to_shadow_mode_too(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [
+                _record(
+                    voyage_cache_mode="shadow",
+                    voyage_cache_hit=True,
+                    timestamp=100.0,
+                ),
+                _record(
+                    voyage_cache_mode="shadow",
+                    voyage_cache_hit=True,
+                    timestamp=250.0,
+                ),
+            ]
+        )
+        counts = sqlite_backend.get_hit_rate_counts(
+            "shadow", from_ts=200.0, to_ts=300.0
+        )
+        assert counts == {"hits": 1, "requests": 1}
+
+    def test_only_from_ts_provided_does_not_window(self, sqlite_backend):
+        """Only ONE of from_ts/to_ts provided must NOT apply any time filter
+        -- the spec requires BOTH bounds before windowing kicks in."""
+        sqlite_backend.insert_batch(
+            [_record(voyage_cache_mode="on", voyage_cache_hit=True, timestamp=100.0)]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("on", from_ts=200.0, to_ts=None)
+        assert counts == {"hits": 1, "requests": 1}
+
+
+class TestShadowModeRequestDenomination:
+    """Bug #1391 Defect 2 precondition: get_hit_rate_counts("shadow", ...)
+    must be REQUEST-denominated, exactly like the "on" mode -- one row with
+    BOTH providers in shadow mode counts as ONE request, not two."""
+
+    def test_one_request_both_providers_shadow_counts_as_one(self, sqlite_backend):
+        sqlite_backend.insert_batch(
+            [
+                _record(
+                    voyage_cache_mode="shadow",
+                    voyage_cache_hit=True,
+                    cohere_cache_mode="shadow",
+                    cohere_cache_hit=False,
+                )
+            ]
+        )
+        counts = sqlite_backend.get_hit_rate_counts("shadow")
+        assert counts == {"hits": 1, "requests": 1}, (
+            "A single request with 2 shadow-mode operations must count as "
+            f"1 request / 1 hit (either-provider-hit OR-combine), not 2. Got: {counts}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL backend get_hit_rate_counts windowing (Bug #1391) -- faithful
+# cursor-level mock, mirroring test_query_embedding_cache_backend_1105.py /
+# test_golden_repo_reconcile_breaker_state_1382.py convention. No live
+# PostgreSQL required for these; the live-DB delta tests above/below remain
+# for round-trip coverage.
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_sel_pool(fetchone_return):
+    from unittest.mock import MagicMock
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = fetchone_return
+    conn = MagicMock()
+    conn.execute.return_value = cursor
+    pool = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+    return pool, conn, cursor
+
+
+class TestPostgresGetHitRateCountsWindowingMocked:
+    def test_no_bounds_omits_timestamp_filter(self):
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogPostgresBackend,
+        )
+
+        pool, conn, cursor = _make_mock_sel_pool((5, 3))
+        backend = SearchEventLogPostgresBackend(pool)
+        conn.reset_mock()
+
+        counts = backend.get_hit_rate_counts("on")
+
+        assert counts == {"hits": 3, "requests": 5}
+        sql_arg, params_arg = conn.execute.call_args[0]
+        assert "WHERE" not in sql_arg.upper()
+        assert "?" not in sql_arg
+        assert list(params_arg) == ["on", "on", "on", "on"]
+
+    def test_both_bounds_apply_half_open_timestamp_filter(self):
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogPostgresBackend,
+        )
+
+        pool, conn, cursor = _make_mock_sel_pool((2, 1))
+        backend = SearchEventLogPostgresBackend(pool)
+        conn.reset_mock()
+
+        counts = backend.get_hit_rate_counts("shadow", from_ts=100.0, to_ts=200.0)
+
+        assert counts == {"hits": 1, "requests": 2}
+        sql_arg, params_arg = conn.execute.call_args[0]
+        assert "timestamp >= %s" in sql_arg
+        assert "timestamp < %s" in sql_arg
+        assert "?" not in sql_arg
+        assert list(params_arg) == [
+            "shadow",
+            "shadow",
+            "shadow",
+            "shadow",
+            100.0,
+            200.0,
+        ]
+
+    def test_only_from_ts_provided_omits_filter(self):
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogPostgresBackend,
+        )
+
+        pool, conn, cursor = _make_mock_sel_pool((0, 0))
+        backend = SearchEventLogPostgresBackend(pool)
+        conn.reset_mock()
+
+        backend.get_hit_rate_counts("on", from_ts=100.0, to_ts=None)
+
+        sql_arg, params_arg = conn.execute.call_args[0]
+        assert "timestamp" not in sql_arg.lower()
+        assert list(params_arg) == ["on", "on", "on", "on"]
+
+    def test_fail_open_on_pool_error(self):
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventLogPostgresBackend,
+        )
+
+        pool, conn, cursor = _make_mock_sel_pool((0, 0))
+        backend = SearchEventLogPostgresBackend(pool)
+        pool.connection.side_effect = RuntimeError("connection refused")
+
+        counts = backend.get_hit_rate_counts("on", from_ts=1.0, to_ts=2.0)
+        assert counts == {"hits": 0, "requests": 0}
+
+
+# ---------------------------------------------------------------------------
 # PostgreSQL backend tests (skipped when PG unavailable)
 # ---------------------------------------------------------------------------
 

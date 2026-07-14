@@ -22,14 +22,23 @@ outputSchema:
     success:
       type: boolean
       description: Whether authentication succeeded
-    token:
+    message:
       type: string
-      description: JWT session token for subsequent requests
+      description: Human-readable status message (e.g. "Authentication successful")
+    username:
+      type: string
+      description: Authenticated username (present on success)
+    role:
+      type: string
+      description: Authenticated user's role (present on success)
     error:
       type: string
       description: Error message if failed
+    retry_after:
+      type: integer
+      description: Seconds until the rate limiter allows another attempt (present only on rate-limit failure)
   required:
   - success
 ---
 
-TL;DR: Authenticate with username and API key to establish session. WHEN TO USE: Required before using other tools on /mcp-public endpoint. WHEN NOT TO USE: Already authenticated. RELATED TOOLS: create_user (create new user account).
+TL;DR: Authenticate with username and API key to establish session. The JWT session token is NEVER returned in the response body -- it is set as an HttpOnly `cidx_session` cookie on the HTTP response. WHEN TO USE: Required before using other tools on /mcp-public endpoint. WHEN NOT TO USE: Already authenticated. RELATED TOOLS: create_user (create new user account).

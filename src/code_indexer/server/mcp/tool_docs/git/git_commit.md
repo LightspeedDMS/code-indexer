@@ -16,9 +16,6 @@ inputSchema:
     author_name:
       type: string
       description: Optional author name for commit attribution
-    author_email:
-      type: string
-      description: Optional author email for commit attribution
   required:
   - repository_alias
   - message
@@ -48,4 +45,4 @@ outputSchema:
       description: List of files included in commit
 ---
 
-TL;DR: Create a commit with staged changes. Create a git commit with staged changes. USE CASES: (1) Commit staged files, (2) Create checkpoint with message, (3) Record changes with attribution. REQUIREMENTS: Must have staged files. OPTIONAL: author_name and author_email for custom commit attribution. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "John Doe", "author_email": "john@example.com"} Returns: {"success": true, "commit_hash": "abc123def...", "short_hash": "abc123d", "message": "Fix bug", "author": "John Doe", "files_committed": ["src/file.py"]}
+TL;DR: Create a commit with staged changes. Create a git commit with staged changes. USE CASES: (1) Commit staged files, (2) Create checkpoint with message, (3) Record changes with attribution. REQUIREMENTS: Must have staged files. OPTIONAL: author_name for custom commit author name. NOTE: Commit email is always derived from the authenticated user's stored credential (user.email or the PAT credential's git_user_email) and cannot be overridden per-call -- there is no author_email parameter. PERMISSIONS: Requires repository:write. EXAMPLE: {"repository_alias": "my-repo", "message": "Fix authentication bug", "author_name": "John Doe"} Returns: {"success": true, "commit_hash": "abc123def...", "short_hash": "abc123d", "message": "Fix bug", "author": "John Doe", "files_committed": ["src/file.py"]}

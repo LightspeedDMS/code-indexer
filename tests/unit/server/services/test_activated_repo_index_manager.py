@@ -321,9 +321,18 @@ class TestGetIndexStatus:
 class TestJobExecution:
     """Tests for job execution logic."""
 
-    @patch("subprocess.run")
+    @patch(
+        "code_indexer.server.services.activated_repo_index_manager"
+        ".run_cancellable_subprocess"
+    )
     def test_execute_semantic_indexing(self, mock_subprocess, index_manager):
-        """Test semantic indexing execution."""
+        """Test semantic indexing execution.
+
+        Bug #1342: _run_subprocess_with_telemetry now delegates to
+        run_cancellable_subprocess (Popen-based, cancel-cooperative) instead
+        of a plain subprocess.run, so the mock target moved to the new call
+        site.
+        """
         # Mock successful cidx index execution
         mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 

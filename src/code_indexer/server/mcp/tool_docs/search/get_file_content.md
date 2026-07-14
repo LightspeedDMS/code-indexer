@@ -137,5 +137,3 @@ QUICK START: get_file_content(repository_alias='backend-global', file_path='src/
 For next chunk: get_file_content(repository_alias='backend-global', file_path='src/auth.py', offset=metadata.next_offset)
 
 TOKEN BUDGET: ~5000 tokens max per response. Small files returned completely. Large files chunked automatically. metadata.estimated_tokens shows actual size.
-
-COMPOSITE REPOS: For composite repositories, include source_repo parameter to specify which component repo contains the file.

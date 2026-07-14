@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from tests.e2e.helpers import run_cidx
+from tests.e2e.helpers import run_cidx, sanitize_cli_subprocess_env
 
 
 def _build_test_cli_env() -> dict[str, str]:
@@ -33,7 +33,7 @@ def _build_test_cli_env() -> dict[str, str]:
     existing = os.environ.get("PYTHONPATH", "")
     pythonpath = f"{src_dir}:{existing}" if existing else src_dir
 
-    env = dict(os.environ)
+    env = sanitize_cli_subprocess_env(dict(os.environ))
     env["PYTHONPATH"] = pythonpath
 
     voyage_api_key = os.environ.get("E2E_VOYAGE_API_KEY") or os.environ.get(

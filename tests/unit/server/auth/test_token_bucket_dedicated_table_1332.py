@@ -26,6 +26,7 @@ def _translate_sql(sql: str) -> str:
     sql = sql.replace("%s", "?")
     sql = sql.replace("EXCLUDED.", "excluded.")
     sql = sql.replace("LEAST(", "MIN(")
+    sql = sql.replace("GREATEST(", "MAX(")
     return sql
 
 
@@ -41,6 +42,12 @@ class FakeCursor:
         else:
             self._sqlite_cursor = self._conn.execute(sql)
         return self
+
+    @property
+    def rowcount(self) -> int:
+        if self._sqlite_cursor is None:
+            return -1
+        return self._sqlite_cursor.rowcount
 
     def fetchone(self):
         if self._sqlite_cursor is None:

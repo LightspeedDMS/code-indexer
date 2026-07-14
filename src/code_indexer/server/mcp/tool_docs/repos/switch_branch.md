@@ -13,6 +13,10 @@ inputSchema:
     branch_name:
       type: string
       description: Target branch name
+    create:
+      type: boolean
+      description: 'If true, create branch_name if it does not already exist (default: false).'
+      default: false
   required:
   - user_alias
   - branch_name
@@ -32,4 +36,4 @@ outputSchema:
   - success
 ---
 
-TL;DR: Switch YOUR activated repository to different branch and re-index automatically. Changes the active branch for your user-specific repository copy. REQUIRES: Repository must be activated (use activate_repository first). QUICK START: switch_branch('my-backend', 'develop') switches to develop branch. USE CASES: (1) Work on different feature branches, (2) Compare code across branches (switch + search), (3) Test different versions. AUTOMATIC RE-INDEX: After branch switch, repository is automatically re-indexed to reflect new branch state. This ensures search results match current branch content. BRANCH DISCOVERY: Use get_branches or repository_status to list available branches before switching. WARNING: Uncommitted changes may be lost. Commit or stash changes before switching. ALIAS REQUIREMENT: Works only with YOUR activated repositories (user-specific aliases). Cannot switch branches on global read-only repositories. TROUBLESHOOTING: Branch not found? Use get_branches to verify branch exists. Repository not activated? Use activate_repository first. RELATED TOOLS: get_branches (list available branches), activate_repository (activate repo with specific branch), repository_status (check current branch), git_branch_create (create new branch), git_branch_switch (git operation alternative).
+TL;DR: Switch YOUR activated repository to different branch and re-index automatically. Changes the active branch for your user-specific repository copy. REQUIRES: Repository must be activated (use activate_repository first). QUICK START: switch_branch('my-backend', 'develop') switches to develop branch. Set create=true to create branch_name if it does not already exist. USE CASES: (1) Work on different feature branches, (2) Compare code across branches (switch + search), (3) Test different versions. AUTOMATIC RE-INDEX: After branch switch, repository is automatically re-indexed to reflect new branch state. This ensures search results match current branch content. BRANCH DISCOVERY: Use get_branches or repository_status to list available branches before switching. WARNING: Uncommitted changes may be lost. Commit or stash changes before switching. ALIAS REQUIREMENT: Works only with YOUR activated repositories (user-specific aliases). Cannot switch branches on global read-only repositories. TROUBLESHOOTING: Branch not found? Use get_branches to verify branch exists. Repository not activated? Use activate_repository first. RELATED TOOLS: get_branches (list available branches), activate_repository (activate repo with specific branch), repository_status (check current branch), git_branch_create (create new branch), git_branch_switch (git operation alternative).

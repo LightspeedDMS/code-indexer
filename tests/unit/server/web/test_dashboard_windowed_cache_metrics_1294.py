@@ -210,9 +210,17 @@ class TestCacheWindowPlumbing:
 
 
 class TestCardsResourcedFromWindowedResult:
-    def test_shadow_hit_rate_from_by_cache_mode_shadow(
+    def test_shadow_cosine_p50_from_by_cache_mode_shadow(
         self, client, admin_session_cookie, app
     ):
+        """Shadow Cosine P50 stays sourced from search_embed_event's
+        by_cache_mode["shadow"] aggregate (per-sample distributions are
+        correctly operation-based). Bug #1391: the Shadow Hit Rate card
+        itself moved OFF this source onto search_event_log -- see
+        test_dashboard_hit_rate_cards_windowing_1391.py for that coverage --
+        so shadow_agg.hits/misses here are irrelevant to the hit-rate card
+        and deliberately NOT asserted.
+        """
         backend = _FakeSeeBackend(
             _build_result(shadow_hits=7, shadow_misses=3, shadow_p50=0.97)
         )
@@ -221,9 +229,6 @@ class TestCardsResourcedFromWindowedResult:
             resp = client.get("/admin/partials/dashboard-cache-metrics")
             assert resp.status_code == 200
             html = resp.text
-            assert "70.0%" in html, (
-                f"Expected shadow hit rate 70.0% in HTML:\n{html[:800]}"
-            )
             assert "0.9700" in html, (
                 f"Expected shadow cosine p50 0.9700 in HTML:\n{html[:800]}"
             )
@@ -386,12 +391,18 @@ class TestNonRegression:
     ):
         """On-Mode Hit Rate (Issue #1257) stays sourced from search_event_log's
         get_hit_rate_counts, NOT from the new windowed search_embed_event source.
+
+        Bug #1391: get_hit_rate_counts now also receives from_ts/to_ts (both
+        modes), so the fake must accept them; only the "on" result is
+        asserted here (Shadow Hit Rate windowing/denomination coverage lives
+        in test_dashboard_hit_rate_cards_windowing_1391.py).
         """
 
         class _FakeSelBackend:
-            def get_hit_rate_counts(self, mode):
-                assert mode == "on"
-                return {"hits": 5, "requests": 8}
+            def get_hit_rate_counts(self, mode, from_ts=None, to_ts=None):
+                if mode == "on":
+                    return {"hits": 5, "requests": 8}
+                return {"hits": 0, "requests": 0}
 
         class _FakeSelWriter:
             backend = _FakeSelBackend()

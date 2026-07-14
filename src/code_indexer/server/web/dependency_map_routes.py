@@ -450,6 +450,7 @@ def _render_complete_response(request, session, cached_row: dict) -> HTMLRespons
                     row["phase_timings_parsed"] = parsed
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_job_status.html",
         {
             "request": request,
@@ -489,6 +490,7 @@ def _render_computing_response(request, job_id: str, tracker) -> HTMLResponse:
             )
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_job_status_computing.html",
         {
             "request": request,
@@ -511,6 +513,7 @@ def _render_error_response(request, error_message: str) -> HTMLResponse:
         TemplateResponse rendering partials/depmap_job_status_error.html.
     """
     return templates.TemplateResponse(
+        request,
         "partials/depmap_job_status_error.html",
         {
             "request": request,
@@ -819,6 +822,7 @@ def depmap_activity_panel_partial(request: Request):
         progress, progress_info = _get_progress_from_service(dep_map_service)
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_activity_panel.html",
         {
             "request": request,
@@ -850,6 +854,7 @@ def dependency_map_page(request: Request):
     is_admin = session.role == "admin"
 
     return templates.TemplateResponse(
+        request,
         "dependency_map.html",
         {
             "request": request,
@@ -1058,6 +1063,7 @@ def depmap_repo_coverage_partial(request: Request):
     coverage_data = _get_repo_coverage_data(accessible_repos)
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_repo_coverage.html",
         {
             "request": request,
@@ -1181,6 +1187,7 @@ def depmap_domain_explorer_partial(request: Request):
             domain_data = {"domains": [], "total_count": 0}
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_domain_explorer.html",
         {
             "request": request,
@@ -1235,6 +1242,7 @@ def depmap_domain_detail_partial(request: Request, name: str):
             detail_data = None
 
     return templates.TemplateResponse(
+        request,
         "partials/depmap_domain_detail.html",
         {
             "request": request,

@@ -100,7 +100,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
             # Verify template was rendered with SCIP results
             call_args = mock_templates.TemplateResponse.call_args
             assert call_args is not None
-            template_context = call_args[0][1]
+            template_context = call_args[0][2]  # (request, name, context)
             results = template_context.get("results")
             assert results is not None
             assert len(results) == 1
@@ -162,7 +162,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
 
             # Should return error message
             call_args = mock_templates.TemplateResponse.call_args
-            template_context = call_args[0][1]
+            template_context = call_args[0][2]  # (request, name, context)
             error_message = template_context.get("error_message")
             assert error_message is not None
             assert "SCIP index" in error_message or "not found" in error_message.lower()
@@ -231,7 +231,7 @@ class TestSCIPQueryExecutionInPartialEndpoint:
 
             # Should return error message, not raise exception
             call_args = mock_templates.TemplateResponse.call_args
-            template_context = call_args[0][1]
+            template_context = call_args[0][2]  # (request, name, context)
             error_message = template_context.get("error_message")
             assert error_message is not None
             assert "SCIP" in error_message

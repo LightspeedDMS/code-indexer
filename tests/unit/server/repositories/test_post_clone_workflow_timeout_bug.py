@@ -26,7 +26,7 @@ Fix B: _execute_fts_indexing and _execute_semantic_indexing must check that
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Any, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -282,7 +282,9 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stderr = ""
 
         # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
-        def _capture_run(args: List[str], repo_path: str) -> MagicMock:
+        def _capture_run(
+            args: List[str], repo_path: str, cancel_check: Any = None
+        ) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 
@@ -314,7 +316,9 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stderr = ""
 
         # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
-        def _capture_run(args: List[str], repo_path: str) -> MagicMock:
+        def _capture_run(
+            args: List[str], repo_path: str, cancel_check: Any = None
+        ) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 

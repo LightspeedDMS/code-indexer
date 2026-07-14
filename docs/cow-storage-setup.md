@@ -269,31 +269,31 @@ Note: `df -T /mnt/cow-storage` will show the underlying filesystem type (`xfs`) 
 
 ### Golden Repos on the Shared Mount
 
-The clone mount above (`/mnt/cow-storage`) covers cow-daemon clones. Golden repositories need their own shared mount at a fixed path, and getting the options wrong here was the source of a live-debugged cluster failure.
+The server derives the golden-repos directory as `<server_dir>/data/golden-repos`: `golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"` (`src/code_indexer/server/startup/lifespan.py:134`). This subpath is hard-coded and NOT independently configurable.
 
-The server derives the golden-repos directory as `<server_dir>/data/golden-repos`: `golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"` (`src/code_indexer/server/startup/lifespan.py:134`). This subpath is hard-coded and NOT independently configurable. On startup the server runs an NFS atomic-create self-check against its `cidx-meta` subdirectory (`lifespan.py:1386`), so the path must be a working shared filesystem. Expose a `golden-repos` subdirectory of the daemon `base_path` at `~/.cidx-server/data/golden-repos` on every node.
+**Golden-repos MUST be a SYMLINK into the CoW mount, never a direct bind/NFS mount at that exact path (Bug #1337).** A previous version of this guide recommended bind/NFS-mounting a filesystem directly AT `~/.cidx-server/data/golden-repos`. That gives cross-node query visibility (every node sees the same bytes) but it is NOT sufficient for per-user repo activation: `CowDaemonBackend._translate_to_daemon_path` validates a golden repo's path by calling `os.path.realpath()` and checking that the result falls under `cow_daemon.mount_point` or `cow_daemon.daemon_storage_path`. A directory that is itself a mount point resolves to its own path (`~/.cidx-server/data/golden-repos`), which is never under either root, so translation fails with `... is not under mount_point ... or daemon_storage_path ... cannot translate to daemon view` and activation errors out. Worse, `cp --reflink` (what the CoW daemon uses to clone a golden repo per-user) requires source and destination to be on the SAME filesystem -- a separately-mounted golden-repos filesystem, however it is mounted, can never support reflink cloning regardless of path translation. Golden-repo bytes must physically live on the CoW daemon's own storage filesystem.
 
-**Daemon host** (bind mount -- a node cannot NFS-mount from itself):
+The fix is a SYMLINK from `~/.cidx-server/data/golden-repos` to a `golden-repos` subdirectory of the SAME CoW mount already used for clones (`/mnt/cow-storage`), or, on the co-located daemon host, directly to a `golden-repos` subdirectory of the daemon's own `base_path` (no bind-mount indirection needed there). Both the installer (`scripts/install-cidx-server.sh`, function `ensure_golden_repos_symlink`) and the auto-updater (`DeploymentExecutor._ensure_golden_repos_symlink_for_cow_daemon`) provision and self-heal this symlink automatically for `clone_backend=cow-daemon` deployments -- manual setup below is only needed for troubleshooting or a deployment that bypasses both tools.
 
-```bash
-sudo mkdir -p ~/.cidx-server/data/golden-repos
-sudo mount --bind /srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
-echo '/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  none  bind  0  0' | sudo tee -a /etc/fstab
-```
-
-**Every other node** (NFSv3, `nolock`, `hard` -- NOT NFSv4, NOT `soft`):
+**Daemon host** (symlink directly to the daemon's own storage path -- no bind mount needed, since this node IS the daemon host):
 
 ```bash
-sudo mount -t nfs -o vers=3,nolock,hard,_netdev \
-  <daemon-host>:/srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
-echo '<daemon-host>:/srv/cow-storage/golden-repos  /home/<user>/.cidx-server/data/golden-repos  nfs  vers=3,nolock,hard,_netdev  0  0' | sudo tee -a /etc/fstab
+mkdir -p /srv/cow-storage/golden-repos
+ln -s /srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
 ```
 
-Why NFSv3 with `nolock`, not NFSv4: over NFSv4 (`nfs4` / `vers=4.x`), `git index-pack` fails during golden-repo clone+index with `fatal: write error: Bad file descriptor` followed by `fatal: fetch-pack: invalid index-pack output` (NFSv4 locking plus mmap semantics vs git's pack writing). NFSv3 with `nolock` (client-side locking, equivalent to `local_lock=all`) avoids it. Reproduced and fixed live.
+**Every other (NFS-client) node** (symlink into the already-mounted `/mnt/cow-storage`):
 
-Why `hard`, not `soft`: a `soft` mount returns an I/O error on a transient timeout, which surfaces as SIGBUS on git's mmap'd pack/index files during indexing. `hard` blocks and retries, which git's mmap path requires. Use `hard` on the golden-repos mount even though the clone mount uses `vers=3,nolock` without it.
+```bash
+mkdir -p /mnt/cow-storage/golden-repos
+ln -s /mnt/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
+```
 
-Failure mode if golden-repos stays on local disk: repos are only queryable on the node that indexed them; a query routed to any other node returns 0 results because that node's local `golden-repos` has no index. They are not cross-node visible.
+On startup the server runs an NFS atomic-create self-check against its `cidx-meta` subdirectory (`lifespan.py:1386`), so the resolved path must be a working shared filesystem -- confirm `/mnt/cow-storage` is mounted and writable (see the write-probe checks earlier in this guide) before creating the symlink.
+
+Historical note on mount options: an earlier deployment placed golden-repos on a SEPARATE NFS export mounted `vers=3,nolock,hard` specifically to avoid a `git index-pack` failure (`fatal: write error: Bad file descriptor`) seen over NFSv4 soft mounts during golden-repo clone+index. That separate-mount approach is superseded by the symlink fix above (a second filesystem can never support `cp --reflink` cloning), but the underlying lesson stands: if golden-repo indexing hits `git index-pack`/mmap failures on the CoW mount, check whether `/mnt/cow-storage` itself is mounted NFSv4-soft and consider NFSv3 `nolock,hard` (or a bind mount, on the daemon host) for that mount.
+
+Failure mode if golden-repos stays on local disk (plain directory, not a symlink into the CoW mount): global/`-global` query still works (it never invokes the clone backend), but per-user activation fails loud with the translation error above; and if golden-repos is a local-only directory not shared cross-node at all, queries routed to a different node return 0 results because that node's local `golden-repos` has no index.
 
 ---
 

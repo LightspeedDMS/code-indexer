@@ -31,6 +31,7 @@ from tests.e2e.helpers import (
     _auth_headers,  # builds pre-assembled Authorization header dict (helpers owns assembly)
     login,
     run_cidx,
+    sanitize_cli_subprocess_env,
     wait_for_job,
 )
 
@@ -97,7 +98,7 @@ def _build_cli_env() -> dict[str, str]:
     existing = os.environ.get("PYTHONPATH", "")
     pythonpath = f"{src_dir}:{existing}" if existing else src_dir
 
-    env = dict(os.environ)
+    env = sanitize_cli_subprocess_env(dict(os.environ))
     env["PYTHONPATH"] = pythonpath
 
     voyage_api_key = _optional_env("E2E_VOYAGE_API_KEY") or _optional_env(

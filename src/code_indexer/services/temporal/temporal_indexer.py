@@ -79,6 +79,40 @@ _DEFAULT_PARALLEL_REQUESTS = 8
 _FLUSH_INTERVAL = 10
 
 
+def _wrap_shard_progress_callback(
+    progress_callback: Optional[Callable],
+    offset: int,
+    grand_total: int,
+) -> Optional[Callable]:
+    """Wrap a per-shard progress callback so `current`/`total` reflect the
+    WHOLE embedder run (all quarterly shards), not just the current shard.
+
+    Bug #1378: `_index_shard_commits` computes `total = len(commits)` and
+    restarts `current` from 0 for EVERY quarterly shard it is called for.
+    Left unwrapped, that per-shard `(current, total)` pair is what reaches
+    the CLI's progress display, producing a bar %/ETA and an "X/Y commits"
+    counter that desync and even reset every time a new shard starts.
+
+    This wrapper translates each shard-local `(current, total)` pair into
+    `(offset + current, grand_total)` before forwarding to the real
+    callback -- `offset` is the count of commits already completed by PRIOR
+    shards in this embedder's run, and `grand_total` is the whole run's
+    commit count (constant across all shards). `_index_shard_commits`
+    itself is untouched: its signature, indexing logic, and the `info`
+    string it builds are unaffected -- only the numeric args forwarded to
+    `progress_callback` change.
+
+    Returns None unchanged when no callback was supplied.
+    """
+    if progress_callback is None:
+        return None
+
+    def _wrapped(current: int, total: int, path, *args, **kwargs):
+        return progress_callback(offset + current, grand_total, path, *args, **kwargs)
+
+    return _wrapped
+
+
 class TemporalIndexer:
     """Orchestrates git history indexing as per-commit aggregated contextual documents.
 
@@ -617,6 +651,14 @@ class TemporalIndexer:
         commits_processed = 0
         blobs_processed = 0
         vectors_created = 0
+        # Bug #1378: whole-run denominator, constant across every quarterly
+        # shard processed below -- `commits` here is the embedder's FULL
+        # reconciled commit list (pre-shard-split), so this is exactly the
+        # "total commits across all shards" the progress display must show.
+        # Passed to _wrap_shard_progress_callback() further below so every
+        # shard's progress_callback invocations report this SAME total
+        # instead of resetting to each shard's own (much smaller) count.
+        grand_total = len(commits)
 
         _original_collection_name = self.collection_name
         try:
@@ -674,13 +716,22 @@ class TemporalIndexer:
                 self.vector_store.begin_indexing(_shard_name)
 
                 _shard_commits = shard_commit_map[_shard_name]
+                # Bug #1378: wrap the callback so current/total reflect the
+                # WHOLE embedder run (commits_processed is the running
+                # cumulative offset from prior shards; grand_total is
+                # constant) instead of resetting every shard.
+                _shard_progress_callback = _wrap_shard_progress_callback(
+                    progress_callback,
+                    offset=commits_processed,
+                    grand_total=grand_total,
+                )
                 # reconcile=True: `commits` was already computed by the
                 # caller via reconcile_temporal_index -- skip the (per-shard
                 # base-tracker) redundant re-filter inside _index_shard_commits.
                 _c, _b, _v = self._index_shard_commits(
                     _shard_commits,
                     vector_manager,
-                    progress_callback,
+                    _shard_progress_callback,
                     True,
                 )
                 commits_processed += _c

@@ -76,8 +76,9 @@ class TestSaveTemporalOptionsSinceDateValidation:
         # Must have returned a 400 error response via templates.TemplateResponse
         mock_templates.TemplateResponse.assert_called_once()
         call_args = mock_templates.TemplateResponse.call_args
-        assert call_args[0][0] == "partials/error_message.html"
-        context = call_args[0][1]
+        # Starlette 1.x-safe signature: TemplateResponse(request, name, context)
+        assert call_args[0][1] == "partials/error_message.html"
+        context = call_args[0][2]
         assert "error" in context
         assert "YYYY-MM-DD" in context["error"]
         assert call_args[1]["status_code"] == 400

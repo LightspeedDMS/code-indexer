@@ -10,6 +10,8 @@ Verifies that:
 6. README template mentions multimodal
 """
 
+import contextlib
+import os
 import tempfile
 from pathlib import Path
 
@@ -18,6 +20,23 @@ from click.testing import CliRunner
 
 from code_indexer.cli import cli
 from code_indexer.config import VOYAGE_MULTIMODAL_MODEL
+
+
+@contextlib.contextmanager
+def chdir(path):
+    """Change into `path` for the duration of the block, restoring cwd after.
+
+    Unlike Click's ``CliRunner.isolated_filesystem(temp_dir=X)`` -- which
+    creates and chdirs into a NEW empty subdirectory INSIDE X rather than
+    chdir-ing into X itself -- this helper actually runs inside the given
+    (already-populated) directory. See bug #1371.
+    """
+    original_cwd = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(original_cwd)
 
 
 @pytest.fixture
@@ -70,7 +89,7 @@ class TestStatusCommandMultimodal:
         (multimodal_collection / "metadata.json").write_text('{"vector_count": 5}')
 
         runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=temp_project):
+        with chdir(temp_project):
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0, f"Status command failed: {result.output}"
@@ -95,7 +114,7 @@ class TestStatusCommandMultimodal:
         (code_collection / "metadata.json").write_text('{"vector_count": 10}')
 
         runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=temp_project):
+        with chdir(temp_project):
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0, f"Status command failed: {result.output}"
@@ -139,7 +158,7 @@ class TestStatusCommandMultimodal:
         (multimodal_collection / "hnsw_index.bin").write_bytes(b"fake_hnsw_data" * 1000)
 
         runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=temp_project):
+        with chdir(temp_project):
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0, f"Status command failed: {result.output}"
@@ -179,7 +198,7 @@ class TestStatusCommandMultimodal:
         )
 
         runner = CliRunner()
-        with runner.isolated_filesystem(temp_dir=temp_project):
+        with chdir(temp_project):
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0, f"Status command failed: {result.output}"

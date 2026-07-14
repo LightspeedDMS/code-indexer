@@ -430,6 +430,146 @@ class TestUpdateJob:
 
 
 # ---------------------------------------------------------------------------
+# update_job terminal-status guard (Bug #1344)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateJobTerminalStatusGuardBug1344:
+    """Bug #1344: a stale non-terminal status write (e.g. a delayed
+    cancel_job() persist for a RUNNING job, racing the worker's own later
+    terminal write) must never be able to revert a row that has already
+    reached a terminal status. update_job() must add a
+    ``AND status NOT IN (...)`` guard to the WHERE clause whenever the new
+    status being written is itself non-terminal; a terminal new status is
+    always allowed through unconditionally."""
+
+    def test_update_job_adds_terminal_guard_when_new_status_non_terminal(self):
+        """
+        Given a status update to a NON-terminal value (e.g. "running")
+        When update_job() is called
+        Then the SQL WHERE clause includes a status NOT IN (...) guard
+        listing the terminal statuses, with matching bound params.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.update_job(
+            "job-1", guard_terminal_status=True, status="running", cancelled=True
+        )
+
+        cur.execute.assert_called_once()
+        sql, params = cur.execute.call_args[0]
+        assert "WHERE job_id = %s" in sql
+        assert "AND status NOT IN" in sql
+        for terminal_status in (
+            "completed",
+            "completed_partial",
+            "failed",
+            "cancelled",
+        ):
+            assert terminal_status in params, (
+                f"terminal status {terminal_status!r} must be bound as a "
+                "guard parameter"
+            )
+
+    def test_update_job_without_guard_flag_omits_guard_even_for_non_terminal_status(
+        self,
+    ):
+        """
+        The guard is opt-in (guard_terminal_status=False by default). A
+        non-terminal status update WITHOUT the flag must produce the
+        pre-#1344 unconditional SQL -- no guard clause -- so unrelated
+        callers (e.g. JobTracker's Bug #1256 dedup mechanism) keep relying
+        on an unconditional write reaching the DB.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.update_job("job-1", status="running", cancelled=True)
+
+        cur.execute.assert_called_once()
+        sql, _params = cur.execute.call_args[0]
+        assert "AND status NOT IN" not in sql
+
+    def test_update_job_omits_guard_when_new_status_is_terminal(self):
+        """
+        Given a status update to a TERMINAL value (e.g. "cancelled")
+        When update_job() is called
+        Then no status NOT IN (...) guard is added -- a terminal write is
+        always allowed through, whichever terminal status wins the race.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.update_job("job-1", status="cancelled", cancelled=True)
+
+        cur.execute.assert_called_once()
+        sql, _params = cur.execute.call_args[0]
+        assert "AND status NOT IN" not in sql
+
+    def test_update_job_no_status_kwarg_omits_guard(self):
+        """
+        Given an update_job() call that does not touch the status column
+        When update_job() is called
+        Then no status guard is added (nothing to protect against
+        reverting).
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.update_job("job-1", progress=77)
+
+        cur.execute.assert_called_once()
+        sql, _params = cur.execute.call_args[0]
+        assert "AND status NOT IN" not in sql
+
+    def test_update_job_guard_preserves_executing_node_ownership_clause(self):
+        """
+        Given both executing_node (Bug #542 ownership guard) and a
+        non-terminal status update
+        When update_job() is called
+        Then both guards are present in the WHERE clause, in the correct
+        order, with correctly ordered bound params.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.update_job(
+            "job-1",
+            executing_node="node-a",
+            guard_terminal_status=True,
+            status="running",
+            cancelled=True,
+        )
+
+        sql, params = cur.execute.call_args[0]
+        assert "AND executing_node = %s" in sql
+        assert "AND status NOT IN" in sql
+        assert "node-a" in params
+        assert "cancelled" in params  # terminal-guard value, not the kwarg
+
+
+# ---------------------------------------------------------------------------
 # Helpers for SQLite round-trip tests
 # ---------------------------------------------------------------------------
 

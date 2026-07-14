@@ -103,7 +103,8 @@ class TestExecuteTemporalIndexingGetsPostgresEnvInClusterMode:
 
         with (
             patch(
-                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                "code_indexer.server.services.activated_repo_index_manager"
+                ".run_cancellable_subprocess",
                 side_effect=run_fn,
             ),
             patch(
@@ -135,7 +136,8 @@ class TestExecuteTemporalIndexingGetsPostgresEnvInClusterMode:
 
         with (
             patch(
-                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                "code_indexer.server.services.activated_repo_index_manager"
+                ".run_cancellable_subprocess",
                 side_effect=run_fn,
             ),
             patch(
@@ -176,7 +178,8 @@ class TestExecuteTemporalIndexingGetsPostgresEnvInClusterMode:
 
         with (
             patch(
-                "code_indexer.server.services.activated_repo_index_manager.subprocess.run",
+                "code_indexer.server.services.activated_repo_index_manager"
+                ".run_cancellable_subprocess",
                 side_effect=run_fn,
             ),
             patch(

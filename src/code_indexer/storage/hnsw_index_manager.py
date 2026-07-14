@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,107 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Corruption helpers (Bug #1223 extension)
 # ---------------------------------------------------------------------------
+
+
+HNSW_ORPHAN_REPAIR_MARKER = "HNSW_ORPHAN_REPAIR_EVENT"
+"""Bug #1388: machine-readable marker prefix identifying an orphan
+detect+repair event, emitted as a plain, unbuffered line on the process's
+**stderr** (as opposed to the `logger.info`/`logger.error` calls in
+`_detect_and_repair_orphans`, which never surface outside a `cidx`
+subprocess -- the CLI's own `setup_logging()` sets the root logger to
+WARNING, and the SQLiteLogHandler that would otherwise persist INFO records
+to the server's logs.db is only installed during the SERVER's own lifespan
+startup, never inherited across a subprocess boundary).
+
+Bug #1388 remediation history: the first attempt threaded this marker
+through the `progress_callback`/--progress-json wire protocol as a
+`total=0` event. That was proven wrong by two independent, compounding
+real-boundary gates: (a) the real --progress-json child callback in
+cli.py drops every event where `total <= 0`, so the marker died inside the
+child before reaching stdout; (b) even if it had reached stdout, the
+parent's `run_with_popen_progress` monotonic high-water `_emit` guard would
+have suppressed it too, since HNSW finalize happens at the end of the
+semantic phase when the high-water mark is already near the phase's
+`range_end`. stderr is immune to both: it is not logging (so the WARNING
+filter never applies) and not the JSON progress wire (so neither gate
+applies). The parent-side scraping half of this fix lives in
+`progress_subprocess_runner.run_with_popen_progress`, which reads the
+child's captured stderr for lines with this prefix and forwards them to a
+dedicated `orphan_event_callback` -- never through the monotonic
+percentage channel. Callers on the server side (e.g.
+`golden_repo_manager.py`, `refresh_scheduler.py`) build that callback to
+re-log a forwarded marker line through the SERVER's own logger, which DOES
+reach logs.db. Import this constant rather than hardcoding the literal
+string (Messi Rule #4 anti-duplication)."""
+
+
+def _emit_hnsw_orphan_repair_stderr_event(
+    *, context: str, orphan_count: int, repaired: bool, remaining: Optional[int]
+) -> None:
+    """Bug #1388: print the orphan-repair marker as a plain, unbuffered
+    stderr line -- never through progress_callback/emit_progress_json (see
+    HNSW_ORPHAN_REPAIR_MARKER docstring for why that channel is unusable).
+    """
+    parts = [
+        HNSW_ORPHAN_REPAIR_MARKER + ":",
+        f"context={context}",
+        f"orphan_count={orphan_count}",
+        f"repaired={'true' if repaired else 'false'}",
+    ]
+    if remaining is not None:
+        parts.append(f"remaining={remaining}")
+    print(" ".join(parts), file=sys.stderr, flush=True)
+
+
+class HNSWIntegrityRepairError(RuntimeError):
+    """Raised when finalize-time orphan repair fails to reach zero orphans.
+
+    Story #1359 (Epic #1333, S2): every build/finalize path runs
+    check_integrity() -> repair_orphans() -> re-verify before the index is
+    considered done. S1's repair_orphans() is deterministic and proven to
+    drive orphan_count to exactly 0 for both measured regimes (near-tie,
+    exact-tie), so this should never fire in practice -- if it ever does,
+    that is itself the signal something is wrong (a genuine repair-pipeline
+    regression), and it must surface loudly rather than publish a silent
+    partial index (Messi Rule 2: fail fast, no fallback).
+    """
+
+
+class HNSWCapabilityError(RuntimeError):
+    """Raised when the installed hnswlib lacks the custom fork's methods.
+
+    Bug #1392: production fleet-wide `AttributeError: 'hnswlib.Index' object
+    has no attribute 'check_integrity'` on every CLI-driven refresh, caused
+    by the CLI's system-wide Python environment drifting to a stock PyPI
+    hnswlib while the server's own pipx venv stayed on the custom fork.
+    Distinct from `HNSWIntegrityRepairError` above: this fires when the
+    capability itself is ABSENT (wrong hnswlib installed), never reached
+    repair; `HNSWIntegrityRepairError` fires when repair_orphans() was
+    genuinely ATTEMPTED but failed to converge. `_ensure_hnswlib_capability()`
+    raises this as the very first statement of every build/finalize entry
+    point (build_index, rebuild_from_vectors, save_incremental_update) so the
+    failure surfaces immediately, before any indexing work, rather than deep
+    inside `_detect_and_repair_orphans()` at the tail of each method.
+    """
+
+
+# Bug #1392: informational only -- the actual pin source of truth is
+# pyproject.toml's `hnswlib @ git+...@<commit>` dependency line. This
+# constant exists purely to make HNSWCapabilityError messages actionable
+# (name the expected commit); it does not enforce anything and must be kept
+# in sync with pyproject.toml manually.
+EXPECTED_HNSWLIB_FORK_COMMIT = "878cfbe585395a8bdd95f593d071f778d2fac457"
+
+
+def count_orphan_errors(integrity_result: Dict[str, Any]) -> int:
+    """Count orphan-node entries in a check_integrity() errors list.
+
+    check_integrity() does not expose a structured orphan_count field --
+    orphans are reported as entries in the `errors` list containing the
+    substring "orphan" (verified against the real fork; see S1's own
+    `_orphan_ids` test helper pattern).
+    """
+    return sum(1 for e in integrity_result.get("errors", []) if "orphan" in e)
 
 
 def _is_corrupt_index_error(exc: BaseException) -> bool:
@@ -122,9 +224,126 @@ class HNSWIndexManager:
         self.vector_dim = vector_dim
         self.space = space
 
+    def _ensure_hnswlib_capability(self) -> None:
+        """Raise HNSWCapabilityError if the installed hnswlib lacks the fork.
+
+        Bug #1392: called as the VERY FIRST statement of every build/finalize
+        entry point (build_index, rebuild_from_vectors, save_incremental_update)
+        so a drifted (stock PyPI) hnswlib install fails loudly immediately,
+        before any indexing work, rather than deep inside
+        `_detect_and_repair_orphans()` at the tail of each method. Never
+        called from query-only paths (query, load_index, is_stale,
+        index_exists) or from __init__ -- per the "Query Is Everything"
+        invariant, queries must never be blocked by a build/finalize-only
+        capability gap.
+
+        Raises:
+            HNSWCapabilityError: if hnswlib.Index lacks check_integrity or
+                repair_orphans.
+        """
+        if hasattr(hnswlib.Index, "check_integrity") and hasattr(
+            hnswlib.Index, "repair_orphans"
+        ):
+            return
+
+        raise HNSWCapabilityError(
+            "Installed hnswlib is missing check_integrity()/repair_orphans() "
+            "-- this Python environment does not have the custom hnswlib "
+            f"fork (expected commit {EXPECTED_HNSWLIB_FORK_COMMIT}) installed. "
+            f"Interpreter: {sys.executable}. See docs/hnswlib-custom-build.md "
+            "for the rebuild procedure."
+        )
+
     def _save_hnsw_index(self, index: Any, path: str) -> None:
         # Any: hnswlib.Index is a C extension with no Python type stubs
         index.save_index(path)
+
+    def _detect_and_repair_orphans(self, index: Any, context: str) -> None:
+        """Detect + repair HNSW orphans on an in-memory index before it is
+        persisted (Story #1359 AC1/AC2).
+
+        Runs check_integrity() and logs orphan_count (AC1 -- count only, no
+        ratio: there is no threshold that consumes it, per the AC4
+        zero-tolerance KISS design). If orphan_count > 0, runs S1's
+        repair_orphans() and re-verifies via check_integrity() BEFORE the
+        caller's atomic swap publishes the index (AC2). A repair that fails
+        to reach zero orphans fails LOUD -- never a silent partial index.
+
+        Near-tie detect+repair is the EXPECTED happy path for temporal
+        rebuilds (not an anomaly), so the "detected, repairing" line logs at
+        INFO -- WARNING is reserved for the non-convergence failure case, so
+        this does not trip the Story #1122 post-E2E log-audit gate on
+        ordinary, successful rebuilds.
+
+        Bug #1388: the logger.info/logger.error calls above never surface
+        outside a `cidx` subprocess (see HNSW_ORPHAN_REPAIR_MARKER docstring
+        for why), so when orphan_count > 0 -- the one case actually worth
+        surfacing -- this also emits a single HNSW_ORPHAN_REPAIR_MARKER
+        line on stderr via `_emit_hnsw_orphan_repair_stderr_event`, printed
+        unconditionally (no caller-supplied callback required). The routine
+        orphan_count == 0 case does NOT use this channel -- proportionate:
+        only the interesting event is emitted.
+
+        Args:
+            index: hnswlib.Index instance with vectors already added, not
+                yet saved to disk.
+            context: short label identifying the call site (e.g.
+                "build_index", "rebuild_from_vectors",
+                "incremental_update") for log correlation.
+
+        Raises:
+            HNSWIntegrityRepairError: repair_orphans() ran but orphans
+                remain afterward.
+        """
+        integrity = index.check_integrity()
+        orphan_count = count_orphan_errors(integrity)
+        logger.info(
+            "HNSW finalize integrity check (%s): orphan_count=%d",
+            context,
+            orphan_count,
+        )
+
+        if orphan_count == 0:
+            return
+
+        logger.info(
+            "HNSW finalize (%s): %d orphan(s) detected, running repair_orphans()",
+            context,
+            orphan_count,
+        )
+        index.repair_orphans()
+
+        post_repair = index.check_integrity()
+        post_orphan_count = count_orphan_errors(post_repair)
+
+        if post_orphan_count > 0:
+            logger.error(
+                "HNSW finalize (%s): repair_orphans() failed to eliminate all "
+                "orphans (%d remain after repair)",
+                context,
+                post_orphan_count,
+            )
+            _emit_hnsw_orphan_repair_stderr_event(
+                context=context,
+                orphan_count=orphan_count,
+                repaired=False,
+                remaining=post_orphan_count,
+            )
+            raise HNSWIntegrityRepairError(
+                f"HNSW orphan repair failed for {context}: "
+                f"{post_orphan_count} orphan(s) remain after repair_orphans()"
+            )
+
+        logger.info(
+            "HNSW finalize (%s): repair_orphans() succeeded, orphan_count now 0",
+            context,
+        )
+        _emit_hnsw_orphan_repair_stderr_event(
+            context=context,
+            orphan_count=orphan_count,
+            repaired=True,
+            remaining=None,
+        )
 
     def build_index(
         self,
@@ -149,7 +368,13 @@ class HNSWIndexManager:
 
         Raises:
             ValueError: If vector dimensions don't match or IDs length doesn't match
+            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
+                check_integrity()/repair_orphans() methods (Bug #1392).
         """
+        # Bug #1392: fail loud immediately, before any indexing work, if this
+        # environment's hnswlib lacks the custom fork's capability.
+        self._ensure_hnswlib_capability()
+
         # Validate inputs
         if vectors.shape[1] != self.vector_dim:
             raise ValueError(
@@ -189,6 +414,13 @@ class HNSWIndexManager:
             )
 
         index.add_items(vectors, labels)
+
+        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+        # persisted, so a freshly-built index never finalizes with orphans.
+        self._detect_and_repair_orphans(
+            index,
+            context=f"build_index:{collection_path}",
+        )
 
         # Report info message at completion
         if progress_callback:
@@ -421,7 +653,13 @@ class HNSWIndexManager:
 
         Raises:
             FileNotFoundError: If collection metadata is missing
+            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
+                check_integrity()/repair_orphans() methods (Bug #1392).
         """
+        # Bug #1392: fail loud immediately, before any indexing work, if this
+        # environment's hnswlib lacks the custom fork's capability.
+        self._ensure_hnswlib_capability()
+
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
         # Load collection metadata to get vector dimension
@@ -553,6 +791,14 @@ class HNSWIndexManager:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="🔧 Building HNSW index...")
             index.add_items(vectors, labels)
+
+            # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index
+            # is persisted. ONE shared code path serves regular, temporal,
+            # and multimodal rebuilds (all converge on this method).
+            self._detect_and_repair_orphans(
+                index,
+                context=f"rebuild_from_vectors:{collection_path}",
+            )
 
             # Save to temp file
             index.save_index(str(temp_file))
@@ -1051,13 +1297,32 @@ class HNSWIndexManager:
         Note:
             Updates both index file and metadata with new mappings.
             Preserves existing HNSW parameters (M, ef_construction).
+
+        Raises:
+            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
+                check_integrity()/repair_orphans() methods (Bug #1392).
         """
+        # Bug #1392: fail loud immediately, before any indexing work, if this
+        # environment's hnswlib lacks the custom fork's capability.
+        self._ensure_hnswlib_capability()
+
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
         num_new_vectors = len(id_to_label)
         # Use INFO level so it's visible in logs
         logger.info(
             f"⚡ INCREMENTAL HNSW UPDATE: Adding/updating {num_new_vectors} vectors (total index size: {current_index_size})"
+        )
+
+        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+        # persisted. This is the incremental path's finalize checkpoint --
+        # the two single-point add_items sites in add_or_update_vector()
+        # batch/defer the full-index integrity check to here rather than
+        # running check_integrity() (O(elements)) on every single-point add,
+        # which would be impractical for a per-point incremental operation.
+        self._detect_and_repair_orphans(
+            index,
+            context=f"incremental_update:{collection_path}",
         )
 
         # Save index to disk atomically — temp file + rename prevents corruption on crash

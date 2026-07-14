@@ -305,11 +305,22 @@ class SearchEventLogSqliteBackend:
             )
             return []
 
-    def get_hit_rate_counts(self, mode: str) -> Dict[str, int]:
+    def get_hit_rate_counts(
+        self,
+        mode: str,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+    ) -> Dict[str, int]:
         """Request-denominated hit/request counts for a cache mode (Issue #1257).
 
-        Returns aggregated counts over the ENTIRE table (no time filtering):
-            {"hits": int, "requests": int}
+        Returns aggregated counts as {"hits": int, "requests": int}, optionally
+        scoped to a half-open time window [from_ts, to_ts) when BOTH bounds
+        are provided (Bug #1391) -- mirroring the exact filter pattern
+        query_for_export already uses in this same class, and matching the
+        windowing semantics of get_windowed_metrics elsewhere on the
+        dashboard. When either bound is omitted, no time filter is applied
+        and the counts cover the table's entire lifetime (the original,
+        backward-compatible default).
 
         A row counts toward "requests" when EITHER provider recorded this mode
         for that request (voyage_cache_mode == mode OR cohere_cache_mode ==
@@ -327,8 +338,14 @@ class SearchEventLogSqliteBackend:
         try:
             conn = sqlite3.connect(self._db_path, timeout=30)
             try:
+                params: List[Any] = [mode, mode, mode, mode]
+                where_clause = ""
+                if from_ts is not None and to_ts is not None:
+                    where_clause = "WHERE timestamp >= ? AND timestamp < ?"
+                    params.append(from_ts)
+                    params.append(to_ts)
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT
                         SUM(CASE WHEN voyage_cache_mode = ? OR cohere_cache_mode = ?
                             THEN 1 ELSE 0 END),
@@ -336,8 +353,9 @@ class SearchEventLogSqliteBackend:
                                  OR (cohere_cache_mode = ? AND cohere_cache_hit = 1)
                             THEN 1 ELSE 0 END)
                     FROM search_event_log
+                    {where_clause}
                     """,
-                    (mode, mode, mode, mode),
+                    params,
                 ).fetchone()
                 requests_count = row[0] or 0
                 hits_count = row[1] or 0
@@ -610,20 +628,33 @@ class SearchEventLogPostgresBackend:
             )
             return []
 
-    def get_hit_rate_counts(self, mode: str) -> Dict[str, int]:
+    def get_hit_rate_counts(
+        self,
+        mode: str,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+    ) -> Dict[str, int]:
         """Request-denominated hit/request counts for a cache mode (Issue #1257).
 
-        See SearchEventLogSqliteBackend.get_hit_rate_counts for full rationale.
-        Cluster mode: this table is shared PostgreSQL, so the returned counts
-        are automatically aggregated across every node -- no per-node merge
-        is needed by the caller.
+        See SearchEventLogSqliteBackend.get_hit_rate_counts for full rationale,
+        including the Bug #1391 optional [from_ts, to_ts) half-open windowing
+        (applied only when BOTH bounds are provided; omitting either preserves
+        the original whole-table behavior). Cluster mode: this table is shared
+        PostgreSQL, so the returned counts are automatically aggregated across
+        every node -- no per-node merge is needed by the caller.
 
         Fail-open: returns {"hits": 0, "requests": 0} on any error.
         """
         try:
             with self._pool.connection() as conn:
+                params: List[Any] = [mode, mode, mode, mode]
+                where_clause = ""
+                if from_ts is not None and to_ts is not None:
+                    where_clause = "WHERE timestamp >= %s AND timestamp < %s"
+                    params.append(from_ts)
+                    params.append(to_ts)
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT
                         SUM(CASE WHEN voyage_cache_mode = %s OR cohere_cache_mode = %s
                             THEN 1 ELSE 0 END),
@@ -631,8 +662,9 @@ class SearchEventLogPostgresBackend:
                                  OR (cohere_cache_mode = %s AND cohere_cache_hit = TRUE)
                             THEN 1 ELSE 0 END)
                     FROM search_event_log
+                    {where_clause}
                     """,
-                    (mode, mode, mode, mode),
+                    params,
                 ).fetchone()
                 requests_count = row[0] or 0
                 hits_count = row[1] or 0
