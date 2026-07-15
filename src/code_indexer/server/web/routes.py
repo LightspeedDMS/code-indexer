@@ -3675,6 +3675,31 @@ def save_temporal_options(
 
     options["all_branches"] = all_branches == "1"
 
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind a server-wide runtime flag, shipped OFF by default. Reject
+    # loudly here rather than silently downgrading/dropping the request.
+    if options["all_branches"]:
+        _gate_config = get_config_service().get_config()
+        _gate_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
+        if not _gate_enabled:
+            return templates.TemplateResponse(
+                request,
+                "partials/error_message.html",
+                {
+                    "request": request,
+                    "error": (
+                        "All-branches temporal indexing is disabled on this "
+                        "server (temporal_all_branches_enabled=false). "
+                        "Contact your administrator to enable it."
+                    ),
+                },
+                status_code=400,
+            )
+
     manager = _get_golden_repo_manager()
     manager.save_temporal_options(alias, options)
 
@@ -4095,6 +4120,15 @@ def golden_repo_details_partial(request: Request, alias: str):
             )
         csrf_token = get_csrf_token_from_cookie(request)
         categories = _get_repo_category_service().list_categories()
+        # Story #1412: pass the gate value so the all-branches checkbox can
+        # be disabled/hidden with an explanatory note when the server-wide
+        # temporal_all_branches_enabled flag is off.
+        _gate_config = get_config_service().get_config()
+        _temporal_all_branches_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
         return templates.TemplateResponse(
             request,
             "partials/golden_repo_details.html",
@@ -4103,6 +4137,7 @@ def golden_repo_details_partial(request: Request, alias: str):
                 "repo": repo,
                 "csrf_token": csrf_token,
                 "categories": categories,
+                "temporal_all_branches_enabled": _temporal_all_branches_enabled,
             },
         )
     except Exception as e:

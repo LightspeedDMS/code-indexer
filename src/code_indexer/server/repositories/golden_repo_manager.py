@@ -3544,7 +3544,34 @@ class GoldenRepoManager:
                             command.extend(["--diff-context", str(diff_context)])
 
                         if temporal_options.get("all_branches"):
-                            command.append("--all-branches")
+                            # Story #1412: golden/server temporal all-branches
+                            # indexing is gated behind a server-wide runtime
+                            # flag, shipped OFF by default. Defense-in-depth:
+                            # skip the flag (never trust a stored legacy
+                            # value or a gate flipped off after the option
+                            # was set) and log loudly so the downgrade to
+                            # single-branch is observable.
+                            from code_indexer.server.services.config_service import (
+                                get_config_service as _get_config_service_gate,
+                            )
+
+                            _gate_config = _get_config_service_gate().get_config()
+                            _gate_enabled = bool(
+                                getattr(
+                                    _gate_config.indexing_config,
+                                    "temporal_all_branches_enabled",
+                                    False,
+                                )
+                            )
+                            if _gate_enabled:
+                                command.append("--all-branches")
+                            else:
+                                logger.warning(
+                                    "all_branches requested for golden '%s' "
+                                    "but temporal_all_branches_enabled=false; "
+                                    "indexing single-branch",
+                                    alias,
+                                )
 
                         # Bug #1313 round-4 (Codex Finding 1): in postgres/cluster
                         # mode, hand the child subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR

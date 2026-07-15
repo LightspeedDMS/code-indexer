@@ -342,6 +342,12 @@ Temporal indexing is per-commit-aggregated (message once + all changed-file diff
 
 -> Detail: docs/architecture-invariants.md#indexing-and-migrations
 
+### Golden/Server Temporal All-Branches Gate (Story #1412)
+
+Golden-repo temporal indexing tracks ONLY the branch registered at golden-repo registration by default. The existing `all_branches` opt-in (`temporal_options.all_branches` -> `--all-branches` appended to `cidx index --index-commits`) is retained as scaffolding but shipped DISABLED behind a new server-wide runtime flag `temporal_all_branches_enabled: bool = False` (`IndexingConfig`, Web Config screen checkbox, no env var). Gate off + a request ACQUIRES `all_branches=true` -> reject loudly at three front doors (REST `POST /api/admin/golden-repos`, Web `save_temporal_options`, MCP `add_golden_repo`), never silent-drop. Defense-in-depth at the three command builders (`golden_repo_manager.py`, `refresh_scheduler.py`, MCP `_build_temporal_index_cmd`) skips `--all-branches` + logs a WARNING when a stored legacy `all_branches=true` value is seen with the gate off. Reversible with NO re-index: point ids/payloads carry no branch membership, so enabling later just widens the git-log walk on the next refresh. Standalone CLI `--all-branches` and the `temporal_indexer` engine parameter are UNTOUCHED (server/golden surface only); `hidden_branches` (Bug #306) is a separate system, out of scope.
+
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "Golden/Server Temporal All-Branches Gate")
+
 ### HNSW Finalize-Time Orphan Detect+Repair + Zero-Tolerance Health (Epic #1333, Story #1359)
 
 Every HNSW build/finalize path (`build_index`, `rebuild_from_vectors`, incremental `save_incremental_update`) runs `check_integrity()` -> `repair_orphans()` (Story #1358 fork primitive) -> re-verify BEFORE the index is persisted, via `HNSWIndexManager._detect_and_repair_orphans()`. A repair that fails to converge raises `HNSWIntegrityRepairError` loud — never a silent partial index. Health check (`cidx health`/MCP `check_hnsw_health`/REST/Web) exposes `orphan_count` as a STRICT BINARY signal: 0 is OK, any value >0 is ERROR — no WARNING tier, no configurable threshold (a graded-severity design was explicitly rejected during maintainer review).

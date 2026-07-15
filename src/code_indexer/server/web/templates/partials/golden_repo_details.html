@@ -222,12 +222,18 @@
                             </tr>
                             <tr>
                                 <td colspan="2" style="border: none; padding: 0.2rem 0; vertical-align: middle;">
-                                    <label style="display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; cursor: pointer;">
+                                    <label style="display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; cursor: {{ 'not-allowed' if not temporal_all_branches_enabled else 'pointer' }};">
                                         <input type="checkbox" name="all_branches" value="1"
                                                style="margin: 0; width: auto; height: auto;"
-                                               {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}>
+                                               {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}
+                                               {% if not temporal_all_branches_enabled %}disabled{% endif %}>
                                         All branches
                                     </label>
+                                    {% if not temporal_all_branches_enabled %}
+                                    <div style="font-size: 0.85em; color: var(--pico-muted-color); margin-top: 0.2rem;">
+                                        All-branches indexing is disabled by server configuration. Contact your administrator to enable it.
+                                    </div>
+                                    {% endif %}
                                 </td>
                             </tr>
                             <tr>

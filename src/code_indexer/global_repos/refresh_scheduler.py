@@ -2435,7 +2435,29 @@ class RefreshScheduler:
                 if diff_context is not None:
                     temporal_command.extend(["--diff-context", str(diff_context)])
                 if temporal_options.get("all_branches"):
-                    temporal_command.append("--all-branches")
+                    # Story #1412: golden/server temporal all-branches
+                    # indexing is gated behind a server-wide runtime flag,
+                    # shipped OFF by default. Defense-in-depth: skip the
+                    # flag (never trust a stored legacy value or a gate
+                    # flipped off after the option was set) and log loudly
+                    # so the downgrade to single-branch is observable.
+                    _gate_config = get_config_service().get_config()
+                    _gate_enabled = bool(
+                        getattr(
+                            _gate_config.indexing_config,
+                            "temporal_all_branches_enabled",
+                            False,
+                        )
+                    )
+                    if _gate_enabled:
+                        temporal_command.append("--all-branches")
+                    else:
+                        logger.warning(
+                            "all_branches requested for golden '%s' but "
+                            "temporal_all_branches_enabled=false; indexing "
+                            "single-branch",
+                            alias_name,
+                        )
             else:
                 # Bug #642 Step 2: temporal_options is NULL (e.g. after path migration
                 # where options were never written back to DB). Fall back to reading
