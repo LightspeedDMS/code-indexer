@@ -1362,6 +1362,23 @@ class RefreshScheduler:
             # ConfigManager (CLI)
             return cast(int, self.config_source.get_global_refresh_interval())
 
+    def _is_externally_managed(self) -> bool:
+        """
+        Whether golden-repo presence/refresh is owned by an external manager.
+
+        When true, the server does not run its own refresh cycle or startup
+        restore reconciliation — an external owner materializes and refreshes
+        the clones, and the server only indexes/serves what is registered.
+
+        Only meaningful in server mode (GlobalRepoOperations). The CLI path has
+        no external owner, so it is always False.
+        """
+        if isinstance(self.config_source, GlobalRepoOperations):
+            return bool(
+                self.config_source.get_config().get("externally_managed", False)
+            )
+        return False
+
     def is_running(self) -> bool:
         """
         Check if scheduler is running.
@@ -1379,6 +1396,16 @@ class RefreshScheduler:
         """
         if self._running:
             logger.debug("Refresh scheduler already running")
+            return
+
+        # When golden repos are externally managed, an external owner drives
+        # refresh; running our own periodic refresh would fight it. Skip the
+        # background thread entirely (leave _running False so nothing polls).
+        if self._is_externally_managed():
+            logger.info(
+                "externally_managed=True: skipping self-managed refresh scheduler "
+                "(external owner drives golden-repo refresh)"
+            )
             return
 
         self._running = True
@@ -3448,6 +3475,19 @@ class RefreshScheduler:
         Story #236 AC4-AC7.
         """
         from datetime import datetime
+
+        # When golden repos are externally managed, the external owner — not the
+        # server — decides which clones exist on disk. Restoring "missing" masters
+        # from snapshots here would resurrect repos the owner intentionally
+        # removed. Skip reconciliation entirely. Deliberately do NOT write the
+        # completion marker, so that turning this mode back off later still runs
+        # the one-time reconcile.
+        if self._is_externally_managed():
+            logger.info(
+                "externally_managed=True: skipping startup golden-repo "
+                "reconciliation (external owner owns golden-repo presence)"
+            )
+            return
 
         marker_file = self.golden_repos_dir / ".reconciliation_complete_v1"
 
