@@ -207,6 +207,8 @@ class GlobalRepoOperations:
         Returns:
             Configuration dict with fields:
             - refresh_interval: Refresh interval in seconds
+            - externally_managed: True when an external owner manages golden-repo
+              presence/refresh (server skips self-refresh and startup restore)
 
         Story #3 - Configuration Consolidation:
         Now reads from centralized config.json via ConfigService instead of
@@ -219,13 +221,19 @@ class GlobalRepoOperations:
             config_service = get_config_service()
             golden_repos_config = config_service.get_config().golden_repos_config
             # golden_repos_config is guaranteed non-None by ServerConfig.__post_init__
-            return {"refresh_interval": golden_repos_config.refresh_interval_seconds}
+            return {
+                "refresh_interval": golden_repos_config.refresh_interval_seconds,
+                "externally_managed": golden_repos_config.externally_managed,
+            }
         except (RuntimeError, ValueError, IOError) as e:
             logger.warning(
                 f"Failed to load config from ConfigService, using defaults: {e}"
             )
             # Return default config on error
-            return {"refresh_interval": DEFAULT_REFRESH_INTERVAL}
+            return {
+                "refresh_interval": DEFAULT_REFRESH_INTERVAL,
+                "externally_managed": False,
+            }
 
     def set_config(self, refresh_interval: int) -> None:
         """
