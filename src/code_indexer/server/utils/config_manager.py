@@ -514,6 +514,12 @@ class IndexingConfig:
     temporal_active_embedder: str = "voyage-context-4"
     temporal_aggregation_chunk_chars: int = 4096
 
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind this server-wide runtime flag, shipped OFF by default. When
+    # False, all-branches requests must be rejected loudly at REST/Web/MCP
+    # boundaries and skipped (with a WARNING) at command-build sites.
+    temporal_all_branches_enabled: bool = False
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(

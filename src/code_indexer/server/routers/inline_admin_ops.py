@@ -263,6 +263,34 @@ def register_admin_ops_routes(
         Raises:
             HTTPException: If job submission fails
         """
+        # Story #1412: golden/server temporal all-branches indexing is gated
+        # behind a server-wide runtime flag, shipped OFF by default. Reject
+        # loudly here (before job submission) rather than silently
+        # downgrading/dropping the request. Checked BEFORE the try/except
+        # below so the 400 status is not swallowed into a generic 500.
+        if repo_data.temporal_options and repo_data.temporal_options.all_branches:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
+
+            _gate_config = get_config_service().get_config()
+            _gate_enabled = bool(
+                getattr(
+                    _gate_config.indexing_config,
+                    "temporal_all_branches_enabled",
+                    False,
+                )
+            )
+            if not _gate_enabled:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "All-branches temporal indexing is disabled on this "
+                        "server (temporal_all_branches_enabled=false). "
+                        "Contact your administrator to enable it."
+                    ),
+                )
+
         try:
             # Submit background job for adding golden repo
             func_kwargs: Dict[str, Any] = {

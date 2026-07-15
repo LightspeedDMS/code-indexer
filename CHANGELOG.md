@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.55.0] - 2026-07-14
+
+### Added
+
+- **#1412**: golden-repo temporal indexing now tracks only the branch registered at golden-repo registration by default. The pre-existing `all_branches` opt-in is retained as scaffolding but ships DISABLED behind a new server-wide runtime flag `temporal_all_branches_enabled` (default off, Web Config screen checkbox, no env var). With the gate off, a request that tries to acquire `all_branches=true` is rejected loudly at three front doors -- REST `POST /api/admin/golden-repos`, the Web UI temporal-options form, and MCP `add_golden_repo` -- never silently dropped. Defense-in-depth at the three (now four, including the MCP provider-index background job) temporal command-build sites skips `--all-branches` and logs a WARNING when a legacy stored `all_branches=true` value is seen with the gate off. Fully reversible with no re-index: the temporal index format carries no branch-membership fields, so enabling the gate later just widens the git-log walk on the next refresh. Standalone CLI `--all-branches` and the `temporal_indexer` engine parameter are untouched (server/golden surface only).
+
 ## [11.54.0] - 2026-07-14
 
 ### Fixed

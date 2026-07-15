@@ -959,6 +959,30 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         enable_temporal = params.get("enable_temporal", False)
         temporal_options = params.get("temporal_options")
 
+        # Story #1412: golden/server temporal all-branches indexing is gated
+        # behind a server-wide runtime flag, shipped OFF by default. Reject
+        # loudly here rather than silently downgrading/dropping the request.
+        if temporal_options and temporal_options.get("all_branches"):
+            _gate_config = get_config_service().get_config()
+            _gate_enabled = bool(
+                getattr(
+                    _gate_config.indexing_config,
+                    "temporal_all_branches_enabled",
+                    False,
+                )
+            )
+            if not _gate_enabled:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            "All-branches temporal indexing is disabled on "
+                            "this server (temporal_all_branches_enabled="
+                            "false). Contact your administrator to enable it."
+                        ),
+                    }
+                )
+
         job_id = _utils.app_module.golden_repo_manager.add_golden_repo(
             repo_url=repo_url,
             alias=alias,
@@ -1577,8 +1601,19 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
     return env
 
 
-def _build_temporal_index_cmd(clear: bool, temporal_options: dict) -> list:
-    """Build the cidx index --index-commits command with optional temporal flags."""
+def _build_temporal_index_cmd(
+    clear: bool,
+    temporal_options: dict,
+    all_branches_gate_enabled: bool = False,
+    alias: str = "",
+) -> list:
+    """Build the cidx index --index-commits command with optional temporal flags.
+
+    Story #1412: --all-branches is only appended when all_branches_gate_enabled
+    is True (defaults to False -- fail-closed). When temporal_options requests
+    all_branches but the gate is off, the flag is skipped and a WARNING is
+    logged naming the repo so the downgrade to single-branch is observable.
+    """
     cmd = ["cidx", "index", "--index-commits", "--progress-json"]
     if clear:
         cmd.append("--clear")
@@ -1588,7 +1623,14 @@ def _build_temporal_index_cmd(clear: bool, temporal_options: dict) -> list:
     if diff_context is not None:
         cmd.extend(["--diff-context", str(diff_context)])
     if temporal_options.get("all_branches"):
-        cmd.append("--all-branches")
+        if all_branches_gate_enabled:
+            cmd.append("--all-branches")
+        else:
+            logger.warning(
+                "all_branches requested for golden '%s' but "
+                "temporal_all_branches_enabled=false; indexing single-branch",
+                alias or "<unknown>",
+            )
     max_commits = temporal_options.get("max_commits")
     if max_commits is not None:
         cmd.extend(["--max-commits", str(max_commits)])
@@ -2097,14 +2139,26 @@ def _provider_temporal_index_job(
         build_temporal_child_env,
     )
 
-    _merged_env = build_temporal_child_env(
-        get_config_service().get_config(), base_env=env
-    )
+    _server_config = get_config_service().get_config()
+    _merged_env = build_temporal_child_env(_server_config, base_env=env)
     if _merged_env is not None:
         env = _merged_env
 
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind a server-wide runtime flag, shipped OFF by default. Reuse the
+    # config already fetched above rather than a second get_config_service()
+    # call.
+    _all_branches_gate_enabled = bool(
+        getattr(_server_config.indexing_config, "temporal_all_branches_enabled", False)
+    )
+
     temporal_options = kwargs.get("temporal_options", {}) or {}
-    cmd = _build_temporal_index_cmd(clear, temporal_options)
+    cmd = _build_temporal_index_cmd(
+        clear,
+        temporal_options,
+        all_branches_gate_enabled=_all_branches_gate_enabled,
+        alias=repo_alias,
+    )
 
     success, stdout_out, stderr_out = _run_provider_subprocess(
         cmd,

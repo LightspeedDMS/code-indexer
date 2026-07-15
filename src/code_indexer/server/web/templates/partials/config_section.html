@@ -1721,6 +1721,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.indexing.temporal_aggregation_chunk_chars }}</td>
                         <td class="config-note"><small>Character size used to chunk each per-commit aggregated document (message + diffs) before embedding</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Temporal All-Branches Indexing</td>
+                        <td class="config-value">{{ 'Enabled' if config.indexing.temporal_all_branches_enabled else 'Disabled' }}</td>
+                        <td class="config-note"><small>When disabled (default), golden temporal indexing tracks only the registered branch; all-branches requests are rejected</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1770,6 +1775,16 @@ function saveLlmCredsConfig() {
                     Temporal Aggregation Chunk Size
                     <input type="number" id="indexing-temporal-chunk-chars" name="temporal_aggregation_chunk_chars" value="{{ config.indexing.temporal_aggregation_chunk_chars }}" min="1">
                     <small>Character size used to chunk the per-commit aggregated document (message + diffs) before embedding. Default 4096.</small>
+                </label>
+                <label for="indexing-temporal-all-branches-enabled">
+                    <!-- Story #1412: hidden fallback guarantees the key is always
+                         submitted even when the checkbox is unchecked (browsers omit
+                         unchecked checkboxes from form data entirely) -- same pattern
+                         as Bug #943's elevation_enforcement_enabled field. -->
+                    <input type="hidden" name="temporal_all_branches_enabled" value="false">
+                    <input type="checkbox" id="indexing-temporal-all-branches-enabled" name="temporal_all_branches_enabled" value="true" {% if config.indexing.temporal_all_branches_enabled %}checked{% endif %}>
+                    Temporal All-Branches Indexing
+                    <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
                 </label>
             </div>
             <div class="form-actions">

@@ -765,6 +765,12 @@ class ConfigService:
                     if config.indexing_config is not None
                     else 4096
                 ),
+                # Story #1412: golden/server temporal all-branches gate display wiring
+                "temporal_all_branches_enabled": (
+                    config.indexing_config.temporal_all_branches_enabled
+                    if config.indexing_config is not None
+                    else False
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -2579,6 +2585,17 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_aggregation_chunk_chars to %d",
                 indexing.temporal_aggregation_chunk_chars,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1412: golden/server temporal all-branches gate (default OFF).
+        if key == "temporal_all_branches_enabled":
+            indexing.temporal_all_branches_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_all_branches_enabled to %s",
+                indexing.temporal_all_branches_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

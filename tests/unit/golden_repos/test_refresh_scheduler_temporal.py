@@ -117,7 +117,8 @@ class TestRefreshSchedulerTemporalAllBranches:
 
     def test_all_branches_true_produces_flag(self, tmp_path):
         """
-        AC5: all_branches=True in temporal_options produces --all-branches.
+        AC5/Story #1412 Scenario 6: all_branches=True in temporal_options
+        AND the server-wide gate enabled produces --all-branches.
 
         This calls the real _index_source method on a real RefreshScheduler
         instance (with mocked registry and subprocess only).
@@ -128,7 +129,18 @@ class TestRefreshSchedulerTemporalAllBranches:
         )
         scheduler = _make_scheduler(registry)
 
-        cmds = _capture_subprocess_cmds(scheduler, alias, tmp_path)
+        mock_indexing = MagicMock()
+        mock_indexing.temporal_all_branches_enabled = True
+        mock_server_cfg = MagicMock()
+        mock_server_cfg.indexing_config = mock_indexing
+        mock_cfg_svc = MagicMock()
+        mock_cfg_svc.get_config.return_value = mock_server_cfg
+
+        with patch(
+            "code_indexer.global_repos.refresh_scheduler.get_config_service",
+            return_value=mock_cfg_svc,
+        ):
+            cmds = _capture_subprocess_cmds(scheduler, alias, tmp_path)
 
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"AC5: No temporal command issued. All commands: {cmds}"
