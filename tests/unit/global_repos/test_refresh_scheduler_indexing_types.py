@@ -255,6 +255,23 @@ class TestTemporalIndexingInIndexSource:
                 "diff_context": 3,
             },
         )
+        # Bug #1414: _index_source now reads temporal_options from
+        # self.golden_repo_metadata (golden_repos_metadata table, bare
+        # alias), not from the registry (global_repos, -global-suffixed
+        # alias) used above. The `scheduler` fixture lazily resolves
+        # golden_repo_metadata to a real, empty per-test SQLite backend
+        # (no row for this repo), so mirror the same temporal_options here
+        # -- modeling the "at registration both tables agree" case -- to
+        # keep this test's values and assertions unchanged.
+        golden_meta = MagicMock()
+        golden_meta.get_repo.return_value = {
+            "temporal_options": {
+                "max_commits": 500,
+                "since_date": "2024-01-01",
+                "diff_context": 3,
+            }
+        }
+        scheduler.golden_repo_metadata = golden_meta
 
         temporal_calls = []
         popen_call_count = [0]
