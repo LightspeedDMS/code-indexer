@@ -2914,7 +2914,11 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
 @click.option(
     "--max-commits",
     type=int,
-    help="Maximum number of commits to index per branch (default: all)",
+    help="Maximum number of newly-discovered commits to schedule this run, "
+    "per configured temporal embedder (default: all). Applied AFTER "
+    "incremental-gate discovery as a global (not per-branch) cap: "
+    "selects the newest N chronologically-eligible commits; any "
+    "remainder is picked up on a future unrestricted run.",
 )
 @click.option(
     "--since-date",
