@@ -123,7 +123,9 @@ class TestFailuresNeverRaise:
         assert "boom" in res.error
         assert res.failure_class == FailureClass.RETRYABLE_ON_OTHER
 
-    def test_nonzero_exit_despite_completed_status_is_failure(self, invoker, monkeypatch):
+    def test_nonzero_exit_despite_completed_status_is_failure(
+        self, invoker, monkeypatch
+    ):
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
             if path == "/auth/login":
                 return {"token": "t"}
@@ -223,3 +225,54 @@ class TestBackpressureAndAuth:
         invoker.invoke("f", "/r", "p", 300)
         invoker.invoke("f", "/r", "p", 300)
         assert calls["login"] == 1
+
+
+class TestRepoResolution:
+    def test_resolved_repo_sets_repourl_branch_and_gitaware(self, invoker, monkeypatch):
+        monkeypatch.setattr(
+            invoker,
+            "_resolve_repo",
+            lambda cwd: {"repoUrl": "https://example.com/r.git", "branch": "dev"},
+        )
+        captured = {}
+
+        def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
+            if path == "/auth/login":
+                return {"token": "t"}
+            if path == "/jobs/with-capabilities":
+                captured["body"] = body
+                return {"jobId": "j"}
+            return {
+                "status": "completed",
+                "result": {"status": "completed", "exitCode": 0, "output": "ok"},
+            }
+
+        monkeypatch.setattr(invoker, "_request", fake_request)
+        invoker.invoke("f", "/some/repo", "p", 300)
+
+        assert captured["body"]["options"]["gitAware"] is True
+        assert captured["body"]["repoUrl"] == "https://example.com/r.git"
+        assert captured["body"]["branch"] == "dev"
+
+    def test_unresolved_repo_leaves_gitaware_off_and_no_repourl(
+        self, invoker, monkeypatch
+    ):
+        monkeypatch.setattr(invoker, "_resolve_repo", lambda cwd: {})
+        captured = {}
+
+        def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
+            if path == "/auth/login":
+                return {"token": "t"}
+            if path == "/jobs/with-capabilities":
+                captured["body"] = body
+                return {"jobId": "j"}
+            return {
+                "status": "completed",
+                "result": {"status": "completed", "exitCode": 0, "output": "ok"},
+            }
+
+        monkeypatch.setattr(invoker, "_request", fake_request)
+        invoker.invoke("f", "/not/a/repo", "p", 300)
+
+        assert captured["body"]["options"]["gitAware"] is False
+        assert "repoUrl" not in captured["body"]

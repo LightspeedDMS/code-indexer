@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 import urllib.error
@@ -125,30 +126,78 @@ class OrchestratorInvoker:
             self._token = str(token)
             return self._token
 
+    @staticmethod
+    def _resolve_repo(cwd: str) -> Dict[str, Any]:
+        """Resolve the git origin URL + current branch of the repo at cwd.
+
+        cidx's dispatcher passes a LOCAL path (the golden-repo clone on the cidx
+        pod's volume). That path is NOT reachable from the orchestrator's
+        sandboxed worker, so without this the agent runs in an empty workspace
+        and analyzes nothing. We read the repo's origin here (cidx HAS the clone)
+        and hand the orchestrator a repoUrl + branch so it provisions the real
+        repo in its own sandbox (gitAware). Returns {} when cwd is not a git
+        repo with an origin -- the agent then runs against whatever prompt
+        context it was given, as before.
+        """
+        try:
+            url = subprocess.run(
+                ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if url.returncode != 0 or not url.stdout.strip():
+                return {}
+            branch = subprocess.run(
+                ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            info: Dict[str, Any] = {"repoUrl": url.stdout.strip()}
+            b = branch.stdout.strip()
+            if branch.returncode == 0 and b and b != "HEAD":
+                info["branch"] = b
+            return info
+        except Exception as exc:  # noqa: BLE001 - best-effort; fall back to no repo
+            logger.warning("could not resolve repo from cwd %s: %s", cwd, exc)
+            return {}
+
     # ── job lifecycle ────────────────────────────────────────────────────────
     def _submit(self, prompt: str, cwd: str, timeout: int) -> str:
         job_id = str(uuid.uuid4())
+        repo = self._resolve_repo(cwd)
+        options: Dict[str, Any] = {
+            "agentEngine": "claude",
+            "model": self._model,
+            "timeout": timeout,
+            # Return ONLY the agent's final message, matching plain `claude -p`.
+            # Without this the orchestrator returns the full rendered agentic
+            # transcript (tool-call trace + answer), and cidx's
+            # UnifiedResponseParser -- which takes the first `{` -- hits an early
+            # tool-call brace instead of the final structured answer.
+            # Requires agent-orchestrator master 2aef293 or later.
+            "outputMode": "result",
+            "cidxAware": False,
+            # gitAware provisions the repo in the orchestrator's sandbox (via
+            # workspace-mcp) from the top-level repoUrl/branch below. On when we
+            # resolved a URL (so the agent analyzes real content), off otherwise.
+            "gitAware": bool(repo),
+        }
+
         body: Dict[str, Any] = {
             "jobId": job_id,
             "prompt": prompt,
-            "options": {
-                "agentEngine": "claude",
-                "model": self._model,
-                "timeout": timeout,
-                # Return ONLY the agent's final message, matching plain
-                # `claude -p`. Without this the orchestrator returns the full
-                # rendered agentic transcript (tool-call trace + answer), and
-                # cidx's UnifiedResponseParser -- which takes the first `{` -- hits
-                # an early tool-call brace instead of the final structured answer.
-                # Requires agent-orchestrator master 2aef293 or later.
-                "outputMode": "result",
-                # The agent works in the orchestrator's own sandbox; cidx's copy
-                # of the repo (cwd) is not reachable from there.
-                "gitAware": False,
-                "cidxAware": False,
-            },
+            "options": options,
             "metadata": {"source": "cidx", "cwd": cwd},
         }
+        # repoUrl/branch are TOP-LEVEL body fields (not options): the orchestrator
+        # reads them there to scope the job's workspace-mcp JWT to this repo and
+        # provision it into the agent's sandbox.
+        if repo:
+            body["repoUrl"] = repo["repoUrl"]
+            if "branch" in repo:
+                body["branch"] = repo["branch"]
         deadline = time.monotonic() + timeout
         while True:
             token = self._login()
