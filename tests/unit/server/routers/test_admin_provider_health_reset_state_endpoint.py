@@ -121,9 +121,9 @@ class TestResetStateRouteRegistered:
         Checks both path and method to reject misconfigured GET-only routes.
         """
         route = find_route(app_with_router, "/admin/provider-health/reset-state")
-        assert (
-            route is not None
-        ), "Route /admin/provider-health/reset-state is not registered"
+        assert route is not None, (
+            "Route /admin/provider-health/reset-state is not registered"
+        )
         assert "POST" in route.methods, (
             f"Route /admin/provider-health/reset-state is registered but not for POST; "
             f"methods={route.methods}"
