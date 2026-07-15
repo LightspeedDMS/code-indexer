@@ -135,6 +135,13 @@ class OrchestratorInvoker:
                 "agentEngine": "claude",
                 "model": self._model,
                 "timeout": timeout,
+                # Return ONLY the agent's final message, matching plain
+                # `claude -p`. Without this the orchestrator returns the full
+                # rendered agentic transcript (tool-call trace + answer), and
+                # cidx's UnifiedResponseParser -- which takes the first `{` -- hits
+                # an early tool-call brace instead of the final structured answer.
+                # Requires agent-orchestrator master 2aef293 or later.
+                "outputMode": "result",
                 # The agent works in the orchestrator's own sandbox; cidx's copy
                 # of the repo (cwd) is not reachable from there.
                 "gitAware": False,

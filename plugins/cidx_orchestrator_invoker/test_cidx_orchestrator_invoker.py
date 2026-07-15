@@ -64,6 +64,7 @@ class TestHappyPath:
             if path == "/jobs/with-capabilities":
                 assert body["prompt"] == "describe the repo"
                 assert body["options"]["model"] == "opus"
+                assert body["options"]["outputMode"] == "result"
                 return {"jobId": "job-1"}
             return {
                 "status": "completed",
