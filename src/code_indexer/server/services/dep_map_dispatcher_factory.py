@@ -29,6 +29,7 @@ from code_indexer.server.services.codex_invoker import CodexInvoker
 from code_indexer.server.services.codex_mcp_auth_header_provider import (
     build_codex_mcp_auth_header_provider,
 )
+from code_indexer.server.services.cli_invoker_plugin import get_invoker_factory
 
 
 def build_dep_map_dispatcher(
@@ -96,6 +97,18 @@ def build_dep_map_dispatcher(
             )
         else:
             claude_invoker = ClaudeInvoker(analysis_model=analysis_model)
+
+    # A deployment may replace the primary invoker with its own -- e.g. one that
+    # runs the prompt in a sandboxed agent runner instead of a local `claude`
+    # subprocess. When a plugin is configured it takes the `claude=` slot and
+    # codex routing is disabled: the point of the plugin is that THIS is where
+    # LLM execution happens, so weighted failover to a second local CLI would be
+    # wrong. With no plugin, the built-in ClaudeInvoker is used unchanged.
+    # See cli_invoker_plugin for the contract and selection order.
+    factory = get_invoker_factory()
+    if factory is not None:
+        primary_invoker = factory(analysis_model, claude_soft_timeout_seconds)
+        return CliDispatcher(claude=primary_invoker, codex=None, codex_weight=0.0)
 
     codex_invoker = None
     codex_weight = 0.0
