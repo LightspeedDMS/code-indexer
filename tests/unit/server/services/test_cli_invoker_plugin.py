@@ -32,6 +32,19 @@ from code_indexer.server.services.dep_map_dispatcher_factory import (
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
 
 
+def _fake_entry_points_no_plugin(group=None):
+    """Mirrors the REAL cross-version importlib.metadata.entry_points() call
+    shapes (Python 3.9 real signature takes zero parameters and returns a
+    plain dict; 3.10+ accepts group= and returns an iterable directly) so
+    tests stay correct regardless of which branch the running interpreter's
+    version takes -- unlike a single-shape fake, which would silently mask a
+    version-specific incompatibility exactly like the one this module fixes.
+    """
+    if group is None:
+        return {}
+    return []
+
+
 @pytest.fixture(autouse=True)
 def _clear(monkeypatch):
     monkeypatch.delenv(ENV_VAR, raising=False)
@@ -39,7 +52,9 @@ def _clear(monkeypatch):
     # venv: these tests exercise the env-var path explicitly, and the default
     # case must mean "no entry point either". (In CI the orchestrator plugin is
     # not installed; locally it may be.)
-    monkeypatch.setattr(cli_invoker_plugin, "entry_points", lambda group=None: [])
+    monkeypatch.setattr(
+        cli_invoker_plugin, "entry_points", _fake_entry_points_no_plugin
+    )
     cli_invoker_plugin.reset_cache()
     yield
     cli_invoker_plugin.reset_cache()
@@ -108,6 +123,41 @@ class TestPluginTakesThePrimarySlot:
 
         assert result.success is True
         assert result.cli_used == "stub"
+
+
+class TestPython39EntryPointsRealSignature:
+    """Bug: Python 3.9's REAL importlib.metadata.entry_points() takes ZERO
+    parameters and returns a plain dict (group -> List[EntryPoint]); the
+    ``group=`` keyword argument was only added in Python 3.10. The autouse
+    ``_clear`` fixture above masks this because its fake
+    (``lambda group=None: []``) accepts ``group=`` unconditionally, unlike the
+    real pre-3.10 stdlib -- so it cannot catch this incompatibility. This test
+    installs a fake that mirrors the REAL 3.9 signature exactly (no
+    parameters at all) to prove the entry-point-discovery code path actually
+    works under genuine Python 3.9 semantics.
+    """
+
+    def test_load_from_entry_points_with_real_py39_signature(self, monkeypatch):
+        class _FakeEntryPoint:
+            name = "test-plugin"
+
+            def load(self):
+                return make_stub
+
+        def _fake_entry_points_py39_signature():
+            # Real Python 3.9 signature: entry_points() -- NO parameters,
+            # not even an optional one. Passing group=... raises TypeError,
+            # exactly like the genuine stdlib on 3.9.
+            return {cli_invoker_plugin.ENTRY_POINT_GROUP: [_FakeEntryPoint()]}
+
+        monkeypatch.setattr(
+            cli_invoker_plugin, "entry_points", _fake_entry_points_py39_signature
+        )
+        cli_invoker_plugin.reset_cache()
+
+        factory = get_invoker_factory()
+
+        assert factory is make_stub
 
 
 class TestMisconfigurationFailsLoud:
