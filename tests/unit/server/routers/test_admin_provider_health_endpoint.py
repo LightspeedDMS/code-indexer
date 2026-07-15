@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-
+from tests.utils.route_registration import route_paths
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -142,8 +142,7 @@ class TestProviderHealthEndpointAuth:
 
     def test_endpoint_route_exists(self, app_with_router):
         """Router registers /admin/provider-health route."""
-        routes = [r.path for r in app_with_router.routes]
-        assert "/admin/provider-health" in routes
+        assert "/admin/provider-health" in route_paths(app_with_router)
 
 
 # ---------------------------------------------------------------------------
