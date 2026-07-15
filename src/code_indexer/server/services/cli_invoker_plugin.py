@@ -48,9 +48,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from importlib import import_module
 from importlib.metadata import entry_points
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,17 @@ def _load_from_path(spec: str) -> InvokerFactory:
 
 
 def _load_from_entry_points() -> Optional[InvokerFactory]:
-    selected = next(iter(entry_points(group=ENTRY_POINT_GROUP)), None)
+    # importlib.metadata.entry_points() only accepts the `group=` keyword
+    # starting in Python 3.10 (SelectableGroups). On 3.9 the function takes NO
+    # parameters at all and returns a plain dict of group -> List[EntryPoint];
+    # `.get(group, [])` is the pre-3.10 equivalent lookup. This repo's CI
+    # matrix still targets 3.9, so both call shapes must be supported.
+    candidates: List[Any]
+    if sys.version_info >= (3, 10):
+        candidates = list(entry_points(group=ENTRY_POINT_GROUP))
+    else:
+        candidates = list(entry_points().get(ENTRY_POINT_GROUP, []))
+    selected = next(iter(candidates), None)
     if selected is None:
         return None
     try:
