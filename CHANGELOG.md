@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.57.0] - 2026-07-15
+
+### Fixed
+
+- **#1407**: scheduled temporal refresh ran a full multi-shard disk-scan reconcile on every tick, even when the repo was fully caught up (~44 min measured on a 93k-commit / 69-shard repo). Root cause: `TemporalIndexer` relied on a buggy global `last_commit..HEAD` cursor narrowing with no cheap "already caught up" gate, so every run re-scanned every shard's `vector_*.json` files (also resolves #1411, a related global-cursor multi-embedder blind-spot bug). Fixed by introducing a durable stale-lifecycle marker system (`mark_stale`/`clear_stale`, fsync-durable) and per-embedder commit-set-difference enumeration (new `temporal_incremental_gate.py`) replacing the cursor entirely: a no-op tick now performs zero `vector_*.json` reads. A physically-stale shard is force-rebuilt rather than incrementally appended onto a possibly-inconsistent index; stray points from a crashed prior run are deleted fail-closed before rebuild. The shared finalize path (`end_indexing`/`save_incremental_update`/`rebuild_from_vectors`) gained a scoped `clear_stale` parameter defaulting to today's behavior, so ordinary (non-temporal) incremental indexing and watch-mode are unaffected -- verified by explicit regression tests. Also fixes a defect found during code review: operator `--reconcile` no longer silently clears `is_stale` on a shard that was already stale coming in (e.g. from a real prior crash) without rebuilding it -- that shard is now force-rebuilt instead of being blessed as fresh.
+
 ## [11.56.0] - 2026-07-15
 
 ### Fixed

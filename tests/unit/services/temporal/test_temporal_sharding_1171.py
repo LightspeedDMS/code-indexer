@@ -349,6 +349,9 @@ class TestIndexerShardRouting:
         mock_vector_store.begin_indexing.return_value = None
         mock_vector_store.end_indexing.return_value = {"status": "ok"}
         mock_vector_store.upsert_points.return_value = None
+        # Bug #1407: the automatic gate (compute_embedder_indexing_plan)
+        # calls list_collections() for disk-derived shard enumeration.
+        mock_vector_store.list_collections.return_value = []
 
         return mock_config_manager, mock_vector_store, mock_config
 
@@ -833,6 +836,10 @@ def _make_indexer_mocks(tmp_path: Path, collection_exists: bool = False):
     mock_vector_store.begin_indexing.return_value = None
     mock_vector_store.end_indexing.return_value = {"status": "ok"}
     mock_vector_store.upsert_points.return_value = None
+    # Bug #1407: the automatic gate (compute_embedder_indexing_plan) calls
+    # list_collections() for disk-derived shard/staleness enumeration on
+    # every index_commits() call.
+    mock_vector_store.list_collections.return_value = []
 
     return mock_config_manager, mock_vector_store
 
