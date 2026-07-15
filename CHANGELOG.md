@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [11.55.0] - 2026-07-14
+## [11.56.0] - 2026-07-15
+
+### Fixed
+
+- **#1414**: golden repo `temporal_options` (`all_branches`, `max_commits`, `since_date`, `diff_context`) split-brain across two DB tables. `GoldenRepoManager.save_temporal_options` (the Web UI's only write path) wrote exclusively to `golden_repos_metadata`, but `RefreshScheduler._index_source` read from the separate `global_repos` table -- frozen at registration time -- so any post-registration edit was silently ignored by every future scheduled refresh. Most dangerous under Story #1412's all-branches gate: an operator disabling `all_branches` via the Web UI would have the scheduler keep reading the stale `True` value and keep doing multi-branch indexing against explicit operator intent, forever. Fixed by repointing the read to the authoritative `golden_repos_metadata` table (fail-closed WARNING + existing Bug #642 NULL-fallback on any read error), and by adding the previously-missing `update_temporal_options` method to the PostgreSQL metadata backend + its Protocol (the Web UI save 500'd unconditionally in cluster/production mode until now). `enable_temporal`/`enable_scip` reads are unchanged (already correctly handled by Bug #1390/#1406). Discovered via adversarial review of #1412, connected but independently root-caused and fixed.
 
 ### Added
 

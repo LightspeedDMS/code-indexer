@@ -2444,7 +2444,40 @@ class RefreshScheduler:
         enable_temporal = (
             repo_info.get("enable_temporal", False) if repo_info else False
         )
-        temporal_options = repo_info.get("temporal_options") if repo_info else None
+
+        # Bug #1414: temporal_options must be read from golden_repos_metadata
+        # (bare-alias-keyed, Web-UI-authoritative -- GoldenRepoManager.
+        # save_temporal_options is the Web UI's ONLY write path and writes
+        # exclusively to this table), NOT from self.registry's global_repos
+        # table, which is frozen at registration time. A stale registry read
+        # here silently ignores every operator edit to max_commits/
+        # since_date/diff_context/all_branches, forever -- most dangerously
+        # for all_branches under Story #1412's gate (the #1406-class
+        # scenario: operator disables all_branches via the Web UI, but the
+        # stale registry copy still says True, so the scheduler keeps doing
+        # multi-branch indexing against explicit operator intent). Reuses
+        # the #1373 bare/-global alias normalization pattern already
+        # established in _reconcile_registry_with_filesystem. enable_temporal
+        # (above) and enable_scip (below) are UNCHANGED -- their
+        # registry-based consistency is handled separately and correctly
+        # (Bug #1390/#1406), and is explicitly out of scope here.
+        _GLOBAL_SUFFIX = "-global"
+        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
+        try:
+            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
+        except Exception as exc:
+            logger.warning(
+                "Bug #1414: could not read golden_repos_metadata for %s, "
+                "temporal_options unavailable this cycle (Bug #642 NULL "
+                "fallback will apply): %s: %s",
+                bare_alias,
+                type(exc).__name__,
+                exc,
+            )
+            golden_meta_info = None
+        temporal_options = (
+            golden_meta_info.get("temporal_options") if golden_meta_info else None
+        )
 
         repo_url = repo_info.get("repo_url", "") if repo_info else ""
         is_local_repo = repo_url.startswith("local://") if repo_url else False
