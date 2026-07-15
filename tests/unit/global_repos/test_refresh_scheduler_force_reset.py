@@ -17,7 +17,6 @@ from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 
-
 # ---------------------------------------------------------------------------
 # Fixtures (reuse pattern from test_refresh_scheduler_git_pull_location.py)
 # ---------------------------------------------------------------------------
@@ -496,8 +495,13 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()  # type: ignore[misc]
 
+        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
-            alias_name, force_reset=True, progress_callback=None
+            alias_name,
+            force_reset=True,
+            progress_callback=None,
+            tracked_by_caller=True,
         )
 
     def test_submit_job_passes_force_reset_false_in_lambda(
@@ -539,8 +543,13 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()  # type: ignore[misc]
 
+        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
-            alias_name, force_reset=False, progress_callback=None
+            alias_name,
+            force_reset=False,
+            progress_callback=None,
+            tracked_by_caller=True,
         )
 
     def test_submit_job_default_force_reset_is_false(
@@ -576,6 +585,11 @@ class TestSubmitRefreshJobForceReset:
             captured_funcs[0]()  # type: ignore[misc]
 
         # Default must be force_reset=False
+        # EVO-64385: the worker runs under submit_job's already-claimed job,
+        # so it must tell _execute_refresh not to register a second one.
         mock_execute.assert_called_once_with(
-            alias_name, force_reset=False, progress_callback=None
+            alias_name,
+            force_reset=False,
+            progress_callback=None,
+            tracked_by_caller=True,
         )
