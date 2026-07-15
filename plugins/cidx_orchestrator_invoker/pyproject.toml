@@ -9,11 +9,11 @@ description = "Run cidx's LLM prompts as agent-orchestrator jobs instead of a lo
 requires-python = ">=3.10"
 dependencies = []
 
-# Discovered automatically by cidx via the upstream plugin seam. Setting
-# CIDX_LLM_INVOKER=cidx_orchestrator_invoker:invoke is equivalent and takes
-# precedence; the entry point means the plugin works as soon as it is installed.
-[project.entry-points."code_indexer.llm_invoker"]
-orchestrator = "cidx_orchestrator_invoker:invoke"
+# Registers on cidx's code_indexer.cli_invoker seam, so the plugin is active as
+# soon as it is installed. CIDX_CLI_INVOKER=cidx_orchestrator_invoker:make_invoker
+# is an equivalent override and takes precedence.
+[project.entry-points."code_indexer.cli_invoker"]
+orchestrator = "cidx_orchestrator_invoker:make_invoker"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cidx_orchestrator_invoker"]

@@ -1,10 +1,12 @@
 """
-Tests for the orchestrator-backed LLM invoker.
+Tests for the orchestrator-backed IntelligenceCliInvoker.
 
-The contract cidx relies on is narrow but unforgiving: return (ok, output), and
-NEVER raise. This plugin runs inside a cidx background job (golden-repo
-registration); an escaping exception fails that job, which is the exact failure
-mode -- exit 127 from a missing `claude` CLI -- that the plugin exists to cure.
+The dispatcher contract is unforgiving: invoke(...) must return an
+InvocationResult and NEVER raise. This invoker runs inside a cidx background job
+(golden-repo registration, dep-map); an escaping exception fails that job, which
+is the exact failure mode -- exit 127 from a missing `claude` CLI -- the plugin
+exists to cure. On failure it must classify the failure so the dispatcher's
+retry/failover logic behaves.
 """
 
 from __future__ import annotations
@@ -16,63 +18,76 @@ import urllib.error
 import pytest
 
 import cidx_orchestrator_invoker as plugin
+from code_indexer.server.services.intelligence_cli_invoker import (
+    FailureClass,
+    InvocationResult,
+)
 
 
-@pytest.fixture(autouse=True)
-def _env(monkeypatch):
+@pytest.fixture()
+def invoker(monkeypatch):
     monkeypatch.setenv("CIDX_ORCH_PASSWORD", "secret")
     monkeypatch.setenv("CIDX_ORCH_POLL_SECS", "0")
-    plugin._token = None
-    yield
-    plugin._token = None
+    return plugin.make_invoker("opus", 300)
 
 
 def _http_error(code: int, body: dict | None = None) -> urllib.error.HTTPError:
     payload = json.dumps(body or {}).encode()
     return urllib.error.HTTPError(
-        url="http://orch/jobs", code=code, msg="err", hdrs=None, fp=io.BytesIO(payload)
+        url="http://orch", code=code, msg="err", hdrs=None, fp=io.BytesIO(payload)
     )
 
 
+class TestContract:
+    def test_make_invoker_satisfies_the_protocol(self, invoker):
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            IntelligenceCliInvoker,
+        )
+
+        assert isinstance(invoker, IntelligenceCliInvoker)
+
+    def test_model_override_env_wins(self, monkeypatch):
+        monkeypatch.setenv("CIDX_ORCH_PASSWORD", "x")
+        monkeypatch.setenv("CIDX_ORCH_MODEL", "sonnet")
+        inv = plugin.make_invoker("opus", 300)
+        assert inv._model == "sonnet"
+
+
 class TestHappyPath:
-    def test_submits_polls_and_returns_the_agent_output(self, monkeypatch):
+    def test_submits_polls_and_returns_output(self, invoker, monkeypatch):
         seen = []
 
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
             seen.append((method, path))
             if path == "/auth/login":
-                return {"token": "jwt-123"}
+                return {"token": "jwt"}
             if path == "/jobs/with-capabilities":
-                assert body["prompt"] == "analyze the repo"
-                assert body["options"]["agentEngine"] == "claude"
+                assert body["prompt"] == "describe the repo"
+                assert body["options"]["model"] == "opus"
                 return {"jobId": "job-1"}
-            if path == "/jobs/job-1":
-                return {
-                    "status": "completed",
-                    "result": {
-                        "status": "completed",
-                        "exitCode": 0,
-                        "output": "THE DESCRIPTION",
-                    },
-                }
-            raise AssertionError(path)
+            return {
+                "status": "completed",
+                "result": {"status": "completed", "exitCode": 0, "output": "DESC"},
+            }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
+        monkeypatch.setattr(invoker, "_request", fake_request)
 
-        ok, out = plugin.invoke("/repo", "analyze the repo", 300, 360)
+        res = invoker.invoke("describe", "/repo", "describe the repo", 300)
 
-        assert (ok, out) == (True, "THE DESCRIPTION")
+        assert isinstance(res, InvocationResult)
+        assert res.success is True
+        assert res.output == "DESC"
+        assert res.cli_used == "orchestrator"
         assert ("POST", "/jobs/with-capabilities") in seen
-        assert ("GET", "/jobs/job-1") in seen
 
-    def test_polls_until_terminal(self, monkeypatch):
+    def test_polls_until_terminal(self, invoker, monkeypatch):
         states = iter(
             [
                 {"status": "queued"},
                 {"status": "running"},
                 {
                     "status": "completed",
-                    "result": {"status": "completed", "exitCode": 0, "output": "done"},
+                    "result": {"status": "completed", "exitCode": 0, "output": "ok"},
                 },
             ]
         )
@@ -84,15 +99,12 @@ class TestHappyPath:
                 return {"jobId": "j"}
             return next(states)
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
+        monkeypatch.setattr(invoker, "_request", fake_request)
+        assert invoker.invoke("f", "/r", "p", 300).success is True
 
-        assert plugin.invoke("/repo", "p", 300, 360) == (True, "done")
 
-
-class TestFailuresNeverEscape:
-    """Every failure must come back as (False, message) -- never an exception."""
-
-    def test_agent_job_failed(self, monkeypatch):
+class TestFailuresNeverRaise:
+    def test_agent_job_failed_is_retryable_on_other(self, invoker, monkeypatch):
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
             if path == "/auth/login":
                 return {"token": "t"}
@@ -100,16 +112,17 @@ class TestFailuresNeverEscape:
                 return {"jobId": "j"}
             return {
                 "status": "failed",
-                "result": {"status": "failed", "exitCode": 1, "error": "agent blew up"},
+                "result": {"status": "failed", "exitCode": 1, "error": "boom"},
             }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
+        monkeypatch.setattr(invoker, "_request", fake_request)
 
-        ok, out = plugin.invoke("/repo", "p", 300, 360)
-        assert ok is False
-        assert "agent blew up" in out
+        res = invoker.invoke("f", "/r", "p", 300)
+        assert res.success is False
+        assert "boom" in res.error
+        assert res.failure_class == FailureClass.RETRYABLE_ON_OTHER
 
-    def test_nonzero_exit_is_a_failure_even_if_status_says_completed(self, monkeypatch):
+    def test_nonzero_exit_despite_completed_status_is_failure(self, invoker, monkeypatch):
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
             if path == "/auth/login":
                 return {"token": "t"}
@@ -120,33 +133,31 @@ class TestFailuresNeverEscape:
                 "result": {"status": "completed", "exitCode": 3, "output": "partial"},
             }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
-
-        ok, _ = plugin.invoke("/repo", "p", 300, 360)
-        assert ok is False
+        monkeypatch.setattr(invoker, "_request", fake_request)
+        assert invoker.invoke("f", "/r", "p", 300).success is False
 
     def test_missing_password_is_reported_not_raised(self, monkeypatch):
         monkeypatch.delenv("CIDX_ORCH_PASSWORD", raising=False)
+        inv = plugin.make_invoker("opus", 300)
 
-        ok, out = plugin.invoke("/repo", "p", 300, 360)
+        res = inv.invoke("f", "/r", "p", 300)
+        assert res.success is False
+        assert "CIDX_ORCH_PASSWORD" in res.error
+        assert res.failure_class == FailureClass.RETRYABLE_ON_SAME
 
-        assert ok is False
-        assert "CIDX_ORCH_PASSWORD" in out
-
-    def test_unexpected_crash_is_reported_not_raised(self, monkeypatch):
+    def test_unexpected_crash_is_reported_not_raised(self, invoker, monkeypatch):
         def boom(*a, **k):
             raise RuntimeError("socket exploded")
 
-        monkeypatch.setattr(plugin, "_request", boom)
+        monkeypatch.setattr(invoker, "_request", boom)
 
-        ok, out = plugin.invoke("/repo", "p", 300, 360)
-
-        assert ok is False
-        assert "socket exploded" in out
+        res = invoker.invoke("f", "/r", "p", 300)
+        assert res.success is False
+        assert "socket exploded" in res.error
 
 
 class TestBackpressureAndAuth:
-    def test_429_is_retried_after_the_hinted_delay(self, monkeypatch):
+    def test_429_is_retried_after_the_hinted_delay(self, invoker, monkeypatch):
         slept = []
         monkeypatch.setattr(plugin.time, "sleep", lambda s: slept.append(s))
         calls = {"submit": 0}
@@ -164,15 +175,14 @@ class TestBackpressureAndAuth:
                 "result": {"status": "completed", "exitCode": 0, "output": "ok"},
             }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
+        monkeypatch.setattr(invoker, "_request", fake_request)
 
-        ok, out = plugin.invoke("/repo", "p", 300, 360)
+        res = invoker.invoke("f", "/r", "p", 300)
+        assert res.success is True
+        assert calls["submit"] == 2
+        assert 7 in slept
 
-        assert (ok, out) == (True, "ok")
-        assert calls["submit"] == 2, "the submit must be retried, not abandoned"
-        assert 7 in slept, "must honour the orchestrator's retryAfterSeconds hint"
-
-    def test_expired_jwt_triggers_one_reauth_then_succeeds(self, monkeypatch):
+    def test_expired_jwt_forces_one_reauth(self, invoker, monkeypatch):
         calls = {"login": 0, "submit": 0}
 
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
@@ -189,14 +199,12 @@ class TestBackpressureAndAuth:
                 "result": {"status": "completed", "exitCode": 0, "output": "ok"},
             }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
+        monkeypatch.setattr(invoker, "_request", fake_request)
 
-        ok, _ = plugin.invoke("/repo", "p", 300, 360)
+        assert invoker.invoke("f", "/r", "p", 300).success is True
+        assert calls["login"] >= 2
 
-        assert ok is True
-        assert calls["login"] >= 2, "a 401 must force a re-login"
-
-    def test_token_is_cached_across_calls(self, monkeypatch):
+    def test_token_cached_across_calls(self, invoker, monkeypatch):
         calls = {"login": 0}
 
         def fake_request(path, *, method="GET", body=None, token=None, timeout=30):
@@ -210,9 +218,7 @@ class TestBackpressureAndAuth:
                 "result": {"status": "completed", "exitCode": 0, "output": "ok"},
             }
 
-        monkeypatch.setattr(plugin, "_request", fake_request)
-
-        plugin.invoke("/repo", "p", 300, 360)
-        plugin.invoke("/repo", "p", 300, 360)
-
-        assert calls["login"] == 1, "the 8h JWT must not be re-fetched on every call"
+        monkeypatch.setattr(invoker, "_request", fake_request)
+        invoker.invoke("f", "/r", "p", 300)
+        invoker.invoke("f", "/r", "p", 300)
+        assert calls["login"] == 1
