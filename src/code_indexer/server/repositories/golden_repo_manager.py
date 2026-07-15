@@ -488,7 +488,16 @@ class GoldenRepoManager:
             if not clone_path:
                 return
             try:
-                if os.path.exists(clone_path):
+                if os.path.islink(clone_path):
+                    # EVO-64228: a symlink must be unlinked, never rmtree'd —
+                    # rmtree raises on a symlink and (if followed) could delete
+                    # its target. Unlink removes the stale link cleanly.
+                    os.unlink(clone_path)
+                    logging.info(
+                        "Bug #1218: removed orphaned clone symlink '%s' after registration failure",
+                        clone_path,
+                    )
+                elif os.path.exists(clone_path):
                     shutil.rmtree(clone_path)
                     logging.info(
                         "Bug #1218: removed orphaned clone '%s' after registration failure",
@@ -513,7 +522,14 @@ class GoldenRepoManager:
             try:
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
-                _clone_path_for_cleanup = clone_path
+                # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
+                # the source the caller materialized directly into
+                # golden_repos_dir on the shared volume -- cidx did NOT create
+                # it. Never register it for failure cleanup, or a later indexing
+                # / activation error would rmtree the caller's (workspace-mcp's)
+                # content. Only track a clone cidx actually made a copy of.
+                if not self._is_in_place_registration(repo_url, clone_path):
+                    _clone_path_for_cleanup = clone_path
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -1366,6 +1382,29 @@ class GoldenRepoManager:
             or repo_url.startswith("local://")
         )
 
+    def _is_in_place_registration(self, repo_url: str, clone_path: str) -> bool:
+        """True when repo_url is a local path already materialized AT clone_path.
+
+        In this case the golden repo was provisioned directly into
+        golden_repos_dir/{alias} (e.g. workspace-mcp writing into the shared RWX
+        volume), so cidx must index it IN PLACE (no copy) and must NEVER delete
+        it on failure cleanup -- the content is not cidx's to remove (EVO-64228).
+        Single source of truth for the "same-dir" predicate used by both the
+        copy short-circuit and the worker's cleanup guard.
+        """
+        if not self._is_local_path(repo_url):
+            return False
+        if repo_url.startswith("file://"):
+            source_path = repo_url[len("file://") :]
+        elif repo_url.startswith("local://"):
+            return False  # local:// has no external source to compare
+        else:
+            source_path = repo_url
+        try:
+            return os.path.realpath(source_path) == os.path.realpath(clone_path)
+        except OSError:
+            return False
+
     def _clone_local_repository_with_regular_copy(
         self, repo_url: str, clone_path: str
     ) -> str:
@@ -1409,6 +1448,17 @@ class GoldenRepoManager:
                     logging.info(
                         f"Using existing local directory for {repo_url}: {clone_path}"
                     )
+                return clone_path
+
+            if self._is_in_place_registration(repo_url, clone_path):
+                # EVO-64228: the source has already been materialized at clone_path
+                # (workspace-mcp provisions golden repos directly into golden_repos_dir on
+                # the shared volume), so it is already in place inside golden_repos_dir —
+                # index it as-is instead of copying a directory onto itself.
+                logging.info(
+                    "Golden repo already at clone_path; indexing in place: %s",
+                    clone_path,
+                )
                 return clone_path
 
             # Always use regular copy for golden repository registration
@@ -1609,7 +1659,12 @@ class GoldenRepoManager:
             return None  # Directory already removed
 
         try:
-            shutil.rmtree(str(clone_path_obj))
+            if os.path.islink(str(clone_path_obj)):
+                # EVO-64228: a symlink must be unlinked, never rmtree'd — rmtree
+                # raises on a symlink and (if followed) could delete its target.
+                os.unlink(str(clone_path_obj))
+            else:
+                shutil.rmtree(str(clone_path_obj))
             logging.info(f"Successfully cleaned up repository files: {clone_path_obj}")
             return True
         except (PermissionError, OSError) as fs_error:

@@ -25,11 +25,24 @@ def _make_scheduler(registry):
 
     RefreshScheduler.__init__ requires several injected dependencies. We
     supply only what _index_source actually uses: self.registry.
+
+    Bug #1414: _index_source now reads temporal_options from
+    self.golden_repo_metadata (golden_repos_metadata table), not from the
+    registry. These tests model the "at registration both tables agree" /
+    unedited-repo case, so mirror the registry's stored temporal_options
+    into a golden_repo_metadata double here -- this keeps every test's
+    values and assertions unchanged while exercising the new read path.
     """
     from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
     scheduler = object.__new__(RefreshScheduler)
     scheduler.registry = registry
+    repo_info = registry.get_global_repo.return_value
+    golden_meta = MagicMock()
+    golden_meta.get_repo.return_value = {
+        "temporal_options": repo_info.get("temporal_options") if repo_info else None
+    }
+    scheduler.golden_repo_metadata = golden_meta
     return scheduler
 
 

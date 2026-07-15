@@ -455,6 +455,44 @@ class TestCohereErrorHandling401Bug595Issue2:
         assert "CO_API_KEY" in error_msg
         assert "Invalid" in error_msg or "invalid" in error_msg
 
+    def test_401_raises_value_error_immediately_without_retry_sleeps(
+        self, cohere_provider
+    ):
+        """Bug (EVO-64222): a 401 on the indexing path (retry=True) must raise
+        ValueError on the FIRST occurrence — before any back-off sleep — so a
+        doomed pass fails in milliseconds instead of retrying max_retries times.
+        """
+        import time
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_client_cls = MagicMock()
+        mock_instance = mock_client_cls.return_value
+        http_error = httpx.HTTPStatusError(
+            "401 Unauthorized",
+            request=type("Req", (), {})(),
+            response=type(
+                "Resp", (), {"status_code": 401, "text": "Unauthorized", "headers": {}}
+            )(),
+        )
+        mock_instance.post.side_effect = http_error
+
+        with patch("httpx.Client", mock_client_cls):
+            with patch.object(time, "sleep") as mock_sleep:
+                with pytest.raises(ValueError, match="CO_API_KEY"):
+                    cohere_provider._make_sync_request(["test"], retry=True)
+
+        # Exactly one request — no retry attempts for an auth failure.
+        assert mock_instance.post.call_count == 1, (
+            "401 was retried; it must raise immediately without retrying "
+            f"(post called {mock_instance.post.call_count} times)."
+        )
+        # No back-off sleep was performed.
+        assert mock_sleep.call_count == 0, (
+            "time.sleep was called on a 401; the auth failure must raise "
+            "before any exponential-backoff sleep."
+        )
+
 
 class TestCohereLoadModelSpecsFallbackBug595Issue3:
     """Bug #595 Issue 3: _load_model_specs() has no exception handling.

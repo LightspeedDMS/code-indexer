@@ -9,6 +9,10 @@ repository_health.py::get_repository_health and activated_repos.py::get_health:
 - discover_health_collections: scan a `.code-indexer/index` directory for every
   collection subdirectory containing an hnsw_index.bin, classifying its index
   type (semantic/temporal/multimodal).
+- discover_incomplete_collections: scan the same directory for the partially
+  built collections discover_health_collections cannot see -- vector shards on
+  disk but no hnsw_index.bin (EVO-64245). They are reported unhealthy rather
+  than silently skipped, which previously made a broken index look healthy.
 - get_shared_health_service: ONE HNSWHealthService singleton (5-minute TTL)
   shared by both routers, replacing activated_repos.py's previous
   fresh-cache-less-instance-per-request pattern. HNSWHealthService guards its
@@ -102,6 +106,44 @@ def _to_collection_health_result(
     )
 
 
+def _classify_index_type(collection_name: str) -> str:
+    """Classify a collection's index type from its directory name.
+
+    Substring classification, exactly as both routers previously did:
+    "temporal" in name.lower() -> "temporal", "multimodal" in name.lower() ->
+    "multimodal", else "semantic".
+
+    Args:
+        collection_name: Collection directory name (e.g. "voyage-code-3").
+
+    Returns:
+        "temporal", "multimodal", or "semantic".
+    """
+    name_lower = collection_name.lower()
+    if "temporal" in name_lower:
+        return "temporal"
+    if "multimodal" in name_lower:
+        return "multimodal"
+    return "semantic"
+
+
+def collection_has_vector_shards(collection_dir: Path) -> bool:
+    """Return True if the collection holds at least one vector shard.
+
+    Vector shards (``vector_*.json``) are written incrementally during
+    indexing and live in nested subdirectories, so rglob is required. Their
+    presence means indexing populated the collection -- as opposed to a
+    genuinely empty / never-indexed collection directory, which has none.
+
+    Args:
+        collection_dir: Path to a single collection directory.
+
+    Returns:
+        True if any vector_*.json shard exists anywhere under collection_dir.
+    """
+    return next(collection_dir.rglob("vector_*.json"), None) is not None
+
+
 def discover_health_collections(
     index_base_path: Path,
 ) -> List[Tuple[str, str, Path]]:
@@ -112,10 +154,7 @@ def discover_health_collections(
 
     Returns:
         List of (collection_name, index_type, hnsw_file_path) tuples, sorted
-        by collection_name for deterministic ordering. index_type is
-        classified by substring exactly as both routers previously did:
-        "temporal" in name.lower() -> "temporal", "multimodal" in
-        name.lower() -> "multimodal", else "semantic".
+        by collection_name for deterministic ordering.
 
     Raises:
         ValueError: If index_base_path is None.
@@ -135,18 +174,89 @@ def discover_health_collections(
         if not hnsw_file.exists():
             continue
 
-        collection_name = collection_dir.name
-        name_lower = collection_name.lower()
-        if "temporal" in name_lower:
-            index_type = "temporal"
-        elif "multimodal" in name_lower:
-            index_type = "multimodal"
-        else:
-            index_type = "semantic"
-
-        discovered.append((collection_name, index_type, hnsw_file))
+        discovered.append(
+            (
+                collection_dir.name,
+                _classify_index_type(collection_dir.name),
+                hnsw_file,
+            )
+        )
 
     return discovered
+
+
+def discover_incomplete_collections(index_base_path: Path) -> List[Path]:
+    """Scan for collections that hold vector shards but no HNSW graph.
+
+    Such a collection is partially built: indexing wrote the shards but was
+    interrupted (OOM/crash/timeout) before ``hnsw_index.bin`` was renamed into
+    place. It is populated yet permanently unqueryable until rebuilt.
+    discover_health_collections() skips it -- it has no hnsw_index.bin to check
+    -- so on its own the repository reports healthy-with-zero-collections, a
+    false green that hides a broken index.
+
+    A collection directory with neither shards nor a graph is genuinely empty /
+    never indexed and is NOT returned here, so this does not false-alarm.
+
+    Args:
+        index_base_path: Path to `.code-indexer/index` directory.
+
+    Returns:
+        Collection directories with shards but no hnsw_index.bin, sorted by
+        name for deterministic ordering.
+
+    Raises:
+        ValueError: If index_base_path is None.
+    """
+    if index_base_path is None:
+        raise ValueError("index_base_path must not be None")
+
+    if not (index_base_path.exists() and index_base_path.is_dir()):
+        return []
+
+    incomplete: List[Path] = []
+    for collection_dir in sorted(index_base_path.iterdir(), key=lambda p: p.name):
+        if not collection_dir.is_dir():
+            continue
+        if (collection_dir / "hnsw_index.bin").exists():
+            continue
+        if collection_has_vector_shards(collection_dir):
+            incomplete.append(collection_dir)
+
+    return incomplete
+
+
+def build_incomplete_collection_result(
+    collection_dir: Path,
+) -> CollectionHealthResult:
+    """Build the unhealthy result for a partially-built collection.
+
+    There is no graph to load, so every liveness flag is False and the errors
+    list carries the rebuild instruction.
+
+    Args:
+        collection_dir: A collection directory with shards but no HNSW graph.
+
+    Returns:
+        A CollectionHealthResult with valid=False and a clear rebuild reason.
+    """
+    return CollectionHealthResult(
+        collection_name=collection_dir.name,
+        index_type=_classify_index_type(collection_dir.name),
+        valid=False,
+        file_exists=False,
+        readable=False,
+        loadable=False,
+        # No graph exists, so there is nothing to count orphans in -- None
+        # (unknown), not 0 (checked and clean).
+        orphan_count=None,
+        errors=[
+            "Vector shards present but HNSW graph missing (hnsw_index.bin) — "
+            "indexing was interrupted before the graph was built. "
+            "Rebuild needed: cidx index --rebuild-index"
+        ],
+        check_duration_ms=0.0,
+    )
 
 
 # Bug #1394: ONE shared HNSWHealthService instance with the 5-minute TTL
@@ -224,25 +334,36 @@ def compute_repository_health(
         return _empty_repository_health_result(repo_alias)
 
     discovered = discover_health_collections(index_base_path)
-    if not discovered:
+    incomplete = discover_incomplete_collections(index_base_path)
+    if not discovered and not incomplete:
         return _empty_repository_health_result(repo_alias)
-
-    batch_results = check_health_batch(
-        health_service,
-        [str(path) for _name, _index_type, path in discovered],
-        force_refresh=force_refresh,
-        max_workers=max_workers,
-    )
 
     collections: List[CollectionHealthResult] = []
     any_from_cache = False
-    for collection_name, index_type, hnsw_file in discovered:
-        health_result = batch_results[str(hnsw_file)]
-        if health_result.from_cache:
-            any_from_cache = True
-        collections.append(
-            _to_collection_health_result(collection_name, index_type, health_result)
+
+    if discovered:
+        batch_results = check_health_batch(
+            health_service,
+            [str(path) for _name, _index_type, path in discovered],
+            force_refresh=force_refresh,
+            max_workers=max_workers,
         )
+        for collection_name, index_type, hnsw_file in discovered:
+            health_result = batch_results[str(hnsw_file)]
+            if health_result.from_cache:
+                any_from_cache = True
+            collections.append(
+                _to_collection_health_result(collection_name, index_type, health_result)
+            )
+
+    # A partially-built collection has no graph to health-check, so it never
+    # reaches check_health_batch; report it directly as unhealthy instead of
+    # letting it vanish from the result (see discover_incomplete_collections).
+    collections.extend(
+        build_incomplete_collection_result(collection_dir)
+        for collection_dir in incomplete
+    )
+    collections.sort(key=lambda c: c.collection_name)
 
     healthy_count = sum(1 for c in collections if c.valid)
     unhealthy_count = len(collections) - healthy_count
