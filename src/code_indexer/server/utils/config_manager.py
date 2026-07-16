@@ -163,9 +163,7 @@ class ServerResourceConfig:
     git_untracked_file_timeout: int = 60  # 1 minute for untracked file check
 
     # Refresh scheduler timeouts (in seconds)
-    cow_clone_timeout: int = (
-        3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
-    )
+    cow_clone_timeout: int = 3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
@@ -1465,12 +1463,8 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = (
-        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    )
-    enable_malloc_arena_max: bool = (
-        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
-    )
+    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
 
     # Story #1032 AC6 - Pre-deactivation leak scan (bootstrap-only, never DB).
     # Default False: _detect_resource_leaks is post-failure-only diagnostic.
@@ -2096,13 +2090,13 @@ class ServerConfigManager:
             if "scip_config" not in config_dict:
                 config_dict["scip_config"] = {}
             if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"][
-                    "scip_workspace_retention_days"
-                ] = retention_days
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict["scip_config"].scip_workspace_retention_days = (
+                config_dict["scip_config"]["scip_workspace_retention_days"] = (
                     retention_days
                 )
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict[
+                    "scip_config"
+                ].scip_workspace_retention_days = retention_days
 
         # Story #15 AC2: Final conversion of scip_config after migration
         # This handles the case where scip_config was created by migration above

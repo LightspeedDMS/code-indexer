@@ -4300,9 +4300,7 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except (
-                Exception
-            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
