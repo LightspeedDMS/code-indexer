@@ -41,6 +41,7 @@ from tests.e2e.helpers import (
     run_cidx,
     wait_for_repo_activation,
 )
+from tests.e2e.server.conftest import AdminTokenProvider
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ def _init_git_workspace(workspace: Path, remote_url: str) -> None:
 @pytest.fixture(scope="module")
 def normal_user(
     e2e_http_client: httpx.Client,
-    e2e_admin_token: str,
+    e2e_admin_token_provider: AdminTokenProvider,
 ) -> Generator[tuple[str, str], None, None]:
     """Create a NORMAL_USER via admin REST and yield (username, password). Delete on teardown."""
     username = f"normal_{uuid.uuid4().hex[:8]}"
@@ -159,7 +160,7 @@ def normal_user(
         e2e_http_client,
         "POST",
         "/api/admin/users",
-        token=e2e_admin_token,
+        token=e2e_admin_token_provider.get_token(),
         json={
             "username": username,
             "password": password,
@@ -176,7 +177,7 @@ def normal_user(
         e2e_http_client,
         "DELETE",
         f"/api/admin/users/{username}",
-        token=e2e_admin_token,
+        token=e2e_admin_token_provider.get_token(),
     )
 
 
