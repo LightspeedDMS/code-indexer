@@ -649,6 +649,7 @@ class ConfigService:
             "golden_repos": {
                 "refresh_interval_seconds": config.golden_repos_config.refresh_interval_seconds,
                 "analysis_model": config.golden_repos_config.analysis_model,
+                "externally_managed": config.golden_repos_config.externally_managed,
             },
             # Story #3 - Phase 2: P0/P1 settings
             "mcp_session": {
@@ -2210,6 +2211,8 @@ class ConfigService:
             if value not in ("opus", "sonnet"):
                 raise ValueError(f"Invalid analysis_model: {value}")
             golden_repos.analysis_model = value
+        elif key == "externally_managed":
+            golden_repos.externally_managed = value in ["true", True, "True"]
         else:
             raise ValueError(f"Unknown golden repos setting: {key}")
 
@@ -3328,9 +3331,9 @@ class ConfigService:
                     "SELECT version FROM server_config WHERE config_key = %s",
                     (CONFIG_KEY_RUNTIME,),
                 ).fetchone()
-            assert row is not None, (
-                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
-            )
+            assert (
+                row is not None
+            ), "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",

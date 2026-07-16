@@ -841,6 +841,29 @@ def make_lifespan(
 
             # Get server config for resource_config (timeouts, etc.)
             config_service = get_config_service()
+
+            # In cluster/postgres mode, set the ConfigService PG pool HERE, before
+            # the global-repos lifecycle starts, so its refresh scheduler and
+            # startup reconciliation read the MERGED runtime config (e.g.
+            # golden_repos_config.externally_managed) rather than bootstrap
+            # defaults. Mirrors the Bug #1309 early-pool fix, which runs later in
+            # startup and so did not cover these schedulers. set_connection_pool ->
+            # _load_runtime_from_pg is idempotent, so the later call is harmless.
+            if storage_mode == "postgres" and backend_registry is not None:
+                try:
+                    _gr_config_pool = (
+                        backend_registry.critical_connection_pool
+                        or backend_registry.connection_pool
+                    )
+                    if _gr_config_pool is not None:
+                        config_service.set_connection_pool(_gr_config_pool)
+                except Exception as _gr_pool_exc:  # non-fatal: fall back to bootstrap
+                    logger.warning(
+                        "Could not set ConfigService PG pool before global-repos "
+                        "start; schedulers may read bootstrap config: %s",
+                        _gr_pool_exc,
+                    )
+
             server_config = config_service.get_config()
 
             # Story #1034 wiring fix: build VersionedSnapshotManager BEFORE
@@ -4277,7 +4300,9 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except (
+                Exception
+            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
