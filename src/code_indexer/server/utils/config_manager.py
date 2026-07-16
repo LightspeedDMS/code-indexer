@@ -775,6 +775,22 @@ class BackgroundJobsConfig:
     # compute and allows up to 20 concurrent xray jobs without starvation.
     xray_max_concurrent_jobs: int = 20
 
+    # EVO-64538 (C10): memory-aware admission for heavy index jobs.
+    # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
+    # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
+    # can exceed the pod's cgroup limit and OOMKill it. When the gate is enabled,
+    # a worker consults the cgroup-aware MemoryGovernor before starting a
+    # memory-heavy op and, if the pod is under pressure, re-queues the job
+    # (it stays PENDING) and backs off — jobs wait instead of OOMing. The
+    # watermark is a percentage of the pod's OWN cgroup limit, so it self-tunes
+    # to any memory.max without per-deployment tuning.
+    job_admission_memory_gate_enabled: bool = True
+    # Admit a heavy job only while cgroup used% is below this (below the
+    # governor's 85% RED/eviction line, leaving headroom for the job's growth).
+    job_admission_memory_max_used_pct: float = 80.0
+    # Seconds a worker waits after declining to admit before re-checking.
+    job_admission_backoff_seconds: float = 2.0
+
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
             self.max_concurrent_refresh_jobs = max(

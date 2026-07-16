@@ -133,6 +133,21 @@ PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 # The dashboard and API consumers use at most 50 rows per page in practice.
 MAX_PAGE_SIZE: int = 50
 
+# EVO-64538 (C10): operation types whose execution loads large structures into
+# RAM (HNSW graph build + FTS index + Voyage embedding batches). These are the
+# ops the memory-aware admission gate throttles under pod memory pressure.
+# Cheap/quick ops (status, cancel, xray reads, dependency-map queries) are never
+# gated so they stay responsive even while indexing is backpressured.
+_MEMORY_HEAVY_OPS: frozenset = frozenset(
+    {
+        "add_golden_repo",
+        "provider_index_add",
+        "provider_temporal_index_rebuild",
+        "sync_repository",
+        "change_branch",
+    }
+)
+
 
 class BackgroundJobManager:
     """
@@ -266,6 +281,16 @@ class BackgroundJobManager:
                 self._pending_job_queue.task_done()
                 break
             job_id, func, args, kwargs = item
+            # EVO-64538 (C10): memory-aware admission. Under pod memory pressure,
+            # re-queue a heavy index job (it stays PENDING) and back off rather
+            # than running it and risking an OOMKill. Jobs wait, never OOM.
+            if self._admission_blocked(job_id):
+                self._pending_job_queue.put(item)
+                self._pending_job_queue.task_done()
+                self._pool_shutdown.wait(
+                    self._background_jobs_config.job_admission_backoff_seconds
+                )
+                continue
             try:
                 self._execute_job(job_id, func, args, kwargs)
             except Exception:
@@ -274,6 +299,29 @@ class BackgroundJobManager:
                 )
             finally:
                 self._pending_job_queue.task_done()
+
+    def _admission_blocked(self, job_id: str) -> bool:
+        """EVO-64538 (C10): should this heavy job be deferred under memory pressure?
+
+        Returns True only when ALL of: the gate is enabled, the job's op type is
+        memory-heavy, a MemoryGovernor singleton exists, and the governor denies
+        admission at the configured cgroup watermark. Fail-open on everything
+        else (gate disabled, cheap op, no governor in CLI/solo mode) so the only
+        behavior change is throttling heavy indexing when the pod is pressured.
+        """
+        cfg = self._background_jobs_config
+        if not cfg.job_admission_memory_gate_enabled:
+            return False
+        job = self.jobs.get(job_id)
+        op_type = job.operation_type if job is not None else ""
+        if op_type not in _MEMORY_HEAVY_OPS:
+            return False
+        from code_indexer.server.services.memory_governor import get_memory_governor
+
+        governor = get_memory_governor()
+        if governor is None:
+            return False
+        return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
 
     @property
     def max_concurrent_jobs(self) -> int:
@@ -1304,9 +1352,9 @@ class BackgroundJobManager:
                             # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
                             self._job_tracker.complete_job(
                                 job_id,
-                                result=job.result
-                                if isinstance(job.result, dict)
-                                else None,
+                                result=(
+                                    job.result if isinstance(job.result, dict) else None
+                                ),
                             )
                         elif job.status == JobStatus.FAILED:
                             error_msg = (

@@ -79,7 +79,14 @@ class DistributedJobClaimer:
                 └─ release_job()  ──>  pending (executing_node = NULL)
     """
 
-    def __init__(self, pool: Any, node_id: str, max_concurrent_jobs: int = 0) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        node_id: str,
+        max_concurrent_jobs: int = 0,
+        memory_gate_enabled: bool = True,
+        memory_max_used_pct: float = 80.0,
+    ) -> None:
         """
         Initialise the claimer.
 
@@ -89,10 +96,19 @@ class DistributedJobClaimer:
             max_concurrent_jobs: Cluster-wide max running jobs (Bug #541).
                 When > 0, claim_next_job() checks the total running count
                 across ALL nodes before claiming. 0 = no limit.
+            memory_gate_enabled: EVO-64538 (C10). When True, a pod under memory
+                pressure declines to claim so the row stays ``pending`` for a
+                pod with headroom (or for later) instead of being run and
+                risking an OOMKill. Fail-open when no MemoryGovernor exists.
+            memory_max_used_pct: cgroup used% watermark for the memory gate;
+                below it (and not RED) a claim is allowed. Self-tunes to the
+                pod's own memory.max.
         """
         self._pool = pool
         self._node_id = node_id
         self._max_concurrent_jobs = max_concurrent_jobs
+        self._memory_gate_enabled = memory_gate_enabled
+        self._memory_max_used_pct = memory_max_used_pct
 
     # ------------------------------------------------------------------
     # Public API
@@ -117,6 +133,27 @@ class DistributedJobClaimer:
             rows plus ``executing_node`` and ``claimed_at``) if a job was
             claimed, or None if no pending jobs are available.
         """
+        # EVO-64538 (C10): memory-aware admission. A pod under memory pressure
+        # declines the claim so the row stays 'pending' — another pod with
+        # headroom (or this pod once it recovers) picks it up, instead of
+        # running it now and risking an OOMKill. Fail-open when no governor
+        # exists (CLI/solo) or the gate is disabled.
+        if self._memory_gate_enabled:
+            from code_indexer.server.services.memory_governor import (
+                get_memory_governor,
+            )
+
+            governor = get_memory_governor()
+            if governor is not None and not governor.admission_allowed(
+                self._memory_max_used_pct
+            ):
+                logger.debug(
+                    "Node %s under memory pressure — skipping claim, "
+                    "leaving job pending",
+                    self._node_id,
+                )
+                return None
+
         # Bug #541: Cluster-wide concurrency check. Count running jobs across
         # ALL nodes before claiming. If at or above limit, skip claim.
         if self._max_concurrent_jobs > 0:

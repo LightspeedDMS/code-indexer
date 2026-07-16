@@ -3070,8 +3070,23 @@ def make_lifespan(
                         DistributedJobWorkerService,
                     )
 
+                    # EVO-64538 (C10): give the claimer the same cgroup-aware
+                    # memory watermark the per-pod pool uses, so a pressured pod
+                    # declines cross-pod refresh claims and leaves them pending.
+                    from code_indexer.server.utils.config_manager import (
+                        BackgroundJobsConfig as _BgJobsConfig,
+                    )
+
+                    _bg_jobs_config = _BgJobsConfig()
                     _job_claimer = DistributedJobClaimer(
-                        pool=_cluster_pool, node_id=_node_id
+                        pool=_cluster_pool,
+                        node_id=_node_id,
+                        memory_gate_enabled=(
+                            _bg_jobs_config.job_admission_memory_gate_enabled
+                        ),
+                        memory_max_used_pct=(
+                            _bg_jobs_config.job_admission_memory_max_used_pct
+                        ),
                     )
                     _refresh_sched = (
                         global_lifecycle_manager.refresh_scheduler
