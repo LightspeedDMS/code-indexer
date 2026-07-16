@@ -4,8 +4,13 @@ Covers:
 - execute_temporal_query_with_fusion() with no collections, single, and multi-provider
 - _query_single_provider() attribution fields populated
 - fuse_rrf_multi wired correctly for multi-provider path
-- TEMPORAL_QUERY_TIMEOUT_SECONDS constant value
 - _make_config_manager() shim wraps config correctly
+
+Issue #1398: TEMPORAL_QUERY_TIMEOUT_SECONDS (confirmed dead code -- Story
+#1291 removed its only consumer) was deleted entirely from
+temporal_fusion_dispatch.py; its "constant value" test was removed here
+accordingly (see test_temporal_query_timeout_seconds_removed_1398.py for
+the proof that it no longer exists in source).
 """
 
 from pathlib import Path
@@ -15,7 +20,6 @@ import pytest
 
 from code_indexer.config import VoyageAIConfig
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
-    TEMPORAL_QUERY_TIMEOUT_SECONDS,
     _make_config_manager,
     execute_temporal_query_with_fusion,
 )
@@ -67,16 +71,6 @@ def _make_mock_vector_store(project_root: Path):
     vs = MagicMock()
     vs.project_root = project_root
     return vs
-
-
-# ---------------------------------------------------------------------------
-# test_timeout_constant_defined
-# ---------------------------------------------------------------------------
-
-
-def test_timeout_constant_defined():
-    """TEMPORAL_QUERY_TIMEOUT_SECONDS must equal 15."""
-    assert TEMPORAL_QUERY_TIMEOUT_SECONDS == 15
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +475,9 @@ def test_disjoint_shard_fusion_preserves_true_score_ordering_bug_1299(tmp_path):
         ),
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch._query_shards_raw",
-            return_value=results_by_shard,
+            # Story #1400 Phase 4: _query_shards_raw now returns
+            # (results_by_shard, shards_attempted, shards_succeeded).
+            return_value=(results_by_shard, 2, 2),
         ),
     ):
         result = execute_temporal_query_with_fusion(

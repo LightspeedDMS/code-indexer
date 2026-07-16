@@ -15,10 +15,10 @@ parallel, because there is never more than one embedder being queried.
 The single-provider path (querying one embedder's own quarterly shards
 sequentially) is UNCHANGED by this removal -- it never had a wall-clock
 timeout wrapping it before Story #1291 either. `TEMPORAL_QUERY_TIMEOUT_SECONDS`
-remains defined and tested (test_temporal_fusion_dispatch.py::test_timeout_constant_defined,
-test_cli_status_temporal_integration.py) in case a future multi-shard-within-one-
-embedder timeout is reintroduced, but it is currently unused inside
-temporal_fusion_dispatch.py.
+was deleted entirely by Issue #1398 (confirmed dead code with zero real
+consumers) rather than kept around as a misleading unused knob -- see
+test_temporal_query_timeout_seconds_removed_1398.py for the proof that it
+no longer exists in source.
 """
 
 from pathlib import Path

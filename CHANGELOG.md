@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.60.0] - 2026-07-16
+
+### Fixed
+
+- **#1421**: temporal queries with `time_range_all=true` intermittently failed with "Temporal snapshot ... missing page N", and in rarer cases could silently return corrupted results (pages spliced from two different write generations) with no error and no log entry. The temporal worker writes grow-then-shrink checkpoints while a query is in flight; the snapshot reader read pages via separate, non-isolated calls that could straddle a mid-flight rewrite. Fixed by detecting a concurrent rewrite (missing page / page-count mismatch / JSON parse failure) and bounded-retrying the reassembly against the latest write; genuine exhaustion now logs a WARNING per retry and an ERROR on final failure. Diagnosed as a single-process, backend-agnostic timing race, not cluster-specific.
+
+## [11.59.0] - 2026-07-16
+
+### Added
+
+- **#1416**: golden repos gain an `externally_managed` config flag. When true, an external owner manages golden-repo presence/freshness (materializes repos into `golden_repos_dir`, registers via the admin API); the server skips its own periodic refresh and startup restore-from-snapshot reconciliation. Also fixes a cluster/postgres startup-ordering bug where the global-repos lifecycle previously started before the ConfigService PG pool was set. Includes a Web UI Config-screen checkbox for the new flag.
+
+## [11.58.0] - 2026-07-16
+
+### Added
+
+- **#1400**: async-hybrid temporal query execution and cluster-aware retrieval. Temporal queries now run through a dedicated dual-lane BGM path with cooperative cancellation, node-scoped orphan cleanup (a node restart no longer fails another node's running jobs), an honest no-resubmit poll contract, static+dynamic deadline budgeting (including terminal rerank), and atomic config updates. `search_code` (MCP) and `POST /api/query` (REST) route temporal queries through the new live async path; `poll_search_job` and `GET /api/query/result/{job_id}` expose real, registered poll endpoints. Job coordination and results flow through JobTracker/PayloadCache (PostgreSQL-backed in cluster mode) rather than per-node RAM.
+
+### Fixed
+
+- **#1415**: HNSW finalize integrity check hard-crashed all indexing with `AttributeError` when the deployed hnswlib was the stock PyPI build instead of the `LightspeedDMS/hnswlib` fork -- caused a real production outage across ~12 golden repos. Reversed Bug #1392's fail-loud design to graceful degrade: missing fork capability now logs a WARNING and skips the optional orphan-repair hardening pass instead of aborting indexing; already-computed embeddings are still persisted and the index remains valid and queryable. Health surfaces the degraded state via a distinct `hnswlib_capability_available` field without spoofing the zero-tolerance `orphan_count` binary.
+- **#1417**: `cidx index --index-commits` silently succeeded (exit 0) instead of failing loud when the PG bootstrap DSN was unreachable, because it was misrouted through the daemon-delegation fast path which has no knowledge of the Bug #1313 fail-loud wiring. Added a `--index-commits` carve-out so temporal indexing always takes the standalone path where the PG-unreachable check runs.
+- **#1419**: `ActivatedRepoIndexManager`'s FTS/semantic indexing error messages silently dropped the "run cidx init" guidance on an uninitialized repo, because the wrapped subprocess error string came back empty. Added an explicit `.code-indexer/config.json` existence check that fast-fails with actionable guidance before the subprocess is ever spawned.
+
+## [11.57.0] - 2026-07-15
+
+### Fixed
+
+- **#1407**: scheduled temporal refresh ran a full multi-shard disk-scan reconcile on every tick, even when the repo was fully caught up (~44 min measured on a 93k-commit / 69-shard repo). Root cause: `TemporalIndexer` relied on a buggy global `last_commit..HEAD` cursor narrowing with no cheap "already caught up" gate, so every run re-scanned every shard's `vector_*.json` files (also resolves #1411, a related global-cursor multi-embedder blind-spot bug). Fixed by introducing a durable stale-lifecycle marker system (`mark_stale`/`clear_stale`, fsync-durable) and per-embedder commit-set-difference enumeration (new `temporal_incremental_gate.py`) replacing the cursor entirely: a no-op tick now performs zero `vector_*.json` reads. A physically-stale shard is force-rebuilt rather than incrementally appended onto a possibly-inconsistent index; stray points from a crashed prior run are deleted fail-closed before rebuild. The shared finalize path (`end_indexing`/`save_incremental_update`/`rebuild_from_vectors`) gained a scoped `clear_stale` parameter defaulting to today's behavior, so ordinary (non-temporal) incremental indexing and watch-mode are unaffected -- verified by explicit regression tests. Also fixes a defect found during code review: operator `--reconcile` no longer silently clears `is_stale` on a shard that was already stale coming in (e.g. from a real prior crash) without rebuilding it -- that shard is now force-rebuilt instead of being blessed as fresh.
+
+## [11.56.0] - 2026-07-15
+
+### Fixed
+
+- **#1414**: golden repo `temporal_options` (`all_branches`, `max_commits`, `since_date`, `diff_context`) split-brain across two DB tables. `GoldenRepoManager.save_temporal_options` (the Web UI's only write path) wrote exclusively to `golden_repos_metadata`, but `RefreshScheduler._index_source` read from the separate `global_repos` table -- frozen at registration time -- so any post-registration edit was silently ignored by every future scheduled refresh. Most dangerous under Story #1412's all-branches gate: an operator disabling `all_branches` via the Web UI would have the scheduler keep reading the stale `True` value and keep doing multi-branch indexing against explicit operator intent, forever. Fixed by repointing the read to the authoritative `golden_repos_metadata` table (fail-closed WARNING + existing Bug #642 NULL-fallback on any read error), and by adding the previously-missing `update_temporal_options` method to the PostgreSQL metadata backend + its Protocol (the Web UI save 500'd unconditionally in cluster/production mode until now). `enable_temporal`/`enable_scip` reads are unchanged (already correctly handled by Bug #1390/#1406). Discovered via adversarial review of #1412, connected but independently root-caused and fixed.
+
+### Added
+
+- **#1412**: golden-repo temporal indexing now tracks only the branch registered at golden-repo registration by default. The pre-existing `all_branches` opt-in is retained as scaffolding but ships DISABLED behind a new server-wide runtime flag `temporal_all_branches_enabled` (default off, Web Config screen checkbox, no env var). With the gate off, a request that tries to acquire `all_branches=true` is rejected loudly at three front doors -- REST `POST /api/admin/golden-repos`, the Web UI temporal-options form, and MCP `add_golden_repo` -- never silently dropped. Defense-in-depth at the three (now four, including the MCP provider-index background job) temporal command-build sites skips `--all-branches` and logs a WARNING when a legacy stored `all_branches=true` value is seen with the gate off. Fully reversible with no re-index: the temporal index format carries no branch-membership fields, so enabling the gate later just widens the git-log walk on the next refresh. Standalone CLI `--all-branches` and the `temporal_indexer` engine parameter are untouched (server/golden surface only).
+
+## [11.54.0] - 2026-07-14
+
+### Fixed
+
+- **#1401**: `regex_search`'s ripgrep/grep output parsing accepted subprocess-reported paths without verifying they stayed inside the repo root, so a `../`-relative path or an internal symlink escape could leak results from outside the intended repo. The repo root is now canonicalized once at construction, and every subprocess-reported path (absolute or relative) is resolved and containment-checked via `relative_to()` before acceptance -- anything that escapes is rejected outright, not silently absolutized.
+- **#1405**: `TemporalIndexer`'s legacy-collection blank-out ran unconditionally at the top of every `index_commits()` call and hard-deleted any temporal-prefixed directory lacking a v2 marker -- including the bare `code-indexer-temporal` bookkeeping directory, which anchors the single shared `TemporalMetadataStore` used by every quarterly shard across every embedder. That directory shares its bare name with a genuine pre-#1290 legacy monolith, so it was being amputated on every single run. Fixed via a data-presence discriminator (`_is_shared_bookkeeping_directory`): a bare-named directory is now skipped (never deleted) if it has neither `hnsw_index.bin` nor any nested `vector_*.json` -- the bookkeeping dir only ever holds metadata, never vector data.
+- **#1406** (companion to #1405, confirmed trigger of a production incident): `RefreshScheduler`'s filesystem-reconciliation for `enable_temporal` was bidirectional -- it could silently re-ENABLE temporal indexing when restored data appeared on disk, even after an operator had explicitly disabled it as part of a recovery procedure. Reconciliation is now one-way on both tracked tables: a stored `True` still downgrades to `False` when the filesystem shows no real data (preserving Bug #1390's fix), but a stored `False` is never flipped back to `True` -- an INFO log documents the honored operator disable instead.
+- **#1398**: five hardcoded, non-Web-UI-configurable timeout constants (search-handler, default-handler, write-mode-handler, embedding-provider, reranker) are consolidated into a new validated `SearchTimeoutsConfig` Web UI settings section, plus a new `.code-indexer/.remote-config` field (`api_read_timeout_seconds`) so the CLI's remote HTTP client timeout is durably configurable per deployment without a repeated `--timeout` flag.
+- **#1399**: several DB-backed Web UI settings (cache TTL/cleanup-interval/FTS-reload-on-access, memory-governor sample interval, `lifecycle_analysis` timeouts at both of its two consumer call sites, xray default timeout) persisted and echoed correctly but were never actually re-read by the live running process -- fixed with explicit hot-reload paths mirroring the existing cache-size-cap precedent, plus a `RESTART_REQUIRED_FIELDS` UI hint extended to the settings that still need a restart to take effect.
+- Two small regressions in the above, caught by full regression re-verification before this release: a doc-staleness false-positive trigger in `docs/architecture-invariants.md` (#1405 follow-up), and a missing bootstrap/runtime classification entry for the new `search_timeouts_config` field (#1398 follow-up).
+
+## [11.53.0] - 2026-07-14
+
+### Fixed
+
+- **#1391**: dashboard cache-metrics On-Mode Hit Rate ignored the Time Window selector (unwindowed lifetime aggregate), and Shadow Hit Rate used an operation-denominated source (`search_embed_event`) inconsistent with On-Mode's request-denominated one (`search_event_log`). Both cards now share the same windowed, request-denominated source.
+- **#1392**: server and CLI subprocess can run different Python environments, and a stock PyPI hnswlib silently lacking `check_integrity()`/`repair_orphans()` would pass an import-only probe. Adds a fail-loud runtime capability gate on build/finalize paths only, a non-fatal startup check, and makes the deploy-pipeline CLI-sync guards capability-aware (an import-only guard made the sync silently no-op when the server build already advanced the shared last-built-commit marker).
+- **#1393**: golden-repo activation's copy-on-write clone could race with a concurrent `RefreshScheduler` refresh of the same repo, corrupting the activated repo's initial state. Adds fail-fast + write-lock coordination, plus a wiring-gap fix (`GlobalReposLifecycleManager` never forwarded `job_tracker` into `RefreshScheduler`, making the fail-fast check a permanent no-op in production) found and closed via live manual E2E testing.
+- **#1394**: `GET /api/repositories/{alias}/health` ran a synchronous, serial per-collection HNSW integrity check inside an async route, causing HTTP 504 on large temporal repos and no per-collection exception isolation. Adds a bounded-concurrency, per-collection-isolated batch helper and new async `POST .../health/check` job endpoints across all four frontend call sites.
+- **#1396**: the Cache Settings Web UI form rejected the entire submission -- including unrelated field edits -- whenever `memory_governor_swap_pswpin_red_threshold` was blank. Fixed across three layers: validator blank-tolerance, ConfigService default-fallback, and a `get_all_settings()` serialization gap that left the template's pre-population guard inert.
+
+### Added
+
+- **#1397** (supersedes #1395): HNSW orphan-repair fleet sweep is now configurable from the Web UI -- `enabled`, `batch_size`, `tick_interval_minutes`, plus a new daily UTC operating-hours window (with overnight wrap-around, fail-open default) so the sweep's disk I/O can be confined to off-peak hours. Changes take effect live, no restart required.
+
 ## [11.52.0] - 2026-07-13
 
 ### Fixed

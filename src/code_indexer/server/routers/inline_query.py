@@ -8,6 +8,7 @@ Zero behavior change: same path, method, response models, and handler logic.
 """
 
 import logging
+from typing import Optional, Tuple
 
 from fastapi import (
     FastAPI,
@@ -16,6 +17,7 @@ from fastapi import (
     Depends,
     Request,
 )
+from fastapi.responses import JSONResponse
 
 from ..models.query import (
     SemanticQueryRequest,
@@ -37,12 +39,217 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.services.temporal_live_dispatch import (
+    execute_live_temporal_search,
+)
 
 # Bug #1209: default overfetch multiplier when rerank config is unavailable.
 _REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# Story #1400: temporal-query detector for the REST SemanticQueryRequest
+# shape -- mirrors mcp/handlers/_utils.py's _is_temporal_query exactly
+# (same field set, same "any truthy" semantics), kept as a separate
+# function since the two doors' request shapes (Dict vs Pydantic model)
+# are not interchangeable.
+_TEMPORAL_REQUEST_FIELDS = (
+    "time_range",
+    "time_range_all",
+    "at_commit",
+    "chunk_type",
+    "diff_type",
+    "author",
+)
+
+
+def _is_temporal_query_request(request: "SemanticQueryRequest") -> bool:
+    return any(getattr(request, f, None) for f in _TEMPORAL_REQUEST_FIELDS)
+
+
+def _resolve_temporal_repo_path_rest(
+    repository_alias: str,
+    current_user,
+    app: FastAPI,
+    activated_repo_manager,
+) -> "Tuple[Optional[str], Optional[JSONResponse]]":
+    """Resolve repo_path for a temporal REST query -- activated vs global,
+    reusing the SAME resolution patterns this file already uses for the
+    FTS/hybrid branch above (never reinventing alias resolution).
+
+    Returns (repo_path, None) on success, (None, error_response) on
+    failure -- error_response is a ready-to-return JSONResponse/dict.
+    """
+    from pathlib import Path as PathLib
+
+    if repository_alias.endswith("-global"):
+        from code_indexer.global_repos.alias_manager import AliasManager
+
+        golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
+        if not golden_repos_dir:
+            return None, JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "success": False,
+                    "error": "golden_repos_dir not configured",
+                },
+            )
+        alias_manager = AliasManager(str(PathLib(golden_repos_dir) / "aliases"))
+        resolved_path = alias_manager.read_alias(repository_alias)
+        if not resolved_path:
+            return None, JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "success": False,
+                    "error": f"Alias for '{repository_alias}' not found",
+                },
+            )
+        return str(resolved_path), None
+
+    repo_path = (
+        PathLib(activated_repo_manager.activated_repos_dir)
+        / current_user.username
+        / repository_alias
+    )
+    return str(repo_path), None
+
+
+def _execute_temporal_via_live_dispatch_rest(
+    request: "SemanticQueryRequest",
+    current_user,
+    app: FastAPI,
+    activated_repo_manager,
+) -> JSONResponse:
+    """Story #1400: the REST live async-hybrid temporal dispatch entry
+    point -- mirrors mcp/handlers/search.py's
+    _execute_temporal_via_live_dispatch exactly, adapted for REST's
+    SemanticQueryRequest shape and JSONResponse wire format.
+
+    Scenario 12: both doors call the SAME execute_live_temporal_search
+    function, so an identical logical query landing on the same node joins
+    the same in-flight job. fusion_fetch_limit is computed via the shared
+    compute_temporal_fusion_fetch_limit() (temporal_fusion_limit.py) below,
+    so an identical logical query from either door now genuinely produces
+    the identical dedup signature.
+    """
+    from code_indexer.services.temporal.temporal_worker_input_adapters import (
+        TemporalAliasRejectedError,
+        build_temporal_worker_input_from_rest_request,
+    )
+    from code_indexer.server.services.config_service import get_config_service
+    from code_indexer.server.utils.config_manager import (
+        TEMPORAL_RESPONSE_RESERVE_SECONDS,
+    )
+    from code_indexer.services.temporal.temporal_fusion_limit import (
+        compute_temporal_fusion_fetch_limit,
+    )
+
+    config_service = get_config_service()
+    access_filtering_service = getattr(app.state, "access_filtering_service", None)
+    fusion_fetch_limit = compute_temporal_fusion_fetch_limit(
+        requested_limit=request.limit,
+        rerank_query=request.rerank_query,
+        access_filtering_service=access_filtering_service,
+        username=current_user.username,
+        config_service=config_service,
+    )
+
+    try:
+        worker_input = build_temporal_worker_input_from_rest_request(
+            request, current_user.username, fusion_fetch_limit
+        )
+    except TemporalAliasRejectedError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "success": False,
+                "error": str(exc),
+                "error_code": exc.error_code,
+            },
+        )
+
+    repo_path, err = _resolve_temporal_repo_path_rest(
+        worker_input.repository_alias, current_user, app, activated_repo_manager
+    )
+    if err is not None:
+        return err
+    import dataclasses
+
+    worker_input = dataclasses.replace(worker_input, repo_path=repo_path)
+
+    bjm = getattr(app.state, "background_job_manager", None)
+    payload_cache = getattr(app.state, "payload_cache", None)
+    if bjm is None or payload_cache is None:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "success": False,
+                "error": "Background job/payload cache service not available",
+            },
+        )
+
+    inline_wait_seconds = (
+        config_service.get_config().search_timeouts_config.temporal_inline_wait_seconds
+    )
+    is_admin = (
+        access_filtering_service.is_admin_user(current_user.username)
+        if access_filtering_service
+        else False
+    )
+
+    dispatch_result = execute_live_temporal_search(
+        worker_input=worker_input,
+        background_job_manager=bjm,
+        payload_cache=payload_cache,
+        access_filtering_service=access_filtering_service,
+        is_admin=is_admin,
+        inline_wait_seconds=inline_wait_seconds,
+        handler_deadline_monotonic=None,
+        response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
+        config_service=config_service,
+    )
+
+    status_field = dispatch_result.get("status")
+    if status_field == "completed":
+        results = dispatch_result.get("results", [])
+        return JSONResponse(
+            content={
+                "results": results,
+                "total_results": len(results),
+                "query_metadata": {"query_text": request.query_text},
+            }
+        )
+
+    if status_field == "waiting":
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "success": False,
+                "error": (
+                    f"Temporal query exceeded the {inline_wait_seconds}s "
+                    "inline wait window; continuing in the background."
+                ),
+                "error_code": "TEMPORAL_QUERY_DEFERRED",
+                "job_id": dispatch_result["job_id"],
+                "partial_results": dispatch_result.get("partial_results", []),
+                "continue_polling": True,
+                "unranked": True,
+                "shards_completed": dispatch_result.get("shards_completed"),
+                "shards_total": dispatch_result.get("shards_total"),
+            },
+        )
+
+    # failed / not_found / capacity_exhausted
+    return JSONResponse(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        content={
+            "success": False,
+            "error": dispatch_result.get("error", "Temporal query failed"),
+            "error_code": dispatch_result.get("error_code"),
+            "job_id": dispatch_result.get("job_id"),
+        },
+    )
 
 
 def register_query_routes(
@@ -174,6 +381,40 @@ def register_query_routes(
                         "message": "Semantic query submitted as background job",
                     },
                 )
+
+            # Story #1400: async-hybrid temporal query execution. Intercept
+            # BEFORE the FTS/hybrid branch below -- temporal queries bypass
+            # the old fully-synchronous semantic_query_manager path
+            # entirely via the async-hybrid worker/dedup/poll machinery
+            # shared with the MCP door (execute_live_temporal_search).
+            if _is_temporal_query_request(request):
+                _temporal_response = _execute_temporal_via_live_dispatch_rest(
+                    request, current_user, app, activated_repo_manager
+                )
+                # Bug #1173: only enqueue telemetry on real success -- a
+                # deferred handoff (202, not yet a real result) must NOT be
+                # logged as success; a genuinely completed query (200) must.
+                # Exact equality (not "< 400"): 202 is < 400 but is NOT a
+                # completed result and must never be logged as success.
+                # The finally block below genuinely runs on this early
+                # return (Python finally semantics), so _result_count must
+                # reflect the REAL result count, not the stale default --
+                # a hardcoded 0 would silently corrupt the search-event log
+                # for every temporal query, including genuine successes.
+                _search_succeeded = _temporal_response.status_code == 200
+                if _search_succeeded:
+                    import json as _json_mod
+
+                    try:
+                        _body = _json_mod.loads(bytes(_temporal_response.body))
+                        _result_count = len(_body.get("results") or [])
+                    except (ValueError, TypeError) as _parse_exc:
+                        logger.debug(
+                            "inline_query: could not parse temporal response "
+                            "body for telemetry result_count: %s",
+                            _parse_exc,
+                        )
+                return _temporal_response
 
             # Story 5: Handle FTS and Hybrid modes
             if request.search_mode in ["fts", "hybrid"]:
@@ -664,3 +905,55 @@ def register_query_routes(
                         "inline_query: failed to enqueue search event record: %s",
                         _enq_exc,
                     )
+
+    @app.get("/api/query/result/{job_id}")
+    def get_query_result(
+        job_id: str,
+        raw_request: Request,
+        current_user: dependencies.User = Depends(dependencies.get_current_user),
+    ):
+        """Story #1400 Phase 8: poll an async-hybrid temporal query job.
+
+        Ownership-checked via background_job_manager.get_job_status (same
+        not-found/unauthorized-indistinguishable contract as the MCP
+        poll_search_job tool). Thin reader around poll_temporal_job_status.
+        """
+        from code_indexer.server.mcp.handlers._utils import (
+            _get_access_filtering_service,
+        )
+        from code_indexer.server.services.temporal_poll_job_status import (
+            poll_temporal_job_status,
+        )
+        from code_indexer.server.services.temporal_snapshot_store import (
+            read_temporal_snapshot,
+        )
+        from code_indexer.server.auth.user_manager import UserRole
+        from code_indexer.server.services.config_service import get_config_service
+
+        bjm = getattr(raw_request.app.state, "background_job_manager", None)
+        if bjm is None:
+            raise HTTPException(
+                status_code=503, detail="Background job service not available"
+            )
+
+        is_admin = hasattr(current_user, "role") and current_user.role == UserRole.ADMIN
+        job_status = bjm.get_job_status(
+            job_id, current_user.username, is_admin=is_admin
+        )
+
+        def _read_snapshot():
+            return read_temporal_snapshot(
+                getattr(raw_request.app.state, "payload_cache", None), job_id
+            )
+
+        result = poll_temporal_job_status(
+            job_status=job_status,
+            read_snapshot_fn=_read_snapshot,
+            access_filtering_service=_get_access_filtering_service(),
+            username=current_user.username,
+            is_admin=is_admin,
+            config_service=get_config_service(),
+        )
+        if result["status"] == "not_found":
+            return JSONResponse(result, status_code=404)
+        return result

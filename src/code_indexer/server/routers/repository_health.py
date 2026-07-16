@@ -6,19 +6,39 @@ Provides REST endpoints for checking HNSW index health with caching support.
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User
-from code_indexer.services.hnsw_health_service import (
-    HealthCheckResult,
-    HNSWHealthService,
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.services.repository_health_aggregator import (
+    CollectionHealthResult,
+    RepositoryHealthResult,
+    compute_repository_health,
+    get_shared_health_service,
+)
+from code_indexer.server.services.repository_health_aggregator import (
+    _to_collection_health_result as _to_collection_health_result,  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+# Bug #1394: CollectionHealthResult, RepositoryHealthResult, and
+# _to_collection_health_result now live in repository_health_aggregator.py
+# (shared with activated_repos.py). Re-exported here so existing imports
+# from this module (e.g. tests) keep working unchanged.
+__all__ = [
+    "detect_semantic_index",
+    "CollectionHealthResult",
+    "RepositoryHealthResult",
+    "IndexesStatusResponse",
+    "DescriptionResponse",
+    "HealthCheckJobResponse",
+    "router",
+]
 
 
 def detect_semantic_index(index_base_path: Path) -> bool:
@@ -47,43 +67,6 @@ def detect_semantic_index(index_base_path: Path) -> bool:
     return False
 
 
-class CollectionHealthResult(BaseModel):
-    """Health result for a single collection/index."""
-
-    collection_name: str = Field(description="Collection name (e.g., voyage-code-3)")
-    index_type: str = Field(description="Index type: semantic, temporal, or multimodal")
-    valid: bool = Field(description="Overall health status")
-    file_exists: bool
-    readable: bool
-    loadable: bool
-    element_count: Optional[int] = None
-    connections_checked: Optional[int] = None
-    min_inbound: Optional[int] = None
-    max_inbound: Optional[int] = None
-    orphan_count: Optional[int] = Field(
-        None,
-        description=(
-            "Zero-tolerance orphan signal (Story #1359 AC4): 0 is OK, any "
-            "value > 0 is ERROR (reflected in `valid`) -- no WARNING tier."
-        ),
-    )
-    file_size_bytes: Optional[int] = None
-    errors: List[str] = Field(default_factory=list)
-    check_duration_ms: float
-
-
-class RepositoryHealthResult(BaseModel):
-    """Aggregated health for all indexes in a repository."""
-
-    repo_alias: str
-    overall_healthy: bool = Field(description="True if ALL indexes are healthy")
-    collections: List[CollectionHealthResult] = Field(default_factory=list)
-    total_collections: int = 0
-    healthy_count: int = 0
-    unhealthy_count: int = 0
-    from_cache: bool = False
-
-
 class IndexesStatusResponse(BaseModel):
     """Index availability status for a repository."""
 
@@ -102,37 +85,17 @@ class DescriptionResponse(BaseModel):
     )
 
 
-def _to_collection_health_result(
-    collection_name: str, index_type: str, health_result: HealthCheckResult
-) -> CollectionHealthResult:
-    """Map an HNSWHealthService HealthCheckResult onto the REST
-    CollectionHealthResult model (Story #1359 AC4: propagates orphan_count
-    unmodified -- `valid` remains the single zero-tolerance signal, no
-    separate graded severity is introduced on this surface).
-    """
-    return CollectionHealthResult(
-        collection_name=collection_name,
-        index_type=index_type,
-        valid=health_result.valid,
-        file_exists=health_result.file_exists,
-        readable=health_result.readable,
-        loadable=health_result.loadable,
-        element_count=health_result.element_count,
-        connections_checked=health_result.connections_checked,
-        min_inbound=health_result.min_inbound,
-        max_inbound=health_result.max_inbound,
-        orphan_count=health_result.orphan_count,
-        file_size_bytes=health_result.file_size_bytes,
-        errors=health_result.errors,
-        check_duration_ms=health_result.check_duration_ms,
+class HealthCheckJobResponse(BaseModel):
+    """Response for POST /api/repositories/{repo_alias}/health/check (Bug #1394)."""
+
+    job_id: str = Field(
+        description="Background job ID to poll via GET /api/jobs/{job_id}"
     )
+    message: str = Field(description="Human-readable submission confirmation")
 
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/repositories", tags=["repository-health"])
-
-# Service instance (singleton pattern)
-_health_service = HNSWHealthService(cache_ttl_seconds=300)  # 5 minute cache
 
 
 def _strip_yaml_frontmatter(content: str) -> str:
@@ -258,6 +221,75 @@ def _get_activated_repo_manager():
     return manager
 
 
+def _get_background_job_manager():
+    """Get background job manager from app state."""
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "background_job_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "background_job_manager not initialized. "
+            "Server must set app.state.background_job_manager during startup."
+        )
+    return manager
+
+
+def _resolve_repository_path(repo_alias: str, current_user: User) -> Tuple[str, Path]:
+    """Resolve a repo_alias to (resolved_alias, actual_repo_clone_path).
+
+    Multi-strategy repository resolution (Story #58), shared by both the
+    GET and POST health-check handlers (Bug #1394):
+    1. Try as golden repo (exact match)
+    2. If not found and ends with -global, try without suffix
+    3. Try as user-activated repo
+
+    Args:
+        repo_alias: Repository alias as given by the caller.
+        current_user: Authenticated user (for activated-repo lookup).
+
+    Returns:
+        Tuple of (resolved_alias, clone_path). resolved_alias equals
+        repo_alias unless the -global suffix was stripped for a golden-repo
+        match.
+
+    Raises:
+        HTTPException 404: Repository not found via any strategy.
+    """
+    golden_repo_manager = _get_golden_repo_manager()
+    repo = golden_repo_manager.get_golden_repo(repo_alias)
+    repo_path = None
+    resolved_alias = repo_alias
+
+    if not repo and repo_alias.endswith("-global"):
+        base_alias = repo_alias[:-7]  # Remove "-global" suffix
+        repo = golden_repo_manager.get_golden_repo(base_alias)
+        if repo:
+            resolved_alias = base_alias
+
+    if not repo:
+        activated_repo_manager = _get_activated_repo_manager()
+        potential_path = activated_repo_manager.get_activated_repo_path(
+            current_user.username, repo_alias
+        )
+        if Path(potential_path).exists():
+            repo_path = potential_path
+
+    if not repo and not repo_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{repo_alias}' not found",
+        )
+
+    if repo:
+        actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
+        clone_path = Path(actual_path)
+    else:
+        assert repo_path is not None
+        clone_path = Path(repo_path)
+
+    return resolved_alias, clone_path
+
+
 @router.get(
     "/{repo_alias}/health",
     response_model=RepositoryHealthResult,
@@ -301,126 +333,14 @@ async def get_repository_health(
         HTTPException 500: Health check failed unexpectedly
     """
     try:
-        # Multi-strategy repository resolution (Story #58)
-        # Strategy 1: Try as golden repo (exact match)
-        golden_repo_manager = _get_golden_repo_manager()
-        repo = golden_repo_manager.get_golden_repo(repo_alias)
-        repo_path = None
-        resolved_alias = repo_alias
-
-        # Strategy 2: If not found and ends with -global, try without suffix
-        if not repo and repo_alias.endswith("-global"):
-            base_alias = repo_alias[:-7]  # Remove "-global" suffix
-            repo = golden_repo_manager.get_golden_repo(base_alias)
-            if repo:
-                resolved_alias = base_alias
-
-        # Strategy 3: Try as user-activated repo
-        if not repo:
-            activated_repo_manager = _get_activated_repo_manager()
-            potential_path = activated_repo_manager.get_activated_repo_path(
-                current_user.username, repo_alias
-            )
-            # Validate path exists before using it
-            if Path(potential_path).exists():
-                repo_path = potential_path
-
-        # If still not found via any strategy, return 404
-        if not repo and not repo_path:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository '{repo_alias}' not found",
-            )
-
-        # Resolve index path using actual filesystem path
-        if repo:
-            # Golden repo path
-            actual_path = golden_repo_manager.get_actual_repo_path(resolved_alias)
-            clone_path = Path(actual_path)
-        else:
-            # Activated repo path
-            assert repo_path is not None
-            clone_path = Path(repo_path)
+        _resolved_alias, clone_path = _resolve_repository_path(repo_alias, current_user)
         index_base_path = clone_path / ".code-indexer" / "index"
 
-        # Check if index directory exists
-        if not index_base_path.exists() or not index_base_path.is_dir():
-            # No collections yet - return empty result with overall_healthy=True
-            return RepositoryHealthResult(
-                repo_alias=repo_alias,
-                overall_healthy=True,
-                collections=[],
-                total_collections=0,
-                healthy_count=0,
-                unhealthy_count=0,
-                from_cache=False,
-            )
-
-        # Iterate all collection directories
-        collections: List[CollectionHealthResult] = []
-        any_from_cache = False
-
-        for collection_dir in index_base_path.iterdir():
-            if not collection_dir.is_dir():
-                continue
-
-            hnsw_file = collection_dir / "hnsw_index.bin"
-            if not hnsw_file.exists():
-                continue
-
-            collection_name = collection_dir.name
-
-            # Determine index type from collection name
-            if "temporal" in collection_name.lower():
-                index_type = "temporal"
-            elif "multimodal" in collection_name.lower():
-                index_type = "multimodal"
-            else:
-                index_type = "semantic"
-
-            # Perform health check for this collection
-            health_result = _health_service.check_health(
-                index_path=str(hnsw_file),
-                force_refresh=force_refresh,
-            )
-
-            # Track if any result came from cache
-            if health_result.from_cache:
-                any_from_cache = True
-
-            # Convert to CollectionHealthResult (Story #1359 AC4: propagates
-            # orphan_count via the shared mapping helper)
-            collection_health = _to_collection_health_result(
-                collection_name, index_type, health_result
-            )
-
-            collections.append(collection_health)
-
-        # If no collections found, return empty result
-        if not collections:
-            return RepositoryHealthResult(
-                repo_alias=repo_alias,
-                overall_healthy=True,
-                collections=[],
-                total_collections=0,
-                healthy_count=0,
-                unhealthy_count=0,
-                from_cache=False,
-            )
-
-        # Aggregate results
-        healthy_count = sum(1 for c in collections if c.valid)
-        unhealthy_count = len(collections) - healthy_count
-        overall_healthy = unhealthy_count == 0
-
-        return RepositoryHealthResult(
-            repo_alias=repo_alias,
-            overall_healthy=overall_healthy,
-            collections=collections,
-            total_collections=len(collections),
-            healthy_count=healthy_count,
-            unhealthy_count=unhealthy_count,
-            from_cache=any_from_cache,
+        return compute_repository_health(
+            repo_alias,
+            index_base_path,
+            get_shared_health_service(),
+            force_refresh=force_refresh,
         )
 
     except HTTPException:
@@ -434,6 +354,91 @@ async def get_repository_health(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Health check failed: {str(e)}",
+        )
+
+
+@router.post(
+    "/{repo_alias}/health/check",
+    response_model=HealthCheckJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Health check job started"},
+        404: {"description": "Repository not found"},
+        409: {
+            "description": "A health check job is already running for this repository"
+        },
+        500: {"description": "Failed to start health check job"},
+    },
+)
+async def check_repository_health_async(
+    repo_alias: str,
+    force_refresh: bool = Query(
+        default=False, description="Bypass cache and perform fresh check"
+    ),
+    current_user: User = Depends(get_current_user_hybrid),
+) -> HealthCheckJobResponse:
+    """
+    Submit a background job to check HNSW index health for a repository.
+
+    Bug #1394: unlike GET /{repo_alias}/health (which runs synchronously and
+    can exceed the reverse-proxy timeout on repositories with dozens of
+    temporal shards), this endpoint submits a background job and returns
+    immediately with a job_id to poll via GET /api/jobs/{job_id}.
+
+    Args:
+        repo_alias: Repository alias (e.g., 'backend', 'frontend')
+        force_refresh: If True, bypass cache and perform fresh check
+        current_user: Authenticated user (injected by auth dependency)
+
+    Returns:
+        HealthCheckJobResponse with job_id to poll
+
+    Raises:
+        HTTPException 404: Repository not found
+        HTTPException 409: A health check job is already running for this repo
+        HTTPException 500: Failed to start health check job
+    """
+    try:
+        resolved_alias, clone_path = _resolve_repository_path(repo_alias, current_user)
+        index_base_path = clone_path / ".code-indexer" / "index"
+        background_job_manager = _get_background_job_manager()
+
+        def health_check_job() -> dict:
+            result = compute_repository_health(
+                resolved_alias,
+                index_base_path,
+                get_shared_health_service(),
+                force_refresh=force_refresh,
+            )
+            return result.model_dump()  # type: ignore[no-any-return]
+
+        job_id = background_job_manager.submit_job(
+            "repository_health_check",
+            health_check_job,
+            submitter_username=current_user.username,
+            repo_alias=resolved_alias,
+        )
+
+        return HealthCheckJobResponse(
+            job_id=job_id,
+            message="Health check job started",
+        )
+
+    except HTTPException:
+        raise
+    except DuplicateJobError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to start health check job for repository {repo_alias}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start health check job: {str(e)}",
         )
 
 

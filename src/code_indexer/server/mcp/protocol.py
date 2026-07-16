@@ -20,6 +20,7 @@ from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
 import functools
+import time
 import uuid
 import json
 import logging
@@ -83,8 +84,11 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
 def _resolve_handler_timeout(tool_name: str) -> int:
     """Return the effective timeout in seconds for a given tool's sync handler.
 
-    Returns the per-tool override from _HANDLER_TIMEOUT_OVERRIDES if one exists,
-    otherwise returns HANDLER_TIMEOUT_SECONDS (60s default, Bug #1008).
+    Issue #1398: reads the live, Web-UI-configurable SearchTimeoutsConfig
+    instead of the module-level hardcoded constants below (which now exist
+    only as documented pre-#1398-compatible defaults / a defensive fallback
+    for the theoretical case where search_timeouts_config is unset --
+    ServerConfig.__post_init__ guarantees it never is in production).
 
     Args:
         tool_name: The MCP tool name being dispatched.
@@ -92,7 +96,15 @@ def _resolve_handler_timeout(tool_name: str) -> int:
     Returns:
         Timeout in seconds to use with asyncio.wait_for.
     """
-    return _HANDLER_TIMEOUT_OVERRIDES.get(tool_name, HANDLER_TIMEOUT_SECONDS)
+    _cfg = get_config_service().get_config()
+    search_timeouts = getattr(_cfg, "search_timeouts_config", None)
+    if search_timeouts is None:
+        return _HANDLER_TIMEOUT_OVERRIDES.get(tool_name, HANDLER_TIMEOUT_SECONDS)
+    if tool_name == "exit_write_mode":
+        return search_timeouts.write_mode_handler_timeout_seconds  # type: ignore[no-any-return]
+    if tool_name == "search_code":
+        return search_timeouts.search_code_handler_timeout_seconds  # type: ignore[no-any-return]
+    return search_timeouts.default_handler_timeout_seconds  # type: ignore[no-any-return]
 
 
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
@@ -265,6 +277,17 @@ async def _invoke_handler(
     if is_async:
         return await handler(arguments, user, **extra_kwargs)
     else:
+        # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
+        # branch enforces an outer asyncio.wait_for timeout (the async
+        # branch has none, per the documented sync/async distinction), so
+        # only here is there a meaningful deadline to compute. A handler
+        # that declares handler_deadline_monotonic can use it to bound its
+        # own internal work (e.g. the temporal foreground waiter) so it
+        # always returns before THIS timeout fires with no job_id.
+        if "handler_deadline_monotonic" in sig.parameters:
+            extra_kwargs["handler_deadline_monotonic"] = (
+                time.monotonic() + timeout_seconds
+            )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, arguments, user, **extra_kwargs)
         try:

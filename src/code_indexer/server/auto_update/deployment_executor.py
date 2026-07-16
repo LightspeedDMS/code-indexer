@@ -110,6 +110,9 @@ _LAUNCH_DEFAULT_HOST, _LAUNCH_DEFAULT_PORT, _LAUNCH_DEFAULT_WORKERS = (
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
 HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
+# Bug #1392: quick `python -c` probe for check_integrity/repair_orphans,
+# same budget as the existing _hnswlib_importable() import probe.
+HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS = 10
 
 # Bug #839: Claude CLI auto-update timeout constants
 NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
@@ -1257,6 +1260,216 @@ class DeploymentExecutor:
             )
             return False
 
+    def _get_cli_python_interpreter(self) -> Optional[str]:
+        """Resolve the Python interpreter the system-wide `cidx` CLI runs under.
+
+        Bug #1392: the CLI's system-wide Python environment is SEPARATE from
+        the server's own pipx venv (`_get_server_python()`) -- real `cidx`
+        indexing subprocesses run under this interpreter, not the server's.
+        Resolved dynamically via the `cidx` console-script's shebang line
+        (never hardcoded), so this works regardless of install layout
+        (system pip, pipx, venv, user install).
+
+        Returns:
+            Absolute path to the CLI's Python interpreter, or None if it
+            cannot be resolved (e.g. no system-wide `cidx` installed yet --
+            a legitimate non-error state, not a failure).
+        """
+        cidx_bin = shutil.which("cidx")
+        if cidx_bin is None:
+            logger.debug(
+                "No system-wide 'cidx' CLI entrypoint found on PATH",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        try:
+            first_line = Path(cidx_bin).read_text().splitlines()[0]
+        except Exception as e:
+            logger.debug(
+                f"Could not read cidx entrypoint {cidx_bin}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        if not first_line.startswith("#!"):
+            logger.debug(
+                f"cidx entrypoint {cidx_bin} has no shebang line",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        shebang = first_line[2:].strip()
+        tokens = shebang.split()
+        if not tokens:
+            logger.debug(
+                f"cidx entrypoint {cidx_bin} has an empty shebang",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        if Path(tokens[0]).name == "env" and len(tokens) > 1:
+            resolved = shutil.which(tokens[1])
+        else:
+            resolved = tokens[0]
+
+        if resolved is None or not Path(resolved).exists():
+            logger.debug(
+                f"cidx entrypoint {cidx_bin} shebang resolved to a "
+                f"nonexistent interpreter: {resolved}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+        return resolved
+
+    def _hnswlib_has_full_capability(self, python_path: str) -> bool:
+        """Return True if the given python's hnswlib has the custom fork's methods.
+
+        Bug #1392: stricter than `_hnswlib_importable()` -- a stock PyPI
+        hnswlib IS importable (that is exactly the bug), so a plain import
+        probe cannot detect drift. This probes for `check_integrity` and
+        `repair_orphans` specifically, mirroring
+        `HNSWIndexManager._hnswlib_has_fork_capability()`'s own check (Bug
+        #1415 renamed/repurposed the former raising
+        `_ensure_hnswlib_capability()` into this non-raising predicate).
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if both fork methods are present (rc=0), False otherwise
+            (including on any probe exception, which is DEBUG-logged).
+        """
+        try:
+            result = subprocess.run(
+                [
+                    python_path,
+                    "-c",
+                    "import hnswlib, sys; sys.exit(0 if hasattr(hnswlib.Index, "
+                    "'check_integrity') and hasattr(hnswlib.Index, "
+                    "'repair_orphans') else 1)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+            )
+            return result.returncode == 0
+        except Exception as e:
+            logger.debug(
+                f"_hnswlib_has_full_capability probe raised an exception for "
+                f"{python_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _get_python_site_packages(self, python_path: str) -> Optional[str]:
+        """Return the given python's primary site-packages path, or None.
+
+        Bug #1392: diagnostic-only -- used purely to make
+        `_ensure_cli_hnswlib_capability()`'s failure message actionable (name
+        the site-packages path found deficient). Does NOT affect where pip
+        installs (pip resolves that correctly for whatever interpreter it is
+        invoked with); this is logging context only.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            The stripped site-packages path, or None on any failure (DEBUG-logged).
+        """
+        try:
+            result = subprocess.run(
+                [python_path, "-c", "import site; print(site.getsitepackages()[0])"],
+                capture_output=True,
+                text=True,
+                timeout=HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                logger.debug(
+                    f"_get_python_site_packages probe failed (rc={result.returncode}) "
+                    f"for {python_path}: {result.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return None
+            output = result.stdout.strip()
+            return output if output else None
+        except Exception as e:
+            logger.debug(
+                f"_get_python_site_packages probe raised an exception for "
+                f"{python_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+
+    def _cli_hnswlib_failure_message(self, cli_python: str) -> str:
+        """Build the actionable error message for a failed CLI hnswlib sync.
+
+        Bug #1392: names the interpreter, its site-packages (if resolvable),
+        the expected fork commit, and the docs rebuild procedure -- split out
+        of `_ensure_cli_hnswlib_capability()` to keep that method short.
+        """
+        site_packages = self._get_python_site_packages(cli_python)
+        expected_commit = self._get_hnswlib_submodule_commit()
+        return (
+            "Failed to sync custom hnswlib fork into the CLI's system-wide "
+            f"Python environment. Interpreter: {cli_python}. Site-packages: "
+            f"{site_packages or 'unresolvable'}. Expected fork commit: "
+            f"{expected_commit or 'unknown'}. Real cidx indexing subprocesses "
+            "under this interpreter may fail with AttributeError on "
+            "check_integrity()/repair_orphans(). See "
+            "docs/hnswlib-custom-build.md for the manual rebuild procedure."
+        )
+
+    def _ensure_cli_hnswlib_capability(self) -> bool:
+        """Ensure the CLI's system-wide Python env has the custom hnswlib fork.
+
+        Bug #1392: the CLI's system-wide Python environment is SEPARATE from
+        the server's own pipx venv, and was previously never synced by the
+        deploy pipeline, so it could silently drift to a stock PyPI hnswlib.
+
+        Orchestration: resolve CLI interpreter (None -> nothing to sync yet)
+        -> skip if already fully capable (idempotent) -> else build -> loud
+        actionable error on failure (see `_cli_hnswlib_failure_message`).
+
+        Returns:
+            True if synced, already capable, or nothing to sync; False if
+            the build genuinely failed (non-fatal to the overall deploy).
+        """
+        cli_python = self._get_cli_python_interpreter()
+        if cli_python is None:
+            logger.info(
+                "No system-wide 'cidx' CLI entrypoint found on PATH -- "
+                "skipping CLI hnswlib capability sync (nothing to sync yet)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if self._hnswlib_has_full_capability(cli_python):
+            logger.info(
+                f"CLI Python environment ({cli_python}) already has hnswlib "
+                "check_integrity/repair_orphans -- skipping rebuild",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if self._build_hnswlib_with_fallback(python_path=cli_python):
+            logger.info(
+                f"Successfully synced custom hnswlib fork into CLI Python "
+                f"environment ({cli_python})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        logger.error(
+            format_error_log(
+                "DEPLOY-GENERAL-209",
+                self._cli_hnswlib_failure_message(cli_python),
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return False
+
     def _hnswlib_importable(self, python_path: str) -> bool:
         """Return True if hnswlib can be imported by the server python.
 
@@ -1348,7 +1561,11 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-    def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
+    def build_custom_hnswlib(
+        self,
+        hnswlib_path: Optional[Path] = None,
+        python_path: Optional[str] = None,
+    ) -> bool:
         """Build and install custom hnswlib from specified path or default submodule.
 
         The custom hnswlib fork includes the check_integrity() method for HNSW
@@ -1358,6 +1575,11 @@ class DeploymentExecutor:
         Args:
             hnswlib_path: Path to hnswlib source directory. If None, uses default
                          submodule path (third_party/hnswlib).
+            python_path: Target Python interpreter to build/install into. If
+                         None (default), resolves via `self._get_server_python()`
+                         as before (Bug #1392: callers targeting a DIFFERENT
+                         environment -- e.g. the CLI's system-wide python --
+                         pass it explicitly here).
 
         Returns:
             True if successful or submodule not present, False on build failure
@@ -1385,16 +1607,28 @@ class DeploymentExecutor:
             return False
 
         try:
-            python_path = self._get_server_python()
+            if python_path is None:
+                python_path = self._get_server_python()
             # Bug #1245: Skip rebuild when hnswlib is already importable and the
             # submodule commit is unchanged since the last successful build.
+            # Bug #1392 remediation: the last-built-commit marker is GLOBAL,
+            # not keyed per-interpreter -- a build against a DIFFERENT
+            # interpreter (e.g. the server's) can have already written it for
+            # the current commit. Gating the skip on plain importability
+            # (_hnswlib_importable) is therefore insufficient: a stock PyPI
+            # hnswlib on THIS interpreter is also importable, so the skip
+            # would falsely fire and leave this interpreter's install
+            # un-rebuilt. _hnswlib_has_full_capability() probes for the
+            # fork's own check_integrity/repair_orphans methods, so it can
+            # only skip when THIS interpreter's install genuinely already has
+            # the fork.
             current_commit = self._get_hnswlib_submodule_commit()
             last_built_commit = self._get_last_built_hnswlib_commit()
-            if self._hnswlib_importable(python_path):
+            if self._hnswlib_has_full_capability(python_path):
                 if current_commit is not None and current_commit == last_built_commit:
                     logger.info(
-                        f"hnswlib already importable and submodule commit unchanged "
-                        f"({current_commit[:8]}); skipping rebuild",
+                        f"hnswlib already has full fork capability and submodule "
+                        f"commit unchanged ({current_commit[:8]}); skipping rebuild",
                         extra={"correlation_id": get_correlation_id()},
                     )
                     return True
@@ -1519,13 +1753,18 @@ class DeploymentExecutor:
 
             if result.returncode != 0:
                 # Bug #1245: Non-fatal when hnswlib is still importable (existing module works).
-                # Only hard-fail when hnswlib genuinely cannot be imported.
-                if self._hnswlib_importable(python_path):
+                # Bug #1392 remediation: "still importable" is NOT sufficient --
+                # a stock PyPI hnswlib is importable too, so demoting on plain
+                # importability would falsely report success for a target that
+                # genuinely lacks the fork's check_integrity/repair_orphans
+                # methods. Only demote to non-fatal when the fork's own
+                # capability is confirmed present.
+                if self._hnswlib_has_full_capability(python_path):
                     logger.warning(
                         format_error_log(
                             "DEPLOY-GENERAL-042",
-                            f"Custom hnswlib build failed but hnswlib is still importable; "
-                            f"continuing deploy: "
+                            f"Custom hnswlib build failed but the fork's capability "
+                            f"is still present; continuing deploy: "
                             f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
                             extra={"correlation_id": get_correlation_id()},
                         )
@@ -1565,7 +1804,7 @@ class DeploymentExecutor:
             )
             return False
 
-    def _build_hnswlib_with_fallback(self) -> bool:
+    def _build_hnswlib_with_fallback(self, python_path: Optional[str] = None) -> bool:
         """Build custom hnswlib with fallback to standalone clone if submodule fails.
 
         Bug #160: Unified method that tries submodule first, then falls back to
@@ -1576,11 +1815,23 @@ class DeploymentExecutor:
         2. If yes: build from submodule (normal path)
         3. If no: clone to fallback location and build from there
 
+        Args:
+            python_path: Target Python interpreter to build/install into,
+                         threaded through to build_custom_hnswlib(). If None
+                         (default), build_custom_hnswlib() resolves via
+                         `self._get_server_python()` as before (Bug #1392:
+                         callers targeting the CLI's system-wide python pass
+                         it explicitly here).
+
         Returns:
             True if either approach succeeds, False if both fail
         """
         submodule_path = self.repo_path / "third_party" / "hnswlib"
         submodule_setup_py = submodule_path / "setup.py"
+        # Bug #1392: only pass python_path through when explicitly given, so
+        # the call shape when it is None (the default) is byte-identical to
+        # pre-#1392 behavior -- existing tests assert the exact call args.
+        extra_kwargs = {} if python_path is None else {"python_path": python_path}
 
         # Try submodule first if setup.py exists
         if submodule_setup_py.exists():
@@ -1588,7 +1839,7 @@ class DeploymentExecutor:
                 "Building hnswlib from submodule path",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return self.build_custom_hnswlib(hnswlib_path=None)
+            return self.build_custom_hnswlib(hnswlib_path=None, **extra_kwargs)
 
         # Submodule doesn't have setup.py - use fallback approach
         logger.warning(
@@ -1612,7 +1863,9 @@ class DeploymentExecutor:
             "Building hnswlib from fallback location",
             extra={"correlation_id": get_correlation_id()},
         )
-        if not self.build_custom_hnswlib(hnswlib_path=HNSWLIB_FALLBACK_PATH):
+        if not self.build_custom_hnswlib(
+            hnswlib_path=HNSWLIB_FALLBACK_PATH, **extra_kwargs
+        ):
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-072",
@@ -3565,6 +3818,38 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+        # Step 1.7 (Bug #1392): Ensure the CLI's SEPARATE system-wide Python
+        # environment also has the custom hnswlib fork -- every real cidx CLI
+        # indexing subprocess runs under that interpreter, not the server's
+        # own pipx venv, and the two have been observed to drift apart in
+        # production (Bug #1392: AttributeError: 'hnswlib.Index' object has
+        # no attribute 'check_integrity' on every fleet-wide refresh).
+        #
+        # Non-fatal (unlike Step 1.6): this targets a wholly INDEPENDENT
+        # Python environment from the one cidx-server itself runs under, so a
+        # failure here (e.g. missing compiler, transient clone failure) must
+        # not block the server's own restart/config steps, which are
+        # unaffected by it. The runtime capability check added in
+        # storage/hnsw_index_manager.py is the actual last-line-of-defense:
+        # it fails loudly and immediately the moment real indexing is
+        # attempted post-deploy, so this step is preventative, not the sole
+        # safety net. Hard-aborting the ENTIRE deploy over an unrelated
+        # environment's compile failure would repeat the exact "deploy
+        # dead-loop over one unrelated environment" failure class this file
+        # has already fixed multiple times (Bug #1243/#1245/#1234) -- just
+        # relocated to a second Python environment.
+        if not self._ensure_cli_hnswlib_capability():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-209",
+                    "CLI system-wide hnswlib capability sync failed -- "
+                    "indexing subprocesses may still fail with AttributeError "
+                    "on check_integrity()/repair_orphans(). See "
+                    "docs/hnswlib-custom-build.md.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Step 2: Pip install
         if not self.pip_install():

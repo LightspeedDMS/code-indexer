@@ -31,6 +31,20 @@ class TestHNSWOrphanRepairSweepConfigDefaults:
         assert cfg.batch_size == 42
         assert cfg.tick_interval_minutes == 3
 
+    def test_default_operating_hours_window_is_always_on(self) -> None:
+        """Story #1397: default (0, 0) preserves the pre-#1397 24x7
+        behavior (start == end means 'always run')."""
+        cfg = HNSWOrphanRepairSweepConfig()
+        assert cfg.operating_hours_start_utc == 0
+        assert cfg.operating_hours_end_utc == 0
+
+    def test_operating_hours_fields_are_overridable(self) -> None:
+        cfg = HNSWOrphanRepairSweepConfig(
+            operating_hours_start_utc=22, operating_hours_end_utc=6
+        )
+        assert cfg.operating_hours_start_utc == 22
+        assert cfg.operating_hours_end_utc == 6
+
 
 class TestServerConfigWiresHNSWOrphanRepairSweepConfig:
     def test_server_config_auto_initializes_when_none(self) -> None:

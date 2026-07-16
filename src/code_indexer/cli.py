@@ -2914,7 +2914,11 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
 @click.option(
     "--max-commits",
     type=int,
-    help="Maximum number of commits to index per branch (default: all)",
+    help="Maximum number of newly-discovered commits to schedule this run, "
+    "per configured temporal embedder (default: all). Applied AFTER "
+    "incremental-gate discovery as a global (not per-branch) cap: "
+    "selects the newest N chronologically-eligible commits; any "
+    "remainder is picked up on a future unrestricted run.",
 )
 @click.option(
     "--since-date",
@@ -4207,9 +4211,15 @@ def index(
             console.print(f"\n🔄 Indexing additional provider: {_extra_provider}")
             config.embedding_provider = _extra_provider  # type: ignore[assignment]
             _extra_embedding = EmbeddingProviderFactory.create(config, console)
-            if not _extra_embedding.health_check():
+            # Bug (EVO-64222): use a real authenticating probe (test_api=True)
+            # here rather than the shallow default (test_api=False, which passes
+            # whenever a key is merely present). A secondary provider with an
+            # invalid credential is skipped now, before its doomed pass would
+            # hang the already-complete primary index at ~99% retrying 401s.
+            if not _extra_embedding.health_check(test_api=True):
                 console.print(
-                    f"⚠️  {_extra_provider} health check failed — skipping",
+                    f"⚠️  {_extra_provider} health check failed "
+                    "(check its API credentials) — skipping",
                     style="yellow",
                 )
                 continue
@@ -8509,6 +8519,16 @@ def health(output_json: bool, quiet: bool, index_path: Optional[str]):
             console.print(f"  Max Inbound: {result.max_inbound}")
         if result.orphan_count is not None:
             console.print(f"  Orphan Count: {result.orphan_count}")
+
+    # Bug #1415: degraded-capability signal, SEPARATE from the zero-tolerance
+    # orphan_count binary above -- only shown when actually evaluated
+    # (Level 4 reached) and found missing.
+    if result.hnswlib_capability_available is False:
+        console.print()
+        console.print(
+            "hnswlib fork capability: unavailable (degraded, orphan repair skipped)",
+            style="bold yellow",
+        )
 
     # Errors (if any)
     if result.errors:

@@ -200,9 +200,15 @@ class TestIndexCommitsWiringMaxCommitsSinceDate:
         from unittest.mock import patch, Mock, MagicMock
         from code_indexer.services.temporal.models import CommitInfo
 
+        # Bug #1407: since_date is now genuinely enforced (as a
+        # post-set-difference scheduling filter) regardless of how the
+        # commit universe was fetched -- the timestamp must be AFTER the
+        # since_date used below (2024-01-01) or the gate correctly excludes
+        # it, which would confound this test's actual intent (verifying
+        # max_commits/since_date get persisted to temporal_meta.json).
         fake_commit = CommitInfo(
             hash="deadbeef1234",
-            timestamp=1700000000,
+            timestamp=1706000000,  # 2024-01-23, after the since_date cutoff
             author_name="Test Author",
             author_email="test@example.com",
             message="Initial commit",

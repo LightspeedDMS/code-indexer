@@ -1078,6 +1078,43 @@ class RefreshScheduler:
         """
         return self.write_lock_manager.is_locked(alias)
 
+    def check_refresh_not_in_progress(self, alias: str) -> None:
+        """
+        Raise DuplicateJobError if a global_repo_refresh job is currently
+        active (running or pending) for the given bare golden repo alias.
+
+        Bug #1393: WriteLockManager alone cannot signal "a refresh is
+        ALREADY executing" -- _execute_refresh() only CHECKS
+        is_write_locked(), it never HOLDS the write lock itself while
+        running (the lock is reserved for the enumerated external-writer
+        set: DependencyMapService, LangfuseTraceSyncService, branch_change,
+        etc -- Story #227). JobTracker is the cluster-visible signal for
+        "currently executing" instead, since _execute_refresh() registers
+        itself into it (Bug #935) under the alias_name form (bare alias +
+        "-global").
+
+        Callers should catch job_tracker.DuplicateJobError and translate it
+        into their own domain error with an actionable message. This
+        mirrors the register_job_if_no_conflict/DuplicateJobError fail-fast
+        convention already used elsewhere in this codebase for conflicting
+        operations, rather than blocking on an unbounded/long wait -- a
+        refresh can legitimately run for well over an hour on a very large
+        golden repo, and this method is called from within a caller's own
+        background-job thread, which should not be tied up indefinitely.
+
+        Args:
+            alias: Repo alias without -global suffix (e.g., "evolution").
+
+        Raises:
+            job_tracker.DuplicateJobError: If a global_repo_refresh job is
+                active for "{alias}-global".
+        """
+        if self._job_tracker is None:
+            return
+        self._job_tracker.check_operation_conflict(
+            "global_repo_refresh", repo_alias=f"{alias}-global"
+        )
+
     def write_lock(self, alias: str, owner_name: str = "refresh_scheduler"):
         """
         Context manager that acquires the write lock on entry and releases on exit.
@@ -1325,6 +1362,23 @@ class RefreshScheduler:
             # ConfigManager (CLI)
             return cast(int, self.config_source.get_global_refresh_interval())
 
+    def _is_externally_managed(self) -> bool:
+        """
+        Whether golden-repo presence/refresh is owned by an external manager.
+
+        When true, the server does not run its own refresh cycle or startup
+        restore reconciliation — an external owner materializes and refreshes
+        the clones, and the server only indexes/serves what is registered.
+
+        Only meaningful in server mode (GlobalRepoOperations). The CLI path has
+        no external owner, so it is always False.
+        """
+        if isinstance(self.config_source, GlobalRepoOperations):
+            return bool(
+                self.config_source.get_config().get("externally_managed", False)
+            )
+        return False
+
     def is_running(self) -> bool:
         """
         Check if scheduler is running.
@@ -1342,6 +1396,16 @@ class RefreshScheduler:
         """
         if self._running:
             logger.debug("Refresh scheduler already running")
+            return
+
+        # When golden repos are externally managed, an external owner drives
+        # refresh; running our own periodic refresh would fight it. Skip the
+        # background thread entirely (leave _running False so nothing polls).
+        if self._is_externally_managed():
+            logger.info(
+                "externally_managed=True: skipping self-managed refresh scheduler "
+                "(external owner drives golden-repo refresh)"
+            )
             return
 
         self._running = True
@@ -1573,9 +1637,19 @@ class RefreshScheduler:
 
         # Story #482 PATH C: Use a named function (not a lambda) so
         # BackgroundJobManager can detect and inject progress_callback.
+        #
+        # EVO-64385: tracked_by_caller=True — submit_job() below claims
+        # (global_repo_refresh, alias_name) in the job tracker (Bug #1065), and
+        # that row holds the idx_active_job_per_repo slot for the whole run. The
+        # worker must NOT register a second job for the same pair or it collides
+        # with its own parent row and the refresh is marked failed before it
+        # starts.
         def _refresh_worker(progress_callback=None):
             return self._execute_refresh(
-                alias_name, force_reset=force_reset, progress_callback=progress_callback
+                alias_name,
+                force_reset=force_reset,
+                progress_callback=progress_callback,
+                tracked_by_caller=True,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -1600,7 +1674,11 @@ class RefreshScheduler:
         self._execute_refresh(alias_name)
 
     def _execute_refresh(
-        self, alias_name: str, force_reset: bool = False, progress_callback=None
+        self,
+        alias_name: str,
+        force_reset: bool = False,
+        progress_callback=None,
+        tracked_by_caller: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -1620,6 +1698,11 @@ class RefreshScheduler:
             force_reset: When True, skip change detection and call
                 updater.update(force_reset=True) to force-reset the repo to the
                 remote branch before indexing (Story #272 AC3/AC4).
+            tracked_by_caller: True when this refresh already runs under a
+                BackgroundJobManager job, whose submit_job() has ALREADY claimed
+                (global_repo_refresh, alias_name) in the job tracker. Registering
+                again here would insert a SECOND active row for the same pair --
+                see the EVO-64385 note below.
 
         Returns:
             Dict with success status and details for BackgroundJobManager tracking
@@ -1630,15 +1713,31 @@ class RefreshScheduler:
         # Bug #935: Register in-flight refresh with JobTracker so drain-status
         # sees it and the auto-updater waits before restarting.
         # Guard with is not None — CLI mode has no tracker.
+        #
+        # EVO-64385: ...but ONLY when nobody has registered us already. When this
+        # refresh runs under a BackgroundJobManager job, submit_job() (Bug #1065)
+        # has already called register_job_if_no_conflict() for the SAME
+        # (operation_type="global_repo_refresh", repo_alias=alias_name) pair, and
+        # that row occupies the idx_active_job_per_repo partial unique index. A
+        # second registration here collides with our own parent row: postgres
+        # raises 23505, the raw error escapes this function, and
+        # BackgroundJobManager marks the whole refresh FAILED -- so the refresh
+        # never runs at all (observed in cluster mode: every scheduled refresh
+        # failed and last_refresh froze for days). The outer job IS the
+        # cluster-visible active job Bug #935 wanted drain-status to see, so let
+        # it own the registration AND the complete/fail lifecycle below.
         _tracker_job_id = f"refresh-{alias_name}"
-        if self._job_tracker is not None:
-            self._job_tracker.register_job(
+        # The tracker WE own: None in CLI mode (no tracker at all) and None when
+        # the caller already registered this refresh (tracked_by_caller).
+        _tracker = None if tracked_by_caller else self._job_tracker
+        if _tracker is not None:
+            _tracker.register_job(
                 _tracker_job_id,
                 operation_type="global_repo_refresh",
                 username="system",
                 repo_alias=alias_name,
             )
-            self._job_tracker.update_status(_tracker_job_id, status="running")
+            _tracker.update_status(_tracker_job_id, status="running")
 
         # Bug #935: track whether the refresh raised so the finally block can
         # call fail_job (raised) vs complete_job (all normal exits incl. early returns).
@@ -2282,14 +2381,18 @@ class RefreshScheduler:
 
         finally:
             # Bug #935: always unregister from JobTracker (finally runs on return AND raise).
-            if self._job_tracker is not None:
+            # EVO-64385: only for the job WE registered. When tracked_by_caller,
+            # `refresh-{alias}` was never inserted by us and the outer
+            # BackgroundJobManager job owns its own completion -- completing or
+            # failing it here would touch a job that is not ours.
+            if _tracker is not None:
                 if _tracker_raised:
-                    self._job_tracker.fail_job(
+                    _tracker.fail_job(
                         _tracker_job_id,
                         error=f"refresh failed for {alias_name}",
                     )
                 else:
-                    self._job_tracker.complete_job(_tracker_job_id)
+                    _tracker.complete_job(_tracker_job_id)
 
     def _index_source(
         self,
@@ -2368,7 +2471,40 @@ class RefreshScheduler:
         enable_temporal = (
             repo_info.get("enable_temporal", False) if repo_info else False
         )
-        temporal_options = repo_info.get("temporal_options") if repo_info else None
+
+        # Bug #1414: temporal_options must be read from golden_repos_metadata
+        # (bare-alias-keyed, Web-UI-authoritative -- GoldenRepoManager.
+        # save_temporal_options is the Web UI's ONLY write path and writes
+        # exclusively to this table), NOT from self.registry's global_repos
+        # table, which is frozen at registration time. A stale registry read
+        # here silently ignores every operator edit to max_commits/
+        # since_date/diff_context/all_branches, forever -- most dangerously
+        # for all_branches under Story #1412's gate (the #1406-class
+        # scenario: operator disables all_branches via the Web UI, but the
+        # stale registry copy still says True, so the scheduler keeps doing
+        # multi-branch indexing against explicit operator intent). Reuses
+        # the #1373 bare/-global alias normalization pattern already
+        # established in _reconcile_registry_with_filesystem. enable_temporal
+        # (above) and enable_scip (below) are UNCHANGED -- their
+        # registry-based consistency is handled separately and correctly
+        # (Bug #1390/#1406), and is explicitly out of scope here.
+        _GLOBAL_SUFFIX = "-global"
+        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
+        try:
+            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
+        except Exception as exc:
+            logger.warning(
+                "Bug #1414: could not read golden_repos_metadata for %s, "
+                "temporal_options unavailable this cycle (Bug #642 NULL "
+                "fallback will apply): %s: %s",
+                bare_alias,
+                type(exc).__name__,
+                exc,
+            )
+            golden_meta_info = None
+        temporal_options = (
+            golden_meta_info.get("temporal_options") if golden_meta_info else None
+        )
 
         repo_url = repo_info.get("repo_url", "") if repo_info else ""
         is_local_repo = repo_url.startswith("local://") if repo_url else False
@@ -2398,7 +2534,29 @@ class RefreshScheduler:
                 if diff_context is not None:
                     temporal_command.extend(["--diff-context", str(diff_context)])
                 if temporal_options.get("all_branches"):
-                    temporal_command.append("--all-branches")
+                    # Story #1412: golden/server temporal all-branches
+                    # indexing is gated behind a server-wide runtime flag,
+                    # shipped OFF by default. Defense-in-depth: skip the
+                    # flag (never trust a stored legacy value or a gate
+                    # flipped off after the option was set) and log loudly
+                    # so the downgrade to single-branch is observable.
+                    _gate_config = get_config_service().get_config()
+                    _gate_enabled = bool(
+                        getattr(
+                            _gate_config.indexing_config,
+                            "temporal_all_branches_enabled",
+                            False,
+                        )
+                    )
+                    if _gate_enabled:
+                        temporal_command.append("--all-branches")
+                    else:
+                        logger.warning(
+                            "all_branches requested for golden '%s' but "
+                            "temporal_all_branches_enabled=false; indexing "
+                            "single-branch",
+                            alias_name,
+                        )
             else:
                 # Bug #642 Step 2: temporal_options is NULL (e.g. after path migration
                 # where options were never written back to DB). Fall back to reading
@@ -3318,6 +3476,19 @@ class RefreshScheduler:
         """
         from datetime import datetime
 
+        # When golden repos are externally managed, the external owner — not the
+        # server — decides which clones exist on disk. Restoring "missing" masters
+        # from snapshots here would resurrect repos the owner intentionally
+        # removed. Skip reconciliation entirely. Deliberately do NOT write the
+        # completion marker, so that turning this mode back off later still runs
+        # the one-time reconcile.
+        if self._is_externally_managed():
+            logger.info(
+                "externally_managed=True: skipping startup golden-repo "
+                "reconciliation (external owner owns golden-repo presence)"
+            )
+            return
+
         marker_file = self.golden_repos_dir / ".reconciliation_complete_v1"
 
         if marker_file.exists():
@@ -3399,6 +3570,96 @@ class RefreshScheduler:
         )
         marker_file.write_text(f"Completed at {datetime.now().isoformat()}")
 
+    def _reconcile_global_repos_temporal(
+        self, global_alias: str, repo_info: Dict[str, Any], filesystem_temporal: bool
+    ) -> bool:
+        """Bug #1406: one-way (auto-DISABLE only) reconciliation of
+        global_repos.enable_temporal. True->False downgrades when the
+        filesystem shows no real data (Bug #1390's fix, preserved).
+        False->True is intentionally never applied -- an explicit operator
+        disable must never be silently overridden by restored/present data.
+
+        Returns True when this table's auto-enable was suppressed (stored
+        value False, filesystem shows real data) so the PARENT method
+        (`_reconcile_registry_with_filesystem`) can emit a single
+        consolidated suppression INFO log across both tables instead of one
+        per table (code-review remediation of #1406 fix-item #3).
+        """
+        registry_temporal = repo_info.get("enable_temporal", False)
+
+        if registry_temporal is True and filesystem_temporal is False:
+            logger.info(
+                f"Reconciling temporal flag for {global_alias}: "
+                f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
+            )
+            self.registry.update_enable_temporal(global_alias, False)
+        elif registry_temporal is False and filesystem_temporal is True:
+            return True
+        return False
+
+    def _reconcile_golden_metadata_temporal(
+        self, bare_alias: str, filesystem_temporal: bool
+    ) -> bool:
+        """Bug #1390 cross-table fix + Bug #1406 one-way (auto-DISABLE only)
+        rule for golden_repos_metadata.enable_temporal. Checked and updated
+        INDEPENDENTLY of the global_repos side -- the two tables can drift
+        independently, so global_repos already matching the filesystem must
+        not skip this check.
+
+        Returns True when this table's auto-enable was suppressed (stored
+        value False, filesystem shows real data) so the PARENT method can
+        emit a single consolidated suppression INFO log across both tables
+        instead of one per table (code-review remediation of #1406
+        fix-item #3).
+        """
+        try:
+            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
+        except Exception as exc:
+            logger.warning(
+                f"Reconciliation: could not read golden_repos_metadata for "
+                f"{bare_alias}: {type(exc).__name__}: {exc}"
+            )
+            return False
+
+        if golden_meta_info is None:
+            return False
+
+        golden_meta_temporal = golden_meta_info.get("enable_temporal", False)
+        if golden_meta_temporal is True and filesystem_temporal is False:
+            logger.info(
+                f"Reconciling temporal flag (golden_repos_metadata) for "
+                f"{bare_alias}: metadata={golden_meta_temporal} -> "
+                f"filesystem={filesystem_temporal}"
+            )
+            try:
+                self.golden_repo_metadata.update_enable_temporal(bare_alias, False)
+            except Exception as exc:
+                logger.error(
+                    f"Reconciliation: failed to update golden_repos_metadata "
+                    f"enable_temporal for {bare_alias}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        elif golden_meta_temporal is False and filesystem_temporal is True:
+            return True
+        return False
+
+    def _reconcile_scip_flag(
+        self, global_alias: str, repo_info: Dict[str, Any], detected: Dict[str, bool]
+    ) -> None:
+        """Reconcile SCIP flag -- global_repos only (no golden_repos_metadata
+        column). Explicitly OUT OF SCOPE for Bug #1406: stays bidirectional,
+        completely unchanged.
+        """
+        registry_scip = repo_info.get("enable_scip", False)
+        filesystem_scip = detected.get("scip", False)
+
+        if registry_scip != filesystem_scip:
+            logger.info(
+                f"Reconciling SCIP flag for {global_alias}: "
+                f"registry={registry_scip} -> filesystem={filesystem_scip}"
+            )
+            self.registry.update_enable_scip(global_alias, filesystem_scip)
+
     def _reconcile_registry_with_filesystem(
         self, alias_name: str, detected: Dict[str, bool]
     ) -> None:
@@ -3419,8 +3680,34 @@ class RefreshScheduler:
         (server/mcp/handlers/repos.py): `bare_alias` strips exactly one
         trailing "-global" suffix if present; `global_alias` is always
         re-derived from `bare_alias` (never assumed / blindly re-suffixed).
+
+        Bug #1406: enable_temporal reconciliation is ONE-WAY (auto-DISABLE
+        only), identically for both tables -- see
+        `_reconcile_global_repos_temporal` / `_reconcile_golden_metadata_temporal`.
+        A True->False downgrade (no real data on disk) is preserved from Bug
+        #1390. A False->True auto-enable (data restored/present while an
+        operator explicitly disabled the feature) is now NEVER applied --
+        that direction previously re-armed the scheduled-refresh temporal-
+        indexing trigger against operator intent (the production incident
+        this bug fixes). Each table's own stored value is still compared
+        independently against filesystem truth (the #1390 drift lesson) --
+        a True->False downgrade applies to whichever table(s) currently hold
+        True, even if the other already holds False.
+
         enable_scip has no golden_repos_metadata column and stays
-        registry-only, unchanged.
+        registry-only, bidirectional, and completely unchanged by Bug #1406
+        (see `_reconcile_scip_flag`).
+
+        Suppression-log cardinality (code-review remediation of #1406
+        fix-item #3): when the auto-enable direction is suppressed (stored
+        value False, filesystem shows real data), `_reconcile_global_repos_temporal`
+        / `_reconcile_golden_metadata_temporal` do NOT log independently --
+        each merely returns a bool signaling suppression. THIS method logs
+        exactly ONE consolidated INFO message per invocation if EITHER
+        table's auto-enable was suppressed, even when BOTH tables were
+        suppressed simultaneously (the exact incident-reproduction
+        scenario). The per-table True->False auto-disable log lines are
+        unaffected and remain inside each helper.
 
         Args:
             alias_name: Repository alias name -- called with the -global-
@@ -3442,57 +3729,17 @@ class RefreshScheduler:
             )
             return
 
-        # Reconcile temporal flag -- global_repos side
-        registry_temporal = repo_info.get("enable_temporal", False)
         filesystem_temporal = detected.get("temporal", False)
-
-        if registry_temporal != filesystem_temporal:
+        suppressed_global = self._reconcile_global_repos_temporal(
+            global_alias, repo_info, filesystem_temporal
+        )
+        suppressed_golden_meta = self._reconcile_golden_metadata_temporal(
+            bare_alias, filesystem_temporal
+        )
+        if suppressed_global or suppressed_golden_meta:
             logger.info(
-                f"Reconciling temporal flag for {global_alias}: "
-                f"registry={registry_temporal} -> filesystem={filesystem_temporal}"
+                f"Temporal data present on disk for {global_alias} but "
+                f"enable_temporal is False -- honoring operator disable "
+                f"(Bug #1406), not auto-enabling"
             )
-            self.registry.update_enable_temporal(global_alias, filesystem_temporal)
-
-        # Bug #1390: reconcile temporal flag -- golden_repos_metadata side
-        # (bare alias). Checked and updated INDEPENDENTLY of the global_repos
-        # branch above -- the two tables can drift independently, so
-        # global_repos already matching the filesystem must not skip the
-        # golden_repos_metadata check.
-        try:
-            golden_meta_info = self.golden_repo_metadata.get_repo(bare_alias)
-        except Exception as exc:
-            logger.warning(
-                f"Reconciliation: could not read golden_repos_metadata for "
-                f"{bare_alias}: {type(exc).__name__}: {exc}"
-            )
-            golden_meta_info = None
-
-        if golden_meta_info is not None:
-            golden_meta_temporal = golden_meta_info.get("enable_temporal", False)
-            if golden_meta_temporal != filesystem_temporal:
-                logger.info(
-                    f"Reconciling temporal flag (golden_repos_metadata) for "
-                    f"{bare_alias}: metadata={golden_meta_temporal} -> "
-                    f"filesystem={filesystem_temporal}"
-                )
-                try:
-                    self.golden_repo_metadata.update_enable_temporal(
-                        bare_alias, filesystem_temporal
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"Reconciliation: failed to update golden_repos_metadata "
-                        f"enable_temporal for {bare_alias}: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-
-        # Reconcile SCIP flag -- global_repos only (no golden_repos_metadata column)
-        registry_scip = repo_info.get("enable_scip", False)
-        filesystem_scip = detected.get("scip", False)
-
-        if registry_scip != filesystem_scip:
-            logger.info(
-                f"Reconciling SCIP flag for {global_alias}: "
-                f"registry={registry_scip} -> filesystem={filesystem_scip}"
-            )
-            self.registry.update_enable_scip(global_alias, filesystem_scip)
+        self._reconcile_scip_flag(global_alias, repo_info, detected)

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from code_indexer.server.services.resizable_limiter import ResizableLimiter
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
@@ -69,6 +70,32 @@ _DEFAULT_EVALUATOR_CODE = (
 
 # Default timeout when the caller omits timeout_seconds.
 _DEFAULT_TIMEOUT_SECONDS = 120
+
+
+def _resolve_default_xray_timeout_seconds() -> int:
+    """Return the effective default xray timeout, read LIVE from ConfigService.
+
+    Bug #1399: xray_config.xray_timeout_seconds was settable/validated via
+    the Web UI Config screen but never consulted here -- the effective
+    default was always the hardcoded _DEFAULT_TIMEOUT_SECONDS module
+    constant. This helper closes that gap for every call site that falls
+    back to a default when the caller omits timeout_seconds.
+
+    Fails soft to _DEFAULT_TIMEOUT_SECONDS on any read failure (no
+    config_service wired yet, DB outage, etc.) so a config-layer problem
+    never blocks an xray search request.
+    """
+    try:
+        return int(get_config_service().get_config().xray_config.xray_timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "xray: failed to read configured xray_timeout_seconds, falling "
+            "back to hardcoded default %ds: %s",
+            _DEFAULT_TIMEOUT_SECONDS,
+            exc,
+        )
+        return _DEFAULT_TIMEOUT_SECONDS
+
 
 # Guard so ensure_seed_patterns() is called at most once per process lifetime.
 _seeds_ensured = False
@@ -487,7 +514,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         effective_timeout_multi: int = (
             timeout_override
             if timeout_override is not None
-            else _DEFAULT_TIMEOUT_SECONDS
+            else _resolve_default_xray_timeout_seconds()
         )
         if not (_TIMEOUT_MIN <= effective_timeout_multi <= _TIMEOUT_MAX):
             return _mcp_response(
@@ -656,7 +683,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # 4. Effective timeout + range check
     # ------------------------------------------------------------------
     effective_timeout: int = (
-        timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+        timeout_override
+        if timeout_override is not None
+        else _resolve_default_xray_timeout_seconds()
     )
     if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
         return _mcp_response(
@@ -1146,7 +1175,9 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     # 4. Effective timeout + range check  (shared — runs before alias branch)
     # ------------------------------------------------------------------
     effective_timeout: int = (
-        timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+        timeout_override
+        if timeout_override is not None
+        else _resolve_default_xray_timeout_seconds()
     )
     if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
         return _mcp_response(

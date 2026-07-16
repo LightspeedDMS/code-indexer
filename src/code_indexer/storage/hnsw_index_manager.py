@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
 
 import numpy as np
 
@@ -96,6 +100,41 @@ class HNSWIntegrityRepairError(RuntimeError):
     regression), and it must surface loudly rather than publish a silent
     partial index (Messi Rule 2: fail fast, no fallback).
     """
+
+
+# Bug #1392: informational only -- the actual pin source of truth is
+# pyproject.toml's `hnswlib @ git+...@<commit>` dependency line. This
+# constant exists purely to make capability-check messages actionable (name
+# the expected commit); it does not enforce anything and must be kept in
+# sync with pyproject.toml manually. Also imported by
+# `server/services/hnswlib_capability_check.py` (Bug #1392's non-fatal
+# server startup probe, unchanged/reused by Bug #1415).
+EXPECTED_HNSWLIB_FORK_COMMIT = "878cfbe585395a8bdd95f593d071f778d2fac457"
+
+
+class HNSWRebuildAllInvalidError(RuntimeError):
+    """Bug #1407 Amendment 5: raised by rebuild_from_vectors(clear_stale=False)
+
+    when vector files EXIST on disk but ALL fail to parse/validate (JSON
+    decode error, missing/malformed 'id' or 'vector', or dimension
+    mismatch). This is NOT a legitimate empty shard -- it is a failure --
+    so staleness must be retained rather than a stale index silently
+    getting blessed as fresh. Only raised on the clear_stale=False
+    (force_full_rebuild) path; the default clear_stale=True path preserves
+    today's lenient bare-return-0 behavior unchanged for the whole
+    non-temporal fleet.
+    """
+
+
+def _fsync_directory(path: Path) -> None:
+    """Fsync a directory so entries created/replaced within it survive a
+    crash/power-loss (precedent: id_index_manager.py's save_index()).
+    """
+    dir_fd = os.open(str(path), os.O_RDONLY)
+    try:
+        nfs_safe_fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def count_orphan_errors(integrity_result: Dict[str, Any]) -> int:
@@ -198,6 +237,25 @@ class HNSWIndexManager:
         self.vector_dim = vector_dim
         self.space = space
 
+    def _hnswlib_has_fork_capability(self) -> bool:
+        """Return True iff hnswlib.Index has the custom fork's
+        check_integrity()/repair_orphans() methods.
+
+        Bug #1415: non-raising predicate, replacing Bug #1392's
+        `_ensure_hnswlib_capability()` (which raised `HNSWCapabilityError`
+        as the very first statement of every build/finalize entry point).
+        That fail-fast design still aborted the ENTIRE indexing operation on
+        a drifted (stock PyPI) hnswlib install -- a fleet-wide production
+        outage (~12 golden repos, plus an activated-repo branch-delta
+        reindex blocked by Bug #1203's correctness-first design). The
+        replacement design never hard-gates build/finalize entry points;
+        only `_detect_and_repair_orphans()` consults this predicate, and
+        degrades (WARNING + skip) rather than raising.
+        """
+        return hasattr(hnswlib.Index, "check_integrity") and hasattr(
+            hnswlib.Index, "repair_orphans"
+        )
+
     def _save_hnsw_index(self, index: Any, path: str) -> None:
         # Any: hnswlib.Index is a C extension with no Python type stubs
         index.save_index(path)
@@ -238,7 +296,32 @@ class HNSWIndexManager:
         Raises:
             HNSWIntegrityRepairError: repair_orphans() ran but orphans
                 remain afterward.
+
+        Bug #1415: if the installed hnswlib lacks check_integrity()/
+        repair_orphans() (stock PyPI hnswlib, not the custom LightspeedDMS
+        fork), this logs ONE WARNING and returns immediately -- the orphan
+        hardening pass is skipped, but the caller's build/save proceeds and
+        still produces a valid, correct index (orphan repair is a hardening
+        layer, not correctness of the vectors themselves). Guarded via
+        hasattr (never a try/except AttributeError around the calls below)
+        so a genuine AttributeError raised from INSIDE a present
+        check_integrity()/repair_orphans() implementation is never
+        mis-classified as a missing-capability case.
         """
+        if not self._hnswlib_has_fork_capability():
+            logger.warning(
+                "HNSW finalize (%s): installed hnswlib lacks check_integrity()/"
+                "repair_orphans() -- this Python environment does not have "
+                "the custom hnswlib fork (expected commit %s) installed. "
+                "Skipping orphan detect+repair for this finalize; indexing "
+                "will still complete (only the orphan hardening pass is "
+                "degraded). See docs/hnswlib-custom-build.md for the "
+                "rebuild procedure.",
+                context,
+                EXPECTED_HNSWLIB_FORK_COMMIT,
+            )
+            return
+
         integrity = index.check_integrity()
         orphan_count = count_orphan_errors(integrity)
         logger.info(
@@ -566,6 +649,7 @@ class HNSWIndexManager:
         progress_callback: Optional[Any] = None,
         visible_files: Optional[Set[str]] = None,
         current_branch: Optional[str] = None,
+        clear_stale: bool = True,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -585,12 +669,25 @@ class HNSWIndexManager:
                            excluded. This makes all rebuilds branch-aware (Bug #306 fix).
                            Also stored in HNSW metadata when filtered=True for use by
                            query-time rebuilds after CoW snapshot.
+            clear_stale: Bug #1407 Amendment 1 -- when True (default, today's
+                         unchanged behavior for the whole fleet), publishes
+                         is_stale=False. When False (temporal force-rebuild
+                         finalize), preserves the PRIOR is_stale/last_marked_stale
+                         (defaulting stale=True for a virgin shard) so only the
+                         caller's explicit clear_stale() call can mark it fresh.
+                         Also activates Amendment 5's empty-shard contract: a
+                         genuinely empty shard (zero vector files) durably
+                         publishes vector_count=0 rather than a silent no-op,
+                         and files-exist-but-all-invalid raises instead of a
+                         silent no-op (never bless a stale index as fresh).
 
         Returns:
             Number of vectors indexed
 
         Raises:
             FileNotFoundError: If collection metadata is missing
+            HNSWRebuildAllInvalidError: clear_stale=False and vector files
+                exist on disk but ALL failed to parse/validate (Amendment 5).
         """
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
@@ -636,7 +733,14 @@ class HNSWIndexManager:
                     visible_count=0,
                     total_on_disk=0,
                     current_branch=current_branch,
+                    clear_stale=clear_stale,
                 )
+            elif not clear_stale:
+                # Amendment 5: legitimate empty shard (zero vector files at
+                # all) under force-rebuild -- durably publish empty state
+                # rather than a silent no-op that would let a stale prior
+                # .bin+id_mapping get blessed as fresh later.
+                self._publish_empty_rebuild_state(collection_path)
             return 0
 
         # Report info message at start
@@ -697,6 +801,18 @@ class HNSWIndexManager:
                     visible_count=0,
                     total_on_disk=total_files_on_disk,
                     current_branch=current_branch,
+                    clear_stale=clear_stale,
+                )
+                return 0
+            if not clear_stale:
+                # Amendment 5: files EXIST on disk but ALL failed to parse/
+                # validate -- NOT a legitimate empty shard. This is a
+                # FAILURE: retain staleness, never silently publish/bless.
+                raise HNSWRebuildAllInvalidError(
+                    f"rebuild_from_vectors: {total_files_on_disk} vector "
+                    f"file(s) found in {collection_path} but ALL failed to "
+                    f"parse/validate -- refusing to publish an empty index "
+                    f"(staleness retained)"
                 )
             return 0
 
@@ -755,6 +871,7 @@ class HNSWIndexManager:
                 visible_count=len(vectors),
                 total_on_disk=total_files_on_disk,
                 current_branch=current_branch,
+                clear_stale=clear_stale,
             )
         else:
             self._update_metadata(
@@ -764,21 +881,84 @@ class HNSWIndexManager:
                 ef_construction=200,
                 ids=ids_list,
                 index_file_size=index_file.stat().st_size,
+                clear_stale=clear_stale,
             )
 
         return len(vectors)
 
-    def mark_stale(self, collection_path: Path) -> None:
-        """Mark HNSW index as stale (needs rebuilding).
+    def _publish_empty_rebuild_state(self, collection_path: Path) -> None:
+        """Amendment 5 (Bug #1407): durably publish an empty index state for
+        a legitimate empty shard (zero vector files on disk) under
+        force-rebuild. Removes any stale .bin so it is no longer queryable,
+        then writes metadata with vector_count=0 / empty id_mapping while
+        PRESERVING (not clearing) staleness -- only the temporal caller's
+        explicit clear_stale() call may mark the shard fresh.
+        """
+        index_file = collection_path / self.INDEX_FILENAME
+        if index_file.exists():
+            try:
+                index_file.unlink()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"rebuild_from_vectors: failed to remove stale "
+                    f"{index_file} while publishing empty index state: {exc}"
+                ) from exc
+        self._update_metadata(
+            collection_path=collection_path,
+            vector_count=0,
+            M=16,
+            ef_construction=200,
+            ids=[],
+            index_file_size=0,
+            clear_stale=False,
+        )
 
-        Uses file locking for cross-process coordination. Sets is_stale=true
-        in collection metadata to indicate index needs rebuilding.
+    @staticmethod
+    def _atomic_write_metadata_durable(collection_path: Path, metadata: dict) -> None:
+        """Write collection_meta.json atomically AND durably (Bug #1407
+        Foundation): flush+fsync the tmp file before os.replace(), then
+        fsync the collection directory so the rename itself survives a
+        crash/power-loss.
+        """
+        meta_file = collection_path / "collection_meta.json"
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(collection_path), suffix=".tmp")
+        fd_owned = False
+        try:
+            try:
+                tmp_f = os.fdopen(tmp_fd, "w")
+                fd_owned = True
+                with tmp_f:
+                    json.dump(metadata, tmp_f, indent=2)
+                    tmp_f.flush()
+                    nfs_safe_fsync(tmp_f.fileno())
+                os.replace(tmp_path, str(meta_file))
+            finally:
+                if not fd_owned:
+                    try:
+                        os.close(tmp_fd)
+                    except OSError:
+                        pass  # Already closed or invalid — discard
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError as cleanup_err:
+                # Best-effort cleanup — log and discard so original exception propagates
+                logger.warning(
+                    "Failed to clean up temp metadata file %s: %s",
+                    tmp_path,
+                    cleanup_err,
+                )
+            raise
+        _fsync_directory(collection_path)
 
-        Args:
-            collection_path: Path to collection directory
+    def _write_stale_flag_durably(self, collection_path: Path, is_stale: bool) -> None:
+        """Shared durable writer for mark_stale()/clear_stale() (Bug #1407
+        Foundation). No-ops (mirrors the pre-existing guard) when
+        collection_meta.json or its 'hnsw_index' key is absent -- never
+        fabricates staleness state on a meta-less/virgin shard.
 
-        Note:
-            This method is called by watch mode to defer HNSW rebuild until query time.
+        last_marked_stale is refreshed only when marking stale; clearing
+        leaves it untouched as an audit trail (non-blocking precision item).
         """
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
@@ -788,54 +968,65 @@ class HNSWIndexManager:
             # Acquire exclusive lock (blocks if query is rebuilding) — NFS-safe
             _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                # Load existing metadata
                 if not meta_file.exists():
-                    return  # No metadata to mark stale
+                    return  # No metadata to mark/clear stale
 
                 with open(meta_file) as f:
                     metadata = json.load(f)
 
                 if "hnsw_index" not in metadata:
-                    return  # No HNSW index to mark stale
+                    return  # No HNSW index to mark/clear stale
 
-                # Mark as stale
-                metadata["hnsw_index"]["is_stale"] = True
-                metadata["hnsw_index"]["last_marked_stale"] = datetime.now(
-                    timezone.utc
-                ).isoformat()
+                metadata["hnsw_index"]["is_stale"] = is_stale
+                if is_stale:
+                    metadata["hnsw_index"]["last_marked_stale"] = datetime.now(
+                        timezone.utc
+                    ).isoformat()
 
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned = False
-                try:
-                    try:
-                        tmp_f = os.fdopen(tmp_fd, "w")
-                        fd_owned = True
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_path, str(meta_file))
-                    finally:
-                        if not fd_owned:
-                            try:
-                                os.close(tmp_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError as cleanup_err:
-                        # Best-effort cleanup — log and discard so original exception propagates
-                        logger.warning(
-                            "Failed to clean up temp metadata file %s: %s",
-                            tmp_path,
-                            cleanup_err,
-                        )
-                    raise
+                self._atomic_write_metadata_durable(collection_path, metadata)
             finally:
                 # Release lock
                 nfs_safe_funlock(lock_f.fileno(), _used_lockf)
+
+    def mark_stale(self, collection_path: Path) -> None:
+        """Mark HNSW index as stale (needs rebuilding), durably.
+
+        Uses file locking for cross-process coordination. Sets is_stale=true
+        in collection metadata to indicate index needs rebuilding. The write
+        is crash-durable (Bug #1407 Foundation): metadata content and the
+        collection directory are both fsynced so the flag cannot be lost by
+        a crash immediately after this call returns.
+
+        Args:
+            collection_path: Path to collection directory
+
+        Note:
+            Called by watch mode to defer HNSW rebuild until query time, and
+            by the temporal per-shard finalize barrier (Bug #1407) before
+            any shard mutation.
+        """
+        self._write_stale_flag_durably(collection_path, is_stale=True)
+
+    def clear_stale(self, collection_path: Path) -> None:
+        """Clear HNSW index staleness, durably (Bug #1407 Foundation).
+
+        The ONLY writer permitted to flip is_stale True->False on the
+        temporal finalize path: callers pass clear_stale=False to
+        save_incremental_update()/rebuild_from_vectors() (via
+        end_indexing(clear_stale=False)) so the underlying HNSW+metadata
+        writes preserve staleness, and invoke THIS method explicitly and
+        ONLY after end_indexing() has returned successfully -- a crash at
+        any point before that leaves the shard flagged stale for repair on
+        the next run (Amendment 2).
+
+        Mirrors mark_stale()'s guards: no-op when collection_meta.json or
+        its 'hnsw_index' key is absent -- never fabricates
+        ``{"is_stale": False}`` on a meta-less/virgin shard.
+
+        Args:
+            collection_path: Path to collection directory
+        """
+        self._write_stale_flag_durably(collection_path, is_stale=False)
 
     def is_stale(self, collection_path: Path) -> bool:
         """Check if HNSW index needs rebuilding.
@@ -909,6 +1100,7 @@ class HNSWIndexManager:
         visible_count: Optional[int] = None,
         total_on_disk: Optional[int] = None,
         current_branch: Optional[str] = None,
+        clear_stale: bool = True,
     ) -> None:
         """Update collection metadata with HNSW index information.
 
@@ -930,6 +1122,13 @@ class HNSWIndexManager:
                            Only stored when filtered=True. Allows query-time
                            rebuilds after CoW snapshot to pass the branch to
                            rebuild_from_vectors() for hidden_branches filtering.
+            clear_stale: Bug #1407 Amendment 1 -- when True (default), writes
+                         is_stale=False/last_marked_stale=None (today's
+                         unchanged behavior). When False, preserves the
+                         PRIOR hnsw_index's is_stale/last_marked_stale
+                         (defaulting stale=True when there was no prior
+                         hnsw_index -- a virgin shard is never fabricated
+                         "fresh").
         """
         import uuid
 
@@ -950,6 +1149,8 @@ class HNSWIndexManager:
                 else:
                     metadata = {}
 
+                prior_hnsw = metadata.get("hnsw_index")
+
                 # Create ID mapping (label -> ID)
                 id_mapping = {str(i): ids[i] for i in range(len(ids))}
 
@@ -967,10 +1168,18 @@ class HNSWIndexManager:
                     "last_rebuild": datetime.now(timezone.utc).isoformat(),
                     "file_size_bytes": index_file_size,
                     "id_mapping": id_mapping,
-                    # Staleness tracking fields
-                    "is_stale": False,  # Fresh after rebuild
-                    "last_marked_stale": None,  # No staleness marking yet
                 }
+                if clear_stale:
+                    hnsw_meta["is_stale"] = False  # Fresh after rebuild
+                    hnsw_meta["last_marked_stale"] = None  # No staleness marking yet
+                elif prior_hnsw is not None:
+                    hnsw_meta["is_stale"] = prior_hnsw.get("is_stale", True)
+                    hnsw_meta["last_marked_stale"] = prior_hnsw.get("last_marked_stale")
+                else:
+                    # Virgin-shard opt-out default (non-blocking precision
+                    # item): never fabricate a fresh meta-less shard.
+                    hnsw_meta["is_stale"] = True
+                    hnsw_meta["last_marked_stale"] = None
 
                 # Branch isolation: write filtered rebuild metadata
                 # This allows is_stale() to compare against visible_count instead
@@ -1216,6 +1425,7 @@ class HNSWIndexManager:
         id_to_label: Dict[str, int],
         label_to_id: Dict[int, str],
         vector_count: int,
+        clear_stale: bool = True,
     ) -> None:
         """Save HNSW index after incremental updates.
 
@@ -1225,10 +1435,17 @@ class HNSWIndexManager:
             id_to_label: Updated id_to_label mapping
             label_to_id: Updated label_to_id mapping
             vector_count: Total number of vectors (including deleted)
+            clear_stale: Bug #1407 Amendment 1 -- when True (default,
+                         today's unchanged behavior for the whole fleet),
+                         marks fresh (is_stale=False). When False, preserves
+                         the PRIOR is_stale/last_marked_stale (defaulting
+                         stale=True for a virgin shard) so only the caller's
+                         explicit clear_stale() call can mark it fresh.
 
         Note:
             Updates both index file and metadata with new mappings.
             Preserves existing HNSW parameters (M, ef_construction).
+
         """
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
@@ -1304,7 +1521,7 @@ class HNSWIndexManager:
                 import uuid
 
                 # Generate new UUID for incremental updates too (version tracking)
-                metadata["hnsw_index"] = {
+                new_hnsw: Dict[str, Any] = {
                     "version": 1,
                     "index_rebuild_uuid": str(
                         uuid.uuid4()
@@ -1317,10 +1534,20 @@ class HNSWIndexManager:
                     "last_rebuild": datetime.now(timezone.utc).isoformat(),
                     "file_size_bytes": index_file.stat().st_size,
                     "id_mapping": id_mapping,
-                    # Mark as fresh after incremental update
-                    "is_stale": False,
-                    "last_marked_stale": None,
                 }
+                if clear_stale:
+                    new_hnsw["is_stale"] = False
+                    new_hnsw["last_marked_stale"] = None
+                elif existing_hnsw:
+                    new_hnsw["is_stale"] = existing_hnsw.get("is_stale", True)
+                    new_hnsw["last_marked_stale"] = existing_hnsw.get(
+                        "last_marked_stale"
+                    )
+                else:
+                    # Virgin-shard opt-out default: never fabricate fresh.
+                    new_hnsw["is_stale"] = True
+                    new_hnsw["last_marked_stale"] = None
+                metadata["hnsw_index"] = new_hnsw
 
                 # Save metadata atomically — temp file + rename prevents corruption on crash
                 tmp_meta_fd, tmp_meta_path = tempfile.mkstemp(

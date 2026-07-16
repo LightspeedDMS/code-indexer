@@ -306,44 +306,6 @@ async function triggerActivatedRepoReindex(userAlias) {
 }
 
 /**
- * Fetch health data for an activated repository
- * @param {string} userAlias - User alias
- * @param {boolean} forceRefresh - Whether to bypass cache
- * @param {string} owner - Repository owner username (for admin checking other users' repos)
- * @returns {Promise<object>} Health check result
- */
-async function fetchActivatedRepoHealth(userAlias, forceRefresh = false, owner = null) {
-    let url = `/api/activated-repos/${encodeURIComponent(userAlias)}/health`;
-    const params = new URLSearchParams();
-
-    if (forceRefresh) {
-        params.append('force_refresh', 'true');
-    }
-
-    if (owner) {
-        params.append('owner', owner);
-    }
-
-    if (params.toString()) {
-        url += '?' + params.toString();
-    }
-
-    const response = await fetch(url, {
-        credentials: 'same-origin'
-    });
-
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    try {
-        return await response.json();
-    } catch (error) {
-        throw new Error(`Failed to parse response JSON: ${error.message}`);
-    }
-}
-
-/**
  * Toggle health details expansion for activated repository
  * @param {string} userAlias - User alias
  * @param {string} owner - Repository owner username (for admin checking other users' repos)
@@ -389,6 +351,81 @@ async function toggleActivatedRepoHealthDetails(userAlias, owner = null) {
 }
 
 /**
+ * Show or hide the job-progress-{userAlias} container/spinner for a
+ * health-check job (Bug #1394). Reuses the SAME container add-index/reindex/
+ * switch-branch already show, driven directly rather than through
+ * pollActivatedRepoJobStatus (whose completion handler triggers a full HTMX
+ * refresh for those 3 operation types -- health-check must not).
+ *
+ * @param {string} userAlias - User alias
+ * @param {boolean} visible - True to show + start spinner, false to hide
+ */
+function _setActivatedRepoHealthJobProgress(userAlias, visible) {
+    const container = document.getElementById(`job-progress-${userAlias}`);
+    const statusText = document.getElementById(`job-status-text-${userAlias}`);
+    const spinner = document.getElementById(`job-spinner-${userAlias}`);
+    const details = document.getElementById(`job-progress-details-${userAlias}`);
+
+    if (visible) {
+        if (container && statusText && spinner) {
+            container.style.display = 'block';
+            statusText.textContent = 'checking health...';
+            statusText.style.color = 'var(--pico-color-blue-550)';
+            spinner.style.display = 'inline-block';
+            if (details) {
+                details.innerHTML = '';
+            }
+        }
+    } else {
+        if (container) {
+            container.style.display = 'none';
+        }
+        if (spinner) {
+            spinner.style.display = 'none';
+        }
+    }
+}
+
+/**
+ * Hide the health-check job progress UI and re-enable the refresh button.
+ * Shared terminal step for both the success and error paths.
+ *
+ * @param {string} userAlias - User alias
+ * @param {HTMLElement|null} refreshBtn - The health-refresh button element
+ */
+function _finishActivatedRepoHealthLoad(userAlias, refreshBtn) {
+    _setActivatedRepoHealthJobProgress(userAlias, false);
+    if (refreshBtn) {
+        refreshBtn.disabled = false;
+    }
+}
+
+/**
+ * Render a completed health-check result into the details/indicator DOM.
+ *
+ * @param {string} userAlias - User alias
+ * @param {object} healthData - RepositoryHealthResult-shaped job result
+ */
+function _renderActivatedRepoHealthResult(userAlias, healthData) {
+    const detailsContainer = document.getElementById(`health-details-${userAlias}`);
+    if (!detailsContainer) {
+        return;
+    }
+
+    if (typeof renderHealthDetails === 'function') {
+        detailsContainer.innerHTML = renderHealthDetails(healthData);
+    } else {
+        detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
+    }
+    detailsContainer.dataset.loaded = 'true';
+
+    const indicatorContainer = document.getElementById(`health-indicator-${userAlias}`);
+    if (indicatorContainer && typeof renderHealthIndicator === 'function') {
+        indicatorContainer.innerHTML = renderHealthIndicator(healthData);
+    }
+}
+
+/**
  * Load and display health details for activated repository
  * @param {string} userAlias - User alias
  * @param {boolean} forceRefresh - Whether to bypass cache
@@ -402,47 +439,40 @@ async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false, o
         return;
     }
 
-    try {
-        // Show loading spinner
-        detailsContainer.innerHTML = `
-            <div class="health-loading">
-                <span class="spinner"></span> Loading health data...
-            </div>
-        `;
-
-        // Disable refresh button during load
-        if (refreshBtn) {
-            refreshBtn.disabled = true;
-        }
-
-        // Fetch health data
-        const healthData = await fetchActivatedRepoHealth(userAlias, forceRefresh, owner);
-
-        // Render details (reuse renderHealthDetails from repo_health.js)
-        if (typeof renderHealthDetails === 'function') {
-            detailsContainer.innerHTML = renderHealthDetails(healthData);
-        } else {
-            detailsContainer.innerHTML = '<p class="health-info">Health data loaded successfully.</p>';
-        }
-        detailsContainer.dataset.loaded = 'true';
-
-        // Update indicator if present
-        const indicatorContainer = document.getElementById(`health-indicator-${userAlias}`);
-        if (indicatorContainer && typeof renderHealthIndicator === 'function') {
-            indicatorContainer.innerHTML = renderHealthIndicator(healthData);
-        }
-
-    } catch (error) {
+    const handleError = (error) => {
         console.error(`Failed to load health data for ${userAlias}:`, error);
         detailsContainer.innerHTML = `
             <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
             <button class="outline small" onclick="loadActivatedRepoHealthDetails('${escapeHtml(userAlias)}', false, ${owner ? `'${escapeHtml(owner)}'` : 'null'})">Retry</button>
         `;
-    } finally {
-        // Re-enable refresh button
-        if (refreshBtn) {
-            refreshBtn.disabled = false;
-        }
+        _finishActivatedRepoHealthLoad(userAlias, refreshBtn);
+    };
+
+    detailsContainer.innerHTML = `
+        <div class="health-loading">
+            <span class="spinner"></span> Loading health data...
+        </div>
+    `;
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
+    _setActivatedRepoHealthJobProgress(userAlias, true);
+
+    try {
+        // Note: the async POST /health/check endpoint does not support the
+        // `owner` admin cross-user parameter (out of scope for this fix) --
+        // it always checks the current user's own activated repo.
+        const submitResult = await submitHealthCheckJob('/api/activated-repos', userAlias, forceRefresh);
+
+        pollHealthCheckJob(submitResult.job_id, {
+            onComplete: (jobStatus) => {
+                _renderActivatedRepoHealthResult(userAlias, jobStatus.result);
+                _finishActivatedRepoHealthLoad(userAlias, refreshBtn);
+            },
+            onError: handleError
+        });
+    } catch (error) {
+        handleError(error);
     }
 }
 
@@ -930,7 +960,6 @@ window.showActivatedRepoAddIndexForm = showActivatedRepoAddIndexForm;
 window.hideActivatedRepoAddIndexForm = hideActivatedRepoAddIndexForm;
 window.submitActivatedRepoAddIndex = submitActivatedRepoAddIndex;
 window.triggerActivatedRepoReindex = triggerActivatedRepoReindex;
-window.fetchActivatedRepoHealth = fetchActivatedRepoHealth;
 window.toggleActivatedRepoHealthDetails = toggleActivatedRepoHealthDetails;
 window.loadActivatedRepoHealthDetails = loadActivatedRepoHealthDetails;
 window.refreshActivatedRepoHealthData = refreshActivatedRepoHealthData;

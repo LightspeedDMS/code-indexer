@@ -49,6 +49,9 @@ from code_indexer.storage.hnsw_index_manager import (
     count_orphan_errors,
 )
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import SweepCandidate
+from code_indexer.server.services.hnswlib_capability_check import (
+    check_hnswlib_capability,
+)
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
 
 logger = logging.getLogger(__name__)
@@ -68,6 +71,11 @@ class SweepOutcome(str, Enum):
     REPAIRED = "repaired"
     TRANSIENT_SKIP = "transient_skip"
     ERROR = "error"
+    # Bug #1415: the installed hnswlib lacks check_integrity()/
+    # repair_orphans() (stock PyPI hnswlib, not the custom fork). Distinct
+    # from TRANSIENT_SKIP -- this condition will NOT resolve on its own on
+    # a later tick (unlike a genuinely transient filesystem race).
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
 
 
 def _default_cache_invalidator(collection_path: str) -> None:
@@ -238,6 +246,23 @@ def process_candidate(
     manager = _resolve_collection_context(collection_path)
     if manager is None:
         return SweepOutcome.TRANSIENT_SKIP
+
+    # Bug #1415: guard BEFORE the lock-free check_integrity() call below --
+    # reuses the existing Bug #1392 server-side capability probe rather than
+    # reimplementing the hasattr check a third time. Missing capability logs
+    # ONE WARNING and returns immediately; check_integrity()/repair_orphans()
+    # are never called, so this candidate cannot AttributeError downstream
+    # (in the lock-free check here, nor in _repair_under_lock/
+    # _verify_post_repair, which are unreachable from this early return).
+    capability_ok, _capability_message = check_hnswlib_capability()
+    if not capability_ok:
+        logger.warning(
+            "hnsw_orphan_sweep: installed hnswlib lacks check_integrity()/"
+            "repair_orphans() -- skipping orphan check for %s (degraded "
+            "capability, Bug #1415)",
+            collection_path,
+        )
+        return SweepOutcome.CAPABILITY_UNAVAILABLE
 
     # --- Lock-free check ---------------------------------------------------
     try:

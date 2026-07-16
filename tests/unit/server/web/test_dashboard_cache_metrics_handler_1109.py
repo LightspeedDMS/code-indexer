@@ -249,15 +249,21 @@ class TestHandlerUsesRealCacheDataSource:
         # Should not blow up; should render 0 gracefully
 
     def test_handler_renders_per_mode_hits(self, client, admin_session_cookie, app):
-        """Shadow hit rate must appear, sourced from the windowed result.
+        """Cache Entries renders from the real cache accessor even when a
+        windowed search_embed_event writer is installed.
 
-        Story #1294: Shadow Hit Rate is now sourced from WindowedCacheMetrics
-        (by_cache_mode["shadow"]), not QueryEmbeddingCacheMetrics.snapshot().
+        Story #1294: Shadow Cosine / coalescer stats are sourced from
+        WindowedCacheMetrics (by_cache_mode["shadow"]), not
+        QueryEmbeddingCacheMetrics.snapshot().
 
-        Note (Issue #1257): On-Mode Hit Rate is deliberately NOT asserted
-        here — it is sourced from search_event_log's get_hit_rate_counts, not
-        from this windowed source (see test_dashboard_on_mode_hit_rate_1257.py
-        for the request-denominated on-mode coverage).
+        Bug #1391: Shadow Hit Rate (and On-Mode Hit Rate) are NOT sourced
+        from this windowed search_embed_event result anymore -- both are
+        request-denominated from search_event_log's get_hit_rate_counts (see
+        test_dashboard_hit_rate_cards_windowing_1391.py for that coverage
+        and test_dashboard_on_mode_hit_rate_1257.py for the original
+        request-denominated on-mode regression). No search_event_log_writer
+        is installed in this test, so both Hit Rate cards fail open to the
+        '--' placeholder.
         """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
@@ -274,9 +280,12 @@ class TestHandlerUsesRealCacheDataSource:
             html = resp.text
             # 42 total entries
             assert "42" in html, f"Expected '42' in HTML, got:\n{html[:500]}"
-            # shadow hits = 7, shadow requests = 7+3 = 10 -> hit rate 70.0%
-            assert "70.0%" in html, (
-                f"Expected shadow hit rate '70.0%' in HTML, got:\n{html[:500]}"
+            shadow_card = next(
+                c for c in html.split("<article") if "<h3>Shadow Hit Rate</h3>" in c
+            )
+            assert "--" in shadow_card, (
+                "With no search_event_log_writer installed, Shadow Hit Rate "
+                f"must fail open to '--', got:\n{shadow_card[:500]}"
             )
         finally:
             clear_query_embedding_cache()

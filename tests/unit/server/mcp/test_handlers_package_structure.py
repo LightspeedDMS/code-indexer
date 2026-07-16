@@ -49,6 +49,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "add_golden_repo_index",
         "get_golden_repo_indexes",
         "regex_search",
+        "poll_search_job",  # Story #1400 Phase 8: async-hybrid temporal query poll
         "create_file",
         "edit_file",
         "delete_file",

@@ -85,9 +85,89 @@ RESTART_REQUIRED_FIELDS = [
     "scip_multi_max_workers",  # SCIP multi-repo thread pool size (singleton init)
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
+    "temporal_lane_concurrency",  # Story #1400: temporal-lane worker pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
     "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
     "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
+    # Bug #1399 item 6: MODERATE-classified fields captured once at server
+    # startup (singleton/manager construction, module globals, or
+    # middleware wiring) and never re-consulted afterward. A Web UI change
+    # has no effect until the server is restarted; these entries only add
+    # the operator-visible hint -- they do NOT implement hot-reload.
+    # password_security.* — captured once at UserManager.__init__ /
+    # PasswordStrengthValidator construction.
+    "min_length",
+    "max_length",
+    "required_char_classes",
+    "min_entropy_bits",
+    # server.jwt_expiration_minutes — captured once at service_init.py JWT
+    # manager construction.
+    "jwt_expiration_minutes",
+    # health.* — written once to module globals at health_service.py
+    # construction; never re-invoked.
+    "memory_warning_threshold_percent",
+    "memory_critical_threshold_percent",
+    "disk_warning_threshold_percent",
+    "disk_critical_threshold_percent",
+    "cpu_sustained_threshold_percent",
+    # error_handling.* — baked into middleware at startup (app_wiring.py).
+    "max_retry_attempts",
+    "base_retry_delay_seconds",
+    "max_retry_delay_seconds",
+    # telemetry.* sub-fields — captured once into TracerProvider/
+    # MeterProvider/exporters at startup. telemetry_enabled (the kill
+    # switch) already has its own hint above; these are the sub-fields.
+    "collector_endpoint",
+    "collector_protocol",
+    "service_name",
+    "export_traces",
+    "export_metrics",
+    "machine_metrics_enabled",
+    "machine_metrics_interval_seconds",
+    "deployment_environment",
+    # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
+    # created client at startup). Pull-sync fields (pull_enabled, pull_host,
+    # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
+    # are correctly re-read live every sync cycle and are NOT listed here.
+    "public_key",
+    "secret_key",
+    "auto_trace_enabled",
+    # codex_integration.* PROVISIONING fields only (provisioned once at
+    # boot). `enabled`/`codex_weight` are correctly read live per dispatched
+    # dep-map job and are NOT listed here.
+    "credential_mode",
+    "api_key",
+    "lcp_url",
+    "lcp_vendor",
+    # scip_cleanup.scip_workspace_retention_days — thread pool sized once at
+    # service_init.py / workspace_cleanup_service.py construction.
+    "scip_workspace_retention_days",
+    # server.coalesce_k_min / coalesce_k_max — construction-scoped seed for
+    # the concurrency governor.
+    "coalesce_k_min",
+    "coalesce_k_max",
+    # golden_repos.analysis_model — SCHEDULER path only (captured once at
+    # startup). The interactive Research Assistant path reads it live and
+    # is unaffected; the flat list has no per-consumer split.
+    "analysis_model",
+    # multi_search timeout/limit fields — module singletons built once.
+    # multi_search_max_workers / scip_multi_max_workers already have hints
+    # above; these are the sibling timeout/limit fields that do not.
+    "multi_search_timeout_seconds",
+    "scip_multi_timeout_seconds",
+    "scip_reference_limit",
+    "scip_dependency_depth",
+    "scip_callchain_max_depth",
+    "scip_callchain_limit",
+    # claude_cli.scheduled_catchup_* — captured once in
+    # ScheduledCatchupService.__init__; loop uses the frozen value.
+    "scheduled_catchup_enabled",
+    "scheduled_catchup_interval_minutes",
+    # cache payload_* fields — snapshotted once at lifespan.py startup.
+    "payload_preview_size_chars",
+    "payload_max_fetch_size_chars",
+    "payload_cache_ttl_seconds",
+    "payload_cleanup_interval_seconds",
 ]
 
 
@@ -213,6 +293,10 @@ _VALID_CONFIG_SECTIONS = (
     "data_retention",
     # Story #967 - Activated repository reaper configuration
     "activated_reaper",
+    # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+    "hnsw_orphan_sweep",
+    # Issue #1398 - Query & search timeouts configuration
+    "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
     "xray",
     # Story #652 - Reranking configuration
@@ -888,19 +972,27 @@ def dashboard_api_metrics_partial(
 
 @web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
 def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400):
-    """Story #1109 (S5) / Story #1294: Query-embedding cache metrics partial.
+    """Story #1109 (S5) / Story #1294 / Bug #1391: Query-embedding cache
+    metrics partial.
 
     Returns an HTML fragment showing total cached entries plus windowed,
     cluster-aggregated cache statistics for the selected time window. Every
-    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT) and
-    On-Mode Hit Rate (Issue #1257, request-denominated from search_event_log)
-    is sourced from WindowedCacheMetrics — a GROUP BY (cache_mode, provider)
-    aggregation over the durable, phantom-free `search_embed_event` table
-    (Story #1293), computed for `[now - cache_window, now)`. This replaces
-    the old in-memory QueryEmbeddingCacheMetrics/CoalescerRegistry per-node,
-    volatile tallies (Story #1294) — the numbers are now durable, windowed,
-    and aggregated across every cluster node by construction (the backend
-    reads the shared store, never a per-node counter).
+    card EXCEPT Cache Entries (a live `query_embedding_cache` COUNT), Shadow
+    Hit Rate, and On-Mode Hit Rate is sourced from WindowedCacheMetrics — a
+    GROUP BY (cache_mode, provider) aggregation over the durable,
+    phantom-free `search_embed_event` table (Story #1293), computed for
+    `[now - cache_window, now)`. The two Hit Rate cards (Shadow and On-Mode)
+    are BOTH request-denominated (one row per user request) and windowed,
+    sourced from `search_event_log` via `get_hit_rate_counts(mode, from_ts,
+    to_ts)` (Issue #1257 introduced the request-denominated semantics for
+    On-Mode; Bug #1391 fixed On-Mode to respect the selected time window and
+    moved Shadow onto this same source/denominator for consistency — it was
+    previously operation-denominated from search_embed_event and always
+    unwindowed). This replaces the old in-memory
+    QueryEmbeddingCacheMetrics/CoalescerRegistry per-node, volatile tallies
+    (Story #1294) — the numbers are now durable, windowed, and aggregated
+    across every cluster node by construction (the backend reads the shared
+    store, never a per-node counter).
 
     Args:
         request: HTTP request.
@@ -952,8 +1044,15 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
 
         shadow_agg = CacheMetricsAggregate()
 
-    shadow_hits = shadow_agg.hits
-    shadow_requests = shadow_agg.hits + shadow_agg.misses
+    # Bug #1391 Defect 2: Shadow Hit Rate is no longer sourced from this
+    # search_embed_event shadow_agg (operation-denominated -- one row per
+    # NEEDED embed per provider). It is computed below from search_event_log
+    # instead, alongside On-Mode, so both Hit Rate cards share the SAME
+    # request-denominated source/window. The cosine distribution fields
+    # below correctly REMAIN sourced from shadow_agg (per-sample
+    # distributions are operation-based by design).
+    shadow_hits = 0
+    shadow_requests = 0
     shadow_cosine_p50 = shadow_agg.shadow_cosine_p50
     shadow_cosine_p05 = shadow_agg.shadow_cosine_p05
     shadow_cosine_min = shadow_agg.shadow_cosine_min
@@ -968,24 +1067,34 @@ def dashboard_cache_metrics_partial(request: Request, cache_window: int = 86400)
     coalescer_dedup_savings = overall.dedup
     coalescer_provider_embed_calls = overall.provider_embed_calls
 
-    # Issue #1257: On-Mode Hit Rate must be REQUEST-denominated (one row per
-    # user request in search_event_log), NOT operation-denominated. This is
-    # UNCHANGED by Story #1294 — it stays sourced from search_event_log's
-    # get_hit_rate_counts, which aggregates REQUESTS (rows), matching the
-    # analytics denominator. Fail-open: on_hits/on_requests stay at 0 when
-    # the writer is not wired or the query fails.
+    # Issue #1257 / Bug #1391: Both Hit Rate cards are REQUEST-denominated
+    # (one row per user request in search_event_log), NOT
+    # operation-denominated, and BOTH now respect the selected cache_window
+    # (from_ts/to_ts) instead of one of them (On-Mode) aggregating the
+    # table's entire lifetime. Each call fails open independently: a failure
+    # on one mode's lookup must not suppress the other card.
     on_hits = 0
     on_requests = 0
     sel_writer = getattr(request.app.state, "search_event_log_writer", None)
     sel_backend = sel_writer.backend if sel_writer is not None else None
     if sel_backend is not None:
         try:
-            _on_counts = sel_backend.get_hit_rate_counts("on")
+            _on_counts = sel_backend.get_hit_rate_counts("on", from_ts, to_ts)
             on_hits = _on_counts.get("hits", 0)
             on_requests = _on_counts.get("requests", 0)
         except Exception as _exc:
             logger.warning(
-                "dashboard_cache_metrics_partial: get_hit_rate_counts failed: %s",
+                "dashboard_cache_metrics_partial: get_hit_rate_counts('on') failed: %s",
+                _exc,
+            )
+        try:
+            _shadow_counts = sel_backend.get_hit_rate_counts("shadow", from_ts, to_ts)
+            shadow_hits = _shadow_counts.get("hits", 0)
+            shadow_requests = _shadow_counts.get("requests", 0)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_hit_rate_counts('shadow') "
+                "failed: %s",
                 _exc,
             )
 
@@ -3567,6 +3676,31 @@ def save_temporal_options(
 
     options["all_branches"] = all_branches == "1"
 
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind a server-wide runtime flag, shipped OFF by default. Reject
+    # loudly here rather than silently downgrading/dropping the request.
+    if options["all_branches"]:
+        _gate_config = get_config_service().get_config()
+        _gate_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
+        if not _gate_enabled:
+            return templates.TemplateResponse(
+                request,
+                "partials/error_message.html",
+                {
+                    "request": request,
+                    "error": (
+                        "All-branches temporal indexing is disabled on this "
+                        "server (temporal_all_branches_enabled=false). "
+                        "Contact your administrator to enable it."
+                    ),
+                },
+                status_code=400,
+            )
+
     manager = _get_golden_repo_manager()
     manager.save_temporal_options(alias, options)
 
@@ -3987,6 +4121,15 @@ def golden_repo_details_partial(request: Request, alias: str):
             )
         csrf_token = get_csrf_token_from_cookie(request)
         categories = _get_repo_category_service().list_categories()
+        # Story #1412: pass the gate value so the all-branches checkbox can
+        # be disabled/hidden with an explanatory note when the server-wide
+        # temporal_all_branches_enabled flag is off.
+        _gate_config = get_config_service().get_config()
+        _temporal_all_branches_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
         return templates.TemplateResponse(
             request,
             "partials/golden_repo_details.html",
@@ -3995,6 +4138,7 @@ def golden_repo_details_partial(request: Request, alias: str):
                 "repo": repo,
                 "csrf_token": csrf_token,
                 "categories": categories,
+                "temporal_all_branches_enabled": _temporal_all_branches_enabled,
             },
         )
     except Exception as e:
@@ -6201,6 +6345,10 @@ def _get_current_config() -> dict:
         DataRetentionConfig,
         # Story #967 - Activated repository reaper configuration
         ActivatedReaperConfig,
+        # Story #1397 - HNSW orphan-repair sweep operating-hours window config
+        HNSWOrphanRepairSweepConfig,
+        # Issue #1398 - Query & search timeouts configuration
+        SearchTimeoutsConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6423,6 +6571,14 @@ def _get_current_config() -> dict:
         "activated_reaper": settings.get(
             "activated_reaper", asdict(ActivatedReaperConfig())
         ),
+        # Story #1397: HNSW orphan-repair sweep operating-hours window config
+        "hnsw_orphan_sweep": settings.get(
+            "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
+        # Issue #1398: Query & search timeouts configuration
+        "search_timeouts": settings.get(
+            "search_timeouts", asdict(SearchTimeoutsConfig())
+        ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
@@ -6513,10 +6669,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 return "JWT expiration must be a valid number"
 
     elif section == "cache":
-        # Validate cache TTL values
+        # Validate cache TTL values.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_ttl_minutes", "fts_cache_ttl_minutes"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_float = float(value)
                     if val_float <= 0:
@@ -6526,10 +6684,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate cleanup intervals
+        # Validate cleanup intervals.
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields below).
         for field in ["index_cache_cleanup_interval", "fts_cache_cleanup_interval"]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6552,7 +6712,9 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     return f"{field} must be empty or a positive integer (MB)"
 
-        # Validate payload cache settings (Story #679)
+        # Validate payload cache settings (Story #679).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         for field in [
             "payload_preview_size_chars",
             "payload_max_fetch_size_chars",
@@ -6560,7 +6722,7 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "payload_cleanup_interval_seconds",
         ]:
             value = data.get(field)
-            if value is not None:
+            if value is not None and str(value).strip() != "":
                 try:
                     val_int = int(value)
                     if val_int < 1:
@@ -6570,9 +6732,11 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
-        # Validate memory governor swap-in threshold (Bug #1225)
+        # Validate memory governor swap-in threshold (Bug #1225).
+        # Bug #1396: blank means "no override, use default" -- must not
+        # reject the whole form (same idiom as the size-cap fields above).
         swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
-        if swap_threshold is not None:
+        if swap_threshold is not None and str(swap_threshold).strip() != "":
             try:
                 val_int = int(swap_threshold)
                 if val_int < 0:
@@ -7260,6 +7424,94 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Cadence Hours must be between 1 and 168"
             except (ValueError, TypeError):
                 return "Cadence Hours must be a valid number"
+
+    elif section == "hnsw_orphan_sweep":
+        # Story #1397: HNSW orphan-repair sweep operating-hours window
+        # configuration validation.
+        for hour_field, label in (
+            ("operating_hours_start_utc", "Operating Hours Start"),
+            ("operating_hours_end_utc", "Operating Hours End"),
+        ):
+            hour_value = data.get(hour_field)
+            if hour_value is not None:
+                try:
+                    val_int = int(hour_value)
+                    if val_int < 0 or val_int > 23:
+                        return f"{label} must be between 0 and 23"
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
+        tick_interval_minutes = data.get("tick_interval_minutes")
+        if tick_interval_minutes is not None:
+            try:
+                val_int = int(tick_interval_minutes)
+                if val_int < 1:
+                    return "Tick Interval Minutes must be at least 1"
+            except (ValueError, TypeError):
+                return "Tick Interval Minutes must be a valid number"
+
+        batch_size = data.get("batch_size")
+        if batch_size is not None:
+            try:
+                val_int = int(batch_size)
+                if val_int < 1:
+                    return "Batch Size must be at least 1"
+            except (ValueError, TypeError):
+                return "Batch Size must be a valid number"
+
+    elif section == "search_timeouts":
+        # Issue #1398: Query & search timeouts configuration validation.
+        # Ranges mirror config_manager.validate_config's SearchTimeoutsConfig checks.
+        for field_name, label, min_val, max_val in (
+            (
+                "search_code_handler_timeout_seconds",
+                "Semantic/Temporal Search Tool Timeout",
+                30,
+                600,
+            ),
+            (
+                "default_handler_timeout_seconds",
+                "Default MCP Tool Timeout",
+                10,
+                300,
+            ),
+            (
+                "write_mode_handler_timeout_seconds",
+                "Write-Mode Refresh Timeout",
+                600,
+                3600,
+            ),
+            (
+                "embedding_provider_timeout_seconds",
+                "Embedding Provider HTTP Timeout",
+                5,
+                120,
+            ),
+            ("reranker_timeout_seconds", "Reranker HTTP Timeout", 5, 120),
+        ):
+            field_value = data.get(field_name)
+            if field_value is not None:
+                try:
+                    val_int = int(field_value)
+                    if val_int < min_val or val_int > max_val:
+                        return (
+                            f"{label} must be between {min_val} and {max_val} seconds"
+                        )
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
+        # Story #1400 CRITICAL 5/6: the ONE float field. Basic sanity
+        # (non-negative) only -- the cross-field grace-budget relationship
+        # against search_code_handler_timeout_seconds is validated later by
+        # config_manager.validate_config against the whole candidate.
+        temporal_wait = data.get("temporal_inline_wait_seconds")
+        if temporal_wait is not None:
+            try:
+                val_float = float(temporal_wait)
+                if val_float < 0.0:
+                    return "Temporal Query Inline Sync-Wait must be >= 0.0 seconds"
+            except (ValueError, TypeError):
+                return "Temporal Query Inline Sync-Wait must be a valid number"
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation
@@ -8951,7 +9203,6 @@ async def update_config_section(
         # (it is a UI-only field, not a config key).
         data.pop("confirm_host_port_change", None)
 
-        # Update all settings without validating (batch update).
         # Bug #1180: the search_event_log UI section renders two fields that
         # belong to different config categories:
         #   - search_event_log_retention_days -> category "search_event_log"
@@ -8962,16 +9213,26 @@ async def update_config_section(
         _section_key_category_overrides: dict = {}
         if section == "search_event_log":
             _section_key_category_overrides = {"export_retention_days": "export"}
-        for key, value in data.items():
-            category = _section_key_category_overrides.get(key, section)
-            config_service.update_setting(category, key, value, skip_validation=True)
+        _updates = [
+            (_section_key_category_overrides.get(key, section), key, value)
+            for key, value in data.items()
+        ]
 
-        # Validate configuration
-        config = config_service.get_config()
-        config_service.config_manager.validate_config(config)
-
-        # For OIDC: test reload BEFORE saving to file
+        # Story #1400 CRITICAL 6: the whole section is now applied as ONE
+        # atomic unit via update_settings_atomic (validate-copy-then-publish
+        # -- a rejected batch never touches the live config, no per-key
+        # partial application). OIDC is the one exception: it needs a live
+        # test-reload BEFORE anything is durably published, so it cannot use
+        # the copy-then-publish primitive (which always publishes on
+        # validation success). It keeps its pre-#1400 shape -- apply
+        # directly against the LIVE config via _apply_setting, validate,
+        # test-reload, and only THEN persist; reload-from-file on failure
+        # undoes the in-memory mutation exactly as before.
         if section == "oidc":
+            config = config_service.get_config()
+            for category, key, value in _updates:
+                config_service._apply_setting(config, category, key, value)
+            config_service.config_manager.validate_config(config)
             try:
                 # Try to reload with new config (don't save yet)
                 await _reload_oidc_configuration()
@@ -8995,9 +9256,10 @@ async def update_config_section(
                     session,
                     error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
                 )
+            config_service.save_config(config)
+        else:
+            config_service.update_settings_atomic(_updates)
 
-        # Only save to file after validation and OIDC test (if applicable)
-        config_service.save_config(config)
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},

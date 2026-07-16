@@ -97,6 +97,14 @@ class GlobalReposLifecycleManager:
         self.global_ops = GlobalRepoOperations(str(self.golden_repos_dir))
 
         # Create RefreshScheduler with all dependencies
+        #
+        # Bug #1393 follow-up: job_tracker MUST be forwarded here. Without
+        # it, RefreshScheduler._job_tracker stays None in every real server
+        # process (even though this manager itself receives job_tracker
+        # correctly from startup/lifespan.py), which makes
+        # check_refresh_not_in_progress()'s fail-fast guard a permanent
+        # no-op -- the activation/refresh race Bug #1393 was meant to close
+        # never actually gets caught in production.
         self.refresh_scheduler = RefreshScheduler(
             golden_repos_dir=str(self.golden_repos_dir),
             config_source=self.global_ops,
@@ -104,6 +112,7 @@ class GlobalReposLifecycleManager:
             cleanup_manager=self.cleanup_manager,
             background_job_manager=background_job_manager,
             resource_config=resource_config,
+            job_tracker=job_tracker,
             snapshot_manager=snapshot_manager,
             golden_repo_metadata_backend=golden_repo_metadata_backend,
         )

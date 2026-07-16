@@ -56,7 +56,11 @@
                     <tr>
                         <td class="config-label">JWT Expiration (minutes)</td>
                         <td class="config-value">{{ config.server.jwt_expiration_minutes }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'jwt_expiration_minutes' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Service Display Name</td>
@@ -791,6 +795,181 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- HNSW Orphan-Repair Sweep Settings Section (Story #1397) -->
+<details class="config-section" id="section-hnsw-orphan-sweep">
+    <summary>
+        <h2>HNSW Orphan-Repair Sweep</h2>
+    </summary>
+    <p class="section-description">
+        Configures the background fleet sweep that detects and repairs orphaned HNSW index
+        nodes. The daily UTC operating-hours window lets the sweep's disk I/O run only during
+        off-peak hours; a start hour equal to the end hour means "always run" (24x7).
+        Changes take effect on the scheduler's next cycle -- no server restart is required.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-hnsw-orphan-sweep">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.hnsw_orphan_sweep.enabled else 'No' }}</td>
+                    <td class="config-description">Whether the sweep scheduler is active (default: Yes)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Operating Hours Start (UTC)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.operating_hours_start_utc }}</td>
+                    <td class="config-description">Hour 0-23; equal to end means always-on (default: 0)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Operating Hours End (UTC)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.operating_hours_end_utc }}</td>
+                    <td class="config-description">Hour 0-23; supports overnight wrap-around (default: 0)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Tick Interval (minutes)</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.tick_interval_minutes }}</td>
+                    <td class="config-description">Minutes between ticks (default: 7)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Batch Size</td>
+                    <td class="config-value">{{ config.hnsw_orphan_sweep.batch_size }}</td>
+                    <td class="config-description">Indexes checked per tick (default: 15)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('hnsw-orphan-sweep')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-hnsw-orphan-sweep" method="post" action="/admin/config/hnsw_orphan_sweep" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.hnsw_orphan_sweep %}
+            <div class="validation-error">{{ validation_errors.hnsw_orphan_sweep }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="hnsw-orphan-sweep-enabled">
+                    Enabled
+                    <select id="hnsw-orphan-sweep-enabled" name="enabled">
+                        <option value="true" {% if config.hnsw_orphan_sweep.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.hnsw_orphan_sweep.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turn the fleet orphan-repair sweep on or off</small>
+                </label>
+                <label>
+                    Operating Hours Start (UTC)
+                    <input type="number" id="hnsw-orphan-sweep-start-hour" name="operating_hours_start_utc" value="{{ config.hnsw_orphan_sweep.operating_hours_start_utc }}" min="0" max="23">
+                    <small>Range: 0-23 (default: 0). Equal to end hour means always-on (24x7).</small>
+                </label>
+                <label>
+                    Operating Hours End (UTC)
+                    <input type="number" id="hnsw-orphan-sweep-end-hour" name="operating_hours_end_utc" value="{{ config.hnsw_orphan_sweep.operating_hours_end_utc }}" min="0" max="23">
+                    <small>Range: 0-23 (default: 0). Start &gt; end wraps overnight (e.g. 22 -&gt; 6).</small>
+                </label>
+                <label>
+                    Tick Interval (minutes)
+                    <input type="number" id="hnsw-orphan-sweep-tick-interval" name="tick_interval_minutes" value="{{ config.hnsw_orphan_sweep.tick_interval_minutes }}" min="1">
+                    <small>Minimum: 1 (default: 7). Minutes between ticks while inside the operating window.</small>
+                </label>
+                <label>
+                    Batch Size
+                    <input type="number" id="hnsw-orphan-sweep-batch-size" name="batch_size" value="{{ config.hnsw_orphan_sweep.batch_size }}" min="1">
+                    <small>Minimum: 1 (default: 15). Indexes checked per tick.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('hnsw-orphan-sweep')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Query & Search Timeouts Settings Section (Issue #1398) -->
+<details class="config-section" id="section-search-timeouts">
+    <summary>
+        <h2>Query & Search Timeouts</h2>
+    </summary>
+    <p class="section-description">
+        Consolidates the previously hardcoded MCP tool-call and embedding/reranking timeout
+        constants into Web-UI-editable settings. Each field names the exact code path it
+        governs -- see the per-field description below for the sync/async dispatch
+        distinction that applies to the Default MCP Tool Timeout.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-search-timeouts">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Semantic/Temporal Search Tool Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.search_code_handler_timeout_seconds }}</td>
+                    <td class="config-description">Caps a single search_code MCP call (semantic and temporal queries); default 180, range 30-600</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Default MCP Tool Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.default_handler_timeout_seconds }}</td>
+                    <td class="config-description">Caps every synchronously-dispatched MCP tool call without a specific override; does NOT apply to regex_search or other async-dispatched tools; default 60, range 10-300</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Write-Mode Refresh Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.write_mode_handler_timeout_seconds }}</td>
+                    <td class="config-description">Caps exit_write_mode conflict resolution; default 720, range 600-3600</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Embedding Provider HTTP Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.embedding_provider_timeout_seconds }}</td>
+                    <td class="config-description">Per outbound Voyage/Cohere embedding call; default 30, range 5-120</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Reranker HTTP Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.reranker_timeout_seconds }}</td>
+                    <td class="config-description">Per rerank call; falls back to unranked order on expiry; default 15, range 5-120</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('search-timeouts')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-search-timeouts" method="post" action="/admin/config/search_timeouts" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.search_timeouts %}
+            <div class="validation-error">{{ validation_errors.search_timeouts }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label>
+                    Semantic/Temporal Search Tool Timeout (seconds)
+                    <input type="number" id="search-timeouts-search-code" name="search_code_handler_timeout_seconds" value="{{ config.search_timeouts.search_code_handler_timeout_seconds }}" min="30" max="600">
+                    <small>Range: 30-600 seconds (default: 180). Caps a single search_code MCP call (semantic and temporal queries).</small>
+                </label>
+                <label>
+                    Default MCP Tool Timeout (seconds)
+                    <input type="number" id="search-timeouts-default" name="default_handler_timeout_seconds" value="{{ config.search_timeouts.default_handler_timeout_seconds }}" min="10" max="300">
+                    <small>Range: 10-300 seconds (default: 60). Caps every synchronously-dispatched MCP tool call with no specific override -- does NOT apply to regex_search or other async-dispatched tools (those run without this wrapper).</small>
+                </label>
+                <label>
+                    Write-Mode Refresh Timeout (seconds)
+                    <input type="number" id="search-timeouts-write-mode" name="write_mode_handler_timeout_seconds" value="{{ config.search_timeouts.write_mode_handler_timeout_seconds }}" min="600" max="3600">
+                    <small>Range: 600-3600 seconds (default: 720). Caps exit_write_mode's Claude-CLI conflict resolution.</small>
+                </label>
+                <label>
+                    Embedding Provider HTTP Timeout (seconds)
+                    <input type="number" id="search-timeouts-embedding" name="embedding_provider_timeout_seconds" value="{{ config.search_timeouts.embedding_provider_timeout_seconds }}" min="5" max="120">
+                    <small>Range: 5-120 seconds (default: 30). Per outbound Voyage/Cohere embedding HTTP call.</small>
+                </label>
+                <label>
+                    Reranker HTTP Timeout (seconds)
+                    <input type="number" id="search-timeouts-reranker" name="reranker_timeout_seconds" value="{{ config.search_timeouts.reranker_timeout_seconds }}" min="5" max="120">
+                    <small>Range: 5-120 seconds (default: 15). Per rerank call; falls back to unranked order on expiry.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('search-timeouts')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- X-Ray Search Settings Section (Story #977) -->
 <details class="config-section" id="section-xray">
     <summary>
@@ -941,7 +1120,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Multi-Search Timeout (seconds)</td>
                         <td class="config-value">{{ config.multi_search.multi_search_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout per repository for all multi-repository searches including REST API and MCP omni-search (default: 30)</small></td>
+                        <td class="config-note">
+                            {% if 'multi_search_timeout_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Timeout per repository for all multi-repository searches including REST API and MCP omni-search (default: 30)</small>
+                        </td>
                     </tr>
                     <tr><td colspan="3"><strong>SCIP Multi-Repository</strong></td></tr>
                     <tr>
@@ -957,7 +1141,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">SCIP Multi Timeout (seconds)</td>
                         <td class="config-value">{{ config.multi_search.scip_multi_timeout_seconds }}</td>
-                        <td class="config-note"><small>Timeout per repository SCIP query (default: 30)</small></td>
+                        <td class="config-note">
+                            {% if 'scip_multi_timeout_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Timeout per repository SCIP query (default: 30)</small>
+                        </td>
                     </tr>
                     <tr><td colspan="3"><strong>MCP Omni-Search Settings</strong><br><small style="font-weight: normal;">MCP-specific settings for caching, aggregation, and result limits. Worker/timeout settings are in the unified section above.</small></td></tr>
                     <tr>
@@ -1431,7 +1620,17 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Analysis Model</td>
                         <td class="config-value">{{ config.golden_repos.analysis_model }}</td>
-                        <td class="config-note"><small>Claude model used for repository analysis jobs</small></td>
+                        <td class="config-note">
+                            {% if 'analysis_model' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Claude model used for repository analysis jobs</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Externally Managed</td>
+                        <td class="config-value">{{ 'Yes' if config.golden_repos.externally_managed else 'No' }}</td>
+                        <td class="config-note"><small>When enabled, an external owner materializes/refreshes golden repos and this server skips its own periodic refresh and startup restore reconciliation</small></td>
                     </tr>
                 </tbody>
             </table>
@@ -1458,6 +1657,16 @@ function saveLlmCredsConfig() {
                         <option value="sonnet" {% if config.golden_repos.analysis_model == "sonnet" %}selected{% endif %}>Sonnet</option>
                     </select>
                     <small>Claude model for repository analysis (Opus: highest quality, Sonnet: faster)</small>
+                </label>
+                <label for="golden-repos-externally-managed">
+                    <!-- Hidden fallback guarantees the key is always submitted even
+                         when the checkbox is unchecked (browsers omit unchecked
+                         checkboxes from form data entirely) -- same pattern as
+                         Story #1412's temporal_all_branches_enabled field. -->
+                    <input type="hidden" name="externally_managed" value="false">
+                    <input type="checkbox" id="golden-repos-externally-managed" name="externally_managed" value="true" {% if config.golden_repos.externally_managed %}checked{% endif %}>
+                    Externally Managed
+                    <small>When enabled, an external owner (not this server) materializes and refreshes golden repos; the server's own periodic refresh and startup restore reconciliation are skipped and the server only indexes/serves what is registered.</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -1527,6 +1736,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.indexing.temporal_aggregation_chunk_chars }}</td>
                         <td class="config-note"><small>Character size used to chunk each per-commit aggregated document (message + diffs) before embedding</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Temporal All-Branches Indexing</td>
+                        <td class="config-value">{{ 'Enabled' if config.indexing.temporal_all_branches_enabled else 'Disabled' }}</td>
+                        <td class="config-note"><small>When disabled (default), golden temporal indexing tracks only the registered branch; all-branches requests are rejected</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1576,6 +1790,16 @@ function saveLlmCredsConfig() {
                     Temporal Aggregation Chunk Size
                     <input type="number" id="indexing-temporal-chunk-chars" name="temporal_aggregation_chunk_chars" value="{{ config.indexing.temporal_aggregation_chunk_chars }}" min="1">
                     <small>Character size used to chunk the per-commit aggregated document (message + diffs) before embedding. Default 4096.</small>
+                </label>
+                <label for="indexing-temporal-all-branches-enabled">
+                    <!-- Story #1412: hidden fallback guarantees the key is always
+                         submitted even when the checkbox is unchecked (browsers omit
+                         unchecked checkboxes from form data entirely) -- same pattern
+                         as Bug #943's elevation_enforcement_enabled field. -->
+                    <input type="hidden" name="temporal_all_branches_enabled" value="false">
+                    <input type="checkbox" id="indexing-temporal-all-branches-enabled" name="temporal_all_branches_enabled" value="true" {% if config.indexing.temporal_all_branches_enabled %}checked{% endif %}>
+                    Temporal All-Branches Indexing
+                    <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -1695,22 +1919,42 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Payload Preview Size (chars)</td>
                         <td class="config-value">{{ config.cache.payload_preview_size_chars }}</td>
-                        <td class="config-note"><small>Characters shown in search results preview</small></td>
+                        <td class="config-note">
+                            {% if 'payload_preview_size_chars' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Characters shown in search results preview</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Payload Max Fetch Size (chars)</td>
                         <td class="config-value">{{ config.cache.payload_max_fetch_size_chars }}</td>
-                        <td class="config-note"><small>Max chars per page when fetching full content</small></td>
+                        <td class="config-note">
+                            {% if 'payload_max_fetch_size_chars' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Max chars per page when fetching full content</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Payload Cache TTL (seconds)</td>
                         <td class="config-value">{{ config.cache.payload_cache_ttl_seconds }}</td>
-                        <td class="config-note"><small>Time-to-live for cached search results</small></td>
+                        <td class="config-note">
+                            {% if 'payload_cache_ttl_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Time-to-live for cached search results</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Payload Cleanup Interval (seconds)</td>
                         <td class="config-value">{{ config.cache.payload_cleanup_interval_seconds }}</td>
-                        <td class="config-note"><small>Interval between cache cleanup runs</small></td>
+                        <td class="config-note">
+                            {% if 'payload_cleanup_interval_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Interval between cache cleanup runs</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Memory Governor Enabled</td>
@@ -1853,7 +2097,7 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="cache-gov-swap-threshold">
                     Memory Governor Swap Pswpin Red Threshold
-                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{{ config.cache.memory_governor_swap_pswpin_red_threshold }}" min="0">
+                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{% if config.cache.memory_governor_swap_pswpin_red_threshold is none %}100{% else %}{{ config.cache.memory_governor_swap_pswpin_red_threshold }}{% endif %}" min="0">
                     <small>Min swap-in pages/interval to force RED (default 100; ignores idle noise, catches death-spirals)</small>
                 </label>
                 <label for="cache-gov-rss">
@@ -2108,27 +2352,52 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Memory Warning Threshold (%)</td>
                         <td class="config-value">{{ config.health.memory_warning_threshold_percent }}</td>
-                        <td class="config-note"><small>Memory usage warning level (default: 80%)</small></td>
+                        <td class="config-note">
+                            {% if 'memory_warning_threshold_percent' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Memory usage warning level (default: 80%)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Memory Critical Threshold (%)</td>
                         <td class="config-value">{{ config.health.memory_critical_threshold_percent }}</td>
-                        <td class="config-note"><small>Memory usage critical level (default: 90%)</small></td>
+                        <td class="config-note">
+                            {% if 'memory_critical_threshold_percent' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Memory usage critical level (default: 90%)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Disk Warning Threshold (%)</td>
                         <td class="config-value">{{ config.health.disk_warning_threshold_percent }}</td>
-                        <td class="config-note"><small>Disk usage warning level (default: 80%)</small></td>
+                        <td class="config-note">
+                            {% if 'disk_warning_threshold_percent' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Disk usage warning level (default: 80%)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Disk Critical Threshold (%)</td>
                         <td class="config-value">{{ config.health.disk_critical_threshold_percent }}</td>
-                        <td class="config-note"><small>Disk usage critical level (default: 90%)</small></td>
+                        <td class="config-note">
+                            {% if 'disk_critical_threshold_percent' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Disk usage critical level (default: 90%)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">CPU Sustained Threshold (%)</td>
                         <td class="config-value">{{ config.health.cpu_sustained_threshold_percent }}</td>
-                        <td class="config-note"><small>Sustained CPU usage alert level (default: 95%)</small></td>
+                        <td class="config-note">
+                            {% if 'cpu_sustained_threshold_percent' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Sustained CPU usage alert level (default: 95%)</small>
+                        </td>
                     </tr>
                 </tbody>
             </table>
@@ -2396,22 +2665,39 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Minimum Length</td>
                         <td class="config-value">{{ config.password_security.min_length }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'min_length' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Maximum Length</td>
                         <td class="config-value">{{ config.password_security.max_length }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'max_length' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Required Character Classes</td>
                         <td class="config-value">{{ config.password_security.required_char_classes }}</td>
-                        <td class="config-note"><small>1-4 (lowercase, uppercase, numbers, symbols)</small></td>
+                        <td class="config-note">
+                            {% if 'required_char_classes' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>1-4 (lowercase, uppercase, numbers, symbols)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Minimum Entropy (bits)</td>
                         <td class="config-value">{{ config.password_security.min_entropy_bits }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'min_entropy_bits' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                 </tbody>
             </table>
@@ -2903,25 +3189,45 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Credential Mode</td>
                         <td class="config-value">{{ config.codex_integration.credential_mode }}</td>
-                        <td class="config-note"><small>How credentials are supplied: none, api_key, or subscription</small></td>
+                        <td class="config-note">
+                            {% if 'credential_mode' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>How credentials are supplied: none, api_key, or subscription</small>
+                        </td>
                     </tr>
                     {% if config.codex_integration.credential_mode == 'api_key' %}
                     <tr>
                         <td class="config-label">API Key</td>
                         <td class="config-value">{% if config.codex_integration.api_key %}***{% else %}(not set){% endif %}</td>
-                        <td class="config-note"><small>API key for direct OpenAI/Codex access</small></td>
+                        <td class="config-note">
+                            {% if 'api_key' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>API key for direct OpenAI/Codex access</small>
+                        </td>
                     </tr>
                     {% endif %}
                     {% if config.codex_integration.credential_mode == 'subscription' %}
                     <tr>
                         <td class="config-label">LCP URL</td>
                         <td class="config-value">{{ config.codex_integration.lcp_url or '(not set)' }}</td>
-                        <td class="config-note"><small>URL of the LCP credential provider</small></td>
+                        <td class="config-note">
+                            {% if 'lcp_url' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>URL of the LCP credential provider</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">LCP Vendor</td>
                         <td class="config-value">{{ config.codex_integration.lcp_vendor }}</td>
-                        <td class="config-note"><small>Vendor identifier sent to the LCP provider (default: openai)</small></td>
+                        <td class="config-note">
+                            {% if 'lcp_vendor' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Vendor identifier sent to the LCP provider (default: openai)</small>
+                        </td>
                     </tr>
                     {% endif %}
                     <tr>
@@ -3468,42 +3774,78 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Collector Endpoint</td>
                         <td class="config-value">{{ config.telemetry.collector_endpoint }}</td>
-                        <td class="config-note"><small>OTLP endpoint URL</small></td>
+                        <td class="config-note">
+                            {% if 'collector_endpoint' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>OTLP endpoint URL</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Collector Protocol</td>
                         <td class="config-value">{{ config.telemetry.collector_protocol }}</td>
-                        <td class="config-note"><small>grpc or http</small></td>
+                        <td class="config-note">
+                            {% if 'collector_protocol' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>grpc or http</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Service Name</td>
                         <td class="config-value">{{ config.telemetry.service_name }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'service_name' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Export Traces</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.export_traces else 'No' }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'export_traces' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Export Metrics</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.export_metrics else 'No' }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'export_metrics' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Machine Metrics Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.machine_metrics_enabled else 'No' }}</td>
-                        <td class="config-note"><small>CPU, memory, disk metrics</small></td>
+                        <td class="config-note">
+                            {% if 'machine_metrics_enabled' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>CPU, memory, disk metrics</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Machine Metrics Interval (sec)</td>
                         <td class="config-value">{{ config.telemetry.machine_metrics_interval_seconds }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'machine_metrics_interval_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Deployment Environment</td>
                         <td class="config-value">{{ config.telemetry.deployment_environment }}</td>
-                        <td class="config-note"><small>development, staging, production</small></td>
+                        <td class="config-note">
+                            {% if 'deployment_environment' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>development, staging, production</small>
+                        </td>
                     </tr>
                 </tbody>
             </table>
@@ -3617,7 +3959,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Public Key</td>
                         <td class="config-value">{{ config.langfuse.public_key if config.langfuse.public_key else 'Not configured' }}</td>
-                        <td class="config-note"><small>Langfuse public key</small></td>
+                        <td class="config-note">
+                            {% if 'public_key' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Langfuse public key</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Secret Key</td>
@@ -3628,7 +3975,12 @@ function saveLlmCredsConfig() {
                                 Not configured
                             {% endif %}
                         </td>
-                        <td class="config-note"><small>Langfuse secret key (masked)</small></td>
+                        <td class="config-note">
+                            {% if 'secret_key' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Langfuse secret key (masked)</small>
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">Host URL</td>
@@ -3638,7 +3990,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Auto-Trace Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.langfuse.auto_trace_enabled else 'No' }}</td>
-                        <td class="config-note"><small>Automatically create traces</small></td>
+                        <td class="config-note">
+                            {% if 'auto_trace_enabled' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>Automatically create traces</small>
+                        </td>
                     </tr>
                 </tbody>
             </table>

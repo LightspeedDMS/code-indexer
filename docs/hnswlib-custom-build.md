@@ -86,24 +86,70 @@ This is the mechanism pip actually resolves on any `pip install .` / `pip instal
 
 ### Custom Commit
 
-The submodule points to commit `57e9453` (`57e94532ecc611c6dc3d462fde14ffd9497fcf74`), which includes two fork patches on top of upstream:
+The submodule points to commit `878cfbe5` (`878cfbe585395a8bdd95f593d071f778d2fac457`), which includes fork patches on top of upstream (descended from the earlier `57e9453`/`8972063` patches):
 
 ```
-57e9453 feat: Add repair_orphans() method to Python bindings for deterministic HNSW orphan repair
 8972063 feat: Expose checkIntegrity() method to Python bindings
+57e9453 feat: Add repair_orphans() method to Python bindings for deterministic HNSW orphan repair
 ```
 
-`8972063` adds `check_integrity()`; `57e9453` adds `repair_orphans()` (Story #1358 / Epic #1333) — both Python bindings not present in the upstream PyPI release.
+`8972063` adds `check_integrity()`; `57e9453` adds `repair_orphans()` (Story #1358 / Epic #1333) — both Python bindings not present in the upstream PyPI release. This commit MUST always match `pyproject.toml`'s `hnswlib @ git+...@<commit-sha>` dependency pin (see "pyproject.toml" above) and the informational `EXPECTED_HNSWLIB_FORK_COMMIT` constant in `src/code_indexer/storage/hnsw_index_manager.py` (Bug #1392) — keep all three in sync manually.
 
 ### Verifying Submodule
 
 ```bash
 cd third_party/hnswlib
 git log -1 --oneline
-# Should show: 57e9453 feat: Add repair_orphans() method to Python bindings for deterministic HNSW orphan repair
+git rev-parse HEAD
+# HEAD should be 878cfbe585395a8bdd95f593d071f778d2fac457
 ```
 
 ## Troubleshooting
+
+### Fleet-wide drift between the server and CLI Python environments (Bug #1392)
+
+Production incident: the custom fork was only ever built into the SERVER's own
+Python environment by the auto-updater (`deployment_executor.py`'s
+`_build_hnswlib_with_fallback()`/`build_custom_hnswlib()`). Real `cidx` CLI
+indexing subprocesses run under a SEPARATE, system-wide Python environment
+that received no equivalent build step, so it could silently drift to a
+stock PyPI `hnswlib` (missing `check_integrity()`/`repair_orphans()`),
+causing every finalize-time orphan detect+repair call to fail with a bare
+`AttributeError` fleet-wide.
+
+Two fixes now catch this automatically:
+
+- **Deploy pipeline coverage**: `DeploymentExecutor._ensure_cli_hnswlib_capability()`
+  resolves the CLI's own interpreter (via the `cidx` console-script's
+  shebang, never a hardcoded path) and syncs the fork into it as a new,
+  non-fatal deploy step (Step 1.7) alongside the server's own build (Step
+  1.6). This should self-heal drift on the next deploy.
+- **Graceful degrade + explicit capability signal (Bug #1415)**: Bug #1392's
+  original fix made every build/finalize entry point raise a dedicated
+  `HNSWCapabilityError` immediately when the fork is missing -- but that
+  still aborted the ENTIRE indexing operation (a fleet-wide outage on
+  2026-07-14 discarded already-computed embedding spend for ~12 golden
+  repos). The design was reversed:
+  - CLI side (`storage/hnsw_index_manager.py`): `build_index()`,
+    `rebuild_from_vectors()`, and `save_incremental_update()` no longer gate
+    on capability at all. `_detect_and_repair_orphans()` -- the single place
+    that actually calls `check_integrity()`/`repair_orphans()` -- checks
+    capability first; if missing, it logs ONE WARNING and skips the orphan
+    hardening pass, and the caller proceeds to persist a valid, correct
+    index (orphan repair is a hardening layer, not correctness of the
+    vectors themselves). Query-only paths (`index_exists()`, `is_stale()`,
+    `query()`, `load_index()`, `__init__`) remain NEVER gated, per the
+    "Query Is Everything" invariant.
+  - Server side (`server/services/hnswlib_capability_check.py`): unchanged
+    from Bug #1392 -- a startup check logs a loud, actionable ERROR (naming
+    the interpreter, expected commit, and this doc) but NEVER blocks server
+    startup.
+  - Health surface (`cidx health` / MCP `check_hnsw_health` / REST / Web):
+    exposes a new, SEPARATE `hnswlib_capability_available` field (True/False/
+    not-evaluated) distinct from the zero-tolerance `orphan_count` signal
+    (which stays exactly 0=OK, >0=ERROR, no WARNING tier) -- so a node
+    running stock hnswlib is visibly flagged as degraded rather than either
+    crashing or silently reporting a false-clean/false-corrupt result.
 
 ### Error: "hnswlib is not installed"
 
@@ -143,7 +189,7 @@ If integration tests fail with "Submodule not on custom commit":
 ```bash
 cd third_party/hnswlib
 git fetch origin
-git checkout 57e9453  # The custom commit (repair_orphans + checkIntegrity)
+git checkout 878cfbe585395a8bdd95f593d071f778d2fac457  # The custom commit (repair_orphans + checkIntegrity)
 cd ../..
 git add third_party/hnswlib
 ```
@@ -263,5 +309,5 @@ If upgrading from a version that used PyPI hnswlib:
 ## References
 
 - hnswlib GitHub: https://github.com/nmslib/hnswlib
-- Custom commits: 8972063 (checkIntegrity method), 57e9453 (repair_orphans method, Story #1358 / Epic #1333)
+- Custom commits: 8972063 (checkIntegrity method), 57e9453 (repair_orphans method, Story #1358 / Epic #1333); current submodule/pyproject.toml pin: 878cfbe585395a8bdd95f593d071f778d2fac457
 - Orphan repair background: `docs/research/hnsw-temporal-orphans-1330.md`
