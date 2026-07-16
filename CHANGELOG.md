@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.59.0] - 2026-07-16
+
+### Added
+
+- **#1416**: golden repos gain an `externally_managed` config flag. When true, an external owner manages golden-repo presence/freshness (materializes repos into `golden_repos_dir`, registers via the admin API); the server skips its own periodic refresh and startup restore-from-snapshot reconciliation. Also fixes a cluster/postgres startup-ordering bug where the global-repos lifecycle previously started before the ConfigService PG pool was set. Includes a Web UI Config-screen checkbox for the new flag.
+
 ## [11.58.0] - 2026-07-16
 
 ### Added
