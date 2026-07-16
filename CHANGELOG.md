@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.60.0] - 2026-07-16
+
+### Fixed
+
+- **#1421**: temporal queries with `time_range_all=true` intermittently failed with "Temporal snapshot ... missing page N", and in rarer cases could silently return corrupted results (pages spliced from two different write generations) with no error and no log entry. The temporal worker writes grow-then-shrink checkpoints while a query is in flight; the snapshot reader read pages via separate, non-isolated calls that could straddle a mid-flight rewrite. Fixed by detecting a concurrent rewrite (missing page / page-count mismatch / JSON parse failure) and bounded-retrying the reassembly against the latest write; genuine exhaustion now logs a WARNING per retry and an ERROR on final failure. Diagnosed as a single-process, backend-agnostic timing race, not cluster-specific.
+
 ## [11.59.0] - 2026-07-16
 
 ### Added
