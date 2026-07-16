@@ -51,7 +51,16 @@ _KNOWN_TEMPORAL_LAUNCH_SITES = {
 #     (`"--index-commits" in args`) for daemon-delegation dispatch -- never
 #     constructs or spawns a `["cidx", ..., "--index-commits", ...]` command
 #     list itself.
-_NON_LAUNCH_SITE_EXCEPTIONS = frozenset({"cli.py", "cli_daemon_fast.py"})
+#   - cli_fast_entry.py (Bug #1417): same client-side flag PARSING pattern as
+#     cli_daemon_fast.py above -- `is_delegatable_command` checks
+#     `"--index-commits" in args` to force temporal indexing onto the
+#     standalone/full-CLI dispatch path (never daemon-delegated) so the
+#     CIDX_TEMPORAL_PG_BOOTSTRAP_DIR fail-loud wiring in cli.py's standalone
+#     branch is always exercised. Never constructs or spawns a
+#     `["cidx", ..., "--index-commits", ...]` command list itself.
+_NON_LAUNCH_SITE_EXCEPTIONS = frozenset(
+    {"cli.py", "cli_daemon_fast.py", "cli_fast_entry.py"}
+)
 
 _LITERAL = '"--index-commits"'
 _WIRING_MARKER = "build_temporal_child_env"
