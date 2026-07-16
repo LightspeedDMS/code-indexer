@@ -475,7 +475,9 @@ def test_disjoint_shard_fusion_preserves_true_score_ordering_bug_1299(tmp_path):
         ),
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch._query_shards_raw",
-            return_value=results_by_shard,
+            # Story #1400 Phase 4: _query_shards_raw now returns
+            # (results_by_shard, shards_attempted, shards_succeeded).
+            return_value=(results_by_shard, 2, 2),
         ),
     ):
         result = execute_temporal_query_with_fusion(

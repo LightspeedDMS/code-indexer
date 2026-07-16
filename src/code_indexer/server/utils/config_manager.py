@@ -266,6 +266,16 @@ class SearchLimitsConfig:
         return self.max_result_size_mb * 1024 * 1024
 
 
+# Story #1400 CRITICAL 5 (FINAL LOCKED DESIGN): reserved grace budget, in
+# seconds, that temporal_inline_wait_seconds must leave below
+# search_code_handler_timeout_seconds so the foreground handler's post-wait
+# work (snapshot read, access-filter, terminal rerank, serialization) has
+# room to finish before the outer asyncio.wait_for cap fires. Consumed by
+# both the static validate_config defense-in-depth check below and (at
+# request time) the runtime deadline-propagation mechanism.
+TEMPORAL_RESPONSE_RESERVE_SECONDS = 1.0
+
+
 @dataclass
 class SearchTimeoutsConfig:
     """
@@ -304,6 +314,18 @@ class SearchTimeoutsConfig:
     # reranker_clients.py (Voyage and Cohere reranker HTTP clients).
     # Range 5-120s.
     reranker_timeout_seconds: int = 15
+
+    # Story #1400 (CRITICAL 5, FINAL LOCKED DESIGN): async-hybrid temporal
+    # query foreground sync-wait window, in seconds. FLOAT (unlike the five
+    # integer fields above) because sub-second values (e.g. 0.001) are the
+    # documented E2E lever for deterministically forcing the async handoff
+    # path (Scenario 11). Live-consumed per-request (mirrors the
+    # _resolve_handler_timeout pattern), no #1399 machinery required.
+    # Validated: 0.0 <= value <= search_code_handler_timeout_seconds - 1.0
+    # (TEMPORAL_RESPONSE_RESERVE_SECONDS grace budget, static
+    # defense-in-depth -- the runtime deadline-propagation mechanism is the
+    # primary guard).
+    temporal_inline_wait_seconds: float = 60.0
 
 
 @dataclass
@@ -814,6 +836,15 @@ class BackgroundJobsConfig:
     # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
     # compute and allows up to 20 concurrent xray jobs without starvation.
     xray_max_concurrent_jobs: int = 20
+
+    # Story #1400 (CRITICAL 1, FINAL LOCKED DESIGN): dedicated temporal-lane
+    # worker-pool size. Temporal query jobs read from a SEPARATE queue
+    # (_temporal_pending_job_queue) served by their own fixed pool of this
+    # many worker threads -- real isolation, not a shared-queue "lane" that
+    # ordinary jobs could still consume from. RESTART-required: the lane
+    # pool is built once at BackgroundJobManager.__init__ (see
+    # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
+    temporal_lane_concurrency: int = 2
 
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
@@ -2666,6 +2697,25 @@ class ServerConfigManager:
                     "reranker_timeout_seconds must be between 5 and 120, "
                     f"got {st.reranker_timeout_seconds}"
                 )
+            # Story #1400 CRITICAL 5: grace-budget cross-field check.
+            if st.temporal_inline_wait_seconds < 0.0:
+                raise ValueError(
+                    "temporal_inline_wait_seconds must be >= 0.0, "
+                    f"got {st.temporal_inline_wait_seconds}"
+                )
+            _temporal_grace_ceiling = (
+                st.search_code_handler_timeout_seconds
+                - TEMPORAL_RESPONSE_RESERVE_SECONDS
+            )
+            if st.temporal_inline_wait_seconds > _temporal_grace_ceiling:
+                raise ValueError(
+                    "temporal_inline_wait_seconds must be <= "
+                    "search_code_handler_timeout_seconds - "
+                    f"{TEMPORAL_RESPONSE_RESERVE_SECONDS} (grace budget), "
+                    f"got {st.temporal_inline_wait_seconds} with "
+                    "search_code_handler_timeout_seconds="
+                    f"{st.search_code_handler_timeout_seconds}"
+                )
 
         # Validate golden_repos_config (Story #3 - Phase 1, AC-M5)
         if config.golden_repos_config:
@@ -2905,6 +2955,12 @@ class ServerConfigManager:
             if not (1 <= config.background_jobs_config.subprocess_max_workers <= 50):
                 raise ValueError(
                     f"subprocess_max_workers must be between 1 and 50, got {config.background_jobs_config.subprocess_max_workers}"
+                )
+            # Story #1400 CRITICAL 1: temporal_lane_concurrency range 1-32
+            if not (1 <= config.background_jobs_config.temporal_lane_concurrency <= 32):
+                raise ValueError(
+                    "temporal_lane_concurrency must be between 1 and 32, got "
+                    f"{config.background_jobs_config.temporal_lane_concurrency}"
                 )
 
         # Validate data_retention_config (Story #400)

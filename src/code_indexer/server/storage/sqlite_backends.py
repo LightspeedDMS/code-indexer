@@ -3377,7 +3377,7 @@ class BackgroundJobsSqliteBackend:
 
         return stats
 
-    def cleanup_orphaned_jobs_on_startup(self) -> int:
+    def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:
         """
         Clean up orphaned jobs on server startup.
 
@@ -3388,6 +3388,14 @@ class BackgroundJobsSqliteBackend:
         and timestamp for audit trail.
 
         Story #723: Clean Up Orphaned Jobs on Server Startup
+
+        Story #1400 CRITICAL 3: node_id is accepted for interface parity with
+        the PostgreSQL backend (which uses it to scope cleanup to THIS node's
+        jobs only in cluster mode) but is intentionally IGNORED here -- solo
+        SQLite mode is always single-process/single-node, so every
+        running/pending row in this database genuinely was orphaned by this
+        same process's restart. Node scoping only matters when a shared
+        cluster backend could see another node's still-running work.
 
         Returns:
             Number of orphaned jobs that were cleaned up.

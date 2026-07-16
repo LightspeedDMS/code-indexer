@@ -25,6 +25,18 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Story #1400 Phase 9: operation types hidden from the dashboard's recent-jobs
+# panel on BOTH the JobTracker path and the no-tracker fallback path (Bug: the
+# fallback path previously had no exclusion mechanism at all -- "mirror
+# xray_search" alone would have left it unfixed). "temporal_query" is the
+# Story #1400 async-hybrid temporal job type.
+_DASHBOARD_HIDDEN_OPERATION_TYPES = [
+    "xray_search",
+    "xray_explore",
+    "xray_search_batch",
+    "temporal_query",
+]
+
 # Period thresholds for label formatting (in seconds)
 _PERIOD_1H = 3600
 _PERIOD_24H = 86400
@@ -500,16 +512,18 @@ class DashboardService:
                 recent_jobs_data = job_tracker.get_recent_jobs(
                     limit=20,
                     time_filter=time_filter,
-                    exclude_operation_types=[
-                        "xray_search",
-                        "xray_explore",
-                        "xray_search_batch",
-                    ],
+                    exclude_operation_types=_DASHBOARD_HIDDEN_OPERATION_TYPES,
                 )
             else:
                 # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
+                # Story #1400 Phase 9: the fallback path previously passed NO
+                # exclusion kwarg at all -- "mirror xray_search" alone left
+                # this path unfixed. Same shared list as the tracker path
+                # above, so the two never drift independently.
                 recent_jobs_data = job_manager.get_recent_jobs_with_filter(
-                    time_filter=time_filter, limit=20
+                    time_filter=time_filter,
+                    limit=20,
+                    exclude_operation_types=_DASHBOARD_HIDDEN_OPERATION_TYPES,
                 )
 
             recent = []

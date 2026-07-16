@@ -146,19 +146,30 @@ class TestAC2SourceGuards:
         )
 
     def test_get_config_precedes_update_setting(self) -> None:
-        """Opus nit: get_config() must appear BEFORE update_setting() in update_config_section."""
+        """Opus nit: get_config() must appear BEFORE the mutating batch call
+        in update_config_section. Story #1400 CRITICAL 6 replaced the former
+        per-key update_setting(..., skip_validation=True) loop with a single
+        update_settings_atomic(...) call (validate-copy-then-publish); the
+        AC2 invariant is unchanged, only the call's name changed."""
         src = _ROUTES_PATH.read_text()
         fn_start = src.find("async def update_config_section(")
         assert fn_start != -1
-        fn_body = src[fn_start : fn_start + 8000]
+        # Story #1400: widened from 8000 -> 12000 chars. The atomic-batch
+        # refactor (CRITICAL 6) lengthened this function with an
+        # OIDC-specific branch, pushing update_settings_atomic(...) past the
+        # old window.
+        fn_body = src[fn_start : fn_start + 12000]
         # Find positions of relevant calls
         get_pos = fn_body.find("get_config()")
-        update_pos = fn_body.find("update_setting(")
+        update_pos = fn_body.find("update_settings_atomic(")
         assert get_pos != -1, "get_config() not found in update_config_section"
-        assert update_pos != -1, "update_setting() not found in update_config_section"
+        assert update_pos != -1, (
+            "update_settings_atomic() not found in update_config_section"
+        )
         assert get_pos < update_pos, (
             "AC2 Opus nit: get_config() (pre-change snapshot) must come BEFORE "
-            "update_setting() so we compare against the ORIGINAL persisted value"
+            "update_settings_atomic() so we compare against the ORIGINAL "
+            "persisted value"
         )
 
 

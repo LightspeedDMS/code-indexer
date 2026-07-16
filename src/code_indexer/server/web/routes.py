@@ -85,6 +85,7 @@ RESTART_REQUIRED_FIELDS = [
     "scip_multi_max_workers",  # SCIP multi-repo thread pool size (singleton init)
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
+    "temporal_lane_concurrency",  # Story #1400: temporal-lane worker pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
     "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
     "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
@@ -7499,6 +7500,19 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     return f"{label} must be a valid number"
 
+        # Story #1400 CRITICAL 5/6: the ONE float field. Basic sanity
+        # (non-negative) only -- the cross-field grace-budget relationship
+        # against search_code_handler_timeout_seconds is validated later by
+        # config_manager.validate_config against the whole candidate.
+        temporal_wait = data.get("temporal_inline_wait_seconds")
+        if temporal_wait is not None:
+            try:
+                val_float = float(temporal_wait)
+                if val_float < 0.0:
+                    return "Temporal Query Inline Sync-Wait must be >= 0.0 seconds"
+            except (ValueError, TypeError):
+                return "Temporal Query Inline Sync-Wait must be a valid number"
+
     elif section == "xray":
         # Story #977: X-Ray configuration validation
         xray_timeout = data.get("xray_timeout_seconds")
@@ -9189,7 +9203,6 @@ async def update_config_section(
         # (it is a UI-only field, not a config key).
         data.pop("confirm_host_port_change", None)
 
-        # Update all settings without validating (batch update).
         # Bug #1180: the search_event_log UI section renders two fields that
         # belong to different config categories:
         #   - search_event_log_retention_days -> category "search_event_log"
@@ -9200,16 +9213,26 @@ async def update_config_section(
         _section_key_category_overrides: dict = {}
         if section == "search_event_log":
             _section_key_category_overrides = {"export_retention_days": "export"}
-        for key, value in data.items():
-            category = _section_key_category_overrides.get(key, section)
-            config_service.update_setting(category, key, value, skip_validation=True)
+        _updates = [
+            (_section_key_category_overrides.get(key, section), key, value)
+            for key, value in data.items()
+        ]
 
-        # Validate configuration
-        config = config_service.get_config()
-        config_service.config_manager.validate_config(config)
-
-        # For OIDC: test reload BEFORE saving to file
+        # Story #1400 CRITICAL 6: the whole section is now applied as ONE
+        # atomic unit via update_settings_atomic (validate-copy-then-publish
+        # -- a rejected batch never touches the live config, no per-key
+        # partial application). OIDC is the one exception: it needs a live
+        # test-reload BEFORE anything is durably published, so it cannot use
+        # the copy-then-publish primitive (which always publishes on
+        # validation success). It keeps its pre-#1400 shape -- apply
+        # directly against the LIVE config via _apply_setting, validate,
+        # test-reload, and only THEN persist; reload-from-file on failure
+        # undoes the in-memory mutation exactly as before.
         if section == "oidc":
+            config = config_service.get_config()
+            for category, key, value in _updates:
+                config_service._apply_setting(config, category, key, value)
+            config_service.config_manager.validate_config(config)
             try:
                 # Try to reload with new config (don't save yet)
                 await _reload_oidc_configuration()
@@ -9233,9 +9256,10 @@ async def update_config_section(
                     session,
                     error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
                 )
+            config_service.save_config(config)
+        else:
+            config_service.update_settings_atomic(_updates)
 
-        # Only save to file after validation and OIDC test (if applicable)
-        config_service.save_config(config)
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},
