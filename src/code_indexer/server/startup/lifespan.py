@@ -3078,8 +3078,23 @@ def make_lifespan(
                         DistributedJobWorkerService,
                     )
 
+                    # Memory-aware admission: give the claimer the same cgroup-aware
+                    # memory watermark the per-pod pool uses, so a pressured pod
+                    # declines cross-pod refresh claims and leaves them pending.
+                    from code_indexer.server.utils.config_manager import (
+                        BackgroundJobsConfig as _BgJobsConfig,
+                    )
+
+                    _bg_jobs_config = _BgJobsConfig()
                     _job_claimer = DistributedJobClaimer(
-                        pool=_cluster_pool, node_id=_node_id
+                        pool=_cluster_pool,
+                        node_id=_node_id,
+                        memory_gate_enabled=(
+                            _bg_jobs_config.job_admission_memory_gate_enabled
+                        ),
+                        memory_max_used_pct=(
+                            _bg_jobs_config.job_admission_memory_max_used_pct
+                        ),
                     )
                     _refresh_sched = (
                         global_lifecycle_manager.refresh_scheduler
@@ -3091,6 +3106,63 @@ def make_lifespan(
                         refresh_scheduler=_refresh_sched,
                     )
                     _cluster_services.append(("dist_job_worker", _dist_worker))
+
+                    # Pod-pull work-stealing: an always-on (NOT
+                    # leader-gated) per-pod loop that claims the memory-heavy
+                    # index ops left PENDING in the shared queue and runs them by
+                    # reconstructing from the row's metadata. The claim is
+                    # memory-gated, so a pressured pod leaves rows for a pod
+                    # with headroom. Started immediately on every postgres pod;
+                    # stopped by the _cluster_services shutdown loop.
+                    from code_indexer.server.services.index_job_claim_loop import (
+                        IndexJobClaimLoop,
+                    )
+                    from code_indexer.server.app_helpers import (
+                        _execute_repository_sync,
+                    )
+                    from code_indexer.server.mcp.handlers.repos import (
+                        _provider_index_job,
+                        _provider_temporal_index_job,
+                    )
+
+                    def _pp_add_golden_repo(md):
+                        return golden_repo_manager.execute_add_golden_repo_work(**md)
+
+                    def _pp_change_branch(md):
+                        return golden_repo_manager.change_branch(
+                            md["alias"], md["target_branch"]
+                        )
+
+                    def _pp_sync_repository(md):
+                        return _execute_repository_sync(
+                            repo_id=md["repo_id"],
+                            username=md["username"],
+                            options=md.get("options") or {},
+                            activated_repo_manager=getattr(
+                                golden_repo_manager, "activated_repo_manager", None
+                            ),
+                        )
+
+                    def _pp_provider_index(md):
+                        return _provider_index_job(**md)
+
+                    def _pp_provider_temporal(md):
+                        return _provider_temporal_index_job(**md)
+
+                    _index_dispatch = {
+                        "add_golden_repo": _pp_add_golden_repo,
+                        "change_branch": _pp_change_branch,
+                        "sync_repository": _pp_sync_repository,
+                        "provider_index_add": _pp_provider_index,
+                        "provider_temporal_index_rebuild": _pp_provider_temporal,
+                    }
+                    _index_claim_loop = IndexJobClaimLoop(
+                        claimer=_job_claimer,
+                        dispatch=_index_dispatch,
+                        node_id=_node_id,
+                    )
+                    _index_claim_loop.start()
+                    _cluster_services.append(("index_claim_loop", _index_claim_loop))
 
                     # Story #538: Enable PG advisory locks for password changes
                     from code_indexer.server.auth.concurrency_protection import (
@@ -4300,7 +4372,9 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except (
+                Exception
+            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",

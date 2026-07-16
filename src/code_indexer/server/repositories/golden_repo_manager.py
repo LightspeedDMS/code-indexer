@@ -21,7 +21,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, cast
+from typing import Callable, Dict, List, Optional, Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.models.golden_repo_branch_models import (
@@ -480,6 +480,59 @@ class GoldenRepoManager:
                     f"Invalid or inaccessible git repository: {repo_url}"
                 )
 
+        # Pod-pull: the real clone+index+register+activate work now
+        # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
+        # can run it from the job row's metadata. This thin wrapper preserves the
+        # exact solo/local-pool path.
+        def background_worker(progress_callback=None) -> Dict[str, Any]:
+            return self.execute_add_golden_repo_work(
+                repo_url=repo_url,
+                alias=alias,
+                default_branch=default_branch,
+                enable_temporal=enable_temporal,
+                temporal_options=temporal_options,
+                submitter_username=submitter_username,
+                progress_callback=progress_callback,
+            )
+
+        # Submit to BackgroundJobManager. Pod-pull: pass reconstruction params
+        # as metadata so in cluster mode the row is left PENDING and claimable +
+        # runnable on any pod (pod-pull); solo mode runs background_worker locally.
+        job_id = self.background_job_manager.submit_job(
+            operation_type="add_golden_repo",
+            func=background_worker,
+            submitter_username=submitter_username,
+            is_admin=True,
+            repo_alias=alias,  # AC5: Fix unknown repo bug
+            metadata={
+                "repo_url": repo_url,
+                "alias": alias,
+                "default_branch": default_branch,
+                "enable_temporal": enable_temporal,
+                "temporal_options": temporal_options,
+                "submitter_username": submitter_username,
+            },
+        )
+        return cast(str, job_id)
+
+    def execute_add_golden_repo_work(
+        self,
+        *,
+        repo_url: str,
+        alias: str,
+        default_branch: Optional[str] = None,
+        enable_temporal: bool = False,
+        temporal_options: Optional[Dict] = None,
+        submitter_username: str = "admin",
+        progress_callback: Optional[Callable[..., Any]] = None,
+    ) -> Dict[str, Any]:
+        """reusable clone + index + register + global-activate body for
+        add_golden_repo, extracted verbatim from the former background_worker
+        closure so a pod-pull IndexJobClaimLoop can execute it on any pod from the
+        job row's metadata. Retry-safe: a partial clone is cleaned up on failure
+        and a duplicate alias is rejected up front by the caller.
+        """
+
         def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
             """Remove a partially-cloned directory so retries don't fail with
             'destination path already exists' (Bug #1218 orphan-clone cleanup).
@@ -512,7 +565,7 @@ class GoldenRepoManager:
 
         # Create wrapper for background execution that accepts progress_callback
         # so BackgroundJobManager can inject it (Story #482 PATH A).
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        def _run() -> Dict[str, Any]:
             """Execute add operation in background thread."""
             nonlocal default_branch
             # Bug #1218: track clone_path so we can clean it up on failure.
@@ -742,15 +795,7 @@ class GoldenRepoManager:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise
 
-        # Submit to BackgroundJobManager
-        job_id = self.background_job_manager.submit_job(
-            operation_type="add_golden_repo",
-            func=background_worker,
-            submitter_username=submitter_username,
-            is_admin=True,
-            repo_alias=alias,  # AC5: Fix unknown repo bug
-        )
-        return cast(str, job_id)
+        return _run()
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
@@ -3315,6 +3360,9 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias,
+            # Pod-pull: the executor is the bound change_branch method
+            # reconstructed from these params on whichever pod claims the row.
+            metadata={"alias": alias, "target_branch": target_branch},
         )
         return {"success": True, "job_id": job_id}
 

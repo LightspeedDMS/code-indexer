@@ -318,6 +318,9 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             func=sync_job_wrapper,
             submitter_username=user.username,
             repo_alias=repo_id,
+            # Pod-pull: reconstruction params for
+            # _execute_repository_sync on whichever pod claims the row.
+            metadata={"repo_id": repo_id, "username": user.username, "options": {}},
         )
         return _mcp_response(
             {
@@ -2396,6 +2399,12 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
                 repo_path=repo_path,
                 provider_name=provider_name,
                 clear=False,
+                # Pod-pull: reconstruction params for _provider_index_job.
+                metadata={
+                    "repo_path": repo_path,
+                    "provider_name": provider_name,
+                    "clear": False,
+                },
             )
             job_ids.append({"alias": alias, "job_id": job_id})
 

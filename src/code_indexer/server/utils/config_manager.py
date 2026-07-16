@@ -163,7 +163,9 @@ class ServerResourceConfig:
     git_untracked_file_timeout: int = 60  # 1 minute for untracked file check
 
     # Refresh scheduler timeouts (in seconds)
-    cow_clone_timeout: int = 3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
+    cow_clone_timeout: int = (
+        3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
+    )
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
@@ -854,6 +856,22 @@ class BackgroundJobsConfig:
     # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
     temporal_lane_concurrency: int = 2
 
+    # Memory-aware admission for heavy index jobs.
+    # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
+    # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
+    # can exceed the process/cgroup memory limit and OOM the server. When the
+    # gate is enabled, a worker consults the cgroup-aware MemoryGovernor before
+    # starting a memory-heavy op and, if under pressure, re-queues the job (it
+    # stays PENDING) and backs off — jobs wait instead of OOMing. The watermark
+    # is a percentage of the process's OWN cgroup limit, so it self-tunes to any
+    # memory.max without per-deployment tuning.
+    job_admission_memory_gate_enabled: bool = True
+    # Admit a heavy job only while cgroup used% is below this (below the
+    # governor's 85% RED/eviction line, leaving headroom for the job's growth).
+    job_admission_memory_max_used_pct: float = 80.0
+    # Seconds a worker waits after declining to admit before re-checking.
+    job_admission_backoff_seconds: float = 2.0
+
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
             self.max_concurrent_refresh_jobs = max(
@@ -1463,8 +1481,12 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+    enable_malloc_trim: bool = (
+        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    )
+    enable_malloc_arena_max: bool = (
+        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+    )
 
     # Story #1032 AC6 - Pre-deactivation leak scan (bootstrap-only, never DB).
     # Default False: _detect_resource_leaks is post-failure-only diagnostic.
@@ -2090,13 +2112,13 @@ class ServerConfigManager:
             if "scip_config" not in config_dict:
                 config_dict["scip_config"] = {}
             if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"]["scip_workspace_retention_days"] = (
+                config_dict["scip_config"][
+                    "scip_workspace_retention_days"
+                ] = retention_days
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict["scip_config"].scip_workspace_retention_days = (
                     retention_days
                 )
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict[
-                    "scip_config"
-                ].scip_workspace_retention_days = retention_days
 
         # Story #15 AC2: Final conversion of scip_config after migration
         # This handles the case where scip_config was created by migration above

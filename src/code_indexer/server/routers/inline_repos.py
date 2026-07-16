@@ -939,6 +939,15 @@ def register_repo_routes(
                 sync_job_wrapper,
                 submitter_username=current_user.username,
                 repo_alias=cleaned_repo_id,  # AC5: Fix unknown repo bug
+                # Pod-pull: reconstruction params for
+                # _execute_repository_sync. options carries the (optional)
+                # progress_webhook; a work-stolen sync completes without pushing
+                # incremental webhook progress (progress_callback rebuilt as None).
+                metadata={
+                    "repo_id": cleaned_repo_id,
+                    "username": current_user.username,
+                    "options": sync_options,
+                },
             )
 
             # Return job details
