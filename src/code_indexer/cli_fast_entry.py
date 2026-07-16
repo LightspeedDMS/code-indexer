@@ -55,7 +55,7 @@ def is_delegatable_command(command: str, args: list) -> bool:
 
     Commands that can be delegated:
     - query: Semantic/FTS search (EXCEPT temporal queries with --time-range)
-    - index: Indexing operations
+    - index: Indexing operations (EXCEPT temporal --index-commits)
     - watch: Watch mode
     - clean/clean-data: Cleanup operations
     - start/stop: Daemon lifecycle
@@ -69,6 +69,15 @@ def is_delegatable_command(command: str, args: list) -> bool:
     - sync: Remote operations
     - list-repos: Server operations
     - query --time-range: Temporal queries (daemon doesn't support this yet)
+    - index --index-commits: Temporal git-history indexing (Bug #1417 -- the
+      CIDX_TEMPORAL_PG_BOOTSTRAP_DIR fail-loud wiring for unreachable
+      cluster-mode PostgreSQL, Bug #1313, lives EXCLUSIVELY in cli.py's
+      standalone `index()` branch. cli_daemon_fast.execute_via_daemon has no
+      knowledge of that contract, so daemon-delegating --index-commits would
+      silently skip the fail-loud check -- a silent SQLite fallback that
+      violates Messi Rule #2 (anti-fallback). This mirrors the pre-existing
+      code comment in cli.py's index() command documenting the same
+      invariant.)
 
     Args:
         command: Command name (first argument after 'cidx')
@@ -91,6 +100,10 @@ def is_delegatable_command(command: str, args: list) -> bool:
 
     # Special case: query with --time-range or --time-range-all cannot be delegated (temporal queries)
     if command == "query" and ("--time-range" in args or "--time-range-all" in args):
+        return False
+
+    # Bug #1417: index --index-commits cannot be delegated (see docstring above)
+    if command == "index" and "--index-commits" in args:
         return False
 
     return command in delegatable

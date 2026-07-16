@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.58.0] - 2026-07-16
+
+### Added
+
+- **#1400**: async-hybrid temporal query execution and cluster-aware retrieval. Temporal queries now run through a dedicated dual-lane BGM path with cooperative cancellation, node-scoped orphan cleanup (a node restart no longer fails another node's running jobs), an honest no-resubmit poll contract, static+dynamic deadline budgeting (including terminal rerank), and atomic config updates. `search_code` (MCP) and `POST /api/query` (REST) route temporal queries through the new live async path; `poll_search_job` and `GET /api/query/result/{job_id}` expose real, registered poll endpoints. Job coordination and results flow through JobTracker/PayloadCache (PostgreSQL-backed in cluster mode) rather than per-node RAM.
+
+### Fixed
+
+- **#1415**: HNSW finalize integrity check hard-crashed all indexing with `AttributeError` when the deployed hnswlib was the stock PyPI build instead of the `LightspeedDMS/hnswlib` fork -- caused a real production outage across ~12 golden repos. Reversed Bug #1392's fail-loud design to graceful degrade: missing fork capability now logs a WARNING and skips the optional orphan-repair hardening pass instead of aborting indexing; already-computed embeddings are still persisted and the index remains valid and queryable. Health surfaces the degraded state via a distinct `hnswlib_capability_available` field without spoofing the zero-tolerance `orphan_count` binary.
+- **#1417**: `cidx index --index-commits` silently succeeded (exit 0) instead of failing loud when the PG bootstrap DSN was unreachable, because it was misrouted through the daemon-delegation fast path which has no knowledge of the Bug #1313 fail-loud wiring. Added a `--index-commits` carve-out so temporal indexing always takes the standalone path where the PG-unreachable check runs.
+- **#1419**: `ActivatedRepoIndexManager`'s FTS/semantic indexing error messages silently dropped the "run cidx init" guidance on an uninitialized repo, because the wrapped subprocess error string came back empty. Added an explicit `.code-indexer/config.json` existence check that fast-fails with actionable guidance before the subprocess is ever spawned.
+
 ## [11.57.0] - 2026-07-15
 
 ### Fixed

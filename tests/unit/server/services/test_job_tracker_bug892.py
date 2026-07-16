@@ -149,6 +149,11 @@ def tracker_with_backend(tmp_path: Path):
     jt._lock = threading.Lock()
     jt._backend = be
     jt._conn_manager = None
+    # Story #1400 CRITICAL 3: __new__ bypasses __init__, so the node_id
+    # field it now sets must be stamped manually here too. These bug-892
+    # tests exercise progress_info serialization, not node scoping -- None
+    # is the correct default (matches JobTracker(db_path) with no node_id).
+    jt._node_id = None
     return jt
 
 

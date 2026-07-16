@@ -20,6 +20,7 @@ from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
 import functools
+import time
 import uuid
 import json
 import logging
@@ -276,6 +277,17 @@ async def _invoke_handler(
     if is_async:
         return await handler(arguments, user, **extra_kwargs)
     else:
+        # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
+        # branch enforces an outer asyncio.wait_for timeout (the async
+        # branch has none, per the documented sync/async distinction), so
+        # only here is there a meaningful deadline to compute. A handler
+        # that declares handler_deadline_monotonic can use it to bound its
+        # own internal work (e.g. the temporal foreground waiter) so it
+        # always returns before THIS timeout fires with no job_id.
+        if "handler_deadline_monotonic" in sig.parameters:
+            extra_kwargs["handler_deadline_monotonic"] = (
+                time.monotonic() + timeout_seconds
+            )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, arguments, user, **extra_kwargs)
         try:

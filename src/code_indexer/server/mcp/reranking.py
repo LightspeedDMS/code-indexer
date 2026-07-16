@@ -128,6 +128,7 @@ def _attempt_provider_rerank(
     top_k: int,
     monitor: ProviderHealthMonitor,
     timeout_seconds: float = 15.0,
+    deadline_monotonic: Optional[float] = None,
 ) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str]]:
     """Try one reranker provider; return (scored_pairs, failure_reason).
 
@@ -138,10 +139,19 @@ def _attempt_provider_rerank(
         timeout_seconds: HTTP request timeout passed to client_cls (Issue
             #1398). Defaults to 15.0 (pre-#1398 hardcoded value) so direct
             callers that don't pass it keep the old behavior.
+        deadline_monotonic: Story #1400 CRITICAL 5 dynamic half. When set,
+            the attempt is skipped entirely if the deadline has already
+            passed (remaining <= 0); otherwise the client HTTP timeout is
+            capped to min(timeout_seconds, remaining) and
+            execute_with_backoff's cumulative 429-retry sleep budget is
+            capped to remaining. None (default) leaves timeout_seconds and
+            the backoff module's own default cumulative_cap untouched —
+            byte-identical to every pre-#1400 caller.
 
     Returns:
         (scored_pairs, None)  — success
-        (None, "skipped")     — provider health=down, not attempted
+        (None, "skipped")     — provider health=down, not attempted, or
+            deadline already passed before this attempt could start
         (None, "failed")      — provider raised an exception
     """
     health = monitor.get_health(health_key)
@@ -150,6 +160,20 @@ def _attempt_provider_rerank(
         return None, "skipped"
     if monitor.is_sinbinned(health_key):
         return None, "skipped"
+
+    effective_timeout = timeout_seconds
+    backoff_kwargs: Dict[str, float] = {}
+    if deadline_monotonic is not None:
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            logger.info(
+                "%s reranker skipped: response deadline already passed",
+                provider_name.capitalize(),
+            )
+            return None, "skipped"
+        effective_timeout = min(timeout_seconds, remaining)
+        backoff_kwargs["cumulative_cap"] = remaining
+
     try:
         from code_indexer.server.services.search_service import _get_http_client_factory
         from code_indexer.server.services.provider_concurrency_governor import (
@@ -170,7 +194,7 @@ def _attempt_provider_rerank(
             _factory = None
         from code_indexer.services.provider_backoff import execute_with_backoff
 
-        client = client_cls(timeout=timeout_seconds, http_client_factory=_factory)
+        client = client_cls(timeout=effective_timeout, http_client_factory=_factory)
         # Bug #1078: gate the HTTP call through the concurrency governor AND wrap
         # with execute_with_backoff so 429 sleeps happen OUTSIDE the held slot.
         _budget = _RERANKER_BUDGET.get(client_cls, "voyage:rerank")
@@ -185,7 +209,8 @@ def _attempt_provider_rerank(
                     top_k=top_k,
                 ),
                 acquire_timeout=_GOVERNOR_ACQUIRE_TIMEOUT_SECS,
-            )
+            ),
+            **backoff_kwargs,
         )
         return [(r.index, r.relevance_score) for r in rerank_results], None
     except RerankerSinbinnedException:
@@ -204,6 +229,7 @@ def _run_provider_chain(
     instruction: Optional[str],
     top_k: int,
     timeout_seconds: float = 15.0,
+    deadline_monotonic: Optional[float] = None,
 ) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str], Optional[str], int]:
     """Run Voyage->Cohere chain; return (scored_pairs, provider_name, failure_reason, elapsed_ms).
 
@@ -214,6 +240,11 @@ def _run_provider_chain(
         timeout_seconds: HTTP request timeout threaded to each provider's
             client construction (Issue #1398). Defaults to 15.0 (pre-#1398
             hardcoded value).
+        deadline_monotonic: Story #1400 CRITICAL 5 dynamic half. Threaded
+            into every _attempt_provider_rerank call -- each provider hop
+            independently skips itself once the deadline has passed
+            (covers both the first and any subsequent hop). None (default)
+            preserves pre-#1400 behavior exactly.
 
     Measures total chain elapsed time from first provider attempt to last.
     failure_reason is the worst-case reason across all providers:
@@ -240,6 +271,7 @@ def _run_provider_chain(
             top_k,
             monitor,
             timeout_seconds=timeout_seconds,
+            deadline_monotonic=deadline_monotonic,
         )
         if scored_pairs is not None:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
@@ -258,10 +290,18 @@ def _apply_reranking_sync(
     content_extractor: Callable[[dict], str],
     requested_limit: int,
     config_service: Any,
+    deadline_monotonic: Optional[float] = None,
 ) -> Tuple[List[dict], dict]:  # noqa: E501
     """Apply reranking; return (results, rerank_metadata). No-op when rerank_query absent.
 
     rerank_metadata contains legacy Story #654 fields plus 'reranker_status' (AC4).
+
+    Args:
+        deadline_monotonic: Story #1400 CRITICAL 5 dynamic half. Threaded
+            through to _run_provider_chain -- caps each provider's HTTP
+            timeout and the 429-retry backoff sleep budget by remaining
+            time, and skips a provider hop entirely once the deadline has
+            passed. None (default) preserves pre-#1400 behavior exactly.
     """
     safe_limit = max(0, requested_limit)
     if not rerank_query:
@@ -304,6 +344,7 @@ def _apply_reranking_sync(
         rerank_instruction,
         top_k,
         timeout_seconds=timeout_seconds,
+        deadline_monotonic=deadline_monotonic,
     )
     if reranked_pairs is None:
         logger.warning(
@@ -502,3 +543,26 @@ def _tagged_content_extractor(item: dict) -> str:
             return ""
         return f"{title}: {summary}" if title and summary else (title or summary)
     return str(item.get("content", "") or item.get("code_snippet", ""))
+
+
+def derive_unranked(rerank_metadata: dict) -> bool:
+    """Story #1400 Phase 5: derive the response envelope's `unranked` flag
+    from the reranker's ACTUAL outcome, never from mere presence of
+    rerank_query in context. The reranker can no-op when no providers are
+    configured, or fail/skip every provider -- in both cases a naive
+    "rerank_query was present" check would report unranked=False on an
+    outcome that never actually reordered anything.
+
+    Args:
+        rerank_metadata: the dict returned by _apply_reranking_sync,
+            containing a nested "reranker_status": {"status": ...} dict
+            with status in {"success", "failed", "skipped", "disabled"}.
+            A metadata dict with no "reranker_status" key at all (rerank
+            never attempted) is also treated as unranked.
+
+    Returns:
+        False only when reranker_status.status == "success"; True
+        otherwise.
+    """
+    status = rerank_metadata.get("reranker_status", {}).get("status")
+    return bool(status != "success")

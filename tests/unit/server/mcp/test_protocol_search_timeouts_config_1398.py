@@ -52,6 +52,14 @@ class TestResolveHandlerTimeoutReflectsLiveConfig:
     def test_search_code_timeout_reflects_configured_value(
         self, isolated_config_service
     ) -> None:
+        # Story #1400 CRITICAL 5: temporal_inline_wait_seconds must leave a
+        # >=1s grace below search_code_handler_timeout_seconds. The default
+        # temporal_inline_wait_seconds (60.0) is incompatible with 35, so
+        # lower it first -- this is the new, intended cross-field invariant,
+        # not a workaround.
+        isolated_config_service.update_setting(
+            "search_timeouts", "temporal_inline_wait_seconds", 5.0
+        )
         isolated_config_service.update_setting(
             "search_timeouts", "search_code_handler_timeout_seconds", 35
         )

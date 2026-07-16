@@ -8520,6 +8520,16 @@ def health(output_json: bool, quiet: bool, index_path: Optional[str]):
         if result.orphan_count is not None:
             console.print(f"  Orphan Count: {result.orphan_count}")
 
+    # Bug #1415: degraded-capability signal, SEPARATE from the zero-tolerance
+    # orphan_count binary above -- only shown when actually evaluated
+    # (Level 4 reached) and found missing.
+    if result.hnswlib_capability_available is False:
+        console.print()
+        console.print(
+            "hnswlib fork capability: unavailable (degraded, orphan repair skipped)",
+            style="bold yellow",
+        )
+
     # Errors (if any)
     if result.errors:
         console.print()

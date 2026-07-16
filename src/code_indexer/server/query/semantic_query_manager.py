@@ -165,6 +165,100 @@ class QueryMetadata:
         return result
 
 
+def reconstruct_temporal_backend(
+    repo_path: Path,
+    repository_alias: str,
+    shard_ownership: Optional[Any] = None,
+) -> Tuple[Any, Path, Any]:
+    """Reconstruct (config, index_path, vector_store) for a temporal query.
+
+    Story #1400 Phase 3: extracted from _execute_temporal_query's inline
+    block so BOTH the inline (synchronous) temporal path AND a future
+    standalone temporal worker (which has no SemanticQueryManager instance
+    to call methods on) reconstruct the identical backend from just a
+    repo_path + repository_alias -- one reconstruction path, not two.
+
+    Args:
+        repo_path: Repository path.
+        repository_alias: Repository alias (used for cluster-sharding cache
+            ownership decisions).
+        shard_ownership: Optional ShardOwnership instance (mirrors
+            SemanticQueryManager._owns_for_cache's None-safe fail-open
+            semantics: None means sharding is off / no ownership info, so
+            the shared cache is always used).
+
+    Returns:
+        (config, index_path, vector_store) tuple.
+
+    Raises:
+        ValueError: if repo_path or repository_alias is missing/empty.
+    """
+    if repo_path is None or str(repo_path) == "":
+        raise ValueError("reconstruct_temporal_backend: repo_path is required")
+    if not repository_alias:
+        raise ValueError("reconstruct_temporal_backend: repository_alias is required")
+
+    from ...proxy.config_manager import ConfigManager
+    from ...backends.backend_factory import BackendFactory
+
+    config_manager = ConfigManager.create_with_backtrack(repo_path)
+    config = config_manager.get_config()
+
+    # Create vector store (Story #526: pass server cache)
+    from ..app import _server_hnsw_cache
+    from ..services.memory_governor import get_memory_governor
+
+    owns_for_cache = shard_ownership is None or shard_ownership.owns(repository_alias)
+    backend = BackendFactory.create(
+        config=config,
+        project_root=repo_path,
+        # Cluster sharding: only populate this pod's shared index cache for
+        # repos it owns; non-owned repos load-and-discard (fail-open).
+        hnsw_cache=(_server_hnsw_cache if owns_for_cache else None),
+        memory_governor=get_memory_governor(),
+    )
+    vector_store = backend.get_vector_store_client()
+    index_path = repo_path / ".code-indexer" / "index"
+    return config, index_path, vector_store
+
+
+def convert_temporal_result_to_query_result(
+    temporal_result: Any, repository_alias: str
+) -> "QueryResult":
+    """Convert one TemporalSearchResult into a QueryResult (Story #503
+    MCP/REST parity fields). Extracted from _execute_temporal_query's
+    inline conversion loop (Story #1400 Phase 3/8) so the standalone
+    temporal worker reuses the EXACT SAME conversion, not a second
+    reimplementation.
+    """
+    result_metadata = {
+        "commit_hash": temporal_result.metadata.get("commit_hash"),
+        "commit_date": temporal_result.metadata.get("commit_date"),
+        "author_name": temporal_result.metadata.get("author_name"),
+        "author_email": temporal_result.metadata.get("author_email"),
+        "commit_message": temporal_result.metadata.get("commit_message"),
+        "diff_type": temporal_result.metadata.get("diff_type"),
+    }
+    temporal_context = {
+        "commit_hash": temporal_result.temporal_context.get("commit_hash"),
+        "commit_date": temporal_result.temporal_context.get("commit_date"),
+        "commit_message": temporal_result.temporal_context.get("commit_message"),
+        "author_name": temporal_result.temporal_context.get("author_name"),
+        "commit_timestamp": temporal_result.temporal_context.get("commit_timestamp"),
+        "diff_type": temporal_result.temporal_context.get("diff_type"),
+    }
+    return QueryResult(
+        file_path=temporal_result.file_path,
+        line_number=1,  # Temporal results don't have line numbers
+        code_snippet=temporal_result.content,
+        similarity_score=temporal_result.score,
+        repository_alias=repository_alias,
+        source_repo=None,
+        metadata=result_metadata,
+        temporal_context=temporal_context,
+    )
+
+
 class SemanticQueryManager:
     """
     Manages semantic queries for CIDX server users.
@@ -2250,8 +2344,6 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects with temporal context
         """
-        from ...proxy.config_manager import ConfigManager
-        from ...backends.backend_factory import BackendFactory
         from ...services.temporal.temporal_fusion_dispatch import (
             execute_temporal_query_with_fusion,
         )
@@ -2261,29 +2353,14 @@ class SemanticQueryManager:
         )
 
         try:
-            # Load repository configuration
-            config_manager = ConfigManager.create_with_backtrack(repo_path)
-            config = config_manager.get_config()
-
-            # Create vector store (Story #526: pass server cache)
-            from ..app import _server_hnsw_cache
-
-            from ..services.memory_governor import get_memory_governor
-
-            backend = BackendFactory.create(
-                config=config,
-                project_root=repo_path,
-                # Cluster sharding: only populate this pod's shared index cache for
-                # repos it owns; non-owned repos load-and-discard (fail-open).
-                hnsw_cache=(
-                    _server_hnsw_cache
-                    if self._owns_for_cache(repository_alias)
-                    else None
-                ),
-                memory_governor=get_memory_governor(),
+            # Story #1400 Phase 3: shared reconstruction helper -- the SAME
+            # path a future standalone temporal worker will use, not a
+            # duplicate inline block.
+            config, index_path, vector_store = reconstruct_temporal_backend(
+                repo_path,
+                repository_alias,
+                shard_ownership=getattr(self, "_shard_ownership", None),
             )
-            vector_store = backend.get_vector_store_client()
-            index_path = repo_path / ".code-indexer" / "index"
 
             # Resolve time range tuple before calling fusion dispatch
             if time_range:
@@ -2346,49 +2423,14 @@ class SemanticQueryManager:
                     _temporal_warning_out.append(temporal_results.warning)
                 return []
 
-            # Convert temporal results to QueryResult objects
-            query_results = []
-            for temporal_result in temporal_results.results:
-                # Extract individual result metadata (Story #503 - MCP/REST parity)
-                # Contains commit-level info for each result
-                result_metadata = {
-                    "commit_hash": temporal_result.metadata.get("commit_hash"),
-                    "commit_date": temporal_result.metadata.get("commit_date"),
-                    "author_name": temporal_result.metadata.get("author_name"),
-                    "author_email": temporal_result.metadata.get("author_email"),
-                    "commit_message": temporal_result.metadata.get("commit_message"),
-                    "diff_type": temporal_result.metadata.get("diff_type"),
-                }
-
-                # Build temporal context (Acceptance Criterion 7)
-                # Contains diff-based commit fields produced by TemporalSearchService
-                temporal_context = {
-                    "commit_hash": temporal_result.temporal_context.get("commit_hash"),
-                    "commit_date": temporal_result.temporal_context.get("commit_date"),
-                    "commit_message": temporal_result.temporal_context.get(
-                        "commit_message"
-                    ),
-                    "author_name": temporal_result.temporal_context.get("author_name"),
-                    "commit_timestamp": temporal_result.temporal_context.get(
-                        "commit_timestamp"
-                    ),
-                    "diff_type": temporal_result.temporal_context.get("diff_type"),
-                }
-
-                # Create QueryResult with both metadata and temporal_context
-                # (Story #503 - MCP/REST API parity with CLI)
-                query_result = QueryResult(
-                    file_path=temporal_result.file_path,
-                    line_number=1,  # Temporal results don't have line numbers
-                    code_snippet=temporal_result.content,
-                    similarity_score=temporal_result.score,
-                    repository_alias=repository_alias,
-                    source_repo=None,
-                    metadata=result_metadata,
-                    temporal_context=temporal_context,
+            # Convert temporal results to QueryResult objects (Story #1400
+            # Phase 3/8: shared conversion, reused by the standalone worker).
+            query_results = [
+                convert_temporal_result_to_query_result(
+                    temporal_result, repository_alias
                 )
-
-                query_results.append(query_result)
+                for temporal_result in temporal_results.results
+            ]
 
             return query_results
 

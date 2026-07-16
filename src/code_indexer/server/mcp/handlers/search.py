@@ -32,8 +32,17 @@ if TYPE_CHECKING:
     )
 from pathlib import Path
 
-from code_indexer.server.auth.user_manager import User
+from code_indexer.server.auth.user_manager import User, UserRole
 from . import _utils
+from code_indexer.server.services.temporal_snapshot_store import (
+    read_temporal_snapshot,
+)
+from code_indexer.server.services.temporal_poll_job_status import (
+    poll_temporal_job_status,
+)
+from code_indexer.server.services.temporal_live_dispatch import (
+    execute_live_temporal_search,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
@@ -1222,7 +1231,184 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     return _mcp_response({"success": True, "results": result})
 
 
-def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _resolve_temporal_repo_path(
+    repository_alias: str, user: User
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Resolve repo_path for a temporal query -- activated vs global,
+    reusing the SAME resolution helpers the rest of search_code already
+    uses (never reinventing alias resolution, per the locked design).
+
+    Returns (repo_path, None) on success, (None, error_envelope) on failure.
+    """
+    if repository_alias.endswith("-global"):
+        _repo_entry, target_path, err = _resolve_global_repo_target(
+            repository_alias, user
+        )
+        if err is not None:
+            return None, err
+        return str(target_path), None
+
+    _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+    if _arm is None:
+        return None, _mcp_response(
+            {
+                "success": False,
+                "error": "Repository service not available",
+                "results": [],
+            }
+        )
+    try:
+        repo_path = _arm.get_activated_repo_path(user.username, repository_alias)
+    except Exception as exc:
+        return None, _mcp_response({"success": False, "error": str(exc), "results": []})
+    return str(repo_path), None
+
+
+def _execute_temporal_via_live_dispatch(
+    params: Dict[str, Any],
+    user: User,
+    repository_alias: Any,
+    handler_deadline_monotonic: Optional[float],
+) -> Dict[str, Any]:
+    """Story #1400: the live async-hybrid temporal dispatch entry point.
+
+    Replaces the old fully-synchronous _execute_temporal_query call for the
+    temporal branch. Builds TemporalWorkerInput, resolves repo_path,
+    computes fusion_fetch_limit via the shared
+    compute_temporal_fusion_fetch_limit() (temporal_fusion_limit.py --
+    MCP's access-filter-aware formula, now the single implementation both
+    doors call), and calls execute_live_temporal_search. Maps the result
+    to either the standard unchanged success envelope (Scenario 1: fast
+    completion, no job_id/status/partial_results fields) or the
+    async-handoff failure envelope (Scenario 2/3: job_id + partial_results
+    + continue_polling=True -- a dumb client sees only success=False with
+    an error string, indistinguishable in effect from a plain timeout).
+    """
+    import dataclasses
+
+    from code_indexer.services.temporal.temporal_worker_input_adapters import (
+        TemporalAliasRejectedError,
+        build_temporal_worker_input_from_mcp_dict,
+    )
+    from code_indexer.services.temporal.temporal_fusion_limit import (
+        compute_temporal_fusion_fetch_limit,
+    )
+    from code_indexer.server.utils.config_manager import (
+        TEMPORAL_RESPONSE_RESERVE_SECONDS,
+    )
+
+    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    fusion_fetch_limit = compute_temporal_fusion_fetch_limit(
+        requested_limit=requested_limit,
+        rerank_query=params.get("rerank_query"),
+        access_filtering_service=_get_access_filtering_service(),
+        username=user.username,
+        config_service=get_config_service(),
+    )
+
+    try:
+        worker_input = build_temporal_worker_input_from_mcp_dict(
+            {**params, "repository_alias": repository_alias},
+            user.username,
+            fusion_fetch_limit,
+        )
+    except TemporalAliasRejectedError as exc:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": str(exc),
+                "error_code": exc.error_code,
+                "results": [],
+            }
+        )
+
+    repo_path, err = _resolve_temporal_repo_path(worker_input.repository_alias, user)
+    if err is not None:
+        return err
+    worker_input = dataclasses.replace(worker_input, repo_path=repo_path)
+
+    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    _app_state = getattr(_utils.app_module.app, "state", None)
+    payload_cache = getattr(_app_state, "payload_cache", None) if _app_state else None
+    if bjm is None or payload_cache is None:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Background job/payload cache service not available",
+                "results": [],
+            }
+        )
+
+    config_service = get_config_service()
+    inline_wait_seconds = (
+        config_service.get_config().search_timeouts_config.temporal_inline_wait_seconds
+    )
+    is_admin = hasattr(user, "role") and user.role == UserRole.ADMIN
+
+    dispatch_result = execute_live_temporal_search(
+        worker_input=worker_input,
+        background_job_manager=bjm,
+        payload_cache=payload_cache,
+        access_filtering_service=_get_access_filtering_service(),
+        is_admin=is_admin,
+        inline_wait_seconds=inline_wait_seconds,
+        handler_deadline_monotonic=handler_deadline_monotonic,
+        response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
+        config_service=config_service,
+    )
+
+    status = dispatch_result.get("status")
+    if status == "completed":
+        results = dispatch_result.get("results", [])
+        return _mcp_response(
+            {
+                "success": True,
+                "results": {
+                    "results": results,
+                    "total_results": len(results),
+                    "query_metadata": {
+                        "query_text": params.get("query_text", ""),
+                    },
+                },
+            }
+        )
+
+    if status == "waiting":
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Temporal query exceeded the {inline_wait_seconds}s "
+                    "inline wait window; continuing in the background."
+                ),
+                "error_code": "TEMPORAL_QUERY_DEFERRED",
+                "job_id": dispatch_result["job_id"],
+                "results": dispatch_result.get("partial_results", []),
+                "partial_results": dispatch_result.get("partial_results", []),
+                "continue_polling": True,
+                "unranked": True,
+                "shards_completed": dispatch_result.get("shards_completed"),
+                "shards_total": dispatch_result.get("shards_total"),
+            }
+        )
+
+    # failed / not_found / capacity_exhausted
+    return _mcp_response(
+        {
+            "success": False,
+            "error": dispatch_result.get("error", "Temporal query failed"),
+            "error_code": dispatch_result.get("error_code"),
+            "job_id": dispatch_result.get("job_id"),
+            "results": [],
+        }
+    )
+
+
+def search_code(
+    params: Dict[str, Any],
+    user: User,
+    handler_deadline_monotonic: Optional[float] = None,
+) -> Dict[str, Any]:
     """Search code using semantic search, FTS, or hybrid mode.
 
     Routes to the appropriate handler based on repository_alias type:
@@ -1306,6 +1492,19 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         )
                         params["repository_alias"] = _promoted
                         repository_alias = _promoted
+
+        # Story #1400: async-hybrid temporal query execution. Intercept
+        # AFTER the Story #1039 alias promotion above (so a bare alias that
+        # was promoted to its -global form is what temporal sees) but
+        # BEFORE the wildcard/list routing below -- temporal queries bypass
+        # the old fully-synchronous _execute_temporal_query path entirely
+        # via the async-hybrid worker/dedup/poll machinery. Alias
+        # validation (missing/list-typed) is handled inside the dispatch
+        # function itself via the shared adapter.
+        if _is_temporal_query(params):
+            return _execute_temporal_via_live_dispatch(
+                params, user, repository_alias, handler_deadline_monotonic
+            )
 
         # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
         # omni/expansion path, not to _search_activated_repo. Wrap the single wildcard
@@ -1794,8 +1993,52 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
+def handle_poll_search_job(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for poll_search_job tool (Story #1400 Phase 8).
+
+    Non-blocking check for an async-hybrid temporal query job. Thin reader
+    around poll_temporal_job_status: ownership/authorization is via
+    background_job_manager.get_job_status(job_id, username, is_admin)
+    (returns None for BOTH not-found AND unauthorized, by design -- this
+    handler cannot and must not try to distinguish them).
+    """
+    job_id = args.get("job_id")
+    if not job_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: job_id"}
+        )
+
+    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    if bjm is None:
+        return _mcp_response(
+            {"success": False, "error": "Background job service not available"}
+        )
+
+    is_admin = hasattr(user, "role") and user.role == UserRole.ADMIN
+    job_status = bjm.get_job_status(job_id, user.username, is_admin=is_admin)
+
+    def _read_snapshot() -> Optional[Dict[str, Any]]:
+        _payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+        snapshot: Optional[Dict[str, Any]] = read_temporal_snapshot(
+            _payload_cache, job_id
+        )
+        return snapshot
+
+    result = poll_temporal_job_status(
+        job_status=job_status,
+        read_snapshot_fn=_read_snapshot,
+        access_filtering_service=_get_access_filtering_service(),
+        username=user.username,
+        is_admin=is_admin,
+        config_service=get_config_service(),
+    )
+    result["success"] = result["status"] != "not_found"
+    return _mcp_response(result)
+
+
 def _register(registry: dict) -> None:
     """Register search handlers in the HANDLER_REGISTRY."""
     registry["search_code"] = search_code
     registry["regex_search"] = handle_regex_search
+    registry["poll_search_job"] = handle_poll_search_job
     registry["get_cached_content"] = handle_get_cached_content

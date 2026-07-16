@@ -231,6 +231,9 @@ class HNSWOrphanRepairSweepScheduler:
             SweepOutcome.REPAIRED.value: 0,
             SweepOutcome.TRANSIENT_SKIP.value: 0,
             SweepOutcome.ERROR.value: 0,
+            # Bug #1415: must be pre-seeded -- counts[outcome.value] += 1
+            # below would KeyError on this outcome otherwise.
+            SweepOutcome.CAPABILITY_UNAVAILABLE.value: 0,
         }
 
         for candidate in batch:
