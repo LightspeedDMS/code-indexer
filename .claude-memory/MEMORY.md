@@ -34,6 +34,7 @@
 
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously (no triage questions); every defect found = file + fix + iterate until staging logs are clean; clean logs is the bar
+- [feedback_bug_report_means_report_not_fix.md](feedback_bug_report_means_report_not_fix.md) - "Root cause + bug report" request = investigate, file issue, STOP — never start fixing without explicit fix instruction (file+fix mandate is overnight-mission-only)
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
