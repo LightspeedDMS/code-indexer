@@ -102,29 +102,13 @@ class HNSWIntegrityRepairError(RuntimeError):
     """
 
 
-class HNSWCapabilityError(RuntimeError):
-    """Raised when the installed hnswlib lacks the custom fork's methods.
-
-    Bug #1392: production fleet-wide `AttributeError: 'hnswlib.Index' object
-    has no attribute 'check_integrity'` on every CLI-driven refresh, caused
-    by the CLI's system-wide Python environment drifting to a stock PyPI
-    hnswlib while the server's own pipx venv stayed on the custom fork.
-    Distinct from `HNSWIntegrityRepairError` above: this fires when the
-    capability itself is ABSENT (wrong hnswlib installed), never reached
-    repair; `HNSWIntegrityRepairError` fires when repair_orphans() was
-    genuinely ATTEMPTED but failed to converge. `_ensure_hnswlib_capability()`
-    raises this as the very first statement of every build/finalize entry
-    point (build_index, rebuild_from_vectors, save_incremental_update) so the
-    failure surfaces immediately, before any indexing work, rather than deep
-    inside `_detect_and_repair_orphans()` at the tail of each method.
-    """
-
-
 # Bug #1392: informational only -- the actual pin source of truth is
 # pyproject.toml's `hnswlib @ git+...@<commit>` dependency line. This
-# constant exists purely to make HNSWCapabilityError messages actionable
-# (name the expected commit); it does not enforce anything and must be kept
-# in sync with pyproject.toml manually.
+# constant exists purely to make capability-check messages actionable (name
+# the expected commit); it does not enforce anything and must be kept in
+# sync with pyproject.toml manually. Also imported by
+# `server/services/hnswlib_capability_check.py` (Bug #1392's non-fatal
+# server startup probe, unchanged/reused by Bug #1415).
 EXPECTED_HNSWLIB_FORK_COMMIT = "878cfbe585395a8bdd95f593d071f778d2fac457"
 
 
@@ -253,34 +237,23 @@ class HNSWIndexManager:
         self.vector_dim = vector_dim
         self.space = space
 
-    def _ensure_hnswlib_capability(self) -> None:
-        """Raise HNSWCapabilityError if the installed hnswlib lacks the fork.
+    def _hnswlib_has_fork_capability(self) -> bool:
+        """Return True iff hnswlib.Index has the custom fork's
+        check_integrity()/repair_orphans() methods.
 
-        Bug #1392: called as the VERY FIRST statement of every build/finalize
-        entry point (build_index, rebuild_from_vectors, save_incremental_update)
-        so a drifted (stock PyPI) hnswlib install fails loudly immediately,
-        before any indexing work, rather than deep inside
-        `_detect_and_repair_orphans()` at the tail of each method. Never
-        called from query-only paths (query, load_index, is_stale,
-        index_exists) or from __init__ -- per the "Query Is Everything"
-        invariant, queries must never be blocked by a build/finalize-only
-        capability gap.
-
-        Raises:
-            HNSWCapabilityError: if hnswlib.Index lacks check_integrity or
-                repair_orphans.
+        Bug #1415: non-raising predicate, replacing Bug #1392's
+        `_ensure_hnswlib_capability()` (which raised `HNSWCapabilityError`
+        as the very first statement of every build/finalize entry point).
+        That fail-fast design still aborted the ENTIRE indexing operation on
+        a drifted (stock PyPI) hnswlib install -- a fleet-wide production
+        outage (~12 golden repos, plus an activated-repo branch-delta
+        reindex blocked by Bug #1203's correctness-first design). The
+        replacement design never hard-gates build/finalize entry points;
+        only `_detect_and_repair_orphans()` consults this predicate, and
+        degrades (WARNING + skip) rather than raising.
         """
-        if hasattr(hnswlib.Index, "check_integrity") and hasattr(
+        return hasattr(hnswlib.Index, "check_integrity") and hasattr(
             hnswlib.Index, "repair_orphans"
-        ):
-            return
-
-        raise HNSWCapabilityError(
-            "Installed hnswlib is missing check_integrity()/repair_orphans() "
-            "-- this Python environment does not have the custom hnswlib "
-            f"fork (expected commit {EXPECTED_HNSWLIB_FORK_COMMIT}) installed. "
-            f"Interpreter: {sys.executable}. See docs/hnswlib-custom-build.md "
-            "for the rebuild procedure."
         )
 
     def _save_hnsw_index(self, index: Any, path: str) -> None:
@@ -323,7 +296,32 @@ class HNSWIndexManager:
         Raises:
             HNSWIntegrityRepairError: repair_orphans() ran but orphans
                 remain afterward.
+
+        Bug #1415: if the installed hnswlib lacks check_integrity()/
+        repair_orphans() (stock PyPI hnswlib, not the custom LightspeedDMS
+        fork), this logs ONE WARNING and returns immediately -- the orphan
+        hardening pass is skipped, but the caller's build/save proceeds and
+        still produces a valid, correct index (orphan repair is a hardening
+        layer, not correctness of the vectors themselves). Guarded via
+        hasattr (never a try/except AttributeError around the calls below)
+        so a genuine AttributeError raised from INSIDE a present
+        check_integrity()/repair_orphans() implementation is never
+        mis-classified as a missing-capability case.
         """
+        if not self._hnswlib_has_fork_capability():
+            logger.warning(
+                "HNSW finalize (%s): installed hnswlib lacks check_integrity()/"
+                "repair_orphans() -- this Python environment does not have "
+                "the custom hnswlib fork (expected commit %s) installed. "
+                "Skipping orphan detect+repair for this finalize; indexing "
+                "will still complete (only the orphan hardening pass is "
+                "degraded). See docs/hnswlib-custom-build.md for the "
+                "rebuild procedure.",
+                context,
+                EXPECTED_HNSWLIB_FORK_COMMIT,
+            )
+            return
+
         integrity = index.check_integrity()
         orphan_count = count_orphan_errors(integrity)
         logger.info(
@@ -397,13 +395,7 @@ class HNSWIndexManager:
 
         Raises:
             ValueError: If vector dimensions don't match or IDs length doesn't match
-            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
-                check_integrity()/repair_orphans() methods (Bug #1392).
         """
-        # Bug #1392: fail loud immediately, before any indexing work, if this
-        # environment's hnswlib lacks the custom fork's capability.
-        self._ensure_hnswlib_capability()
-
         # Validate inputs
         if vectors.shape[1] != self.vector_dim:
             raise ValueError(
@@ -694,15 +686,9 @@ class HNSWIndexManager:
 
         Raises:
             FileNotFoundError: If collection metadata is missing
-            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
-                check_integrity()/repair_orphans() methods (Bug #1392).
             HNSWRebuildAllInvalidError: clear_stale=False and vector files
                 exist on disk but ALL failed to parse/validate (Amendment 5).
         """
-        # Bug #1392: fail loud immediately, before any indexing work, if this
-        # environment's hnswlib lacks the custom fork's capability.
-        self._ensure_hnswlib_capability()
-
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
         # Load collection metadata to get vector dimension
@@ -1460,14 +1446,7 @@ class HNSWIndexManager:
             Updates both index file and metadata with new mappings.
             Preserves existing HNSW parameters (M, ef_construction).
 
-        Raises:
-            HNSWCapabilityError: If installed hnswlib lacks the custom fork's
-                check_integrity()/repair_orphans() methods (Bug #1392).
         """
-        # Bug #1392: fail loud immediately, before any indexing work, if this
-        # environment's hnswlib lacks the custom fork's capability.
-        self._ensure_hnswlib_capability()
-
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
         num_new_vectors = len(id_to_label)
