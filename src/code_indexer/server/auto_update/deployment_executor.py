@@ -1330,7 +1330,9 @@ class DeploymentExecutor:
         hnswlib IS importable (that is exactly the bug), so a plain import
         probe cannot detect drift. This probes for `check_integrity` and
         `repair_orphans` specifically, mirroring
-        `HNSWIndexManager._ensure_hnswlib_capability()`'s own check.
+        `HNSWIndexManager._hnswlib_has_fork_capability()`'s own check (Bug
+        #1415 renamed/repurposed the former raising
+        `_ensure_hnswlib_capability()` into this non-raising predicate).
 
         Args:
             python_path: Path to the Python interpreter to probe.

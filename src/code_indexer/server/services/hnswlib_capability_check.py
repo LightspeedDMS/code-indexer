@@ -2,14 +2,20 @@
 
 A drifted (stock PyPI) hnswlib install on the server's own Python
 environment would cause every finalize-time orphan detect+repair call to
-fail with AttributeError. Unlike the CLI side (storage/hnsw_index_manager.py,
-which fails LOUD via HNSWCapabilityError at build/finalize entry points),
-hard-failing SERVER STARTUP over this would take down ALL query serving --
-a wildly disproportionate blast-radius increase for a defect that (per the
-originating bug report) leaves query serving unaffected, and a violation of
-this project's "Query Is Everything" invariant. So this check logs ERROR
-loudly but NEVER raises or blocks startup; see wiring in
-`server/startup/lifespan.py`.
+fail with AttributeError. Hard-failing SERVER STARTUP over this would take
+down ALL query serving -- a wildly disproportionate blast-radius increase
+for a defect that (per the originating bug report) leaves query serving
+unaffected, and a violation of this project's "Query Is Everything"
+invariant. So this check logs ERROR loudly but NEVER raises or blocks
+startup; see wiring in `server/startup/lifespan.py`.
+
+The CLI side (storage/hnsw_index_manager.py) originally (Bug #1392) failed
+LOUD via a dedicated `HNSWCapabilityError` raised at every build/finalize
+entry point. Bug #1415 reversed that: it still aborted the entire indexing
+operation on a drifted install (a fleet-wide production outage), so the CLI
+side now degrades gracefully too -- `_detect_and_repair_orphans()` logs one
+WARNING and skips the orphan hardening pass instead, letting the caller
+persist a valid, correct index. See docs/hnswlib-custom-build.md.
 """
 
 import logging
