@@ -148,6 +148,12 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
     }
 )
 
+# EVO-64538 (C10): min seconds between "deferring under memory pressure" INFO
+# logs per manager, so a sustained RED spell (a heavy job deferred every
+# backoff interval by every worker) can't storm the log while still leaving a
+# clear, periodic breadcrumb that the gate is actively throttling.
+_ADMISSION_DEFER_LOG_INTERVAL_SECONDS: float = 10.0
+
 
 class BackgroundJobManager:
     """
@@ -238,6 +244,10 @@ class BackgroundJobManager:
         # Bug #1063 Part 3: Bounded worker pool shutdown signal.
         self._pool_shutdown = threading.Event()
 
+        # EVO-64538 (C10): last time a memory-pressure deferral was logged
+        # (monotonic seconds); rate-limits the deferral breadcrumb.
+        self._last_admission_defer_log: float = 0.0
+
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
         # service owning the running job (e.g. DependencyMapService._cancel_event).
@@ -285,6 +295,7 @@ class BackgroundJobManager:
             # re-queue a heavy index job (it stays PENDING) and back off rather
             # than running it and risking an OOMKill. Jobs wait, never OOM.
             if self._admission_blocked(job_id):
+                self._log_admission_deferred(job_id)
                 self._pending_job_queue.put(item)
                 self._pending_job_queue.task_done()
                 self._pool_shutdown.wait(
@@ -322,6 +333,41 @@ class BackgroundJobManager:
         if governor is None:
             return False
         return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+
+    def _log_admission_deferred(self, job_id: str) -> None:
+        """EVO-64538 (C10): rate-limited breadcrumb when a heavy job is deferred.
+
+        Makes the throttle observable (throttled vs. stuck) without storming the
+        log: at most one line per _ADMISSION_DEFER_LOG_INTERVAL_SECONDS per
+        manager, tagged with the governor band and last-sampled cgroup used%.
+        """
+        now = time.monotonic()
+        if now - self._last_admission_defer_log < _ADMISSION_DEFER_LOG_INTERVAL_SECONDS:
+            return
+        self._last_admission_defer_log = now
+        # Best-effort: a breadcrumb must never crash the worker loop.
+        try:
+            job = self.jobs.get(job_id)
+            op_type = job.operation_type if job is not None else ""
+            from code_indexer.server.services.memory_governor import (
+                get_memory_governor,
+            )
+
+            governor = get_memory_governor()
+            band_obj = getattr(governor, "band", None)
+            band = getattr(band_obj, "value", "no-governor")
+            used_pct = getattr(governor, "last_used_pct", -1.0)
+            logging.info(
+                "C10: deferring memory-heavy job %s (op=%s) under memory pressure "
+                "(band=%s used_pct=%.1f); re-queued PENDING, backing off %.1fs",
+                job_id,
+                op_type,
+                band,
+                used_pct,
+                self._background_jobs_config.job_admission_backoff_seconds,
+            )
+        except Exception:  # noqa: BLE001 — logging must never break admission
+            logging.debug("C10: deferral-log failed (ignored)", exc_info=True)
 
     @property
     def max_concurrent_jobs(self) -> int:

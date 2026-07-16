@@ -116,6 +116,25 @@ class TestAdmissionBlockedHelper:
         m._admission_blocked("j1")
         assert stub.calls == [73.5]
 
+    def test_deferral_log_rate_limited(self, caplog):
+        import logging as _logging
+
+        m = self._manager()
+        m.jobs["j1"] = _job("j1", "add_golden_repo")
+        gov = _StubGovernor(allowed=False)
+        gov.band = type("B", (), {"value": "RED"})()
+        gov.last_used_pct = 92.0
+        mg.set_memory_governor(gov)
+
+        with caplog.at_level(_logging.INFO):
+            m._log_admission_deferred("j1")  # first: logs
+            m._log_admission_deferred("j1")  # immediately after: suppressed
+
+        c10_lines = [r for r in caplog.records if "C10: deferring" in r.getMessage()]
+        assert len(c10_lines) == 1
+        assert "band=RED" in c10_lines[0].getMessage()
+        assert "op=add_golden_repo" in c10_lines[0].getMessage()
+
 
 @pytest.mark.slow
 class TestPoolWorkerRequeue:
@@ -148,6 +167,8 @@ class TestPoolWorkerRequeue:
 
         m.jobs["j1"] = _job("j1", "add_golden_repo")
         stub = _StubGovernor(allowed=False)
+        stub.band = type("B", (), {"value": "RED"})()
+        stub.last_used_pct = 92.0
         mg.set_memory_governor(stub)
 
         # Enqueue the heavy job directly onto the pool queue.
