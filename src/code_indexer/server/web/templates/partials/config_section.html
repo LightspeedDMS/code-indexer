@@ -1627,6 +1627,11 @@ function saveLlmCredsConfig() {
                             <small>Claude model used for repository analysis jobs</small>
                         </td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Externally Managed</td>
+                        <td class="config-value">{{ 'Yes' if config.golden_repos.externally_managed else 'No' }}</td>
+                        <td class="config-note"><small>When enabled, an external owner materializes/refreshes golden repos and this server skips its own periodic refresh and startup restore reconciliation</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1652,6 +1657,16 @@ function saveLlmCredsConfig() {
                         <option value="sonnet" {% if config.golden_repos.analysis_model == "sonnet" %}selected{% endif %}>Sonnet</option>
                     </select>
                     <small>Claude model for repository analysis (Opus: highest quality, Sonnet: faster)</small>
+                </label>
+                <label for="golden-repos-externally-managed">
+                    <!-- Hidden fallback guarantees the key is always submitted even
+                         when the checkbox is unchecked (browsers omit unchecked
+                         checkboxes from form data entirely) -- same pattern as
+                         Story #1412's temporal_all_branches_enabled field. -->
+                    <input type="hidden" name="externally_managed" value="false">
+                    <input type="checkbox" id="golden-repos-externally-managed" name="externally_managed" value="true" {% if config.golden_repos.externally_managed %}checked{% endif %}>
+                    Externally Managed
+                    <small>When enabled, an external owner (not this server) materializes and refreshes golden repos; the server's own periodic refresh and startup restore reconciliation are skipped and the server only indexes/serves what is registered.</small>
                 </label>
             </div>
             <div class="form-actions">

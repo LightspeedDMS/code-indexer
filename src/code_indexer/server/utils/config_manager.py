@@ -341,6 +341,14 @@ class GoldenReposConfig:
     refresh_interval_seconds: int = 3600
     # Story #76 AC2: Claude model for repository analysis (opus or sonnet)
     analysis_model: str = "opus"
+    # When true, an external owner (e.g. a provisioning service) owns golden-repo
+    # presence and freshness: it materializes each repo directly into
+    # golden_repos_dir and registers it via the admin API. The server then only
+    # indexes and serves what is registered — it skips its own periodic refresh
+    # and its startup restore-from-snapshot reconciliation, so it never fights the
+    # external owner over which clones should exist on disk. Default false keeps
+    # the server fully self-managing.
+    externally_managed: bool = False
 
 
 @dataclass
