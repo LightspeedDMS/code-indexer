@@ -628,6 +628,28 @@ class ActivatedRepoIndexManager:
         finally:
             self._drain_telemetry(repo_path)
 
+    @staticmethod
+    def _uninitialized_repo_error(repo_path: str, operation: str) -> Dict[str, Any]:
+        """Bug #1419: fast-fail dict for a repo missing .code-indexer/config.json.
+
+        Returned by both _execute_fts_indexing and _execute_semantic_indexing
+        BEFORE the `cidx` subprocess is ever spawned. Without this guard, the
+        subprocess's own config discovery backtracks up the directory tree
+        (ConfigManager.create_with_backtrack) and can pick up an unrelated
+        ANCESTOR .code-indexer/config.json -- producing a confusing,
+        unrelated failure whose message often lands on stdout (not stderr),
+        so the wrapped `{operation} indexing failed: {result.stderr}` error
+        comes back empty with no actionable guidance for the operator.
+        """
+        return {
+            "success": False,
+            "error": (
+                f"{operation} indexing failed: repo at '{repo_path}' is not "
+                "initialized (missing .code-indexer/config.json). Run "
+                "'cidx init' to configure the repository before indexing."
+            ),
+        }
+
     def _execute_semantic_indexing(
         self,
         repo_path: str,
@@ -640,9 +662,16 @@ class ActivatedRepoIndexManager:
         cancelled activation/switch/sync job can kill the `cidx index`
         child promptly instead of blocking to completion. None (the default,
         used by the unrelated manual-reindex job path) disables cancellation.
+
+        Bug #1419: guards against running on a repo with no
+        .code-indexer/config.json -- see _uninitialized_repo_error.
         """
         try:
             repo_path_obj = Path(repo_path)
+
+            if not (repo_path_obj / ".code-indexer" / "config.json").exists():
+                return self._uninitialized_repo_error(repo_path, "Semantic")
+
             index_dir = repo_path_obj / ".code-indexer" / "index"
 
             # Clear index if requested
@@ -713,8 +742,17 @@ class ActivatedRepoIndexManager:
             )
 
     def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute FTS indexing using TantivyIndexManager."""
+        """Execute FTS indexing using TantivyIndexManager.
+
+        Bug #1419: guards against running on a repo with no
+        .code-indexer/config.json -- see _uninitialized_repo_error.
+        """
         try:
+            repo_path_obj = Path(repo_path)
+
+            if not (repo_path_obj / ".code-indexer" / "config.json").exists():
+                return self._uninitialized_repo_error(repo_path, "FTS")
+
             args = ["cidx", "index", "--fts"]
             if clear:
                 args.append("--clear")

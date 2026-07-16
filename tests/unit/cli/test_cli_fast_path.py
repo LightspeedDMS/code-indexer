@@ -164,6 +164,35 @@ class TestCommandClassification:
                 f"{cmd} should not be delegatable"
             )
 
+    def test_index_commits_is_never_daemon_delegatable(self):
+        """Bug #1417 regression: `index --index-commits` must NEVER be
+        daemon-delegatable.
+
+        Root cause: the CIDX_TEMPORAL_PG_BOOTSTRAP_DIR fail-loud wiring
+        (Bug #1313) lives EXCLUSIVELY in cli.py's standalone `index()`
+        branch. If `--index-commits` is treated as daemon-delegatable, the
+        fast entry point routes it to cli_daemon_fast.execute_via_daemon,
+        which has zero knowledge of the PG bootstrap contract -- the child
+        silently completes without ever exercising the unreachable-DSN
+        fail-loud check (a silent SQLite fallback, violating Messi Rule #2).
+
+        A plain `index` (no --index-commits) must remain delegatable --
+        this is a narrow carve-out, not a blanket exclusion of "index".
+        """
+        from code_indexer.cli_fast_entry import is_delegatable_command
+
+        assert (
+            is_delegatable_command(
+                "index",
+                ["cidx", "index", "--index-commits", "--max-commits", "2"],
+            )
+            is False
+        ), "index --index-commits must never be daemon-delegatable (Bug #1417)"
+
+        assert is_delegatable_command("index", ["cidx", "index"]) is True, (
+            "plain index (no --index-commits) must remain daemon-delegatable"
+        )
+
 
 class TestFastPathRouting:
     """Test main entry point routing logic."""
