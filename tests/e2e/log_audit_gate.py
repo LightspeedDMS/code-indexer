@@ -355,6 +355,17 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # correctly -- not a service defect.
     "Temporal embedder 'not-a-configured-embedder' has no indexed collections",
     "Temporal index not available for repository, returning empty results repository_alias=temporal-dual-embedder-1292",
+    # Story #1400 (test_19_temporal_live_wiring_1400.py): execute_live_temporal_search
+    # deliberately omits repo_alias from submit_job for lane="temporal" jobs.
+    # BGM's register_job_if_no_conflict gate is a per-(operation_type, repo_alias)
+    # uniqueness constraint; passing repository_alias would incorrectly reject a
+    # SECOND, entirely different temporal query (different query_text/filters)
+    # against the same repo as a "duplicate". Correct dedup granularity (the full
+    # query signature) is already enforced at the TemporalDedupCache layer above
+    # submit_job -- this WARNING is submit_job's own pre-existing, generic
+    # "no repo_alias" notice firing as an EXPECTED side effect of that correct
+    # design choice, not a defect.
+    "Job submitted without repo_alias for operation 'temporal_query'",
 ]
 
 

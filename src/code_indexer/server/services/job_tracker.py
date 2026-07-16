@@ -342,7 +342,9 @@ class JobTracker:
     direct DatabaseConnectionManager access.
     """
 
-    def __init__(self, db_path: str, storage_backend=None) -> None:
+    def __init__(
+        self, db_path: str, storage_backend=None, node_id: Optional[str] = None
+    ) -> None:
         """
         Initialise tracker.
 
@@ -351,6 +353,13 @@ class JobTracker:
             storage_backend: Optional BackgroundJobsBackend instance.  When
                 provided, all DB operations are delegated to this backend
                 instead of direct SQLite access.
+            node_id: Story #1400 CRITICAL 3 -- this node's cluster identity.
+                Threaded into cleanup_orphaned_jobs_on_startup() (so a
+                restart only fails THIS node's orphaned jobs, never another
+                node's legitimately-running work) and stamped as
+                executing_node on every job registered by this tracker,
+                including while still pending.  None in solo/SQLite mode
+                (no cluster, node scoping is moot).
         """
         self._backend = storage_backend
         if storage_backend is None:
@@ -359,6 +368,7 @@ class JobTracker:
             self._conn_manager = None  # type: ignore[assignment]
         self._active_jobs: Dict[str, TrackedJob] = {}
         self._lock = threading.Lock()
+        self._node_id = node_id
 
     # ------------------------------------------------------------------
     # Public API
@@ -1045,7 +1055,9 @@ class JobTracker:
             Number of orphaned jobs marked as failed.
         """
         if self._backend is not None:
-            count: int = int(self._backend.cleanup_orphaned_jobs_on_startup())
+            count: int = int(
+                self._backend.cleanup_orphaned_jobs_on_startup(node_id=self._node_id)
+            )
             if count:
                 logger.info(
                     f"JobTracker.cleanup_orphaned_jobs_on_startup: "
@@ -1335,6 +1347,12 @@ class JobTracker:
                     metadata=job.metadata,
                     is_admin=is_admin,
                     actor_username=actor_username,
+                    # Story #1400 CRITICAL 3: stamp the owning node while
+                    # still pending -- closes the gap a running-only stamp
+                    # would leave (a crash before this job ever reaches
+                    # "running" would otherwise be invisible to node-scoped
+                    # cleanup).
+                    executing_node=self._node_id,
                 )
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
@@ -1429,6 +1447,11 @@ class JobTracker:
                 repo_alias=job.repo_alias,
                 progress_info=job.progress_info,
                 metadata=job.metadata,
+                # Story #1400 CRITICAL 3: stamp the owning node at
+                # registration time (even while still pending), so a
+                # node-scoped restart-cleanup sweep can tell this job's
+                # jobs apart from another node's legitimately-running work.
+                executing_node=self._node_id,
             )
             return
 

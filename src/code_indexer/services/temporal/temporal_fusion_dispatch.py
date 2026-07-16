@@ -9,7 +9,7 @@ Used by CLI, server (semantic_query_manager), multi_search_service, and daemon.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .temporal_fusion import (
     TEMPORAL_OVERFETCH_MULTIPLIER,
@@ -105,6 +105,24 @@ def execute_temporal_query_with_fusion(
     no_embedding_cache_shortcut: bool = False,
     # Story #1291 AC7/AC8: explicit embedder override for recall selection.
     temporal_embedder: Optional[str] = None,
+    # Story #1400 Phase 4 (FINAL LOCKED DESIGN): fires once with the
+    # post-health-filter shard count.
+    on_shards_discovered: Optional[Callable[[int], None]] = None,
+    # Story #1400 Phase 4: fires once per ATTEMPTED shard (success or
+    # swallowed exception) with (shards_attempted, shards_succeeded,
+    # cumulative_fused_results) -- already fused + chrono-resorted.
+    on_shard_complete: Optional[Callable[[int, int, List[Any]], None]] = None,
+    # Story #1400 CRITICAL 2: cooperative cancellation, checked before each
+    # shard query. Returning True raises InterruptedError, stopping the loop
+    # with bounded worst-case latency (one in-flight shard query).
+    cancel_check: Optional[Callable[[], bool]] = None,
+    # Story #1400 Phase 10: optional per-shard-attempt latency-injection
+    # hook (target name only -- no server/app.state import here, this
+    # module stays CLI-safe). None (default, always the case for CLI/solo/
+    # daemon callers) is a no-op -- byte-identical behavior. Only a
+    # server-side caller constructs the real fault-injection-aware
+    # callable via build_temporal_shard_latency_injector() and passes it.
+    maybe_inject_internal_latency: Optional[Callable[[str], None]] = None,
 ) -> Any:
     """Execute a temporal query against EXACTLY ONE embedder's collections.
 
@@ -225,6 +243,11 @@ def execute_temporal_query_with_fusion(
     # merge_shards_by_score preserves the TRUE cosine score across shards.
     base_name, shards = provider_groups[0]
 
+    # Story #1400 Phase 4: fires once with the post-health-filter shard
+    # count -- the actual scheduled work, not the raw discovered count.
+    if on_shards_discovered is not None:
+        on_shards_discovered(len(shards))
+
     # Story #1293 S1b [A5]: compute-once reuse seam. Without this, each
     # sequential shard query below re-embeds the SAME query text through the
     # SAME embedder (base_name is resolved to at most one embedder) -- 1 miss
@@ -268,7 +291,7 @@ def execute_temporal_query_with_fusion(
             )
             precomputed_query_vector = None
 
-    results_by_shard = _query_shards_raw(
+    results_by_shard, shards_attempted, shards_succeeded = _query_shards_raw(
         config,
         vector_store,
         shards,
@@ -285,6 +308,10 @@ def execute_temporal_query_with_fusion(
         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         at_commit_ts=at_commit_ts,
         precomputed_query_vector=precomputed_query_vector,
+        display_limit=limit,
+        on_shard_complete=on_shard_complete,
+        cancel_check=cancel_check,
+        maybe_inject_internal_latency=maybe_inject_internal_latency,
     )
     if not results_by_shard:
         return TemporalSearchResults(
@@ -292,7 +319,37 @@ def execute_temporal_query_with_fusion(
             query=query_text,
             filter_type="time_range" if time_range else "none",
             filter_value=time_range,
+            shards_total=len(shards),
+            shards_attempted=shards_attempted,
+            shards_succeeded=shards_succeeded,
         )
+    merged = _fuse_and_order(results_by_shard, limit)
+    return TemporalSearchResults(
+        results=merged,
+        query=query_text,
+        filter_type="time_range" if time_range else "none",
+        filter_value=time_range,
+        total_found=len(merged),
+        shards_total=len(shards),
+        shards_attempted=shards_attempted,
+        shards_succeeded=shards_succeeded,
+    )
+
+
+def _fuse_and_order(results_by_shard: Dict[str, list], limit: int) -> list:
+    """Merge-by-true-score then Bug #1299 chronological re-sort.
+
+    Story #1400 Phase 4 (FINAL LOCKED DESIGN, Codex's locus adopted): extracted
+    so the SAME fusion logic serves both the final result (outer dispatch
+    function) and the per-shard CUMULATIVE checkpoint passed to
+    on_shard_complete inside _query_shards_raw -- ALL fusion logic, including
+    the chronological-resort rule, lives in exactly one place.
+
+    Returns [] when `results_by_shard` is empty (no shard has produced any
+    result yet -- a legitimate state for an early checkpoint).
+    """
+    if not results_by_shard:
+        return []
     merged = merge_shards_by_score(
         results_by_provider=results_by_shard,
         dedup_key=make_temporal_dedup_key,
@@ -300,21 +357,11 @@ def execute_temporal_query_with_fusion(
     )
     # Bug #1299 (multi-shard half): the top-`limit` subset was just selected
     # by TRUE relevance (score) above. Re-sort ONLY that selected subset
-    # reverse-chronologically for display (newest to oldest, like git log)
-    # -- mirrors the identical Phase 3 pattern in
-    # TemporalSearchService.query_temporal so display order is consistent
-    # whether a query resolves to one shard or several.
-    merged = sorted(
+    # reverse-chronologically for display (newest to oldest, like git log).
+    return sorted(
         merged,
         key=lambda r: r.temporal_context.get("commit_timestamp", 0),
         reverse=True,
-    )
-    return TemporalSearchResults(
-        results=merged,
-        query=query_text,
-        filter_type="time_range" if time_range else "none",
-        filter_value=time_range,
-        total_found=len(merged),
     )
 
 
@@ -419,7 +466,15 @@ def _query_shards_raw(
     no_embedding_cache_shortcut: bool = False,
     at_commit_ts: Optional[int] = None,
     precomputed_query_vector: Optional[List[float]] = None,
-) -> Dict[str, list]:
+    # Story #1400 Phase 4: display limit for the per-shard cumulative fuse
+    # passed to on_shard_complete. None-safe: falls back to overfetch_limit
+    # (a safe, if slightly-generous, upper bound) when omitted -- existing
+    # callers pass no callback so this value is unused for them.
+    display_limit: Optional[int] = None,
+    on_shard_complete: Optional[Callable[[int, int, List[Any]], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    maybe_inject_internal_latency: Optional[Callable[[str], None]] = None,
+) -> Tuple[Dict[str, list], int, int]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
     Shards are loaded one at a time to bound peak RAM usage. Returns a dict
@@ -431,16 +486,37 @@ def _query_shards_raw(
         overfetch_limit: Per-shard limit (caller multiplies by OVERFETCH_MULTIPLIER).
 
     Returns:
-        Dict mapping shard display name -> list of TemporalSearchResult.
-        Empty dict when all shards return zero results.
+        (results_by_shard, shards_attempted, shards_succeeded).
+        results_by_shard maps shard display name -> list of
+        TemporalSearchResult (empty dict when all shards return zero
+        results). shards_attempted is a one-based count of loop iterations
+        completed (success OR swallowed exception); shards_succeeded
+        excludes exceptions (a normal empty result still counts as success).
+
+    Raises:
+        InterruptedError: if cancel_check() returns True before a shard is
+            queried (Story #1400 CRITICAL 2 cooperative cancellation).
     """
     import time as _time
     from .temporal_collection_naming import collection_display_name
 
     results_by_shard: Dict[str, list] = {}
+    shards_attempted = 0
+    shards_succeeded = 0
+    effective_display_limit = (
+        display_limit if display_limit is not None else overfetch_limit
+    )
 
     for shard_name in shard_names:  # SEQUENTIAL — never parallel
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError(
+                "Temporal query cancelled before querying shard "
+                f"'{shard_name}' (Story #1400 CRITICAL 2)"
+            )
+        if maybe_inject_internal_latency is not None:
+            maybe_inject_internal_latency("temporal-shard")
         _t0 = _time.time()
+        shard_succeeded_this_attempt = False
         try:
             result = _query_single_provider(
                 config,
@@ -463,6 +539,7 @@ def _query_shards_raw(
             if result.results:
                 results_by_shard[collection_display_name(shard_name)] = result.results
             record_temporal_success(shard_name, (_time.time() - _t0) * 1000)
+            shard_succeeded_this_attempt = True
         except Exception as e:
             record_temporal_failure(shard_name, (_time.time() - _t0) * 1000)
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
@@ -510,7 +587,19 @@ def _query_shards_raw(
                         # on the eviction hot path.
                         _gov.log_gov002_evict(shard=shard_name, freed_mb=0.0)
 
-    return results_by_shard
+            # Story #1400 Phase 4: after EVERY attempted shard (success or
+            # swallowed exception alike), merge + chrono-resort the
+            # accumulated results and notify on_shard_complete. Runs inside
+            # the same finally block as the eviction logic above so it fires
+            # exactly once per attempted shard regardless of outcome.
+            shards_attempted += 1
+            if shard_succeeded_this_attempt:
+                shards_succeeded += 1
+            if on_shard_complete is not None:
+                cumulative = _fuse_and_order(results_by_shard, effective_display_limit)
+                on_shard_complete(shards_attempted, shards_succeeded, cumulative)
+
+    return results_by_shard, shards_attempted, shards_succeeded
 
 
 def _query_single_provider(

@@ -7,12 +7,23 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import copy
 import json
 import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+    runtime_checkable,
+)
 
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
@@ -90,6 +101,9 @@ def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
         "write_mode_handler_timeout_seconds": st.write_mode_handler_timeout_seconds,
         "embedding_provider_timeout_seconds": st.embedding_provider_timeout_seconds,
         "reranker_timeout_seconds": st.reranker_timeout_seconds,
+        # Story #1400 CRITICAL 5: async-hybrid temporal query inline
+        # sync-wait window (float seconds).
+        "temporal_inline_wait_seconds": st.temporal_inline_wait_seconds,
     }
 
 
@@ -222,6 +236,12 @@ class ConfigService:
         # host/port/workers off disk within this process. None means "not
         # captured yet"; a captured value is a dict (possibly empty).
         self._bootstrap_launch_keys_snapshot: Optional[Dict[str, Any]] = None
+        # Story #1400 CRITICAL 6: guards update_settings_atomic's
+        # validate-copy-then-publish sequence (deep-copy live config ->
+        # apply updates to the copy -> validate the copy -> publish only on
+        # success). Never held during I/O beyond the deep-copy/apply/
+        # validate/save sequence itself.
+        self._config_update_lock: threading.RLock = threading.RLock()
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -893,23 +913,31 @@ class ConfigService:
             "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
         }
 
-    def update_setting(
-        self, category: str, key: str, value: Any, skip_validation: bool = False
-    ) -> None:
+    def _apply_setting(
+        self, config: ServerConfig, category: str, key: str, value: Any
+    ) -> bool:
         """
-        Update a single setting.
+        Apply one (category, key, value) update to `config` in place.
 
-        Args:
-            category: Setting category (server, cache, reindexing, timeouts, password_security)
-            key: Setting key within the category
-            value: New value for the setting
-            skip_validation: If True, skip validation and save (for batch updates)
+        Story #1400 CRITICAL 6: extracted from the former update_setting
+        dispatch body so callers (update_settings_atomic) can apply updates
+        to a CANDIDATE copy of the config, never the live object directly.
+        Every branch below is unchanged from the pre-#1400 dispatch.
+
+        Returns:
+            True if `config` was mutated and should participate in the
+            standard validate-then-publish flow. False for the "indexing"
+            category, a pre-existing special case that persists itself
+            internally (_update_indexing_setting) against the live config
+            and must not be re-validated/re-published by the generic
+            atomic flow.
 
         Raises:
-            ValueError: If category or key is invalid, or value fails validation
+            ValueError: If category or key is invalid, or value fails
+                per-field validation performed inline by the per-category
+                helper (full cross-field validation happens later, in
+                config_manager.validate_config, against the CANDIDATE).
         """
-        config = self.get_config()
-
         if category == "server":
             self._update_server_setting(config, key, value)
         elif category == "cache":
@@ -976,8 +1004,9 @@ class ConfigService:
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(key, value)
-            # _update_indexing_setting saves config internally, so skip normal save below
-            return
+            # _update_indexing_setting saves config internally, so the
+            # caller must skip the normal validate-then-publish flow.
+            return False
         # Story #323 - Wiki metadata fields configuration
         elif category == "wiki":
             self._update_wiki_setting(config, key, value)
@@ -1008,11 +1037,13 @@ class ConfigService:
             self._update_export_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
+        return True
 
-        # Validate and save (unless skipping for batch updates)
-        if not skip_validation:
-            self.config_manager.validate_config(config)
-            self.save_config(config)
+    def _log_applied_updates(self, updates: Sequence[Tuple[str, str, Any]]) -> None:
+        """Log every non-"indexing" update after a successful atomic publish."""
+        for category, key, value in updates:
+            if category == "indexing":
+                continue
             logger.info(
                 "Updated setting %s.%s to %s",
                 category,
@@ -1020,15 +1051,57 @@ class ConfigService:
                 value,
                 extra={"correlation_id": get_correlation_id()},
             )
-        else:
-            # Just update in memory, don't validate or save yet
-            logger.debug(
-                "Updated setting %s.%s to %s (validation deferred)",
-                category,
-                key,
-                value,
-                extra={"correlation_id": get_correlation_id()},
-            )
+
+    def update_settings_atomic(
+        self, updates: Sequence[Tuple[str, str, Any]]
+    ) -> ServerConfig:
+        """
+        Apply a batch of (category, key, value) updates as ONE atomic unit.
+
+        Story #1400 CRITICAL 6: validate a deep-copied CANDIDATE and publish
+        atomically only on full success, so a rejected update can never
+        leave the shared live config mutated in place. The "indexing"
+        category is a pre-existing special case that self-persists against
+        the live config, independent of this batch's atomicity.
+
+        Raises:
+            ValueError: invalid category/key, or the candidate fails
+                config_manager.validate_config.
+        """
+        with self._config_update_lock:
+            live = self.get_config()
+            candidate = copy.deepcopy(live)
+            has_candidate_updates = False
+            for category, key, value in updates:
+                if category == "indexing":
+                    self._apply_setting(live, category, key, value)
+                    continue
+                if self._apply_setting(candidate, category, key, value):
+                    has_candidate_updates = True
+
+            if has_candidate_updates:
+                self.config_manager.validate_config(candidate)
+                self.save_config(candidate)
+                self._log_applied_updates(updates)
+
+            return self.get_config()
+
+    def update_setting(
+        self, category: str, key: str, value: Any, skip_validation: bool = False
+    ) -> None:
+        """
+        Update a single setting.
+
+        Story #1400 CRITICAL 6: delegates to update_settings_atomic, which
+        validates against a COPY and publishes atomically only on success.
+        `skip_validation` is now a no-op kept only for call-site signature
+        compatibility -- the old "mutate first, validate later" deferred
+        path (which could leave a rejected value live) has been retired.
+
+        Raises:
+            ValueError: If category or key is invalid, or value fails validation
+        """
+        self.update_settings_atomic([(category, key, value)])
 
     def _update_server_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2317,6 +2390,10 @@ class ConfigService:
         elif key == "subprocess_max_workers":
             # Story #27: SubprocessExecutor max_workers configuration
             background_jobs.subprocess_max_workers = int(value)
+        elif key == "temporal_lane_concurrency":
+            # Story #1400 CRITICAL 1: temporal-lane worker pool size
+            # (restart-required -- see RESTART_REQUIRED_FIELDS).
+            background_jobs.temporal_lane_concurrency = int(value)
         else:
             raise ValueError(f"Unknown background jobs setting: {key}")
 
@@ -2402,6 +2479,11 @@ class ConfigService:
             st.embedding_provider_timeout_seconds = int(value)
         elif key == "reranker_timeout_seconds":
             st.reranker_timeout_seconds = int(value)
+        elif key == "temporal_inline_wait_seconds":
+            # Story #1400 CRITICAL 5/6: the ONE float field among six --
+            # sub-second precision (e.g. 0.001) is the documented E2E lever
+            # for deterministically forcing the async-hybrid handoff path.
+            st.temporal_inline_wait_seconds = float(value)
         else:
             raise ValueError(f"Unknown search_timeouts setting: {key}")
 

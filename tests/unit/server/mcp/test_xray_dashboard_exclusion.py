@@ -256,6 +256,9 @@ def test_dashboard_passes_exclusion_to_job_tracker():
         "xray_search",
         "xray_explore",
         "xray_search_batch",
+        # Story #1400 Phase 9: async-hybrid temporal query jobs are also
+        # dashboard-hidden, sharing this same exclusion list.
+        "temporal_query",
     }, (
         f"Expected xray_search, xray_explore, and xray_search_batch in exclusion list, got: {exclude}"
     )
