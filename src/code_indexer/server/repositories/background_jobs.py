@@ -148,6 +148,17 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
     }
 )
 
+# EVO-64545 (pod-pull work-stealing): operation types that, in cluster mode,
+# are left PENDING in the shared Postgres queue for any pod with memory headroom
+# to claim and execute — instead of being pinned to the submitting pod's local
+# worker pool. Same set as the C10 memory-heavy ops: these are exactly the
+# expensive index builds worth distributing. Each must (a) have its submit call
+# pass reconstruction params via `metadata=` and (b) be dispatchable by the
+# IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
+# Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
+# so the ops set has a single source of truth across the cluster job plumbing.
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
+
 # EVO-64538 (C10): min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every
 # backoff interval by every worker) can't storm the log while still leaving a
@@ -173,6 +184,7 @@ class BackgroundJobManager:
         job_tracker: Optional["JobTracker"] = None,
         data_retention_config: Optional["DataRetentionConfig"] = None,
         storage_backend: Optional[Any] = None,
+        cluster_mode: bool = False,
     ):
         """Initialize enhanced background job manager.
 
@@ -247,6 +259,11 @@ class BackgroundJobManager:
         # EVO-64538 (C10): last time a memory-pressure deferral was logged
         # (monotonic seconds); rate-limits the deferral breadcrumb.
         self._last_admission_defer_log: float = 0.0
+
+        # EVO-64545 (pod-pull): when True (cluster/postgres mode), _POD_PULL_OPS
+        # are left PENDING in PG for cross-pod claiming instead of dispatched to
+        # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
+        self._cluster_mode: bool = cluster_mode
 
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
@@ -497,6 +514,7 @@ class BackgroundJobManager:
         is_admin: bool = False,
         repo_alias: Optional[str] = None,  # AC5: Fix unknown repo bug
         actor_username: Optional[str] = None,  # AC12: who triggered the job
+        metadata: Optional[Dict[str, Any]] = None,  # EVO-64545: pod-pull params
         **kwargs,
     ) -> str:
         """
@@ -511,6 +529,11 @@ class BackgroundJobManager:
             repo_alias: Repository alias being processed (AC5: Fix unknown repo bug)
             actor_username: Who actually triggered the job (AC12). When None,
                 defaults to submitter_username for backward compatibility.
+            metadata: EVO-64545. Reconstruction params persisted to the
+                background_jobs row (JSONB) so a pod-pull index op can be
+                executed on any pod that claims it. Required for a
+                ``_POD_PULL_OPS`` op to be work-stolen in cluster mode; without
+                it the op falls back to this pod's local worker pool.
             **kwargs: Function keyword arguments
 
         Returns:
@@ -592,6 +615,7 @@ class BackgroundJobManager:
                     operation_type=operation_type,
                     username=submitter_username,
                     repo_alias=repo_alias,
+                    metadata=metadata,
                     is_admin=is_admin,
                     actor_username=resolved_actor,
                 )
@@ -644,6 +668,29 @@ class BackgroundJobManager:
                         "continuing without tracker registration",
                         exc_info=True,
                     )
+
+        # EVO-64545 (pod-pull work-stealing): in cluster mode a memory-heavy
+        # index op has already been registered PENDING / executing_node NULL in
+        # the shared PG queue above, so it is immediately claimable by ANY pod
+        # with memory headroom. Do NOT dispatch it to THIS pod's in-memory pool
+        # (which would pin it here) — leave it for the memory-gated
+        # IndexJobClaimLoop running on every pod. Guarded on metadata being
+        # present so a not-yet-migrated caller (no reconstruction params) safely
+        # falls back to the local pool instead of stranding an unexecutable row.
+        if (
+            self._cluster_mode
+            and operation_type in POD_PULL_OPS
+            and repo_alias
+            and metadata is not None
+            and self._job_tracker is not None
+        ):
+            logging.info(
+                "Background job %s (%s) left PENDING for pod-pull work-stealing "
+                "(not dispatched to local pool)",
+                job_id,
+                operation_type,
+            )
+            return job_id
 
         # Bug #1063 Part 3: Enqueue the job for the bounded worker pool.
         # Workers pull from _pending_job_queue and call _execute_job().

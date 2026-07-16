@@ -27,8 +27,19 @@ _SELECT_COLS = """
     job_id, operation_type, status, created_at, started_at, completed_at,
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
-    language_resolution_status, executing_node, claimed_at
+    language_resolution_status, executing_node, claimed_at, metadata
 """
+
+
+def _json_col(val: Any) -> Any:
+    """Decode a JSONB column psycopg may hand back already-parsed or as text."""
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, str):
+        return json.loads(val)
+    return val
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
@@ -54,6 +65,8 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         "language_resolution_status": json.loads(row[17]) if row[17] else None,
         "executing_node": row[18],
         "claimed_at": row[19],
+        # EVO-64545: reconstruction params for pod-pull work-stealing.
+        "metadata": _json_col(row[20]),
     }
 
 
@@ -115,7 +128,11 @@ class DistributedJobClaimer:
     # ------------------------------------------------------------------
 
     def claim_next_job(
-        self, job_type: Optional[str] = None
+        self,
+        job_type: Optional[str] = None,
+        *,
+        job_types: Optional[List[str]] = None,
+        exclude_types: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Atomically claim the next pending job for this node.
@@ -126,12 +143,20 @@ class DistributedJobClaimer:
         the same row.
 
         Args:
-            job_type: If provided, only claim jobs of this operation_type.
+            job_type: If provided, only claim jobs of this operation_type
+                (single-type shorthand, kept for backward compatibility).
+            job_types: EVO-64545. If provided, only claim jobs whose
+                operation_type is in this list (``= ANY``). Used by the
+                per-pod IndexJobClaimLoop to claim only pod-pull index ops.
+            exclude_types: EVO-64545. If provided, never claim jobs of these
+                operation_types (``<> ALL``). Used by the leader-only
+                DistributedJobWorkerService so it leaves pod-pull rows for the
+                index loop and the two claimers target disjoint row sets.
 
         Returns:
             A job dictionary (same schema as BackgroundJobsPostgresBackend
-            rows plus ``executing_node`` and ``claimed_at``) if a job was
-            claimed, or None if no pending jobs are available.
+            rows plus ``executing_node``, ``claimed_at`` and ``metadata``) if a
+            job was claimed, or None if no pending jobs are available.
         """
         # EVO-64538 (C10): memory-aware admission. A pod under memory pressure
         # declines the claim so the row stays 'pending' — another pod with
@@ -172,12 +197,21 @@ class DistributedJobClaimer:
                 )
                 return None
 
-        type_filter = "AND operation_type = %s" if job_type else ""
-        # One positional param for SET executing_node = %s,
-        # plus one optional param for the job_type filter.
+        # Build the operation_type filter. The first positional param is always
+        # SET executing_node = %s; the sub-SELECT filter params follow in the
+        # exact textual order they appear in the WHERE clause.
+        filters: List[str] = []
         params: List[Any] = [self._node_id]
         if job_type:
+            filters.append("AND operation_type = %s")
             params.append(job_type)
+        if job_types:
+            filters.append("AND operation_type = ANY(%s)")
+            params.append(list(job_types))
+        if exclude_types:
+            filters.append("AND operation_type <> ALL(%s)")
+            params.append(list(exclude_types))
+        type_filter = "\n                  ".join(filters)
 
         sql = f"""
             UPDATE background_jobs

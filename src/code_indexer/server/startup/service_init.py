@@ -508,6 +508,9 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=(
             _backend_registry.background_jobs if _backend_registry else None
         ),
+        # EVO-64545: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
+        # shared queue for cross-pod work-stealing instead of the local pool.
+        cluster_mode=(_storage_mode == "postgres"),
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
