@@ -194,6 +194,9 @@ class TestBGMSubmitJobTrackerRegistration:
                     operation_type="test_operation",
                     username="testuser",
                     repo_alias="my-repo",
+                    # Pod-pull (PR #1424): submit_job threads metadata (None here,
+                    # no reconstruction params) into the atomic INSERT.
+                    metadata=None,
                     is_admin=False,
                     actor_username="testuser",
                 )

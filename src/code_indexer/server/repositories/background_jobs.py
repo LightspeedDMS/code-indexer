@@ -142,6 +142,38 @@ PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 # The dashboard and API consumers use at most 50 rows per page in practice.
 MAX_PAGE_SIZE: int = 50
 
+# Memory-aware admission: operation types whose execution loads large structures into
+# RAM (HNSW graph build + FTS index + Voyage embedding batches). These are the
+# ops the memory-aware admission gate throttles under pod memory pressure.
+# Cheap/quick ops (status, cancel, xray reads, dependency-map queries) are never
+# gated so they stay responsive even while indexing is backpressured.
+_MEMORY_HEAVY_OPS: frozenset = frozenset(
+    {
+        "add_golden_repo",
+        "provider_index_add",
+        "provider_temporal_index_rebuild",
+        "sync_repository",
+        "change_branch",
+    }
+)
+
+# Pod-pull work-stealing: operation types that, in cluster mode,
+# are left PENDING in the shared Postgres queue for any pod with memory headroom
+# to claim and execute — instead of being pinned to the submitting pod's local
+# worker pool. Same set as the memory-heavy ops: these are exactly the
+# expensive index builds worth distributing. Each must (a) have its submit call
+# pass reconstruction params via `metadata=` and (b) be dispatchable by the
+# IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
+# Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
+# so the ops set has a single source of truth across the cluster job plumbing.
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
+
+# Memory-aware admission: min seconds between "deferring under memory pressure" INFO
+# logs per manager, so a sustained RED spell (a heavy job deferred every
+# backoff interval by every worker) can't storm the log while still leaving a
+# clear, periodic breadcrumb that the gate is actively throttling.
+_ADMISSION_DEFER_LOG_INTERVAL_SECONDS: float = 10.0
+
 
 class BackgroundJobManager:
     """
@@ -162,6 +194,7 @@ class BackgroundJobManager:
         data_retention_config: Optional["DataRetentionConfig"] = None,
         storage_backend: Optional[Any] = None,
         node_id: Optional[str] = None,
+        cluster_mode: bool = False,
     ):
         """Initialize enhanced background job manager.
 
@@ -246,6 +279,15 @@ class BackgroundJobManager:
         # Bug #1063 Part 3: Bounded worker pool shutdown signal.
         self._pool_shutdown = threading.Event()
 
+        # Memory-aware admission: last time a memory-pressure deferral was logged
+        # (monotonic seconds); rate-limits the deferral breadcrumb.
+        self._last_admission_defer_log: float = 0.0
+
+        # Pod-pull: when True (cluster/postgres mode), _POD_PULL_OPS
+        # are left PENDING in PG for cross-pod claiming instead of dispatched to
+        # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
+        self._cluster_mode: bool = cluster_mode
+
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
         # service owning the running job (e.g. DependencyMapService._cancel_event).
@@ -311,6 +353,17 @@ class BackgroundJobManager:
                 queue_ref.task_done()
                 break
             job_id, func, args, kwargs = item
+            # Memory-aware admission: under memory pressure, re-queue a heavy
+            # index job onto THIS lane's queue (it stays PENDING) and back off
+            # rather than running it and risking an OOM. Jobs wait, never OOM.
+            if self._admission_blocked(job_id):
+                self._log_admission_deferred(job_id)
+                queue_ref.put(item)
+                queue_ref.task_done()
+                self._pool_shutdown.wait(
+                    self._background_jobs_config.job_admission_backoff_seconds
+                )
+                continue
             try:
                 self._execute_job(job_id, func, args, kwargs)
             except Exception:
@@ -321,6 +374,76 @@ class BackgroundJobManager:
                 )
             finally:
                 queue_ref.task_done()
+
+    def _admission_blocked(self, job_id: str) -> bool:
+        """should this heavy job be deferred under memory pressure?
+
+        Returns True only when ALL of: the gate is enabled, the job's op type is
+        memory-heavy, a MemoryGovernor singleton exists, and the governor denies
+        admission at the configured cgroup watermark. Fail-open on everything
+        else (gate disabled, cheap op, no governor in CLI/solo mode) so the only
+        behavior change is throttling heavy indexing when the pod is pressured.
+        """
+        cfg = self._background_jobs_config
+        if not cfg.job_admission_memory_gate_enabled:
+            return False
+        job = self.jobs.get(job_id)
+        op_type = job.operation_type if job is not None else ""
+        if op_type not in _MEMORY_HEAVY_OPS:
+            return False
+        from code_indexer.server.services.memory_governor import get_memory_governor
+
+        governor = get_memory_governor()
+        if governor is None:
+            return False
+        try:
+            return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+        except Exception:  # noqa: BLE001 — L1: a governor error must never kill
+            # the pool-worker thread. Fail-open (do not block) so the only effect
+            # of a broken governor is that admission throttling is skipped, never
+            # a stalled lane.
+            logging.debug(
+                "memory-pressure: admission check raised; failing open (ignored)",
+                exc_info=True,
+            )
+            return False
+
+    def _log_admission_deferred(self, job_id: str) -> None:
+        """rate-limited breadcrumb when a heavy job is deferred.
+
+        Makes the throttle observable (throttled vs. stuck) without storming the
+        log: at most one line per _ADMISSION_DEFER_LOG_INTERVAL_SECONDS per
+        manager, tagged with the governor band and last-sampled cgroup used%.
+        """
+        now = time.monotonic()
+        if now - self._last_admission_defer_log < _ADMISSION_DEFER_LOG_INTERVAL_SECONDS:
+            return
+        self._last_admission_defer_log = now
+        # Best-effort: a breadcrumb must never crash the worker loop.
+        try:
+            job = self.jobs.get(job_id)
+            op_type = job.operation_type if job is not None else ""
+            from code_indexer.server.services.memory_governor import (
+                get_memory_governor,
+            )
+
+            governor = get_memory_governor()
+            band_obj = getattr(governor, "band", None)
+            band = getattr(band_obj, "value", "no-governor")
+            used_pct = getattr(governor, "last_used_pct", -1.0)
+            logging.info(
+                "memory-pressure: deferring memory-heavy job %s (op=%s) under memory pressure "
+                "(band=%s used_pct=%.1f); re-queued PENDING, backing off %.1fs",
+                job_id,
+                op_type,
+                band,
+                used_pct,
+                self._background_jobs_config.job_admission_backoff_seconds,
+            )
+        except Exception:  # noqa: BLE001 — logging must never break admission
+            logging.debug(
+                "memory-pressure: deferral-log failed (ignored)", exc_info=True
+            )
 
     @property
     def max_concurrent_jobs(self) -> int:
@@ -454,6 +577,7 @@ class BackgroundJobManager:
         actor_username: Optional[str] = None,  # AC12: who triggered the job
         lane: str = "ordinary",  # Story #1400 CRITICAL 1: dedicated worker pool
         snapshot_ctx: Optional[Dict[str, Any]] = None,  # Story #1400: job metadata only
+        metadata: Optional[Dict[str, Any]] = None,  # pod-pull reconstruction params
         **kwargs,
     ) -> str:
         """
@@ -475,6 +599,11 @@ class BackgroundJobManager:
             snapshot_ctx: Opaque job-registration metadata for the temporal
                 foreground/handoff layer. Stored on the job, NEVER passed to
                 `func`.
+            metadata: Reconstruction params persisted to the
+                background_jobs row (JSONB) so a pod-pull index op can be
+                executed on any pod that claims it. Required for a
+                ``_POD_PULL_OPS`` op to be work-stolen in cluster mode; without
+                it the op falls back to this pod's local worker pool.
             **kwargs: Function keyword arguments
 
         Returns:
@@ -564,6 +693,7 @@ class BackgroundJobManager:
                     operation_type=operation_type,
                     username=submitter_username,
                     repo_alias=repo_alias,
+                    metadata=metadata,
                     is_admin=is_admin,
                     actor_username=resolved_actor,
                 )
@@ -617,10 +747,48 @@ class BackgroundJobManager:
                         exc_info=True,
                     )
 
-        # Bug #1063 Part 3 / Story #1400 CRITICAL 1: Enqueue the job for its
-        # dedicated bounded worker pool. Workers pull from the LANE-SPECIFIC
-        # queue and call _execute_job() -- ordinary and temporal jobs are
-        # routed to entirely separate queues, never a shared one.
+        # Pod-pull work-stealing: in cluster mode a memory-heavy index op has
+        # already been registered PENDING / executing_node NULL in the shared
+        # queue above, so it is immediately claimable by ANY node with memory
+        # headroom. Do NOT dispatch it to THIS node's in-memory pool (which would
+        # pin it here) -- leave it for the memory-gated IndexJobClaimLoop running
+        # on every node. Guarded on metadata being present so a not-yet-migrated
+        # caller (no reconstruction params) safely falls back to the local pool
+        # instead of stranding an unexecutable row.
+        if (
+            self._cluster_mode
+            and operation_type in POD_PULL_OPS
+            and repo_alias
+            and metadata is not None
+            and self._job_tracker is not None
+        ):
+            # Cluster-Aware State (ABSOLUTE RULE): this job executes on WHICHEVER
+            # node claims it, and its real progress/status live in the shared
+            # background_jobs row (written cross-node by the claimer's
+            # update_progress/complete_job/fail_job). Do NOT retain a node-local
+            # in-memory PENDING entry -- get_job_status and get_jobs_for_display
+            # both PREFER self.jobs over the DB row, so keeping it would make a
+            # poll that lands on THIS (submitting) node report stale PENDING
+            # forever while another node runs the job. Dropping it makes both
+            # read paths fall through to the authoritative shared DB row
+            # regardless of which node the poll hits. (Cancellation stays
+            # correct: cancel_job's no-in-memory branch already routes to the
+            # cross-node DB-cancellation path.)
+            with self._lock:
+                self.jobs.pop(job_id, None)
+            logging.info(
+                "Background job %s (%s) left PENDING for pod-pull work-stealing "
+                "(not dispatched to local pool; in-memory entry dropped so "
+                "status reads defer to the shared DB row)",
+                job_id,
+                operation_type,
+            )
+            return job_id
+
+        # Story #1400 CRITICAL 1: Enqueue the job for its dedicated bounded
+        # worker pool. Workers pull from the LANE-SPECIFIC queue and call
+        # _execute_job() -- ordinary and temporal jobs are routed to entirely
+        # separate queues, never a shared one.
         target_queue = (
             self._temporal_pending_job_queue
             if lane == "temporal"
@@ -1411,9 +1579,9 @@ class BackgroundJobManager:
                             # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
                             self._job_tracker.complete_job(
                                 job_id,
-                                result=job.result
-                                if isinstance(job.result, dict)
-                                else None,
+                                result=(
+                                    job.result if isinstance(job.result, dict) else None
+                                ),
                             )
                         elif job.status == JobStatus.FAILED:
                             error_msg = (

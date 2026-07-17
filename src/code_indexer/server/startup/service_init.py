@@ -516,6 +516,9 @@ def initialize_services() -> Dict[str, Any]:
         # fail_orphaned_jobs() can detect a PostgreSQL backend and skip its
         # unscoped sweep, avoiding cross-node false failures.
         node_id=_node_id,
+        # Pod-pull: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
+        # shared queue for cross-pod work-stealing instead of the local pool.
+        cluster_mode=(_storage_mode == "postgres"),
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager

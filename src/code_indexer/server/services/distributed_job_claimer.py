@@ -27,8 +27,19 @@ _SELECT_COLS = """
     job_id, operation_type, status, created_at, started_at, completed_at,
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
-    language_resolution_status, executing_node, claimed_at
+    language_resolution_status, executing_node, claimed_at, metadata
 """
+
+
+def _json_col(val: Any) -> Any:
+    """Decode a JSONB column psycopg may hand back already-parsed or as text."""
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, str):
+        return json.loads(val)
+    return val
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
@@ -54,6 +65,8 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         "language_resolution_status": json.loads(row[17]) if row[17] else None,
         "executing_node": row[18],
         "claimed_at": row[19],
+        # Pod-pull: reconstruction params for pod-pull work-stealing.
+        "metadata": _json_col(row[20]),
     }
 
 
@@ -79,7 +92,14 @@ class DistributedJobClaimer:
                 └─ release_job()  ──>  pending (executing_node = NULL)
     """
 
-    def __init__(self, pool: Any, node_id: str, max_concurrent_jobs: int = 0) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        node_id: str,
+        max_concurrent_jobs: int = 0,
+        memory_gate_enabled: bool = True,
+        memory_max_used_pct: float = 80.0,
+    ) -> None:
         """
         Initialise the claimer.
 
@@ -89,17 +109,30 @@ class DistributedJobClaimer:
             max_concurrent_jobs: Cluster-wide max running jobs (Bug #541).
                 When > 0, claim_next_job() checks the total running count
                 across ALL nodes before claiming. 0 = no limit.
+            memory_gate_enabled: When True, a pod under memory
+                pressure declines to claim so the row stays ``pending`` for a
+                pod with headroom (or for later) instead of being run and
+                risking an OOMKill. Fail-open when no MemoryGovernor exists.
+            memory_max_used_pct: cgroup used% watermark for the memory gate;
+                below it (and not RED) a claim is allowed. Self-tunes to the
+                pod's own memory.max.
         """
         self._pool = pool
         self._node_id = node_id
         self._max_concurrent_jobs = max_concurrent_jobs
+        self._memory_gate_enabled = memory_gate_enabled
+        self._memory_max_used_pct = memory_max_used_pct
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def claim_next_job(
-        self, job_type: Optional[str] = None
+        self,
+        job_type: Optional[str] = None,
+        *,
+        job_types: Optional[List[str]] = None,
+        exclude_types: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Atomically claim the next pending job for this node.
@@ -110,13 +143,42 @@ class DistributedJobClaimer:
         the same row.
 
         Args:
-            job_type: If provided, only claim jobs of this operation_type.
+            job_type: If provided, only claim jobs of this operation_type
+                (single-type shorthand, kept for backward compatibility).
+            job_types: If provided, only claim jobs whose
+                operation_type is in this list (``= ANY``). Used by the
+                per-pod IndexJobClaimLoop to claim only pod-pull index ops.
+            exclude_types: If provided, never claim jobs of these
+                operation_types (``<> ALL``). Used by the leader-only
+                DistributedJobWorkerService so it leaves pod-pull rows for the
+                index loop and the two claimers target disjoint row sets.
 
         Returns:
             A job dictionary (same schema as BackgroundJobsPostgresBackend
-            rows plus ``executing_node`` and ``claimed_at``) if a job was
-            claimed, or None if no pending jobs are available.
+            rows plus ``executing_node``, ``claimed_at`` and ``metadata``) if a
+            job was claimed, or None if no pending jobs are available.
         """
+        # Memory-aware admission: memory-aware admission. A pod under memory pressure
+        # declines the claim so the row stays 'pending' — another pod with
+        # headroom (or this pod once it recovers) picks it up, instead of
+        # running it now and risking an OOMKill. Fail-open when no governor
+        # exists (CLI/solo) or the gate is disabled.
+        if self._memory_gate_enabled:
+            from code_indexer.server.services.memory_governor import (
+                get_memory_governor,
+            )
+
+            governor = get_memory_governor()
+            if governor is not None and not governor.admission_allowed(
+                self._memory_max_used_pct
+            ):
+                logger.debug(
+                    "Node %s under memory pressure — skipping claim, "
+                    "leaving job pending",
+                    self._node_id,
+                )
+                return None
+
         # Bug #541: Cluster-wide concurrency check. Count running jobs across
         # ALL nodes before claiming. If at or above limit, skip claim.
         if self._max_concurrent_jobs > 0:
@@ -135,12 +197,21 @@ class DistributedJobClaimer:
                 )
                 return None
 
-        type_filter = "AND operation_type = %s" if job_type else ""
-        # One positional param for SET executing_node = %s,
-        # plus one optional param for the job_type filter.
+        # Build the operation_type filter. The first positional param is always
+        # SET executing_node = %s; the sub-SELECT filter params follow in the
+        # exact textual order they appear in the WHERE clause.
+        filters: List[str] = []
         params: List[Any] = [self._node_id]
         if job_type:
+            filters.append("AND operation_type = %s")
             params.append(job_type)
+        if job_types:
+            filters.append("AND operation_type = ANY(%s)")
+            params.append(list(job_types))
+        if exclude_types:
+            filters.append("AND operation_type <> ALL(%s)")
+            params.append(list(exclude_types))
+        type_filter = "\n                  ".join(filters)
 
         sql = f"""
             UPDATE background_jobs
@@ -305,6 +376,63 @@ class DistributedJobClaimer:
                 job_id,
             )
         return failed
+
+    def update_progress(
+        self,
+        job_id: str,
+        progress: int,
+        phase: Optional[str] = None,
+        detail: Optional[str] = None,
+    ) -> bool:
+        """Write incremental progress for a claimed (work-stolen) job.
+
+        PR #1424 H2: a pod-pull index op runs on whichever node claimed it, not
+        the submitting node, so its in-process progress_callback closure is gone.
+        This writes progress back to the SHARED background_jobs row -- the same
+        row the originating node's dashboard polls -- so a work-stolen job shows
+        real incremental progress instead of a 0 -> 100 jump.
+
+        Ownership-scoped (``executing_node = self._node_id``) like complete/fail,
+        and phase/detail are COALESCE-updated so omitting them preserves the
+        existing values rather than nulling them.
+
+        Args:
+            job_id: The job to update (must be owned by this node).
+            progress: Percent complete (0-100).
+            phase: Optional coarse phase label (e.g. "index", "cow").
+            detail: Optional human-readable phase detail.
+
+        Returns:
+            True if the row was updated, False if not found or not owned by this
+            node (e.g. reclaimed by reconciliation while executing).
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE background_jobs
+                    SET progress      = %s,
+                        current_phase = COALESCE(%s, current_phase),
+                        phase_detail  = COALESCE(%s, phase_detail)
+                    WHERE job_id = %s
+                      AND executing_node = %s
+                    """,
+                    (progress, phase, detail, job_id, self._node_id),
+                )
+                updated: bool = cur.rowcount > 0
+            conn.commit()
+
+        if not updated:
+            # Not fatal: a lost progress tick just means the dashboard misses one
+            # update. Log at DEBUG (fail_job/complete_job already WARN on the
+            # terminal-transition version of this reclaim race).
+            logger.debug(
+                "Node %s progress update for job %s no-op (rowcount=0; "
+                "likely reclaimed)",
+                self._node_id,
+                job_id,
+            )
+        return updated
 
     def get_node_jobs(self) -> List[Dict[str, Any]]:
         """
