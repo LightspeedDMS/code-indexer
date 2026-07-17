@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 
 from code_indexer.server.services.distributed_job_claimer import DistributedJobClaimer
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -64,6 +63,7 @@ def _make_job_row(
     language_resolution_status=None,
     executing_node="node-1",
     claimed_at="2026-01-01T00:01:00+00:00",
+    metadata=None,
 ):
     """Build a tuple matching the _SELECT_COLS column order."""
     return (
@@ -87,6 +87,8 @@ def _make_job_row(
         json.dumps(language_resolution_status) if language_resolution_status else None,
         executing_node,
         claimed_at,
+        # Pod-pull: metadata JSONB column (pod-pull reconstruction params).
+        json.dumps(metadata) if metadata else None,
     )
 
 

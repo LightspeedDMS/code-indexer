@@ -465,6 +465,12 @@ def register_admin_ops_routes(
                     repo_path=repo_path,
                     provider_name=request.providers[0],
                     clear=False,
+                    # Pod-pull: reconstruction params for _provider_index_job.
+                    metadata={
+                        "repo_path": repo_path,
+                        "provider_name": request.providers[0],
+                        "clear": False,
+                    },
                 )
                 job_ids.append(provider_job_id)
 
@@ -521,6 +527,14 @@ def register_admin_ops_routes(
                     provider_name=request.providers[0],
                     clear=False,
                     temporal_options=_temporal_opts,
+                    # Pod-pull: reconstruction params for
+                    # _provider_temporal_index_job (temporal_options → **kwargs).
+                    metadata={
+                        "repo_path": repo_path,
+                        "provider_name": request.providers[0],
+                        "clear": False,
+                        "temporal_options": _temporal_opts,
+                    },
                 )
                 job_ids.append(provider_job_id)
 

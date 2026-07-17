@@ -881,6 +881,22 @@ class BackgroundJobsConfig:
     # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
     temporal_lane_concurrency: int = 2
 
+    # Memory-aware admission for heavy index jobs.
+    # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
+    # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
+    # can exceed the process/cgroup memory limit and OOM the server. When the
+    # gate is enabled, a worker consults the cgroup-aware MemoryGovernor before
+    # starting a memory-heavy op and, if under pressure, re-queues the job (it
+    # stays PENDING) and backs off — jobs wait instead of OOMing. The watermark
+    # is a percentage of the process's OWN cgroup limit, so it self-tunes to any
+    # memory.max without per-deployment tuning.
+    job_admission_memory_gate_enabled: bool = True
+    # Admit a heavy job only while cgroup used% is below this (below the
+    # governor's 85% RED/eviction line, leaving headroom for the job's growth).
+    job_admission_memory_max_used_pct: float = 80.0
+    # Seconds a worker waits after declining to admit before re-checking.
+    job_admission_backoff_seconds: float = 2.0
+
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
             self.max_concurrent_refresh_jobs = max(

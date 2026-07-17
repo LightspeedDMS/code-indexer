@@ -21,7 +21,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, TYPE_CHECKING, cast
+from typing import Callable, Dict, List, Optional, Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.models.golden_repo_branch_models import (
@@ -480,6 +480,59 @@ class GoldenRepoManager:
                     f"Invalid or inaccessible git repository: {repo_url}"
                 )
 
+        # Pod-pull: the real clone+index+register+activate work now
+        # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
+        # can run it from the job row's metadata. This thin wrapper preserves the
+        # exact solo/local-pool path.
+        def background_worker(progress_callback=None) -> Dict[str, Any]:
+            return self.execute_add_golden_repo_work(
+                repo_url=repo_url,
+                alias=alias,
+                default_branch=default_branch,
+                enable_temporal=enable_temporal,
+                temporal_options=temporal_options,
+                submitter_username=submitter_username,
+                progress_callback=progress_callback,
+            )
+
+        # Submit to BackgroundJobManager. Pod-pull: pass reconstruction params
+        # as metadata so in cluster mode the row is left PENDING and claimable +
+        # runnable on any pod (pod-pull); solo mode runs background_worker locally.
+        job_id = self.background_job_manager.submit_job(
+            operation_type="add_golden_repo",
+            func=background_worker,
+            submitter_username=submitter_username,
+            is_admin=True,
+            repo_alias=alias,  # AC5: Fix unknown repo bug
+            metadata={
+                "repo_url": repo_url,
+                "alias": alias,
+                "default_branch": default_branch,
+                "enable_temporal": enable_temporal,
+                "temporal_options": temporal_options,
+                "submitter_username": submitter_username,
+            },
+        )
+        return cast(str, job_id)
+
+    def execute_add_golden_repo_work(
+        self,
+        *,
+        repo_url: str,
+        alias: str,
+        default_branch: Optional[str] = None,
+        enable_temporal: bool = False,
+        temporal_options: Optional[Dict] = None,
+        submitter_username: str = "admin",
+        progress_callback: Optional[Callable[..., Any]] = None,
+    ) -> Dict[str, Any]:
+        """reusable clone + index + register + global-activate body for
+        add_golden_repo, extracted verbatim from the former background_worker
+        closure so a pod-pull IndexJobClaimLoop can execute it on any pod from the
+        job row's metadata. Retry-safe: a partial clone is cleaned up on failure
+        and a duplicate alias is rejected up front by the caller.
+        """
+
         def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
             """Remove a partially-cloned directory so retries don't fail with
             'destination path already exists' (Bug #1218 orphan-clone cleanup).
@@ -512,7 +565,7 @@ class GoldenRepoManager:
 
         # Create wrapper for background execution that accepts progress_callback
         # so BackgroundJobManager can inject it (Story #482 PATH A).
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        def _run() -> Dict[str, Any]:
             """Execute add operation in background thread."""
             nonlocal default_branch
             # Bug #1218: track clone_path so we can clean it up on failure.
@@ -520,6 +573,17 @@ class GoldenRepoManager:
             # retries with "destination path already exists".
             _clone_path_for_cleanup: Optional[str] = None
             try:
+                # Pod-pull retry safety (PR #1424 H1): a dead-node reclaim can
+                # re-execute this body after a hard crash (SIGKILL) that left a
+                # PARTIAL clone dir at golden_repos_dir/{alias} with no committed
+                # golden_repos row (the except-path cleanup below never ran). If
+                # we cloned now, _clone_repository would raise "destination path
+                # already exists" BEFORE _clone_path_for_cleanup is assigned, so
+                # nothing would ever be cleaned and every retry -- and every
+                # future manual re-add of this alias -- would fail forever.
+                # Remove such an orphan up front (guards inside the helper never
+                # touch in-place content or a committed registration).
+                self._remove_orphan_clone_for_retry(repo_url, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
@@ -742,15 +806,44 @@ class GoldenRepoManager:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise
 
-        # Submit to BackgroundJobManager
-        job_id = self.background_job_manager.submit_job(
-            operation_type="add_golden_repo",
-            func=background_worker,
-            submitter_username=submitter_username,
-            is_admin=True,
-            repo_alias=alias,  # AC5: Fix unknown repo bug
+        return _run()
+
+    def _remove_orphan_clone_for_retry(self, repo_url: str, alias: str) -> bool:
+        """Remove an ORPHAN partial-clone dir so an add_golden_repo retry can
+        proceed (PR #1424 H1).
+
+        Pod-pull work-stealing made add_golden_repo cross-node reclaim-eligible.
+        A hard crash (SIGKILL) mid-clone leaves a partial clone at
+        golden_repos_dir/{alias} with NO committed golden_repos row (the
+        except-path _cleanup_failed_clone never ran). Without removing it, the
+        next clone raises "destination path already exists" and every retry --
+        plus every future manual re-add of this alias -- fails forever.
+
+        Removes the directory ONLY when ALL hold, so it can never destroy live
+        or caller-owned content:
+          - the clone dir actually exists, AND
+          - it is NOT an in-place registration (EVO-64228: the content is the
+            caller's, not cidx's, to delete), AND
+          - there is NO committed golden_repos row for the alias (a row means a
+            near-complete registration, not an orphan).
+
+        Returns True iff an orphan clone was removed.
+        """
+        clone_path = os.path.join(self.golden_repos_dir, alias)
+        if not os.path.exists(clone_path):
+            return False
+        if self._is_in_place_registration(repo_url, clone_path):
+            return False
+        if self.get_golden_repo(alias) is not None:
+            return False
+        logging.warning(
+            "add_golden_repo retry: removing orphan clone for '%s' at %s "
+            "(no committed registry row) so the clone can proceed",
+            alias,
+            clone_path,
         )
-        return cast(str, job_id)
+        shutil.rmtree(clone_path, ignore_errors=True)
+        return True
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
@@ -3323,6 +3416,9 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias,
+            # Pod-pull: the executor is the bound change_branch method
+            # reconstructed from these params on whichever pod claims the row.
+            metadata={"alias": alias, "target_branch": target_branch},
         )
         return {"success": True, "job_id": job_id}
 
