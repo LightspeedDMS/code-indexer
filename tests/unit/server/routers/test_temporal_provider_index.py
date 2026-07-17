@@ -46,6 +46,10 @@ def _mock_server_config(voyage_key="voyage-key", cohere_key=None) -> MagicMock:
     cfg = MagicMock()
     cfg.voyageai_api_key = voyage_key
     cfg.cohere_api_key = cohere_key
+    # Story #1404: production reads this via getattr(..., "index_floor_date", None).
+    # Without an explicit value, MagicMock auto-creates a truthy child mock instead
+    # of None, which breaks resolve_effective_floor_date()'s max() comparison.
+    cfg.temporal_indexing_config.index_floor_date = None
     return cfg
 
 
@@ -384,8 +388,8 @@ class TestProviderTemporalIndexJobCommand:
         assert "--max-commits" in cmd
         max_idx = cmd.index("--max-commits")
         assert cmd[max_idx + 1] == "50"
-        assert "--since" in cmd
-        since_idx = cmd.index("--since")
+        assert "--since-date" in cmd
+        since_idx = cmd.index("--since-date")
         assert cmd[since_idx + 1] == "2024-01-01"
 
     def test_provider_temporal_index_job_command_no_temporal_options(self, tmp_path):
