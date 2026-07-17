@@ -2622,15 +2622,18 @@ class RefreshScheduler:
             now always passes an explicit sanitized env (never relies on this
             default), so this None default only matters for a hypothetical
             future caller.
+
+            Story #1418: this is the SHARED convergence point for both the
+            semantic (Step 1) and temporal (Step 2) calls in this workflow,
+            so CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+            unconditionally (both storage modes).
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
-            # Bug #1313 round-3 regression guard: only pass the env= kwarg
-            # when it is not None, so callers that intentionally pass None
-            # (e.g. temporal in sqlite mode, to stay byte-unchanged) do not
-            # have that None overwritten here -- several pre-existing tests
-            # mock run_with_popen_progress with a strict (non-**kwargs)
-            # signature that does not accept an env kwarg at all.
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+
             _popen_kwargs: dict = dict(
                 command=command,
                 phase_name=phase_name,
@@ -2641,8 +2644,9 @@ class RefreshScheduler:
                 cwd=str(source_path),
                 error_label=error_label,
             )
-            if env is not None:
-                _popen_kwargs["env"] = env
+            _popen_kwargs["env"] = build_embedding_stats_child_env(
+                get_config_service().get_config(), base_env=env
+            )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- several pre-existing tests
             # mock run_with_popen_progress with a strict signature lacking

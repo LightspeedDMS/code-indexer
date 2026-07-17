@@ -183,6 +183,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "cidx_fetch_cached_payload",
         # Story 4 (Epic #1213): Memory Governor observability MCP twin
         "get_memory_governor_stats",
+        # Story #1418: Embedding & Reranker Call Tracking admin query tool
+        "admin_embedding_stats_query",
     }
 )
 

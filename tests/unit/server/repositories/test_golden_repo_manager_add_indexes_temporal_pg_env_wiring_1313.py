@@ -197,7 +197,21 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             ),
         )
 
-    def test_temporal_command_receives_env_none_in_sqlite_mode(self, tmp_path):
+    def test_temporal_command_receives_non_none_env_with_embedding_stats_var_in_sqlite_mode(
+        self, tmp_path
+    ):
+        """Story #1418: unlike the temporal-only PG bootstrap var (which
+        stays gated on postgres mode), CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
+        fires UNCONDITIONALLY -- so the temporal Popen call's env is no
+        longer raw None in sqlite mode, even though the temporal-specific
+        var is still correctly absent."""
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+        )
+        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+            EMBEDDING_STATS_BOOTSTRAP_DIR_ENV,
+        )
+
         manager, repo_path = _make_manager(tmp_path)
         server_config = ServerConfig(
             server_dir="/opt/cidx-server", storage_mode="sqlite"
@@ -230,7 +244,15 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             _run_captured_worker(manager)
 
         by_phase = {c["phase_name"]: c["env"] for c in calls}
-        assert by_phase["temporal"] is None, (
-            "sqlite/solo mode must be byte-unchanged: temporal Popen call "
-            "must receive env=None"
+        temporal_env = by_phase["temporal"]
+        assert temporal_env is not None, (
+            "Story #1418: the embedding-stats bootstrap var fires "
+            "unconditionally, so env is no longer raw None even in sqlite "
+            "mode"
+        )
+        assert temporal_env[EMBEDDING_STATS_BOOTSTRAP_DIR_ENV] == "/opt/cidx-server"
+        assert_env_absent(
+            temporal_env,
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
+            msg="sqlite mode must NOT receive the temporal-only PG bootstrap var",
         )

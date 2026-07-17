@@ -382,6 +382,20 @@ class XrayPatternService:
         if pattern_params is None:
             pattern_params = {}
 
+        # Bug #1423 (defense in depth): repo_alias must be a str before it
+        # reaches the path-traversal check below or _load_pattern's Path
+        # division. A list (even single-element -- the omni multi-repo
+        # repository_alias form) passes the "/" in field_value membership
+        # check silently (it's a valid, False, list-containment test) and
+        # would otherwise crash _load_pattern with a raw
+        # "unsupported operand type(s) for /: 'PosixPath' and 'list'"
+        # TypeError. Reject loudly here instead.
+        if not isinstance(repo_alias, str):
+            raise ValueError(
+                f"invalid_repo_alias_type: repo_alias must be a str, got "
+                f"{type(repo_alias).__name__} ({repo_alias!r})"
+            )
+
         # Validate repo_alias and pattern_name for path traversal sequences
         for field_name, field_value in [
             ("repo_alias", repo_alias),

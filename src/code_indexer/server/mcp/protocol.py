@@ -838,7 +838,23 @@ async def process_jsonrpc_request(
         # Invalid params error
         return create_jsonrpc_error(-32602, f"Invalid params: {str(e)}", request_id)
     except Exception as e:
-        # Internal error
+        # Internal error — log server-side before surfacing as a raw -32603
+        # (Bug #1423: this was previously a silent failure with zero
+        # server-side log trace, e.g. a TypeError from xray_search/
+        # xray_explore's pattern resolution). Centralized here so every
+        # tools/call dispatch is covered without per-handler duplication.
+        raw_arguments = params.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        logger.error(
+            "MCP request failed with unhandled exception: method=%r tool=%r "
+            "repository_alias=%r pattern_name=%r error=%s",
+            method,
+            params.get("name"),
+            arguments.get("repository_alias"),
+            arguments.get("pattern_name"),
+            e,
+            exc_info=True,
+        )
         return create_jsonrpc_error(
             -32603,
             f"Internal error: {str(e)}",

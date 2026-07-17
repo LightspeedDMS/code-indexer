@@ -610,12 +610,21 @@ class ActivatedRepoIndexManager:
         wall-clock deadline on the subprocess itself. The only legitimate
         fixed timeout in the system is the per-request outbound embedding-
         provider HTTP call.
+
+        Story #1418: this is the SHARED convergence point for every
+        `cidx index` spawn in this file (semantic, fts, temporal), so
+        CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+        unconditionally (both storage modes), before the existing
+        build_cidx_subprocess_env() PYTHONPATH sanitization.
         """
-        resolved_env = (
-            build_cidx_subprocess_env(env)
-            if env is not None
-            else build_cidx_subprocess_env()
+        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+            build_embedding_stats_child_env,
         )
+
+        env_with_stats = build_embedding_stats_child_env(
+            get_config_service().get_config(), base_env=env
+        )
+        resolved_env = build_cidx_subprocess_env(env_with_stats)
         self._seed_telemetry(repo_path)
         try:
             return run_cancellable_subprocess(

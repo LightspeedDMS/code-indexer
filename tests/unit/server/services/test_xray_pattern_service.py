@@ -866,3 +866,45 @@ evaluator_code: |
                 repo_alias="my-repo",
                 pattern_name="../../../etc/passwd",
             )
+
+
+class TestNonStringRepoAlias:
+    """Bug #1423 defense-in-depth: resolve_and_prepare_pattern/_load_pattern
+    must reject a non-str repo_alias with a clear ValueError instead of
+    crashing with a raw TypeError from Path.__truediv__ when a list slips
+    through (e.g. an omni multi-repo repository_alias that bypassed handler
+    normalisation). Covers both a genuine multi-element list and a
+    single-element list (row 7 from the bug report's scope table)."""
+
+    def test_list_repo_alias_raises_value_error_not_type_error(
+        self, tmp_path: Path
+    ) -> None:
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="invalid_repo_alias_type"):
+            service.resolve_and_prepare_pattern(
+                repo_alias=["click-global", "typer-global"],  # type: ignore[arg-type]
+                pattern_name="deep-nesting",
+            )
+
+    def test_single_element_list_repo_alias_raises_value_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Even a single-element list (row 7 from Bug #1423) must be rejected
+        loudly at the service layer rather than silently producing a
+        TypeError from Path division."""
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="invalid_repo_alias_type"):
+            service.resolve_and_prepare_pattern(
+                repo_alias=["click-global"],  # type: ignore[arg-type]
+                pattern_name="deep-nesting",
+            )

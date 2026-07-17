@@ -1994,7 +1994,18 @@ def _run_provider_subprocess(
     # cidx dependency. Preserves the provider API key vars and (in postgres
     # mode) the #1313 CIDX_TEMPORAL_PG_BOOTSTRAP_DIR var already merged into
     # env by the callers.
-    sanitized_env = build_cidx_subprocess_env(env)
+    #
+    # Story #1418: this is ALSO the single shared convergence point for both
+    # job types, so CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here
+    # ONCE, unconditionally (both storage modes).
+    from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+        build_embedding_stats_child_env,
+    )
+
+    env_with_stats = build_embedding_stats_child_env(
+        get_config_service().get_config(), base_env=env
+    )
+    sanitized_env = build_cidx_subprocess_env(env_with_stats)
 
     try:
         run_with_popen_progress(
