@@ -668,6 +668,23 @@ class BackgroundJobManager:
             snapshot_ctx=snapshot_ctx,  # Story #1400
         )
 
+        # Pod-pull: in cluster mode a memory-heavy POD_PULL_OPS operation
+        # with reconstruction metadata is left PENDING for cross-node
+        # work-stealing instead of dispatched to this node's local pool
+        # (see the early-return branch below). Bug #1430: such a row MUST be
+        # inserted with executing_node NULL -- DistributedJobClaimer.
+        # claim_next_job's `executing_node IS NULL` predicate can otherwise
+        # never match it, since the submitting node deliberately never runs
+        # it locally. Computed once, before the atomic insert, so both the
+        # insert call and the post-insert routing decision below agree.
+        is_pod_pull_eligible = (
+            self._cluster_mode
+            and operation_type in POD_PULL_OPS
+            and bool(repo_alias)
+            and metadata is not None
+            and self._job_tracker is not None
+        )
+
         # Bug #1065: For repo-scoped operations, use the cluster-atomic
         # register_job_if_no_conflict gate (idx_active_job_per_repo partial
         # unique index) BEFORE adding to in-memory state and BEFORE spawning
@@ -696,6 +713,8 @@ class BackgroundJobManager:
                     metadata=metadata,
                     is_admin=is_admin,
                     actor_username=resolved_actor,
+                    # Bug #1430: leave executing_node NULL for pod-pull rows.
+                    stamp_executing_node=not is_pod_pull_eligible,
                 )
             except _TrackerDuplicateJobError as exc:
                 # Translate into the canonical DuplicateJobError that all
@@ -748,20 +767,15 @@ class BackgroundJobManager:
                     )
 
         # Pod-pull work-stealing: in cluster mode a memory-heavy index op has
-        # already been registered PENDING / executing_node NULL in the shared
-        # queue above, so it is immediately claimable by ANY node with memory
-        # headroom. Do NOT dispatch it to THIS node's in-memory pool (which would
-        # pin it here) -- leave it for the memory-gated IndexJobClaimLoop running
+        # already been registered PENDING / executing_node NULL (Bug #1430
+        # fix: stamp_executing_node=False above) in the shared queue, so it
+        # is immediately claimable by ANY node with memory headroom. Do NOT
+        # dispatch it to THIS node's in-memory pool (which would pin it
+        # here) -- leave it for the memory-gated IndexJobClaimLoop running
         # on every node. Guarded on metadata being present so a not-yet-migrated
         # caller (no reconstruction params) safely falls back to the local pool
         # instead of stranding an unexecutable row.
-        if (
-            self._cluster_mode
-            and operation_type in POD_PULL_OPS
-            and repo_alias
-            and metadata is not None
-            and self._job_tracker is not None
-        ):
+        if is_pod_pull_eligible:
             # Cluster-Aware State (ABSOLUTE RULE): this job executes on WHICHEVER
             # node claims it, and its real progress/status live in the shared
             # background_jobs row (written cross-node by the claimer's

@@ -6,19 +6,42 @@ filters, update_progress, complete_job) against row dicts -- not a scripted
 MagicMock -- so the test exercises the actual claim/execute/complete seam and
 the dead-node reclaim -> re-claim -> re-execute path a work-stolen index op
 relies on.
+
+Bug #1430 coverage gap: every class below (except the last) seeds its
+pending row via the hand-constructed ``_pending_row()`` helper, which sets
+``executing_node: None`` directly -- bypassing the REAL insert path entirely
+(BackgroundJobManager.submit_job -> JobTracker.register_job_if_no_conflict
+-> _atomic_insert_impl), which is exactly where issue #1430's regression
+lived (the atomic insert unconditionally stamped
+executing_node=self._node_id, even for pod-pull rows, orphaning them
+forever). TestPodPullRoundTripRealSubmitBug1430 below closes that gap: it
+derives the pending row from a genuine submit_job() call against a real
+SQLite-backed JobTracker, so a reintroduced insert-time stamp would make
+this test fail exactly as issue #1430 described (the row can never be
+claimed).
 """
 
 from __future__ import annotations
 
+import json
+import shutil
+import sqlite3
+import tempfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
+from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.services import memory_governor as mg
 from code_indexer.server.services.distributed_job_claimer import (
     DistributedJobClaimer,
     _SELECT_COLS,
 )
 from code_indexer.server.services.index_job_claim_loop import IndexJobClaimLoop
+from code_indexer.server.services.job_tracker import JobTracker
+from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
 
 
 # Column order the claimer's RETURNING clause uses; parsed once so the fake row
@@ -253,5 +276,166 @@ class TestPodPullRoundTrip:
         )
         assert loop._process_one_job() is True
         assert ran == [{"alias": "repoA"}]
+        assert row["status"] == "completed"
+        assert row["executing_node"] == "node-2"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1430: real-insert-then-claim round trip.
+#
+# Unlike the classes above (which hand-construct the pending row via
+# _pending_row(), setting executing_node=None directly), this class derives
+# the pending row from a GENUINE BackgroundJobManager.submit_job() call
+# against a real SQLite-backed JobTracker -- the exact seam issue #1430
+# proved broken on staging (the atomic insert stamped executing_node to the
+# submitting node even for pod-pull rows, so DistributedJobClaimer's
+# `executing_node IS NULL` predicate could never match it and the job hung
+# PENDING forever). If the insert-time stamp regresses, this test fails at
+# the claim step below exactly as production did.
+# ---------------------------------------------------------------------------
+
+
+def _create_schema(db_path: str) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS background_jobs (
+            job_id TEXT PRIMARY KEY NOT NULL,
+            operation_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            result TEXT,
+            error TEXT,
+            progress INTEGER NOT NULL DEFAULT 0,
+            username TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            cancelled INTEGER NOT NULL DEFAULT 0,
+            repo_alias TEXT,
+            resolution_attempts INTEGER NOT NULL DEFAULT 0,
+            claude_actions TEXT,
+            failure_reason TEXT,
+            extended_error TEXT,
+            language_resolution_status TEXT,
+            current_phase TEXT,
+            phase_detail TEXT,
+            actor_username TEXT,
+            progress_info TEXT,
+            metadata TEXT,
+            executing_node TEXT,
+            claimed_at TEXT
+        )"""
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_job_per_repo
+            ON background_jobs(operation_type, repo_alias)
+            WHERE status IN ('pending', 'running')
+              AND repo_alias IS NOT NULL
+            """
+        )
+        conn.commit()
+
+
+def _real_submitted_pending_row(db_path: str, job_id: str) -> Dict[str, Any]:
+    """Read back a submitted job's row from SQLite, shaped exactly like
+    _pending_row()'s dict so it drops straight into _ClaimerJobsTable."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT job_id, operation_type, status, created_at, started_at,
+                      completed_at, result, error, progress, username,
+                      is_admin, cancelled, repo_alias, resolution_attempts,
+                      claude_actions, failure_reason, extended_error,
+                      language_resolution_status, executing_node, claimed_at,
+                      metadata, current_phase, phase_detail
+               FROM background_jobs WHERE job_id = ?""",
+            (job_id,),
+        ).fetchone()
+    assert row is not None, f"job {job_id} not found in DB"
+    d = dict(row)
+    d["is_admin"] = bool(d["is_admin"])
+    d["cancelled"] = bool(d["cancelled"])
+    d["metadata"] = json.loads(d["metadata"]) if d["metadata"] else None
+    return d
+
+
+def simple_job() -> Dict[str, Any]:
+    return {"status": "ok"}
+
+
+class TestPodPullRoundTripRealSubmitBug1430:
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = str(Path(self.tmp) / "jobs.db")
+        _create_schema(self.db_path)
+
+        self.backend = BackgroundJobsSqliteBackend(self.db_path)
+        self.tracker = JobTracker(
+            db_path=self.db_path,
+            storage_backend=self.backend,
+            node_id="node-submitter",
+        )
+        self.manager = BackgroundJobManager(
+            storage_path=None,
+            cluster_mode=True,
+            node_id="node-submitter",
+        )
+        self.manager._job_tracker = self.tracker  # type: ignore[assignment]
+
+    def teardown_method(self):
+        try:
+            self.manager.shutdown()
+        except Exception:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        mg.clear_memory_governor()
+
+    def test_real_submit_then_real_claim_execute_complete(self):
+        """End-to-end: real submit_job() insert -> real claim_next_job() ->
+        real IndexJobClaimLoop execution -> real completion, on a DIFFERENT
+        node than the submitter (proving genuine cross-node work-stealing,
+        not merely "some node can claim it")."""
+        job_id = self.manager.submit_job(
+            "add_golden_repo",
+            simple_job,
+            submitter_username="admin",
+            is_admin=True,
+            repo_alias="repoA",
+            metadata={"alias": "repoA"},
+        )
+
+        row = _real_submitted_pending_row(self.db_path, job_id)
+        assert row["status"] == "pending"
+
+        table = _ClaimerJobsTable([row], datetime.now(timezone.utc))
+        # node-2: a DIFFERENT node than the submitter (node-submitter),
+        # proving this is genuine cross-node pod-pull work-stealing.
+        claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
+
+        seen = {}
+
+        def add_executor(metadata, progress_callback):
+            seen.update(metadata)
+            progress_callback(40, phase="index", detail="indexing")
+            return {"success": True, "alias": metadata["alias"]}
+
+        loop = IndexJobClaimLoop(
+            claimer=claimer,
+            dispatch={"add_golden_repo": add_executor},
+            node_id="node-2",
+        )
+
+        claimed_and_executed = loop._process_one_job()
+
+        assert claimed_and_executed is True, (
+            "Bug #1430: the real submit_job()-inserted row could not be "
+            "claimed by node-2's IndexJobClaimLoop. This reproduces the "
+            "production regression: a pod-pull row born with a non-NULL "
+            "executing_node can never satisfy DistributedJobClaimer's "
+            "`executing_node IS NULL` claim predicate and hangs PENDING "
+            "forever."
+        )
+        assert seen == {"alias": "repoA"}
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
