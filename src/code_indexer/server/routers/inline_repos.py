@@ -23,10 +23,9 @@ Large method sizes are pre-existing in the source inline_routes.py (3221 lines).
 
 import logging
 import os
-import requests
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Dict, Any, Optional
 
 from ..repositories.activated_repo_manager import (  # noqa: E402
     ActivatedRepoError,
@@ -82,6 +81,7 @@ from ..auth import dependencies
 from ..auth.user_manager import UserRole
 from ..app_helpers import (
     _execute_repository_sync,
+    build_sync_progress_webhook_callback,
 )
 
 # Module-level logger
@@ -887,44 +887,14 @@ def register_repo_routes(
                 "progress_webhook": sync_request.progress_webhook,
             }
 
-            def create_webhook_callback(
-                webhook_url: Optional[str],
-            ) -> Optional[Callable[[int], None]]:
-                """Create a webhook callback function if webhook URL is provided."""
-                if not webhook_url:
-                    return None
-
-                def webhook_callback(progress: int) -> None:
-                    """Send progress updates to webhook URL."""
-                    try:
-                        payload = {
-                            "repository_id": cleaned_repo_id,
-                            "progress": progress,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "username": current_user.username,
-                        }
-                        response = requests.post(
-                            webhook_url,
-                            json=payload,
-                            timeout=5,  # Don't wait too long for webhook responses
-                            headers={"Content-Type": "application/json"},
-                        )
-                        # Log webhook failures but don't interrupt sync
-                        if not response.ok:
-                            logging.warning(
-                                f"Webhook {webhook_url} returned {response.status_code}"
-                            )
-                    except Exception as e:
-                        logging.warning(
-                            f"Failed to send webhook to {webhook_url}: {str(e)}"
-                        )
-
-                return webhook_callback
-
             def sync_job_wrapper():
-                # Create webhook callback if webhook URL provided
+                # Build the client webhook callback (if a URL was provided) via
+                # the shared helper -- the SAME builder the pod-pull executing
+                # node uses, so the webhook-POST logic lives in one place.
                 webhook_url: Optional[str] = sync_options.get("progress_webhook")  # type: ignore[assignment]
-                webhook_callback = create_webhook_callback(webhook_url)
+                webhook_callback = build_sync_progress_webhook_callback(
+                    webhook_url, cleaned_repo_id, current_user.username
+                )
 
                 return _execute_repository_sync(
                     repo_id=cleaned_repo_id,

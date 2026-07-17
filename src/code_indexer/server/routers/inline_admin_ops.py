@@ -646,9 +646,7 @@ def register_admin_ops_routes(
             from code_indexer.server.services.config_service import get_config_service
 
             _config_service = get_config_service()
-            max_age_hours = (
-                _config_service.get_config().data_retention_config.background_jobs_retention_hours
-            )
+            max_age_hours = _config_service.get_config().data_retention_config.background_jobs_retention_hours
         if max_age_hours < 1:
             max_age_hours = 1
         if max_age_hours > 8760:  # 1 year

@@ -593,6 +593,20 @@ Deepest reference: `docs/server-memory-invariants.md`.
 
 ---
 
+### Pod-Pull Work-Stealing + Memory-Aware Admission (PR #1424)
+
+In cluster mode (`storage_mode=postgres`) the memory-heavy index ops in `POD_PULL_OPS` (`background_jobs.py`: `add_golden_repo`, `provider_index_add`, `provider_temporal_index_rebuild`, `sync_repository`, `change_branch`) are left PENDING in the shared `background_jobs` queue with their reconstruction params in the row's `metadata` JSONB, and are claimed and executed by an always-on per-pod `IndexJobClaimLoop` via the memory-gated `DistributedJobClaimer`. Key invariants:
+
+- **Shared claimer memory gate also throttles the leader's refresh claims (intended)**: `lifespan.py` builds ONE `DistributedJobClaimer` (with the cgroup-aware memory gate) and shares it between the leader-only `DistributedJobWorkerService` and the per-pod `IndexJobClaimLoop`. The gate is checked at the top of `claim_next_job` BEFORE any op-type filter, so under sustained memory pressure the leader also declines `refresh_golden_repo` claims, not just pod-pull ops. This is deliberate (refresh is memory-heavy too) -- a pressured pod leaves refresh rows PENDING for a pod with headroom rather than risking an OOM.
+- **Disjoint claim sets**: the leader claims with `exclude_types=POD_PULL_OPS`; the loop claims with `job_types=POD_PULL_OPS`. Complementary filters + `FOR UPDATE SKIP LOCKED` guarantee exactly one executor per row.
+- **Work-stolen progress is DB-backed (H2)**: the executing pod is NOT the submitting pod, so the in-process progress_callback closure is gone. `IndexJobClaimLoop` injects a per-job callback that routes to `DistributedJobClaimer.update_progress` (ownership-scoped `UPDATE background_jobs SET progress/current_phase/phase_detail ...`), so the originating node's dashboard -- which polls that row -- shows real incremental progress. For `sync_repository` the client webhook (`options.progress_webhook`, carried in metadata) is rebuilt on the executing node via the shared `build_sync_progress_webhook_callback` (`app_helpers.py`) and fanned out alongside the DB callback. Progress writes are best-effort (a failed tick never fails the work).
+- **Retry-safe add_golden_repo (H1)**: pod-pull makes these ops cross-node reclaim-eligible (dead-node reclaim resets a dead node's `running` row to `pending`). `execute_add_golden_repo_work` calls `_remove_orphan_clone_for_retry` before cloning: a hard-crash partial clone (dir present, NO committed `golden_repos` row, not in-place) is removed so the retry does not wedge forever on "destination path already exists". Guarded to never delete in-place-registration content or a committed registration.
+- **No stale node-local job state (Cluster-Aware State)**: `submit_job` does NOT retain the in-memory `self.jobs[job_id]` entry for a pod-pull job (it is `pop`ped in the pod-pull early-return). The job runs on whichever node claims it and its truth lives in the shared `background_jobs` row; because `get_job_status` and `get_jobs_for_display` both PREFER the in-memory copy over the DB row, keeping a node-local PENDING entry would make a poll landing on the submitting node report stale PENDING forever. Dropping it makes both read paths fall through to the shared DB row on every node. Cancellation stays correct via `cancel_job`'s no-in-memory cross-node DB-cancellation branch.
+- **Dispatch coverage guard (M3)**: `validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)` runs at startup and raises if the dispatch executors do not EXACTLY cover `POD_PULL_OPS`, so a future half-wired op fails loudly instead of being claimed with no executor.
+- **Admission gate fail-open**: the local-pool admission gate (`_admission_blocked`) and the claimer memory gate both fail OPEN (allow the job) when no `MemoryGovernor` exists, the gate is disabled, or the governor raises -- degrading to pre-PR behavior rather than wedging the queue.
+
+---
+
 ## Global Repo Alias Fallback
 
 ### Global Repo Alias Fallback (Story #1039)

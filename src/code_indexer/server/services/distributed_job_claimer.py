@@ -377,6 +377,63 @@ class DistributedJobClaimer:
             )
         return failed
 
+    def update_progress(
+        self,
+        job_id: str,
+        progress: int,
+        phase: Optional[str] = None,
+        detail: Optional[str] = None,
+    ) -> bool:
+        """Write incremental progress for a claimed (work-stolen) job.
+
+        PR #1424 H2: a pod-pull index op runs on whichever node claimed it, not
+        the submitting node, so its in-process progress_callback closure is gone.
+        This writes progress back to the SHARED background_jobs row -- the same
+        row the originating node's dashboard polls -- so a work-stolen job shows
+        real incremental progress instead of a 0 -> 100 jump.
+
+        Ownership-scoped (``executing_node = self._node_id``) like complete/fail,
+        and phase/detail are COALESCE-updated so omitting them preserves the
+        existing values rather than nulling them.
+
+        Args:
+            job_id: The job to update (must be owned by this node).
+            progress: Percent complete (0-100).
+            phase: Optional coarse phase label (e.g. "index", "cow").
+            detail: Optional human-readable phase detail.
+
+        Returns:
+            True if the row was updated, False if not found or not owned by this
+            node (e.g. reclaimed by reconciliation while executing).
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE background_jobs
+                    SET progress      = %s,
+                        current_phase = COALESCE(%s, current_phase),
+                        phase_detail  = COALESCE(%s, phase_detail)
+                    WHERE job_id = %s
+                      AND executing_node = %s
+                    """,
+                    (progress, phase, detail, job_id, self._node_id),
+                )
+                updated: bool = cur.rowcount > 0
+            conn.commit()
+
+        if not updated:
+            # Not fatal: a lost progress tick just means the dashboard misses one
+            # update. Log at DEBUG (fail_job/complete_job already WARN on the
+            # terminal-transition version of this reclaim race).
+            logger.debug(
+                "Node %s progress update for job %s no-op (rowcount=0; "
+                "likely reclaimed)",
+                self._node_id,
+                job_id,
+            )
+        return updated
+
     def get_node_jobs(self) -> List[Dict[str, Any]]:
         """
         Return all jobs currently claimed (running) by this node.

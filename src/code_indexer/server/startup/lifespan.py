@@ -3116,38 +3116,72 @@ def make_lifespan(
                     # stopped by the _cluster_services shutdown loop.
                     from code_indexer.server.services.index_job_claim_loop import (
                         IndexJobClaimLoop,
+                        validate_dispatch_covers,
+                    )
+                    from code_indexer.server.repositories.background_jobs import (
+                        POD_PULL_OPS,
                     )
                     from code_indexer.server.app_helpers import (
                         _execute_repository_sync,
+                        build_sync_progress_webhook_callback,
                     )
                     from code_indexer.server.mcp.handlers.repos import (
                         _provider_index_job,
                         _provider_temporal_index_job,
                     )
 
-                    def _pp_add_golden_repo(md):
-                        return golden_repo_manager.execute_add_golden_repo_work(**md)
-
-                    def _pp_change_branch(md):
-                        return golden_repo_manager.change_branch(
-                            md["alias"], md["target_branch"]
+                    # Pod-pull dispatch executors (PR #1424 H2): each takes the
+                    # row's metadata AND a per-job progress_callback that the
+                    # IndexJobClaimLoop routes to the shared background_jobs row,
+                    # so a work-stolen op reports incremental progress to the
+                    # originating node's dashboard instead of a 0 -> 100 jump.
+                    def _pp_add_golden_repo(md, progress_callback):
+                        return golden_repo_manager.execute_add_golden_repo_work(
+                            **md, progress_callback=progress_callback
                         )
 
-                    def _pp_sync_repository(md):
+                    def _pp_change_branch(md, progress_callback):
+                        return golden_repo_manager.change_branch(
+                            md["alias"],
+                            md["target_branch"],
+                            progress_callback=progress_callback,
+                        )
+
+                    def _pp_sync_repository(md, progress_callback):
+                        # Rebuild the client webhook on THIS (executing) node from
+                        # the metadata options, then fan progress out to BOTH the
+                        # DB-backed dashboard callback and the webhook.
+                        options = md.get("options") or {}
+                        webhook_cb = build_sync_progress_webhook_callback(
+                            options.get("progress_webhook"),
+                            md["repo_id"],
+                            md["username"],
+                        )
+
+                        def _combined(progress: int) -> None:
+                            progress_callback(progress)
+                            if webhook_cb is not None:
+                                webhook_cb(progress)
+
                         return _execute_repository_sync(
                             repo_id=md["repo_id"],
                             username=md["username"],
-                            options=md.get("options") or {},
+                            options=options,
                             activated_repo_manager=getattr(
                                 golden_repo_manager, "activated_repo_manager", None
                             ),
+                            progress_callback=_combined,
                         )
 
-                    def _pp_provider_index(md):
-                        return _provider_index_job(**md)
+                    def _pp_provider_index(md, progress_callback):
+                        return _provider_index_job(
+                            **md, progress_callback=progress_callback
+                        )
 
-                    def _pp_provider_temporal(md):
-                        return _provider_temporal_index_job(**md)
+                    def _pp_provider_temporal(md, progress_callback):
+                        return _provider_temporal_index_job(
+                            **md, progress_callback=progress_callback
+                        )
 
                     _index_dispatch = {
                         "add_golden_repo": _pp_add_golden_repo,
@@ -3156,6 +3190,9 @@ def make_lifespan(
                         "provider_index_add": _pp_provider_index,
                         "provider_temporal_index_rebuild": _pp_provider_temporal,
                     }
+                    # M3: fail loudly if a pod-pull op ever lacks an executor (or
+                    # vice versa) instead of silently claiming an unrunnable row.
+                    validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)
                     _index_claim_loop = IndexJobClaimLoop(
                         claimer=_job_claimer,
                         dispatch=_index_dispatch,
@@ -4372,9 +4409,7 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except (
-                Exception
-            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",

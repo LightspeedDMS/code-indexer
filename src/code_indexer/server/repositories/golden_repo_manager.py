@@ -573,6 +573,17 @@ class GoldenRepoManager:
             # retries with "destination path already exists".
             _clone_path_for_cleanup: Optional[str] = None
             try:
+                # Pod-pull retry safety (PR #1424 H1): a dead-node reclaim can
+                # re-execute this body after a hard crash (SIGKILL) that left a
+                # PARTIAL clone dir at golden_repos_dir/{alias} with no committed
+                # golden_repos row (the except-path cleanup below never ran). If
+                # we cloned now, _clone_repository would raise "destination path
+                # already exists" BEFORE _clone_path_for_cleanup is assigned, so
+                # nothing would ever be cleaned and every retry -- and every
+                # future manual re-add of this alias -- would fail forever.
+                # Remove such an orphan up front (guards inside the helper never
+                # touch in-place content or a committed registration).
+                self._remove_orphan_clone_for_retry(repo_url, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
@@ -796,6 +807,43 @@ class GoldenRepoManager:
                 raise
 
         return _run()
+
+    def _remove_orphan_clone_for_retry(self, repo_url: str, alias: str) -> bool:
+        """Remove an ORPHAN partial-clone dir so an add_golden_repo retry can
+        proceed (PR #1424 H1).
+
+        Pod-pull work-stealing made add_golden_repo cross-node reclaim-eligible.
+        A hard crash (SIGKILL) mid-clone leaves a partial clone at
+        golden_repos_dir/{alias} with NO committed golden_repos row (the
+        except-path _cleanup_failed_clone never ran). Without removing it, the
+        next clone raises "destination path already exists" and every retry --
+        plus every future manual re-add of this alias -- fails forever.
+
+        Removes the directory ONLY when ALL hold, so it can never destroy live
+        or caller-owned content:
+          - the clone dir actually exists, AND
+          - it is NOT an in-place registration (EVO-64228: the content is the
+            caller's, not cidx's, to delete), AND
+          - there is NO committed golden_repos row for the alias (a row means a
+            near-complete registration, not an orphan).
+
+        Returns True iff an orphan clone was removed.
+        """
+        clone_path = os.path.join(self.golden_repos_dir, alias)
+        if not os.path.exists(clone_path):
+            return False
+        if self._is_in_place_registration(repo_url, clone_path):
+            return False
+        if self.get_golden_repo(alias) is not None:
+            return False
+        logging.warning(
+            "add_golden_repo retry: removing orphan clone for '%s' at %s "
+            "(no committed registry row) so the clone can proceed",
+            alias,
+            clone_path,
+        )
+        shutil.rmtree(clone_path, ignore_errors=True)
+        return True
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str

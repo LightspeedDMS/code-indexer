@@ -16,8 +16,12 @@ class FakeClaimer:
         self.jobs_to_return = []
         self.completed_jobs = []
         self.failed_jobs = []
+        self.last_exclude_types = None
 
-    def claim_next_job(self):
+    def claim_next_job(self, job_type=None, *, job_types=None, exclude_types=None):
+        # Mirror the real DistributedJobClaimer signature: the leader worker
+        # excludes POD_PULL_OPS so it leaves those rows for the IndexJobClaimLoop.
+        self.last_exclude_types = exclude_types
         if self.jobs_to_return:
             return self.jobs_to_return.pop(0)
         return None

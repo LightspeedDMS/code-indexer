@@ -26,8 +26,41 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# op_type -> callable(metadata_dict) -> optional result dict.
-DispatchTable = Dict[str, Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]]
+# op_type -> callable(metadata_dict, progress_callback) -> optional result dict.
+# progress_callback(progress: int, phase: Optional[str], detail: Optional[str])
+# routes to the shared background_jobs row so a work-stolen job (PR #1424 H2)
+# reports incremental progress cross-node instead of a 0 -> 100 jump.
+DispatchTable = Dict[
+    str, Callable[[Dict[str, Any], Callable[..., Any]], Optional[Dict[str, Any]]]
+]
+
+
+def validate_dispatch_covers(
+    dispatch: DispatchTable, required_ops: "frozenset[str]"
+) -> None:
+    """Fail loudly at startup if the pod-pull dispatch drifts from the op set.
+
+    PR #1424 M3: the IndexJobClaimLoop claims rows whose operation_type is in
+    ``required_ops`` (POD_PULL_OPS) and executes them via ``dispatch``. If an op
+    is added to one but not the other, a claimed row could have no executor (or
+    a heavy op would never be work-stolen). This turns that silent drift into a
+    RuntimeError at wiring time.
+
+    Raises:
+        RuntimeError: if the dispatch keys are not EXACTLY ``required_ops``.
+    """
+    dispatch_ops = set(dispatch)
+    required = set(required_ops)
+    if dispatch_ops == required:
+        return
+    missing = required - dispatch_ops
+    extra = dispatch_ops - required
+    raise RuntimeError(
+        "pod-pull index dispatch does not match POD_PULL_OPS "
+        f"(missing executors for {sorted(missing)}; "
+        f"unexpected executors {sorted(extra)}). Every pod-pull op MUST have "
+        "exactly one dispatch executor and vice versa."
+    )
 
 
 class IndexJobClaimLoop:
@@ -144,7 +177,7 @@ class IndexJobClaimLoop:
                 job_id,
                 op_type,
             )
-            result = executor(metadata)
+            result = executor(metadata, self._make_progress_callback(job_id))
             self._claimer.complete_job(job_id, result)
             logger.info("IndexJobClaimLoop: completed %s", job_id)
         except Exception as exc:  # noqa: BLE001 — surface as job failure
@@ -159,3 +192,37 @@ class IndexJobClaimLoop:
             with self._in_flight_lock:
                 self._in_flight = None
         return True
+
+    def _make_progress_callback(self, job_id: str) -> Callable[..., None]:
+        """Build a per-job progress callback for a work-stolen op (PR #1424 H2).
+
+        The executor runs on THIS (claiming) node, not the submitting one, so the
+        in-process progress_callback closure the local pool would have injected is
+        gone. This callback writes progress back to the SHARED background_jobs row
+        via the claimer, so the originating node's dashboard (which polls that
+        row) shows real incremental progress. Best-effort: a progress-write hiccup
+        must never fail the actual work, so errors are swallowed at DEBUG.
+
+        Accepts the same shape the worker functions call
+        (``progress_callback(progress)`` positionally, or with ``phase``/
+        ``detail`` keywords); extra kwargs are ignored defensively.
+        """
+
+        def progress_callback(
+            progress: int,
+            phase: Optional[str] = None,
+            detail: Optional[str] = None,
+            **_ignored: Any,
+        ) -> None:
+            try:
+                self._claimer.update_progress(
+                    job_id, progress, phase=phase, detail=detail
+                )
+            except Exception:  # noqa: BLE001 — progress is best-effort
+                logger.debug(
+                    "IndexJobClaimLoop: progress update failed for %s (ignored)",
+                    job_id,
+                    exc_info=True,
+                )
+
+        return progress_callback

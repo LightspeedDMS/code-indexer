@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,7 +42,7 @@ class TestPodPullSubmit:
         )
         # Neutralize actual execution and spy on local-pool enqueues.
         self.manager._execute_job = lambda *a, **k: None
-        self.enqueued = []
+        self.enqueued: List[Any] = []
         orig = self.manager._pending_job_queue.put
 
         def spy(item, *a, **k):

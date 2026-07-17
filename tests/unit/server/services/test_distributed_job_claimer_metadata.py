@@ -1,5 +1,6 @@
 """DistributedJobClaimer metadata column + job_types/exclude_types filters."""
 
+from typing import Any, List
 from unittest.mock import MagicMock
 
 from code_indexer.server.services import memory_governor as mg
@@ -21,14 +22,14 @@ class TestMetadataColumn:
         assert _json_col('{"a": 1}') == {"a": 1}
 
     def test_row_to_dict_includes_metadata_parsed(self):
-        row = [None] * 21
+        row: List[Any] = [None] * 21
         row[0] = "j1"
         row[20] = {"repo_url": "u", "alias": "a"}
         d = _row_to_dict(row)
         assert d["metadata"] == {"repo_url": "u", "alias": "a"}
 
     def test_row_to_dict_metadata_from_json_string(self):
-        row = [None] * 21
+        row: List[Any] = [None] * 21
         row[20] = '{"clear": false}'
         assert _row_to_dict(row)["metadata"] == {"clear": False}
 

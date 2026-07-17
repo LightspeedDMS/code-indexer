@@ -396,7 +396,17 @@ class BackgroundJobManager:
         governor = get_memory_governor()
         if governor is None:
             return False
-        return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+        try:
+            return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+        except Exception:  # noqa: BLE001 — L1: a governor error must never kill
+            # the pool-worker thread. Fail-open (do not block) so the only effect
+            # of a broken governor is that admission throttling is skipped, never
+            # a stalled lane.
+            logging.debug(
+                "memory-pressure: admission check raised; failing open (ignored)",
+                exc_info=True,
+            )
+            return False
 
     def _log_admission_deferred(self, job_id: str) -> None:
         """rate-limited breadcrumb when a heavy job is deferred.
@@ -752,9 +762,24 @@ class BackgroundJobManager:
             and metadata is not None
             and self._job_tracker is not None
         ):
+            # Cluster-Aware State (ABSOLUTE RULE): this job executes on WHICHEVER
+            # node claims it, and its real progress/status live in the shared
+            # background_jobs row (written cross-node by the claimer's
+            # update_progress/complete_job/fail_job). Do NOT retain a node-local
+            # in-memory PENDING entry -- get_job_status and get_jobs_for_display
+            # both PREFER self.jobs over the DB row, so keeping it would make a
+            # poll that lands on THIS (submitting) node report stale PENDING
+            # forever while another node runs the job. Dropping it makes both
+            # read paths fall through to the authoritative shared DB row
+            # regardless of which node the poll hits. (Cancellation stays
+            # correct: cancel_job's no-in-memory branch already routes to the
+            # cross-node DB-cancellation path.)
+            with self._lock:
+                self.jobs.pop(job_id, None)
             logging.info(
                 "Background job %s (%s) left PENDING for pod-pull work-stealing "
-                "(not dispatched to local pool)",
+                "(not dispatched to local pool; in-memory entry dropped so "
+                "status reads defer to the shared DB row)",
                 job_id,
                 operation_type,
             )
