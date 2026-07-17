@@ -427,6 +427,7 @@ class JobTracker:
         metadata: Optional[Dict[str, Any]] = None,
         is_admin: bool = False,
         actor_username: Optional[str] = None,
+        stamp_executing_node: bool = True,
     ) -> TrackedJob:
         """
         Atomically register a new pending job unless an active duplicate exists.
@@ -443,6 +444,16 @@ class JobTracker:
             is_admin: Whether this is an admin job (persisted to DB on INSERT).
             actor_username: Who actually triggered the job (AC12 audit trail).
                 When None, the submitter (username) is the actor.
+            stamp_executing_node: Bug #1430 -- default True preserves Story
+                #1400 CRITICAL 3 behavior (stamp executing_node=self._node_id
+                even while pending, for node-scoped restart cleanup). Callers
+                that will NOT dispatch this job to the local pool -- i.e. a
+                pod-pull-eligible cluster-mode submission left PENDING for
+                cross-node work-stealing -- must pass False so the row is
+                born genuinely unclaimed (executing_node NULL). Otherwise
+                DistributedJobClaimer.claim_next_job's `executing_node IS
+                NULL` predicate can never match the row and it is orphaned
+                forever (no node, including the submitter, can claim it).
 
         Raises:
             ValueError: If any required string field is None, empty, or
@@ -466,7 +477,10 @@ class JobTracker:
         )
 
         self._atomic_insert_or_raise(
-            job, is_admin=is_admin, actor_username=actor_username
+            job,
+            is_admin=is_admin,
+            actor_username=actor_username,
+            stamp_executing_node=stamp_executing_node,
         )
 
         with self._lock:
@@ -1219,6 +1233,7 @@ class JobTracker:
         job: TrackedJob,
         is_admin: bool = False,
         actor_username: Optional[str] = None,
+        stamp_executing_node: bool = True,
     ) -> None:
         """
         Insert a job row atomically, translating a unique-index violation on
@@ -1249,6 +1264,7 @@ class JobTracker:
         Args:
             is_admin: Persisted to the DB row on INSERT (AC12 audit trail).
             actor_username: Persisted to the DB row on INSERT (AC12 audit trail).
+            stamp_executing_node: See register_job_if_no_conflict (Bug #1430).
         """
         assert job.repo_alias is not None, (
             "atomic insert requires non-null repo_alias — partial index excludes NULL"
@@ -1256,7 +1272,10 @@ class JobTracker:
         for attempt in range(1, _MAX_ATOMIC_INSERT_ATTEMPTS + 1):
             try:
                 self._atomic_insert_impl(
-                    job, is_admin=is_admin, actor_username=actor_username
+                    job,
+                    is_admin=is_admin,
+                    actor_username=actor_username,
+                    stamp_executing_node=stamp_executing_node,
                 )
                 return
             except (sqlite3.IntegrityError, _BackendUniqueViolation):
@@ -1310,6 +1329,7 @@ class JobTracker:
         job: TrackedJob,
         is_admin: bool = False,
         actor_username: Optional[str] = None,
+        stamp_executing_node: bool = True,
     ) -> None:
         """
         Raw INSERT that surfaces partial-unique-index violations.
@@ -1323,6 +1343,7 @@ class JobTracker:
         Args:
             is_admin: Persisted to the is_admin column (AC12 audit trail).
             actor_username: Persisted to the actor_username column (AC12).
+            stamp_executing_node: See register_job_if_no_conflict (Bug #1430).
         """
         if self._backend is not None:
             try:
@@ -1351,8 +1372,14 @@ class JobTracker:
                     # still pending -- closes the gap a running-only stamp
                     # would leave (a crash before this job ever reaches
                     # "running" would otherwise be invisible to node-scoped
-                    # cleanup).
-                    executing_node=self._node_id,
+                    # cleanup). Bug #1430: a pod-pull-eligible submission
+                    # (stamp_executing_node=False) must NOT be stamped --
+                    # it is deliberately never dispatched to the submitting
+                    # node's local pool, so it must be born genuinely
+                    # unclaimed (executing_node NULL) for
+                    # DistributedJobClaimer.claim_next_job's `executing_node
+                    # IS NULL` predicate to ever match it.
+                    executing_node=self._node_id if stamp_executing_node else None,
                 )
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
