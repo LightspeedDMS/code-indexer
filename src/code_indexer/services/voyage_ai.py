@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from http import HTTPStatus
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, cast
 from typing import Protocol, runtime_checkable
 import httpx
 from rich.console import Console
@@ -359,11 +359,32 @@ class VoyageAIClient(EmbeddingProvider):
                 timeout=_timeout,
                 pooled=True,
             )
-            with _client_ctx as client:
-                response = client.post(
-                    self.config.api_endpoint, json=payload, headers=_headers
-                )
-            response.raise_for_status()
+
+            def _do_post_and_validate() -> httpx.Response:
+                """The smallest unit including BOTH the network call and its
+                status validation -- a vendor 4xx/5xx here must be recorded
+                as success=False, never success=True (Story #1418)."""
+                with _client_ctx as client:
+                    _response = client.post(
+                        self.config.api_endpoint, json=payload, headers=_headers
+                    )
+                _response.raise_for_status()
+                return cast(httpx.Response, _response)
+
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call,
+            )
+
+            response = instrument_call(
+                provider="voyageai",
+                call_type="embed",
+                model=model_name,
+                item_count=len(texts),
+                token_count=0,
+                batch_size=len(texts),
+                purpose="query" if not retry else "index",
+                fn=_do_post_and_validate,
+            )
 
             result = response.json()
             if not isinstance(result, dict):
@@ -513,11 +534,37 @@ class VoyageAIClient(EmbeddingProvider):
                 timeout=_timeout,
                 pooled=True,
             )
-            with _client_ctx as client:
-                response = client.post(
-                    CONTEXTUALIZED_EMBEDDINGS_ENDPOINT, json=payload, headers=_headers
-                )
-            response.raise_for_status()
+
+            def _do_post_and_validate() -> httpx.Response:
+                """The smallest unit including BOTH the network call and its
+                status validation (Story #1418) -- see _make_sync_request's
+                sibling closure for the same rationale."""
+                with _client_ctx as client:
+                    _response = client.post(
+                        CONTEXTUALIZED_EMBEDDINGS_ENDPOINT,
+                        json=payload,
+                        headers=_headers,
+                    )
+                _response.raise_for_status()
+                return cast(httpx.Response, _response)
+
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call,
+            )
+
+            response = instrument_call(
+                provider="voyageai",
+                call_type="embed",
+                model=model_name,
+                item_count=len(documents),
+                token_count=0,
+                batch_size=len(documents),
+                # CONTEXTUALIZED_EMBEDDINGS_ENDPOINT is used exclusively by
+                # the per-commit temporal contextual embedder
+                # (voyage-context-4) -- purpose is always "temporal".
+                purpose="temporal",
+                fn=_do_post_and_validate,
+            )
 
             result = response.json()
             if not isinstance(result, dict):

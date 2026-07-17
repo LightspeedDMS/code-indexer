@@ -560,17 +560,37 @@ class ClaudeCliManager:
             )
 
         try:
-            subprocess.run(
+            # Story #1418: merge CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR
+            # unconditionally (both storage modes) so this meta-repo
+            # catch-up reindex child subprocess can self-register a
+            # CrossProcessBootstrapWriter.
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+
+            _result = subprocess.run(
                 ["cidx", "index"],
                 cwd=str(self._meta_dir),
                 capture_output=True,
-                env=build_cidx_subprocess_env(),
+                env=build_cidx_subprocess_env(
+                    build_embedding_stats_child_env(get_config_service().get_config())
+                ),
                 check=False,
             )
-            logger.info(
-                "Re-indexed meta directory",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            if _result.returncode == 0:
+                logger.info(
+                    "Re-indexed meta directory",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    format_error_log(
+                        "AUTH-GENERAL-014",
+                        f"Re-index failed with exit code {_result.returncode}: "
+                        f"{_result.stderr.decode(errors='replace') if _result.stderr else ''}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
         except Exception as e:
             logger.warning(
                 format_error_log(

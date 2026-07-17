@@ -189,7 +189,6 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
     let hash = sha256_hex(user_code);
     let so_path = cache_dir.join(format!("{}.so", hash));
     let meta_path = cache_dir.join(format!("{}.meta", hash));
-    let rs_path = cache_dir.join(format!("{}.rs", hash));
 
     // Step 4: Cache check (version + hash + TTL freshness)
     let rustc_version = cache::get_rustc_version();
@@ -208,26 +207,56 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
         }
     }
 
-    // Step 5: Create cache dir and assemble source
+    // Step 5: Create cache dir
     std::fs::create_dir_all(cache_dir).map_err(|e| CompileError {
         message: format!("Failed to create cache directory '{}': {}", cache_dir.display(), e),
         details: vec![],
     })?;
+
+    // Step 5b: Bug #1425 — isolate this compile into a private, per-invocation
+    // build directory instead of writing the .rs source / -o output directly
+    // into the shared cache_dir. Two concurrent compiles of the SAME evaluator
+    // hash use the identical crate name (derived from the source filename), so
+    // rustc's LLVM codegen-unit intermediate object files (*.rcgu.o) — written
+    // alongside the -o path — collide by filename when both processes target
+    // cache_dir directly, producing "rust-lld: error: cannot open <hash>.rcgu.o:
+    // No such file or directory" for whichever process loses the race.
+    // tempdir_in(cache_dir) guarantees the build dir is on the SAME filesystem
+    // as cache_dir, so publishing the finished .so via rename() below is a
+    // single atomic syscall. The TempDir guard recursively removes the build
+    // directory (source + any rustc scratch files) on every exit path —
+    // success or the early '?' returns below — leaving nothing to leak.
+    let build_dir = tempfile::Builder::new()
+        .prefix(&format!("build-{}-", &hash[..hash.len().min(16)]))
+        .tempdir_in(cache_dir)
+        .map_err(|e| CompileError {
+            message: format!(
+                "Failed to create isolated build directory in '{}': {}",
+                cache_dir.display(),
+                e
+            ),
+            details: vec![],
+        })?;
+    let build_rs_path = build_dir.path().join(format!("{}.rs", hash));
+    let build_so_path = build_dir.path().join(format!("{}.so", hash));
+
     let full_source = assemble_evaluator_source(user_code);
-    std::fs::write(&rs_path, &full_source).map_err(|e| CompileError {
+    std::fs::write(&build_rs_path, &full_source).map_err(|e| CompileError {
         message: format!("Failed to write evaluator source: {}", e),
         details: vec![],
     })?;
 
-    // Step 6: Compile
+    // Step 6: Compile — output goes into the isolated build dir, never
+    // directly into the shared cache_dir, so no two concurrent invocations
+    // ever share a -o directory.
     let compile_start = Instant::now();
     let output = std::process::Command::new("rustc")
         .args([
             "--edition", "2021",
             "--crate-type", "cdylib",
             "-C", "opt-level=2",
-            "-o", so_path.to_str().unwrap(),
-            rs_path.to_str().unwrap(),
+            "-o", build_so_path.to_str().unwrap(),
+            build_rs_path.to_str().unwrap(),
         ])
         .output()
         .map_err(|e| CompileError {
@@ -245,6 +274,19 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
             details: adjusted,
         });
     }
+
+    // Step 6b: Atomically publish the compiled .so into the shared cache_dir.
+    // A concurrent compile of the SAME hash may publish first — that's fine,
+    // since both compiles started from byte-identical source; rename() simply
+    // replaces so_path with an equally-valid artifact.
+    std::fs::rename(&build_so_path, &so_path).map_err(|e| CompileError {
+        message: format!(
+            "Failed to publish compiled evaluator to '{}': {}",
+            so_path.display(),
+            e
+        ),
+        details: vec![],
+    })?;
 
     // Step 7: Write metadata (best-effort — .so already exists, warn but don't fail)
     let now = chrono_now_iso();
@@ -671,6 +713,117 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
                 "message at index {} must be 'msg {}', got: {}",
                 i, i, messages[i]
             );
+        }
+    }
+
+    const CONCURRENT_TEST_1425_USER_CODE: &str = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    if node.kind == "try_statement" {
+        findings.push(EvalFinding {
+            pattern: "concurrent_test_1425".to_string(),
+            line: node.start_line,
+            snippet: String::new(),
+        });
+    }
+    findings
+}
+"#;
+
+    /// Spawns `thread_count` threads that all call `compile_evaluator` with the
+    /// SAME `user_code` against the SAME `cache_dir` concurrently, returning
+    /// every thread's result.
+    fn spawn_concurrent_compiles(
+        cache_dir: &Path,
+        user_code: &str,
+        thread_count: usize,
+    ) -> Vec<Result<CompileResult, CompileError>> {
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                let cache_dir = cache_dir.to_path_buf();
+                let code = user_code.to_string();
+                std::thread::spawn(move || compile_evaluator(&code, &cache_dir))
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("compile_evaluator thread must not panic"))
+            .collect()
+    }
+
+    /// Loads a compiled evaluator .so and verifies it produces the expected
+    /// single finding for a `try_statement` node — proves the artifact is not
+    /// merely present on disk but is a correct, loadable evaluator.
+    fn assert_evaluator_finds_try_statement(so_path: &Path, index: usize) {
+        use crate::dynlib::DynlibEvaluator;
+        use crate::owned_node::OwnedNode;
+        use crate::scanner::Evaluator;
+
+        let evaluator = DynlibEvaluator::load(so_path)
+            .unwrap_or_else(|e| panic!("compile #{}: .so must load successfully: {}", index, e));
+        let source: Arc<str> = Arc::from("try { } catch { }");
+        let node = OwnedNode {
+            kind: "try_statement".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 0,
+            children: vec![],
+            is_named: true,
+            source,
+        };
+        let findings = evaluator.evaluate_node(&node);
+        assert_eq!(
+            findings.len(),
+            1,
+            "compile #{}: evaluator must find exactly one match, got {:?}",
+            index,
+            findings
+        );
+        assert_eq!(
+            findings[0].pattern, "concurrent_test_1425",
+            "compile #{}: finding pattern must match evaluator source",
+            index
+        );
+    }
+
+    /// Bug #1425: two concurrent compiles of the SAME evaluator hash against a
+    /// cold cache must NOT clobber each other's rustc intermediate .rcgu.o
+    /// object files. Reproduced by fanning out N threads that all call
+    /// compile_evaluator() with byte-identical source against a shared,
+    /// freshly-created (cold) cache_dir at the same time.
+    ///
+    /// Pre-fix, the losing thread's rustc invocation fails with "rust-lld:
+    /// error: cannot open <hash>.rcgu.o: No such file or directory" because
+    /// both invocations wrote their -o output (and thus their codegen-unit
+    /// object files) directly into the shared cache_dir using the identical
+    /// crate name (the hash). Post-fix, every thread must succeed AND produce
+    /// a loadable, CORRECT compiled evaluator — not just "no panic".
+    #[test]
+    fn test_concurrent_compile_same_hash_cold_cache_both_succeed() {
+        let dir = TempDir::new().unwrap();
+        const THREAD_COUNT: usize = 8;
+        let results =
+            spawn_concurrent_compiles(dir.path(), CONCURRENT_TEST_1425_USER_CODE, THREAD_COUNT);
+
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                result.is_ok(),
+                "concurrent compile #{} of identical hash must succeed, got: {:?}",
+                i,
+                result.as_ref().err().map(|e| e.to_string())
+            );
+        }
+
+        for (i, result) in results.into_iter().enumerate() {
+            let cr = result.unwrap();
+            assert!(
+                cr.so_path.exists(),
+                "compile #{}: .so file must exist on disk at {}",
+                i,
+                cr.so_path.display()
+            );
+            assert_evaluator_finds_try_statement(&cr.so_path, i);
         }
     }
 

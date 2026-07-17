@@ -84,11 +84,41 @@ class TestQuickDaemonCheck:
         assert config_path == config_file
 
     def test_quick_daemon_check_handles_missing_config(self, tmp_path):
-        """Test that quick check returns False when no config found."""
+        """Test that quick check returns False when no config found.
+
+        Test-isolation note (Bug #1420 investigation): this is distinct
+        from the directory-walk bug itself. A shared /tmp sandbox can
+        genuinely contain a real ancestor .code-indexer/config.json (e.g.
+        a developer's own daemon config living at /tmp/.code-indexer) and
+        pytest's tmp_path fixture nests test directories under /tmp with
+        no intervening .code-indexer to shadow it. Once the walk correctly
+        stops at the nearest config (the production fix), a genuinely
+        absent nearer config means the walk legitimately continues to that
+        real ancestor -- which is CORRECT behavior, not a bug. This test
+        verifies the "no config anywhere in the tree" case in isolation by
+        mocking Path.exists() so the walk cannot observe anything outside
+        this test's own tmp_path tree, regardless of real host state.
+        """
         from code_indexer.cli_fast_entry import quick_daemon_check
 
-        # Act - no .code-indexer directory exists
-        with patch("code_indexer.cli_fast_entry.Path.cwd", return_value=tmp_path):
+        real_exists = Path.exists
+
+        def isolated_exists(self: Path) -> bool:
+            # Only allow genuine filesystem checks within this test's own
+            # tmp_path tree; treat any ancestor outside it (e.g. a stray
+            # real /tmp/.code-indexer/config.json) as absent.
+            try:
+                self.relative_to(tmp_path)
+            except ValueError:
+                return False
+            return real_exists(self)
+
+        # Act - no .code-indexer directory exists anywhere in tmp_path,
+        # and ancestor state above tmp_path is isolated away.
+        with (
+            patch("code_indexer.cli_fast_entry.Path.cwd", return_value=tmp_path),
+            patch.object(Path, "exists", isolated_exists),
+        ):
             is_daemon, config_path = quick_daemon_check()
 
         # Assert
@@ -110,6 +140,109 @@ class TestQuickDaemonCheck:
             is_daemon, config_path = quick_daemon_check()
 
         # Assert - should fail gracefully
+        assert is_daemon is False
+        assert config_path is None
+
+    def test_nearer_disabled_config_is_authoritative_over_farther_enabled_ancestor(
+        self, tmp_path
+    ):
+        """Bug #1420 regression: the walk must STOP at the nearest
+        .code-indexer/config.json found and use ITS daemon state, even when
+        a farther ancestor directory has daemon.enabled: true.
+
+        Reproduces the exact scenario from the issue: a nearer directory has
+        daemon mode disabled, and a farther ancestor has daemon mode
+        enabled. The nearer (disabled) config must win -- the walk must
+        never fall through past it to inherit the farther ancestor's
+        enabled state.
+        """
+        # Arrange - farther ancestor: daemon ENABLED
+        farther_config_dir = tmp_path / ".code-indexer"
+        farther_config_dir.mkdir()
+        (farther_config_dir / "config.json").write_text(
+            json.dumps({"daemon": {"enabled": True}})
+        )
+
+        # Arrange - nearer project directory: daemon DISABLED
+        nearer_root = tmp_path / "project"
+        nearer_config_dir = nearer_root / ".code-indexer"
+        nearer_config_dir.mkdir(parents=True)
+        nearer_config_file = nearer_config_dir / "config.json"
+        nearer_config_file.write_text(json.dumps({"daemon": {"enabled": False}}))
+
+        from code_indexer.cli_fast_entry import quick_daemon_check
+
+        # Act - cwd is the nearer project directory
+        with patch("code_indexer.cli_fast_entry.Path.cwd", return_value=nearer_root):
+            is_daemon, config_path = quick_daemon_check()
+
+        # Assert - nearer disabled config must be authoritative
+        assert is_daemon is False, (
+            "nearer disabled config must not be overridden by a farther "
+            "ancestor's enabled config (Bug #1420)"
+        )
+        assert config_path is None
+
+    def test_nearer_enabled_config_is_authoritative_regardless_of_farther_ancestor(
+        self, tmp_path
+    ):
+        """Control test for Bug #1420: confirm the fix stops the walk at
+        the FIRST config found and uses ITS state -- not that it always
+        prefers "disabled". When the nearer config is daemon-ENABLED, that
+        state must still be used, even with a differing farther ancestor.
+        """
+        # Arrange - farther ancestor: daemon DISABLED
+        farther_config_dir = tmp_path / ".code-indexer"
+        farther_config_dir.mkdir()
+        (farther_config_dir / "config.json").write_text(
+            json.dumps({"daemon": {"enabled": False}})
+        )
+
+        # Arrange - nearer project directory: daemon ENABLED
+        nearer_root = tmp_path / "project"
+        nearer_config_dir = nearer_root / ".code-indexer"
+        nearer_config_dir.mkdir(parents=True)
+        nearer_config_file = nearer_config_dir / "config.json"
+        nearer_config_file.write_text(json.dumps({"daemon": {"enabled": True}}))
+
+        from code_indexer.cli_fast_entry import quick_daemon_check
+
+        # Act - cwd is the nearer project directory
+        with patch("code_indexer.cli_fast_entry.Path.cwd", return_value=nearer_root):
+            is_daemon, config_path = quick_daemon_check()
+
+        # Assert - nearer enabled config must be used
+        assert is_daemon is True
+        assert config_path == nearer_config_file
+
+    def test_nearer_malformed_config_stops_walk_before_farther_enabled_ancestor(
+        self, tmp_path
+    ):
+        """Bug #1420 regression: a nearer config that exists but is
+        malformed JSON must ALSO stop the walk (treated as daemon
+        disabled), rather than being skipped in search of a farther
+        ancestor's enabled config.
+        """
+        # Arrange - farther ancestor: daemon ENABLED
+        farther_config_dir = tmp_path / ".code-indexer"
+        farther_config_dir.mkdir()
+        (farther_config_dir / "config.json").write_text(
+            json.dumps({"daemon": {"enabled": True}})
+        )
+
+        # Arrange - nearer project directory: malformed config.json
+        nearer_root = tmp_path / "project"
+        nearer_config_dir = nearer_root / ".code-indexer"
+        nearer_config_dir.mkdir(parents=True)
+        (nearer_config_dir / "config.json").write_text("{invalid json}")
+
+        from code_indexer.cli_fast_entry import quick_daemon_check
+
+        # Act - cwd is the nearer project directory
+        with patch("code_indexer.cli_fast_entry.Path.cwd", return_value=nearer_root):
+            is_daemon, config_path = quick_daemon_check()
+
+        # Assert - nearer malformed config stops the walk
         assert is_daemon is False
         assert config_path is None
 
@@ -151,7 +284,9 @@ class TestCommandClassification:
         ]
 
         for cmd in delegatable:
-            assert is_delegatable_command(cmd) is True, f"{cmd} should be delegatable"
+            assert is_delegatable_command(cmd, []) is True, (
+                f"{cmd} should be delegatable"
+            )
 
     def test_identifies_non_delegatable_commands(self):
         """Test that init, fix-config etc. are not delegatable."""
@@ -160,7 +295,7 @@ class TestCommandClassification:
         non_delegatable = ["init", "fix-config", "reconcile", "sync", "list-repos"]
 
         for cmd in non_delegatable:
-            assert is_delegatable_command(cmd) is False, (
+            assert is_delegatable_command(cmd, []) is False, (
                 f"{cmd} should not be delegatable"
             )
 

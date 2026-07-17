@@ -101,6 +101,30 @@ def _resolve_default_xray_timeout_seconds() -> int:
 _seeds_ensured = False
 
 
+def _pattern_scope_alias(repo_alias_parsed: Any) -> str:
+    """Return the alias to use for pattern-library resolution (Bug #1423).
+
+    Pattern resolution (_resolve_evaluator_code -> XrayPatternService.
+    _load_pattern) does ``Path / repo_alias`` under the hood, which requires
+    a single string. When repo_alias_parsed is already a plain string
+    (single-repo call, or an omni list that collapsed to one element),
+    use it directly — this preserves repo-specific-scope priority over
+    __any__ per XrayPatternService._load_pattern's documented resolution
+    order.
+
+    For a genuine multi-element list (omni multi-repo search), there is no
+    single "owning" repo, so pattern resolution falls back to the
+    cross-repo __any__ scope instead of crashing (the original bug) or
+    arbitrarily picking one alias out of the list.
+    """
+    if isinstance(repo_alias_parsed, str):
+        return repo_alias_parsed
+
+    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+
+    return str(XrayPatternService.ANY_SCOPE)
+
+
 def _resolve_evaluator_code(
     params: Dict[str, Any],
     repo_alias: str,
@@ -376,7 +400,27 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    evaluator_code, err_resp = _resolve_evaluator_code(params, repo_alias)
+
+    # ------------------------------------------------------------------
+    # Bug #1423: alias normalisation MUST run BEFORE pattern resolution.
+    # _resolve_evaluator_code -> XrayPatternService._load_pattern does
+    # Path division with repo_alias, which crashed with a raw TypeError
+    # when repo_alias was a list (even single-element) -- the omni
+    # multi-repo parameter form. Normalize first so pattern resolution
+    # always receives a string alias.
+    # ------------------------------------------------------------------
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
+
+    evaluator_code, err_resp = _resolve_evaluator_code(
+        params, _pattern_scope_alias(repo_alias_parsed)
+    )
     if err_resp is not None:
         return err_resp
     search_target: str = params.get("search_target", "")
@@ -486,18 +530,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # ------------------------------------------------------------------
     # 3. Repository alias resolution — omni-aware (string OR list)
     # ------------------------------------------------------------------
-    # Parse alias: accepts plain string, list of strings, or JSON-encoded
-    # string array (e.g. '["repo-a", "repo-b"]').
-    repo_alias_parsed = _parse_json_string_array(repo_alias)
-
-    # v10.4.5 (Defect 5): normalize single-element list to single-string for
-    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
-    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
-    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
-        candidate = repo_alias_parsed[0]
-        if isinstance(candidate, str) and candidate:
-            repo_alias_parsed = candidate
-
+    # repo_alias_parsed was already normalized above (Bug #1423), before
+    # pattern resolution ran — accepts plain string, list of strings, or
+    # JSON-encoded string array (e.g. '["repo-a", "repo-b"]').
     if isinstance(repo_alias_parsed, list):
         # Multi-repo path — submit one job per alias.
         if not repo_alias_parsed:
@@ -1035,7 +1070,27 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    evaluator_code, err_resp = _resolve_evaluator_code(params, repo_alias)
+
+    # ------------------------------------------------------------------
+    # Bug #1423: alias normalisation MUST run BEFORE pattern resolution.
+    # _resolve_evaluator_code -> XrayPatternService._load_pattern does
+    # Path division with repo_alias, which crashed with a raw TypeError
+    # when repo_alias was a list (even single-element) -- the omni
+    # multi-repo parameter form. Normalize first so pattern resolution
+    # always receives a string alias.
+    # ------------------------------------------------------------------
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
+
+    evaluator_code, err_resp = _resolve_evaluator_code(
+        params, _pattern_scope_alias(repo_alias_parsed)
+    )
     if err_resp is not None:
         return err_resp
     search_target: str = params.get("search_target", "")
@@ -1157,19 +1212,9 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     # ------------------------------------------------------------------
     # 3. Alias normalisation — omni-aware (string OR list)
     # ------------------------------------------------------------------
-    # Bug 1 fix (v10.4.1): the original code passed repo_alias directly to
-    # _resolve_repo_path without normalisation, crashing with AttributeError
-    # ('list' object has no attribute 'endswith') on native-list or
-    # JSON-encoded-array inputs.
-    repo_alias_parsed = _parse_json_string_array(repo_alias)
-
-    # v10.4.5 (Defect 5): normalize single-element list to single-string for
-    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
-    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
-    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
-        candidate = repo_alias_parsed[0]
-        if isinstance(candidate, str) and candidate:
-            repo_alias_parsed = candidate
+    # repo_alias_parsed was already normalized above (Bug #1423), before
+    # pattern resolution ran (Bug 1 fix v10.4.1 origin: repo_alias must
+    # never reach _resolve_repo_path un-normalized).
 
     # ------------------------------------------------------------------
     # 4. Effective timeout + range check  (shared — runs before alias branch)

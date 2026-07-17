@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.61.0] - 2026-07-17
+
+### Added
+
+- **#1418**: cidx-server now tracks every real (non-cached, non-suppressed) embedding and reranker call to VoyageAI/Cohere -- provider, model, token/item counts, purpose, golden-repo/job context, success/failure, latency -- recorded asynchronously outside the hot path to a new dual-backend `embedding_call_stats` table, so operators can reconcile observed vendor usage against internal records. Works in both solo (SQLite) and clustered (PostgreSQL) server deployments; cache hits and coalesced-away duplicates never produce a row. Includes a Web UI Config section (enabled kill-switch, flush interval, retention window), a filterable Web UI dashboard, an admin REST/MCP query endpoint, and a retention sweep scheduler.
+
+### Fixed
+
+- **#1423**: `xray_search`/`xray_explore` crashed with a raw `TypeError` when `pattern_name` (a stored pattern) was combined with list-typed `repository_alias` (the omni multi-repo form), even a single-element list. Fixed by reordering repository-alias normalization to run before pattern resolution, with a defensive guard against non-string aliases and server-side exception logging closing a related silent-failure gap.
+- **#1422**: `temporal_inline_wait_seconds` was writable via the admin config API but had no read surface -- missing from both the Web UI Config screen and the JSON config-read surface. Added the missing display row and edit field alongside its `SearchTimeoutsConfig` siblings.
+- **#1420**: `quick_daemon_check()`'s directory walk didn't stop at the nearest `.code-indexer/config.json` -- it could skip past a nearer daemon-disabled config to inherit a more distant ancestor's daemon-enabled state, misrouting `cidx index`/`query`/`watch`/`clean`. Fixed so the walk always stops at the first config found, using its daemon-mode value (enabled, disabled, or malformed-treated-as-disabled) as the final answer.
+- **#1425**: concurrent xray evaluator compilation of the same cold-cache hash could clobber rustc's intermediate codegen files across jobs, producing a `rust-lld` error and a silent 0-match result for the losing job. Fixed via per-compile-attempt isolated temp build directories with an atomic publish of the finished artifact on success.
+- **#1426**: two tests in `test_cli_fast_path.py` called `is_delegatable_command()` with a stale single-argument signature, failing with `TypeError` since Bug #1417 added a required `args` parameter.
+- **#1427**: two test files sharing an identical basename in different directories (`tests/unit/server/storage/` and `tests/unit/server/services/`) broke pytest collection whenever both directories were collected together.
+
 ## [11.60.0] - 2026-07-16
 
 ### Fixed

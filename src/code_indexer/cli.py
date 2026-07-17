@@ -1,6 +1,7 @@
 """Command line interface for Code Indexer."""
 
 import asyncio
+import atexit
 import getpass
 import json
 import logging
@@ -2846,6 +2847,46 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     return provider_metadata
 
 
+def _install_embedding_stats_writer_for_index() -> None:
+    """CLI child-side embedding-stats bootstrap installer (Story #1418).
+
+    Unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (read ONLY inside the
+    --index-commits standalone branch, since temporal is a conditional
+    feature), CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is a pure DISCOVERY
+    problem: a `cidx index` child subprocess spawned by the server has no
+    other way to locate the server's data directory at all. This helper is
+    therefore called unconditionally at the `index` command entrypoint,
+    BEFORE any --index-commits branching, so plain (non-temporal) indexing
+    is covered too.
+
+    Lazy imports: server/psycopg machinery is only touched when the
+    bootstrap dir env var is actually present (server-orchestrated child),
+    never for standalone/solo CLI usage -- preserves the CLI import budget.
+    """
+    bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
+    if bootstrap_dir:
+        from .server.storage.postgres.embedding_stats_child_wiring import (
+            install_embedding_stats_writer_from_bootstrap,
+        )
+
+        writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+        # Best-effort final flush on normal process exit (sys.exit(0/1),
+        # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM, which
+        # is the accepted fail-open tradeoff documented on
+        # CrossProcessBootstrapWriter. Only registered when a real writer
+        # was installed (never for the NoOpWriter branch below, which has
+        # nothing to flush).
+        if hasattr(writer, "stop"):
+            atexit.register(writer.stop)
+    else:
+        from .server.services.embedding_stats_writer import (
+            EmbeddingStatsWriter,
+            NoOpWriter,
+        )
+
+        EmbeddingStatsWriter.set_active(NoOpWriter())
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -3039,6 +3080,13 @@ def index(
       Filesystem backend stores vectors as optimized JSON files.
     """
     config_manager = ctx.obj["config_manager"]
+
+    # Story #1418: install the embedding-stats writer BEFORE any
+    # embedding-provider client is constructed, and BEFORE any
+    # --index-commits branching (unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR,
+    # this covers plain semantic indexing too -- see the helper's
+    # docstring).
+    _install_embedding_stats_writer_for_index()
 
     # H2: When --progress-json is active, redirect the module-level console to
     # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.

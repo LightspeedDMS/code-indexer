@@ -33,7 +33,11 @@ logger = logging.getLogger(__name__)
 # Sanitize server-internal paths out of error messages so they are never
 # exposed to API callers.
 # Rule 1: xray-cache paths — replaced with the generic name "evaluator.rs".
-_RE_XRAY_CACHE_PATH = re.compile(r"/[^\s\"']+/xray-cache/[a-f0-9]+\.rs")
+# Allows one optional intermediate path segment (e.g. "build-<hash>-<rand>/")
+# so Bug #1425's per-invocation isolated build directory
+# (xray-cache/build-<hash>-<random>/<hash>.rs — see rust/xray-core/src/compiler.rs)
+# is matched alongside the original flat xray-cache/<hash>.rs shape.
+_RE_XRAY_CACHE_PATH = re.compile(r"/[^\s\"']+/xray-cache/(?:[^/\s\"']+/)?[a-f0-9]+\.rs")
 # Rule 2: other absolute paths under /home/, /root/, /tmp/ — replaced with a
 # redaction token so callers know a path was present but cannot reconstruct it.
 _RE_SERVER_PATH = re.compile(r"/(?:home|root|tmp)/[^\s\"':,\])\}]+")
@@ -43,7 +47,8 @@ def _sanitize_error_message(msg: str) -> str:
     """Replace server-internal file paths in error messages.
 
     Applied in order:
-    1. xray-cache paths (/…/xray-cache/<hexhash>.rs) → "evaluator.rs"
+    1. xray-cache paths (/…/xray-cache/<hexhash>.rs, optionally nested one
+       level under a Bug #1425 isolated build-*/ directory) → "evaluator.rs"
     2. Remaining /home/, /root/, /tmp/ paths → "<server-path>"
     """
     msg = _RE_XRAY_CACHE_PATH.sub("evaluator.rs", msg)

@@ -169,6 +169,7 @@ class TestAC1BootstrapKeysRemoved:
                 # UI setting (enable/disable, batch size, tick interval).
                 "hnsw_orphan_repair_sweep_config",
                 "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
+                "embedding_stats_config",  # Story #1418 — runtime Web UI setting (embedding/reranker call tracking: enabled, flush_interval_seconds, retention_days)
             }
         )
 

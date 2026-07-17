@@ -1901,6 +1901,87 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize in-process embedding-stats writer (Story #1418
+        # Phase 3). Without this, the live server process never installs a
+        # real writer -- every server-side instrumented embedding/reranker
+        # call (e.g. query-time embeddings) silently falls through to the
+        # default NoOpWriter. The `cidx index` child-subprocess path
+        # (CrossProcessBootstrapWriter) is unaffected by this block.
+        logger.info(
+            "Server startup: Initializing embedding stats writer",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                start_in_process_embedding_stats_writer,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_writer = start_in_process_embedding_stats_writer(
+                backend_registry.embedding_call_stats, get_config_service()
+            )
+            app.state.embedding_stats_writer = embedding_stats_writer
+            logger.info(
+                "Embedding stats writer started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1418",
+                    f"Failed to initialize embedding stats writer: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize embedding-stats retention sweep scheduler
+        # (Story #1418 Phase 3 Component 9)
+        logger.info(
+            "Server startup: Initializing embedding stats retention scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_retention_scheduler import (
+                EmbeddingStatsRetentionScheduler as _EmbeddingStatsRetentionScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_retention_scheduler = _EmbeddingStatsRetentionScheduler(
+                backend=backend_registry.embedding_call_stats,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            embedding_stats_retention_scheduler.start()
+            app.state.embedding_stats_retention_scheduler = (
+                embedding_stats_retention_scheduler
+            )
+            logger.info(
+                "Embedding stats retention scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1420",
+                    f"Failed to initialize embedding stats retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Dependency Map Scheduler (Story #193)
         dependency_map_service = None
         logger.info(
@@ -4386,6 +4467,53 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-037",
                         f"Error stopping activated reaper scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats writer (Story #1418 Phase 3)
+        embedding_stats_writer_state = getattr(
+            app.state, "embedding_stats_writer", None
+        )
+        if embedding_stats_writer_state is not None:
+            try:
+                from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                    stop_in_process_embedding_stats_writer,
+                )
+
+                stop_in_process_embedding_stats_writer(embedding_stats_writer_state)
+                logger.info(
+                    "Embedding stats writer stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1419",
+                        f"Error stopping embedding stats writer: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats retention scheduler (Story #1418
+        # Phase 3 Component 9)
+        embedding_stats_retention_scheduler_state = getattr(
+            app.state, "embedding_stats_retention_scheduler", None
+        )
+        if embedding_stats_retention_scheduler_state is not None:
+            try:
+                embedding_stats_retention_scheduler_state.stop()
+                logger.info(
+                    "Embedding stats retention scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1421",
+                        f"Error stopping embedding stats retention scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

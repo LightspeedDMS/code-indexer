@@ -1882,15 +1882,22 @@ class GoldenRepoManager:
             CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
             temporal call site below. Defaults to None (inherit current
             process env, unchanged for the semantic/FTS call).
+
+            Story #1418: this is the SHARED convergence point for both the
+            semantic+FTS call and the temporal call in this workflow, so
+            CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+            unconditionally (both storage modes -- unlike the temporal var,
+            this is a pure discovery problem, not gated on postgres mode).
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
-            # Bug #1313 round-3 regression guard: only pass the env= kwarg
-            # when it is not None, so the semantic/FTS call (and sqlite
-            # mode) keep the EXACT pre-existing call shape -- several
-            # pre-existing tests mock run_with_popen_progress with a strict
-            # (non-**kwargs) signature that does not accept an env kwarg at
-            # all.
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_config_service_for_stats,
+            )
+
             _popen_kwargs: dict = dict(
                 command=command,
                 phase_name=phase_name,
@@ -1901,8 +1908,9 @@ class GoldenRepoManager:
                 cwd=clone_path,
                 error_label=error_label,
             )
-            if env is not None:
-                _popen_kwargs["env"] = env
+            _popen_kwargs["env"] = build_embedding_stats_child_env(
+                _get_config_service_for_stats().get_config(), base_env=env
+            )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- defensive compatibility with
             # any strict-signature mock of run_with_popen_progress.
@@ -3465,11 +3473,22 @@ class GoldenRepoManager:
                     Bug #1313 round-4 (Codex Finding 1): env is forwarded so the
                     temporal (--index-commits) child subprocess can be handed
                     CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode --
-                    see the temporal branch below. Only passed to the shared
-                    utility when not None, so the semantic/fts call keeps the
-                    EXACT pre-existing call shape (no env kwarg at all).
+                    see the temporal branch below.
+
+                    Story #1418: this is the SHARED convergence point for
+                    every index_type spawn in this workflow (semantic,
+                    fts-rebuild, temporal), so
+                    CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here
+                    ONCE, unconditionally (both storage modes).
                     """
                     nonlocal all_stdout, all_stderr
+                    from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                        build_embedding_stats_child_env,
+                    )
+                    from code_indexer.server.services.config_service import (
+                        get_config_service as _get_config_service_for_stats,
+                    )
+
                     _shared_kwargs: dict = dict(
                         command=command,
                         phase_name=phase_name,
@@ -3480,8 +3499,9 @@ class GoldenRepoManager:
                         cwd=str(repo_path),
                         error_label=error_label,
                     )
-                    if env is not None:
-                        _shared_kwargs["env"] = env
+                    _shared_kwargs["env"] = build_embedding_stats_child_env(
+                        _get_config_service_for_stats().get_config(), base_env=env
+                    )
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
