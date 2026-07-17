@@ -159,9 +159,7 @@ class ServerResourceConfig:
     git_untracked_file_timeout: int = 60  # 1 minute for untracked file check
 
     # Refresh scheduler timeouts (in seconds)
-    cow_clone_timeout: int = (
-        3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
-    )
+    cow_clone_timeout: int = 3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
@@ -1089,6 +1087,25 @@ class CowDaemonConfig:
 
 
 @dataclass
+class WorkspaceMcpConfig:
+    """workspace-mcp delegated clone-backend configuration (EVO-64616 Phase 1).
+
+    When ``clone_backend="delegated"``, per-user activation clones are performed
+    by workspace-mcp (the disk owner) via its ``cow_clone_path`` endpoint instead
+    of a local ``cp``, so cidx does no filesystem copy itself. workspace-mcp runs
+    on reflink-capable storage, making the clone a real near-instant CoW.
+    """
+
+    endpoint: str = ""  # workspace-mcp base URL exposing cow_clone_path (e.g. https://.../workspace)
+    api_key: str = (
+        ""  # bearer token (shared-authorizer); sent as Authorization: Bearer {api_key}
+    )
+    mount_point: str = ""  # shared-volume root both source and dest must resolve under
+    timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
+    poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
+
+
+@dataclass
 class ClusterConfig:
     """Cluster node configuration (Epic #408)."""
 
@@ -1378,8 +1395,11 @@ class ServerConfig:
     postgres_dsn: Optional[str] = None  # PostgreSQL connection string for cluster mode
     ontap: Optional[OntapConfig] = None  # ONTAP FlexClone settings for cluster mode
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
-    clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
+    clone_backend: str = "local"  # Story #510: "local", "ontap", "cow-daemon", or "delegated" (EVO-64616)
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
+    workspace_mcp: Optional[WorkspaceMcpConfig] = (
+        None  # EVO-64616: workspace-mcp delegated clone backend settings
+    )
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
     # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
@@ -1397,12 +1417,8 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = (
-        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    )
-    enable_malloc_arena_max: bool = (
-        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
-    )
+    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
 
     # Story #1032 AC6 - Pre-deactivation leak scan (bootstrap-only, never DB).
     # Default False: _detect_resource_leaks is post-failure-only diagnostic.
@@ -2025,13 +2041,13 @@ class ServerConfigManager:
             if "scip_config" not in config_dict:
                 config_dict["scip_config"] = {}
             if isinstance(config_dict["scip_config"], dict):
-                config_dict["scip_config"][
-                    "scip_workspace_retention_days"
-                ] = retention_days
-            elif isinstance(config_dict["scip_config"], ScipConfig):
-                config_dict["scip_config"].scip_workspace_retention_days = (
+                config_dict["scip_config"]["scip_workspace_retention_days"] = (
                     retention_days
                 )
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict[
+                    "scip_config"
+                ].scip_workspace_retention_days = retention_days
 
         # Story #15 AC2: Final conversion of scip_config after migration
         # This handles the case where scip_config was created by migration above
@@ -2350,6 +2366,14 @@ class ServerConfigManager:
         # Story #510: Convert cow_daemon dict to CowDaemonConfig
         if "cow_daemon" in config_dict and isinstance(config_dict["cow_daemon"], dict):
             config_dict["cow_daemon"] = CowDaemonConfig(**config_dict["cow_daemon"])
+
+        # EVO-64616: Convert workspace_mcp dict to WorkspaceMcpConfig
+        if "workspace_mcp" in config_dict and isinstance(
+            config_dict["workspace_mcp"], dict
+        ):
+            config_dict["workspace_mcp"] = WorkspaceMcpConfig(
+                **config_dict["workspace_mcp"]
+            )
 
         # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
         if "password_expiry_config" in config_dict and isinstance(

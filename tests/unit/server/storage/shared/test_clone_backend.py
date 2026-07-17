@@ -439,6 +439,35 @@ class TestCloneBackendFactory:
 
         assert isinstance(backend, CowDaemonBackend)
 
+    def test_delegated_backend_returned_for_delegated_config(self):
+        """Factory returns DelegatedCloneBackend when clone_backend='delegated'."""
+        from code_indexer.server.storage.shared.clone_backend import (
+            CloneBackendFactory,
+            DelegatedCloneBackend,
+        )
+        from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
+
+        wsm_config = WorkspaceMcpConfig(
+            endpoint="http://workspace-mcp:8080",
+            api_key="secret-key",
+            mount_point="/mnt/nfs/cidx",
+        )
+
+        backend = CloneBackendFactory.create(
+            clone_backend_type="delegated",
+            versioned_base="/tmp/versioned",
+            workspace_mcp_config=wsm_config,
+        )
+
+        assert isinstance(backend, DelegatedCloneBackend)
+
+    def test_delegated_backend_requires_workspace_mcp_config(self):
+        """Factory raises ValueError when delegated backend lacks its config."""
+        from code_indexer.server.storage.shared.clone_backend import CloneBackendFactory
+
+        with pytest.raises(ValueError, match="workspace_mcp_config is required"):
+            CloneBackendFactory.create(clone_backend_type="delegated")
+
     def test_invalid_backend_type_raises_value_error(self):
         """Factory raises ValueError for unknown backend type."""
         from code_indexer.server.storage.shared.clone_backend import CloneBackendFactory
@@ -457,6 +486,7 @@ class TestCloneBackendFactory:
         assert "local" in msg
         assert "ontap" in msg
         assert "cow-daemon" in msg
+        assert "delegated" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +538,26 @@ class TestProtocolConformance:
         backend = CowDaemonBackend(config=config)
 
         assert callable(getattr(backend, "create_clone", None))
+        assert callable(getattr(backend, "delete_clone", None))
+        assert callable(getattr(backend, "list_clones", None))
+        assert callable(getattr(backend, "clone_exists", None))
+
+    def test_delegated_backend_conforms_to_protocol(self, tmp_path):
+        """DelegatedCloneBackend has all CloneBackend Protocol methods."""
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+        from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
+
+        config = WorkspaceMcpConfig(
+            endpoint="http://workspace-mcp:8080",
+            api_key="key",
+            mount_point="/mnt/nfs/cidx",
+        )
+        backend = DelegatedCloneBackend(config=config, versioned_base=str(tmp_path))
+
+        assert callable(getattr(backend, "create_clone", None))
+        assert callable(getattr(backend, "create_clone_at_path", None))
         assert callable(getattr(backend, "delete_clone", None))
         assert callable(getattr(backend, "list_clones", None))
         assert callable(getattr(backend, "clone_exists", None))
@@ -1678,3 +1728,208 @@ class TestCloneBackendFactoryMissingConfig:
             CloneBackendFactory.create(
                 clone_backend_type="cow-daemon", cow_daemon_config=None
             )
+
+
+# ---------------------------------------------------------------------------
+# DelegatedCloneBackend (EVO-64616): delegates the activated-repo CoW clone
+# to workspace-mcp; performs NO cidx-side filesystem copy.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRequestException(Exception):
+    """Stand-in for requests.RequestException in delegated-backend tests."""
+
+
+def _make_wsm_config(timeout_seconds: int = 30):
+    from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
+
+    return WorkspaceMcpConfig(
+        endpoint="http://workspace-mcp:8080",
+        api_key="test-api-key",
+        mount_point="/mnt/nfs/cidx",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=1,
+    )
+
+
+def _make_delegated_backend(versioned_base: str, timeout_seconds: int = 30):
+    from code_indexer.server.storage.shared.clone_backend import DelegatedCloneBackend
+
+    return DelegatedCloneBackend(
+        config=_make_wsm_config(timeout_seconds=timeout_seconds),
+        versioned_base=versioned_base,
+        visibility_waiter=_noop_visibility_waiter,
+    )
+
+
+def _mock_delegated_requests(post_resp=None, post_side_effect=None):
+    """MagicMock requests module for the delegated backend, with a real
+    RequestException class so `except requests.RequestException` matches."""
+    mock_req = MagicMock()
+    mock_req.RequestException = _FakeRequestException
+    if post_side_effect is not None:
+        mock_req.post.side_effect = post_side_effect
+    elif post_resp is not None:
+        mock_req.post.return_value = post_resp
+    return mock_req
+
+
+class TestDelegatedCloneBackendCreateCloneAtPath:
+    """create_clone_at_path forwards to workspace-mcp over HTTP (no local cp)."""
+
+    def test_posts_source_and_dest_to_cow_clone_path(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        resp = _make_response(200, {"dest_path": "/d", "method": "reflink"})
+        mock_req = _mock_delegated_requests(post_resp=resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.create_clone_at_path(
+                "/mnt/nfs/cidx/src/repo", "/mnt/nfs/cidx/activated/u/repo"
+            )
+
+        mock_req.post.assert_called_once()
+        url = mock_req.post.call_args[0][0]
+        assert url == "http://workspace-mcp:8080/clone-path"
+        body = mock_req.post.call_args[1]["json"]
+        assert body["source_path"] == "/mnt/nfs/cidx/src/repo"
+        assert body["dest_path"] == "/mnt/nfs/cidx/activated/u/repo"
+        assert body["preserve_attrs"] is True
+        # Returns the dest_path (CIDX-view), like every other backend.
+        assert result == "/mnt/nfs/cidx/activated/u/repo"
+
+    def test_sends_bearer_auth_and_timeout(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path), timeout_seconds=42)
+        resp = _make_response(200, {"method": "reflink"})
+        mock_req = _mock_delegated_requests(post_resp=resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src", "/dst")
+
+        headers = mock_req.post.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer test-api-key"
+        # Falls back to config timeout when caller passes none.
+        assert mock_req.post.call_args[1]["timeout"] == 42
+
+    def test_forwards_preserve_attrs_false(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        resp = _make_response(200, {})
+        mock_req = _mock_delegated_requests(post_resp=resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src", "/dst", preserve_attrs=False)
+
+        assert mock_req.post.call_args[1]["json"]["preserve_attrs"] is False
+
+    def test_raises_runtime_error_on_http_error_no_local_fallback(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        resp = _make_response(500, {})
+        resp.text = "boom"
+        mock_req = _mock_delegated_requests(post_resp=resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="HTTP 500"):
+                backend.create_clone_at_path("/src", "/dst")
+
+    def test_raises_on_transport_error_no_local_fallback(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(
+            post_side_effect=_FakeRequestException("conn refused")
+        )
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(RuntimeError, match="clone request to"):
+                backend.create_clone_at_path("/src", "/dst")
+
+    def test_cancel_check_before_request_skips_post(self, tmp_path):
+        from code_indexer.server.utils.cancellable_subprocess import (
+            SubprocessCancelledError,
+        )
+
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, {}))
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(SubprocessCancelledError):
+                backend.create_clone_at_path("/src", "/dst", cancel_check=lambda: True)
+
+        mock_req.post.assert_not_called()
+
+    def test_cancel_check_after_request_raises(self, tmp_path):
+        from code_indexer.server.utils.cancellable_subprocess import (
+            SubprocessCancelledError,
+        )
+
+        backend = _make_delegated_backend(str(tmp_path))
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, {}))
+        # Fire on the SECOND consultation (after the POST completes).
+        calls = {"n": 0}
+
+        def cancel_check() -> bool:
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            with pytest.raises(SubprocessCancelledError):
+                backend.create_clone_at_path("/src", "/dst", cancel_check=cancel_check)
+
+        mock_req.post.assert_called_once()
+
+    def test_waits_for_visibility_of_dest(self, tmp_path):
+        from code_indexer.server.storage.shared.clone_backend import (
+            DelegatedCloneBackend,
+        )
+
+        seen = []
+        backend = DelegatedCloneBackend(
+            config=_make_wsm_config(),
+            versioned_base=str(tmp_path),
+            visibility_waiter=lambda p: seen.append(p),
+        )
+        mock_req = _mock_delegated_requests(post_resp=_make_response(200, {}))
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src", "/mnt/dst")
+
+        assert seen == ["/mnt/dst"]
+
+
+class TestDelegatedCloneBackendSnapshotMethods:
+    """Snapshot-registry / delete methods run locally on the shared mount
+    (composed LocalCloneBackend) — no workspace-mcp call, no working-tree copy."""
+
+    def test_delete_clone_removes_directory(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        target = tmp_path / "clone"
+        target.mkdir()
+
+        assert backend.delete_clone(str(target)) is True
+        assert not target.exists()
+
+    def test_list_clones_reads_versioned_dir(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        ns_dir = tmp_path / ".versioned" / "myns"
+        (ns_dir / "v_1").mkdir(parents=True)
+
+        clones = backend.list_clones("myns")
+
+        assert len(clones) == 1
+        assert clones[0]["name"] == "v_1"
+        assert clones[0]["namespace"] == "myns"
+
+    def test_clone_exists_reflects_disk(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        (tmp_path / ".versioned" / "ns" / "v_9").mkdir(parents=True)
+
+        assert backend.clone_exists("ns", "v_9") is True
+        assert backend.clone_exists("ns", "missing") is False
+
+    def test_create_clone_delegates_to_local(self, tmp_path):
+        backend = _make_delegated_backend(str(tmp_path))
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "f.txt").write_text("data")
+
+        result = backend.create_clone(str(src), "ns", "v_1")
+
+        assert result.endswith("/.versioned/ns/v_1")
+        assert Path(result).is_dir()
