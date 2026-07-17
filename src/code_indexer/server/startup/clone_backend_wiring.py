@@ -31,6 +31,32 @@ logger = logging.getLogger(__name__)
 _MIN_DAEMON_VERSION = "0.2.0"
 
 
+def _check_workspace_mcp_health(endpoint: str, api_key: str) -> None:
+    """Verify workspace-mcp is reachable before wiring the delegated backend.
+
+    EVO-64616: the ``delegated`` clone backend forwards every activated-repo
+    CoW clone to workspace-mcp. If workspace-mcp is unreachable at startup we
+    fail fast — there is NO silent fallback to a local cidx-side copy (that
+    would reintroduce the very filesystem work delegation exists to remove,
+    EVO-64615). GETs ``{endpoint}/clone-path/health``.
+    """
+    import requests  # noqa: PLC0415
+
+    health_url = f"{endpoint.rstrip('/')}/clone-path/health"
+    logger.info("Checking workspace-mcp health at %s", health_url)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        resp = requests.get(health_url, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(
+            f"workspace-mcp not reachable at {endpoint} for the delegated clone "
+            f"backend. Ensure workspace-mcp is running and CIDX_CLONE_BACKEND / "
+            f"workspace_mcp.endpoint is correct. Error: {exc}"
+        ) from exc
+    logger.info("workspace-mcp health check: OK")
+
+
 def _check_daemon_health(daemon_url: str) -> None:
     """Verify CoW daemon is reachable via GET /api/v1/health and meets minimum version.
 
@@ -404,6 +430,30 @@ def build_snapshot_manager(
             "VersionedSnapshotManager: using CowDaemonBackend (daemon=%s, mount=%s)",
             cow_cfg.daemon_url,
             cow_cfg.mount_point,
+        )
+
+    elif backend_type == "delegated":
+        # EVO-64616: delegate the activated-repo CoW clone to workspace-mcp so
+        # cidx performs NO filesystem clone itself (EVO-64615). Fail-fast on an
+        # unreachable workspace-mcp -- NO silent local fallback. cidx does not
+        # translate paths here (unlike cow-daemon); workspace-mcp owns reflink
+        # placement, so the golden/activated symlink-placement checks do not
+        # apply to this backend.
+        wsm_cfg = config.workspace_mcp
+        if wsm_cfg is None or not wsm_cfg.endpoint:
+            raise RuntimeError(
+                "clone_backend='delegated' requires workspace_mcp.endpoint to be "
+                "configured (the workspace-mcp base URL). None was provided."
+            )
+        _check_workspace_mcp_health(wsm_cfg.endpoint, wsm_cfg.api_key)
+        backend = CloneBackendFactory.create(
+            clone_backend_type="delegated",
+            versioned_base=versioned_base,
+            workspace_mcp_config=wsm_cfg,
+        )
+        logger.info(
+            "VersionedSnapshotManager: using DelegatedCloneBackend (workspace-mcp=%s)",
+            wsm_cfg.endpoint,
         )
 
     elif backend_type == "ontap":

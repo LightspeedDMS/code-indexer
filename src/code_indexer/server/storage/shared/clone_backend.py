@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         CowDaemonConfig,
         OntapConfig,
+        WorkspaceMcpConfig,
     )  # pragma: no cover
     from code_indexer.server.storage.shared.ontap_flexclone_client import (
         OntapFlexCloneClient,
@@ -739,6 +740,171 @@ class CowDaemonBackend:
 
 
 # ---------------------------------------------------------------------------
+# DelegatedCloneBackend
+# ---------------------------------------------------------------------------
+
+
+class DelegatedCloneBackend:
+    """Clone backend that delegates the activated-repo copy-on-write clone to
+    workspace-mcp instead of running any filesystem operation inside cidx.
+
+    EVO-64615 / EVO-64616: the server process must NOT perform filesystem
+    clones directly — that responsibility belongs to workspace-mcp (which owns
+    the CoW/reflink primitive and the storage layout). This backend forwards
+    the ONE filesystem-mutating Protocol method — ``create_clone_at_path`` —
+    to workspace-mcp over HTTP (``POST {endpoint}/clone-path``), and
+    composes a :class:`LocalCloneBackend` for the read-only / snapshot-registry
+    methods (``create_clone``, ``delete_clone``, ``list_clones``,
+    ``clone_exists``), which operate on the shared, already-visible mount and
+    perform no cidx-side working-tree copy.
+
+    Fail-loud contract: any HTTP/transport failure raises — there is NO silent
+    fallback to a local copy (that would reintroduce the very cidx-side
+    filesystem work this backend exists to remove). Callers
+    (ActivatedRepoManager) already rmtree the partial dest on any exception.
+
+    Auth: ``Authorization: Bearer {api_key}`` on every request.
+    """
+
+    def __init__(
+        self,
+        config: "WorkspaceMcpConfig",
+        versioned_base: str = "",
+        visibility_waiter: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self._endpoint = config.endpoint.rstrip("/")
+        self._api_key = config.api_key
+        self._mount_point = (config.mount_point or "").rstrip("/")
+        self._timeout = config.timeout_seconds
+        self._poll_interval = config.poll_interval_seconds
+        # Snapshot-registry / delete operations run against the shared mount and
+        # do NOT copy a working tree — compose LocalCloneBackend rather than
+        # duplicate its logic (and keep create_clone_at_path the only delegated,
+        # working-tree-copying method).
+        self._local = LocalCloneBackend(versioned_base=versioned_base)
+        # Read-after-create barrier: workspace-mcp creates the clone on the
+        # shared volume; this pod reaches it and may hold a negative dcache
+        # entry for the brand-new path. Wait for visibility before returning so
+        # no downstream consumer ENOENTs on it. Injectable for tests.
+        self._visibility_waiter: Callable[[str], None] = (
+            visibility_waiter
+            if visibility_waiter is not None
+            else (
+                lambda path: wait_for_nfs_visibility(
+                    path, timeout=_configured_visibility_timeout()
+                )
+            )
+        )
+
+    def _requests(self):  # type: ignore[return]  # lazy import avoids hard dep
+        """Return the ``requests`` module (lazy-imported to keep startup fast)."""
+        import requests  # noqa: PLC0415
+
+        return requests
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._api_key}"}
+
+    def create_clone(
+        self, source_path: str, namespace: str, name: str, timeout: Optional[int] = None
+    ) -> str:
+        """Create a canonical snapshot at the shared ``.versioned`` layout.
+
+        Delegates to the composed LocalCloneBackend: snapshots live on the
+        shared mount and this is a registry-shaped copy, not a per-session
+        activated-repo working-tree clone. Kept local so snapshot identity and
+        layout stay identical to every other backend.
+        """
+        return self._local.create_clone(source_path, namespace, name, timeout=timeout)
+
+    def create_clone_at_path(
+        self,
+        source_path: str,
+        dest_path: str,
+        preserve_attrs: bool = True,
+        timeout: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        poll_interval: float = SHORT_POLL_SECONDS,
+    ) -> str:
+        """Delegate the activated-repo CoW clone to workspace-mcp. Returns dest_path.
+
+        POSTs ``{source_path, dest_path, preserve_attrs}`` to
+        ``{endpoint}/clone-path``. The endpoint performs the reflink copy
+        (near-instant) and responds synchronously with ``{"dest_path": ...,
+        "method": ...}``. cancel_check is honored before and after the request
+        (the copy itself is not mid-flight cancellable, but the caller rmtrees
+        dest on the raised SubprocessCancelledError). Any non-2xx or transport
+        error raises — NO silent local fallback (EVO-64615). poll_interval is
+        accepted for CloneBackend Protocol symmetry and unused here.
+        """
+        if cancel_check is not None and cancel_check():
+            raise SubprocessCancelledError(
+                "activated-repo clone cancelled before workspace-mcp request"
+            )
+        requests = self._requests()
+        body = {
+            "source_path": source_path,
+            "dest_path": dest_path,
+            "preserve_attrs": preserve_attrs,
+        }
+        effective_timeout = timeout if timeout is not None else self._timeout
+        logger.info(
+            "DelegatedCloneBackend: requesting workspace-mcp clone at '%s' from '%s'",
+            dest_path,
+            source_path,
+        )
+        try:
+            response = requests.post(
+                f"{self._endpoint}/clone-path",
+                json=body,
+                headers=self._headers(),
+                timeout=effective_timeout,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp clone request to "
+                f"'{self._endpoint}/clone-path' failed: {exc}"
+            ) from exc
+        if response.status_code >= 300:
+            raise RuntimeError(
+                f"DelegatedCloneBackend: workspace-mcp clone failed "
+                f"(HTTP {response.status_code}): {response.text[:300]}"
+            )
+        # The remote clone completed; honor a cancellation that arrived while we
+        # waited. The caller rmtrees dest_path on this exception.
+        if cancel_check is not None and cancel_check():
+            raise SubprocessCancelledError(
+                "activated-repo clone cancelled during workspace-mcp request"
+            )
+        method = ""
+        try:
+            method = str((response.json() or {}).get("method", ""))
+        except ValueError:  # pragma: no cover - defensive; non-JSON 2xx body
+            pass
+        logger.info(
+            "DelegatedCloneBackend: workspace-mcp clone complete (method=%s) at '%s'",
+            method,
+            dest_path,
+        )
+        # dest is on the shared volume; wait until visible on this pod before
+        # returning so downstream subprocess.run(cwd=dest) does not ENOENT.
+        self._visibility_waiter(dest_path)
+        return dest_path
+
+    def delete_clone(self, clone_path: str) -> bool:
+        """Remove the clone directory tree on the shared mount (no cidx copy)."""
+        return self._local.delete_clone(clone_path)
+
+    def list_clones(self, namespace: str) -> List[dict]:
+        """List snapshots under ``.versioned/{namespace}`` on the shared mount."""
+        return self._local.list_clones(namespace)
+
+    def clone_exists(self, namespace: str, name: str) -> bool:
+        """Return True when the snapshot directory is present on the shared mount."""
+        return self._local.clone_exists(namespace, name)
+
+
+# ---------------------------------------------------------------------------
 # CloneBackendFactory
 # ---------------------------------------------------------------------------
 
@@ -746,7 +912,7 @@ class CowDaemonBackend:
 class CloneBackendFactory:
     """Creates the appropriate CloneBackend from configuration values."""
 
-    _VALID_BACKENDS = ("local", "ontap", "cow-daemon")
+    _VALID_BACKENDS = ("local", "ontap", "cow-daemon", "delegated")
 
     @staticmethod
     def create(
@@ -754,19 +920,25 @@ class CloneBackendFactory:
         versioned_base: str = "",
         ontap_config: Optional["OntapConfig"] = None,
         cow_daemon_config: Optional["CowDaemonConfig"] = None,
+        workspace_mcp_config: Optional["WorkspaceMcpConfig"] = None,
     ) -> CloneBackend:
         """Instantiate and return the requested CloneBackend.
 
         Parameters
         ----------
         clone_backend_type:
-            One of ``"local"``, ``"ontap"``, or ``"cow-daemon"``.
+            One of ``"local"``, ``"ontap"``, ``"cow-daemon"``, or
+            ``"delegated"``.
         versioned_base:
-            Base directory for LocalCloneBackend.
+            Base directory for LocalCloneBackend (also the composed local
+            backend inside DelegatedCloneBackend).
         ontap_config:
             OntapConfig instance, required when ``clone_backend_type="ontap"``.
         cow_daemon_config:
             CowDaemonConfig instance, required when ``clone_backend_type="cow-daemon"``.
+        workspace_mcp_config:
+            WorkspaceMcpConfig instance, required when
+            ``clone_backend_type="delegated"``.
 
         Raises
         ------
@@ -804,6 +976,15 @@ class CloneBackendFactory:
                     "cow_daemon_config is required when clone_backend_type='cow-daemon'"
                 )
             return CowDaemonBackend(config=cow_daemon_config)
+
+        if clone_backend_type == "delegated":
+            if workspace_mcp_config is None:
+                raise ValueError(
+                    "workspace_mcp_config is required when clone_backend_type='delegated'"
+                )
+            return DelegatedCloneBackend(
+                config=workspace_mcp_config, versioned_base=versioned_base
+            )
 
         raise ValueError(
             f"Unsupported clone_backend type: '{clone_backend_type}'. "
