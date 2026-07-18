@@ -98,6 +98,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "hnsw_orphan_repair_sweep_config",  # Story #1360 — runtime Web UI setting
             "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
             "embedding_stats_config",  # Story #1418 Phase 3 — runtime Web UI setting (embedding/reranker call tracking)
+            "temporal_indexing_config",  # Story #1404 — runtime Web UI setting (global temporal indexing floor date)
         }
     )
 

@@ -36,6 +36,7 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
+from ._temporal_index_cmd import _build_temporal_index_cmd
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -1604,43 +1605,9 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
     return env
 
 
-def _build_temporal_index_cmd(
-    clear: bool,
-    temporal_options: dict,
-    all_branches_gate_enabled: bool = False,
-    alias: str = "",
-) -> list:
-    """Build the cidx index --index-commits command with optional temporal flags.
-
-    Story #1412: --all-branches is only appended when all_branches_gate_enabled
-    is True (defaults to False -- fail-closed). When temporal_options requests
-    all_branches but the gate is off, the flag is skipped and a WARNING is
-    logged naming the repo so the downgrade to single-branch is observable.
-    """
-    cmd = ["cidx", "index", "--index-commits", "--progress-json"]
-    if clear:
-        cmd.append("--clear")
-    if not temporal_options or not isinstance(temporal_options, dict):
-        return cmd
-    diff_context = temporal_options.get("diff_context")
-    if diff_context is not None:
-        cmd.extend(["--diff-context", str(diff_context)])
-    if temporal_options.get("all_branches"):
-        if all_branches_gate_enabled:
-            cmd.append("--all-branches")
-        else:
-            logger.warning(
-                "all_branches requested for golden '%s' but "
-                "temporal_all_branches_enabled=false; indexing single-branch",
-                alias or "<unknown>",
-            )
-    max_commits = temporal_options.get("max_commits")
-    if max_commits is not None:
-        cmd.extend(["--max-commits", str(max_commits)])
-    since_date = temporal_options.get("since_date")
-    if since_date:
-        cmd.extend(["--since", str(since_date)])
-    return cmd
+# _build_temporal_index_cmd moved to ._temporal_index_cmd (see re-export
+# import above) purely to keep this file under the 2500-line anti-file-bloat
+# limit; no behavior change.
 
 
 def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
@@ -2166,12 +2133,21 @@ def _provider_temporal_index_job(
         getattr(_server_config.indexing_config, "temporal_all_branches_enabled", False)
     )
 
+    # Story #1404: global temporal indexing floor date, reusing the config
+    # already fetched above rather than a second get_config_service() call
+    # (mirrors the _all_branches_gate_enabled reuse pattern immediately
+    # above).
+    _global_floor_date = getattr(
+        _server_config.temporal_indexing_config, "index_floor_date", None
+    )
+
     temporal_options = kwargs.get("temporal_options", {}) or {}
     cmd = _build_temporal_index_cmd(
         clear,
         temporal_options,
         all_branches_gate_enabled=_all_branches_gate_enabled,
         alias=repo_alias,
+        global_floor_date=_global_floor_date,
     )
 
     success, stdout_out, stderr_out = _run_provider_subprocess(

@@ -1905,15 +1905,30 @@ class GoldenRepoManager:
         if enable_temporal:
             temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
 
+            # Story #1404: global temporal indexing floor date, composed
+            # with the per-repo temporal_options["since_date"] override as
+            # "more restrictive wins" -- computed unconditionally (even when
+            # temporal_options is None) so the global floor still applies
+            # with no per-repo override set. Exactly one --since-date flag
+            # is ever emitted; omitted entirely when both are unset.
+            from ..services.temporal_floor_date import (
+                resolve_effective_floor_date,
+                resolve_temporal_floor_date,
+            )
+
+            _per_repo_since_date = (
+                temporal_options.get("since_date") if temporal_options else None
+            )
+            _effective_since_date = resolve_effective_floor_date(
+                resolve_temporal_floor_date(), _per_repo_since_date
+            )
+            if _effective_since_date:
+                temporal_command.extend(["--since-date", _effective_since_date])
+
             if temporal_options:
                 if temporal_options.get("max_commits"):
                     temporal_command.extend(
                         ["--max-commits", str(temporal_options["max_commits"])]
-                    )
-
-                if temporal_options.get("since_date"):
-                    temporal_command.extend(
-                        ["--since-date", temporal_options["since_date"]]
                     )
 
                 # Add diff-context parameter (default: 5 from model)
@@ -3706,9 +3721,22 @@ class GoldenRepoManager:
                         if max_commits is not None:
                             command.extend(["--max-commits", str(max_commits)])
 
-                        since_date = temporal_options.get("since_date")
-                        if since_date:
-                            command.extend(["--since-date", since_date])
+                        # Story #1404: global temporal indexing floor date,
+                        # composed with the per-repo since_date override as
+                        # "more restrictive wins". Exactly one --since-date
+                        # flag is ever emitted; omitted entirely when both
+                        # are unset.
+                        from ..services.temporal_floor_date import (
+                            resolve_effective_floor_date,
+                            resolve_temporal_floor_date,
+                        )
+
+                        _effective_since_date = resolve_effective_floor_date(
+                            resolve_temporal_floor_date(),
+                            temporal_options.get("since_date"),
+                        )
+                        if _effective_since_date:
+                            command.extend(["--since-date", _effective_since_date])
 
                         diff_context = temporal_options.get("diff_context")
                         if diff_context is not None:
