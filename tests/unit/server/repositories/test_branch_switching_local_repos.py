@@ -18,9 +18,9 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import (
-    GoldenRepo,
     GoldenRepoManager,
 )
+from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.mark.e2e
@@ -147,15 +147,19 @@ class TestBranchSwitchingLocalRepos:
         """Create golden repo manager with local repository."""
         manager = GoldenRepoManager(data_dir=temp_data_dir)
 
-        # Add test repository as golden repo
-        golden_repo = GoldenRepo(
+        # Add test repository as golden repo via the real SQLite backend
+        # (Bug #176 / commit 6157ba24: production reads golden repos via
+        # get_golden_repo(), which is SQLite-backed only -- poking
+        # .golden_repos[alias] directly is invisible to it).
+        manager._sqlite_backend.add_repo(
             alias="local-test-repo",
             repo_url=local_git_repo_no_remote,
             default_branch="master",
             clone_path=local_git_repo_no_remote,
             created_at=datetime.now(timezone.utc).isoformat(),
+            enable_temporal=False,
+            temporal_options=None,
         )
-        manager.golden_repos["local-test-repo"] = golden_repo
 
         return manager
 
@@ -166,15 +170,17 @@ class TestBranchSwitchingLocalRepos:
         """Create golden repo manager with invalid remote repository."""
         manager = GoldenRepoManager(data_dir=temp_data_dir)
 
-        # Add test repository as golden repo
-        golden_repo = GoldenRepo(
+        # Add test repository as golden repo via the real SQLite backend
+        # (see golden_repo_manager_local for rationale).
+        manager._sqlite_backend.add_repo(
             alias="invalid-remote-repo",
             repo_url=local_git_repo_with_invalid_remote,
             default_branch="master",
             clone_path=local_git_repo_with_invalid_remote,
             created_at=datetime.now(timezone.utc).isoformat(),
+            enable_temporal=False,
+            temporal_options=None,
         )
-        manager.golden_repos["invalid-remote-repo"] = golden_repo
 
         return manager
 
@@ -194,6 +200,7 @@ class TestBranchSwitchingLocalRepos:
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_local,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     @pytest.fixture
@@ -208,6 +215,7 @@ class TestBranchSwitchingLocalRepos:
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_invalid_remote,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     def test_branch_switching_with_local_repo_now_works(

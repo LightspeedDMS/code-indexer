@@ -20,6 +20,8 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+from src.code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.mark.e2e
@@ -74,6 +76,17 @@ class TestActivatedRepoConfigCreation:
         mock.golden_repos = {"test-repo": golden_repo}
         # Mock get_actual_repo_path() to return the real path (for canonical path resolution)
         mock.get_actual_repo_path = MagicMock(return_value=str(golden_repo_with_git))
+        # Bug #176 (commit 6157ba24): production reads via get_golden_repo(),
+        # not the .golden_repos dict directly. A bare MagicMock() would
+        # otherwise auto-vivify a fake return whose default_branch is itself
+        # a MagicMock, breaking the branch_name != default_branch check.
+        mock.get_golden_repo = MagicMock(return_value=golden_repo)
+        # A bare MagicMock() auto-vivifies resource_config/cow_clone_timeout
+        # as further MagicMocks, which _clone_with_copy_on_write then uses
+        # in a numeric timeout comparison. Set real production defaults so
+        # the mock faithfully represents an un-wired GoldenRepoManager.
+        mock.resource_config = ServerResourceConfig()
+        mock._refresh_scheduler = None
         return mock
 
     @pytest.fixture
@@ -92,6 +105,7 @@ class TestActivatedRepoConfigCreation:
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     def test_activated_repo_has_config_yml_after_activation(

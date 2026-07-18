@@ -21,9 +21,9 @@ from src.code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from src.code_indexer.server.repositories.golden_repo_manager import (
-    GoldenRepo,
     GoldenRepoManager,
 )
+from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.mark.e2e
@@ -133,15 +133,19 @@ class TestBranchSwitchingIntegration:
         """Create golden repo manager with test repository."""
         manager = GoldenRepoManager(data_dir=temp_data_dir)
 
-        # Add test repository as golden repo
-        golden_repo = GoldenRepo(
+        # Add test repository as golden repo via the real SQLite backend
+        # (Bug #176 / commit 6157ba24: production reads golden repos via
+        # get_golden_repo(), which is SQLite-backed only -- poking
+        # .golden_repos[alias] directly is invisible to it).
+        manager._sqlite_backend.add_repo(
             alias="test-integration-repo",
             repo_url=test_git_repo,
             default_branch="master",
             clone_path=test_git_repo,
             created_at=datetime.now(timezone.utc).isoformat(),
+            enable_temporal=False,
+            temporal_options=None,
         )
-        manager.golden_repos["test-integration-repo"] = golden_repo
 
         return manager
 
@@ -161,6 +165,7 @@ class TestBranchSwitchingIntegration:
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager,
             background_job_manager=background_job_manager_mock,
+            clone_backend=LocalCloneBackend(),
         )
 
     def test_complete_repository_activation_and_branch_switching_workflow(

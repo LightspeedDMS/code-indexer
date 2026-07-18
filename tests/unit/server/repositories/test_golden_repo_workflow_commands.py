@@ -58,7 +58,11 @@ class TestGoldenRepoWorkflowCommands:
         1. cidx init --embedding-provider voyage-ai
         2. cidx index
         """
-        # Arrange: Mock subprocess.run to capture commands without executing
+        # Arrange: Mock subprocess.run (cidx init, Step 1) AND
+        # run_with_popen_progress (cidx index, Step 2 -- a Popen-based real
+        # progress runner, NOT subprocess.run) to capture commands without
+        # executing either. Established convention: see
+        # tests/unit/server/repositories/test_post_clone_workflow_timeout_bug.py.
         executed_commands = []
 
         def mock_subprocess_run(command, **kwargs):
@@ -66,7 +70,23 @@ class TestGoldenRepoWorkflowCommands:
             # Return successful mock result
             return Mock(returncode=0, stdout="", stderr="")
 
-        with patch.object(subprocess, "run", side_effect=mock_subprocess_run):
+        def mock_run_with_popen_progress(**kwargs):
+            executed_commands.append(kwargs["command"])
+            # _run_popen (golden_repo_manager.py) discards this return value
+            # (mirrors test_post_clone_workflow_timeout_bug.py's _capture_popen).
+            return 0
+
+        with (
+            patch.object(subprocess, "run", side_effect=mock_subprocess_run),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_run_with_popen_progress,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(0, 0),
+            ),
+        ):
             # Act: Execute post-clone workflow
             mock_repo_manager._execute_post_clone_workflow(
                 clone_path=str(mock_clone_path),

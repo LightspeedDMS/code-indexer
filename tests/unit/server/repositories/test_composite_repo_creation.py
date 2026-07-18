@@ -13,13 +13,14 @@ import pytest
 import tempfile
 import shutil
 import subprocess
-from unittest.mock import Mock
 
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
     ActivatedRepoError,
 )
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+from datetime import datetime, timezone
 
 
 @pytest.mark.e2e
@@ -87,16 +88,25 @@ class TestCompositeRepositoryCreation:
         # Initialize managers
         self.golden_repo_manager = GoldenRepoManager(data_dir=self.data_dir)
         self.manager = ActivatedRepoManager(
-            data_dir=self.data_dir, golden_repo_manager=self.golden_repo_manager
+            data_dir=self.data_dir,
+            golden_repo_manager=self.golden_repo_manager,
+            clone_backend=LocalCloneBackend(),
         )
 
-        # Register golden repositories
+        # Register golden repositories via the real SQLite backend (Bug #176 /
+        # commit 6157ba24: production reads golden repos via get_golden_repo(),
+        # which is SQLite-backed only -- poking .golden_repos[alias] directly
+        # is invisible to it).
         for alias, path in self.golden_repo_paths.items():
-            mock_golden_repo = Mock()
-            mock_golden_repo.alias = alias
-            mock_golden_repo.clone_path = path
-            mock_golden_repo.default_branch = "master"
-            self.golden_repo_manager.golden_repos[alias] = mock_golden_repo
+            self.golden_repo_manager._sqlite_backend.add_repo(
+                alias=alias,
+                repo_url=f"local://{path}",
+                default_branch="master",
+                clone_path=path,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                enable_temporal=False,
+                temporal_options=None,
+            )
 
     def teardown_method(self):
         """Clean up test fixtures."""
