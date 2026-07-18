@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.62.0] - 2026-07-18
+
+### Added
+
+- **Cluster memory-aware admission + pod-pull work-stealing**: heavy index jobs (golden-repo add, provider-index add) in cluster/PostgreSQL mode now support pod-pull work-stealing -- a job submitted on one node can be claimed and executed by any node with capacity, rather than being pinned to the submitting node. Includes a memory-gated admission control layer to avoid overloading any single node with concurrent heavy jobs.
+- **#1404**: a single global, DB-backed "temporal indexing floor date" now bounds all `cidx index --index-commits` runs across the fleet -- commits dated on/after the floor are indexed, older commits skipped. Composes with the pre-existing per-repo `since_date` override via "more restrictive wins" (the later of the two dates governs). `None`/empty is a safety no-op, byte-identical to prior full-history behavior. Includes a Web UI Config section with a floor-date field and backfill advisory note. Also fixes a bundled bug: the per-repo launch path previously emitted the wrong CLI flag (`--since` instead of `--since-date`), which crashed the child `cidx` process whenever a per-repo `since_date` was set.
+
+### Fixed
+
+- **#1430**: pod-pull-eligible job submissions stamped `executing_node` to the submitting node at insert time, while the claimer's SQL required `executing_node IS NULL` to consider a row claimable -- jobs were born unclaimable by construction, silently defeating cross-node work-stealing. Fixed by leaving `executing_node` unset for pod-pull-eligible rows only; node-scoped orphan cleanup (the only other consumer of that stamp) is unaffected.
+- **#1431**: two independent clusters of pre-existing, deterministic test failures across `tests/unit/server/repositories/` (45 tests total) traced to test-fixture staleness against several already-shipped production changes: (1) `ActivatedRepoManager`'s `clone_backend` became hard-required by Story #1034 but several test fixtures never wired one; a related in-memory-dict-vs-SQLite-backend mismatch (Bug #176), a stale `cidx init` subprocess-argv assertion (Bug #1013/#1014), an unmocked `cidx index` Popen call, and a stale `register_job_if_no_conflict` call-arg assertion (Bug #1430) were fixed in the same pass. (2) `repository_listing_manager`'s test fixture wrote golden-repo fixtures only to an in-memory dict never read by the production listing path (which reads exclusively from the SQLite backend per Bug #176's single-source-of-truth model).
+- **#1432**: concurrent writes to the provider-health "sinbin" persistence file could silently lose one provider's entry -- a lost-update race where `_build_merged_state` accepted the currently-persisted state as a parameter but never used it, so every write discarded whatever a concurrent process had just persisted for a different provider. Fixed by merging into the existing persisted state rather than overwriting it wholesale.
+- **#1429**: `fts_cache_reload_on_access` had the same `bool("false") == True` string-coercion bug as #1418's embedding-stats kill-switch -- a Web UI form posting the string `"false"` could never actually disable the setting. Fixed to use the same `_parse_bool` helper as its sibling boolean settings.
+- **#1428**: reranker API-key-preflight tests could fail deterministically (not flakily) when run after certain other test files in the same pytest process, due to a module-level `ConfigService` singleton leaking real on-disk provider credentials across test boundaries. Fixed with a global autouse fixture resetting the singleton before and after every test.
+
 ## [11.61.0] - 2026-07-17
 
 ### Added
