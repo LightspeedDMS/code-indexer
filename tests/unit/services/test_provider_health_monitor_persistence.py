@@ -376,6 +376,66 @@ class TestConcurrentWrites:
 
 
 # ---------------------------------------------------------------------------
+# Scenario: _persist_to_file must merge with (not discard) externally-written
+# state for other providers -- root-cause regression test for the lost-update
+# race reproduced by TestConcurrentWrites above. Deterministic, single-process,
+# no multiprocessing timing dependency.
+# ---------------------------------------------------------------------------
+
+# Arbitrary future cooldown window used to build a fake externally-persisted
+# sinbin entry in TestPersistPreservesUnrelatedProvider below.
+_EXTERNAL_ENTRY_TTL_SECONDS = 300.0
+
+
+class TestPersistPreservesUnrelatedProvider:
+    """_persist_to_file must not discard another provider's persisted entry.
+
+    Root cause: _build_merged_state accepted an `existing` (currently
+    persisted) dict but never used it -- merged state was built purely from
+    this instance's own in-memory _sinbin_until, so any provider persisted by
+    a different process/instance (and never loaded into THIS instance's
+    memory) was silently dropped on the next write. This is a lost-update
+    race: whichever writer runs last wins, discarding the other's change.
+    """
+
+    def test_persist_preserves_provider_written_externally_by_another_process(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "state.json"
+        # Construct the monitor BEFORE any file exists, so __init__'s
+        # _load_from_file() loads nothing -- this instance's in-memory state
+        # knows only about what it itself does from here on, exactly like a
+        # freshly-started sibling OS process in the real concurrency scenario.
+        m = _fresh_monitor(path)
+
+        # Simulate a concurrent process persisting a DIFFERENT provider's
+        # sinbin state directly to the file, exactly as another
+        # ProviderHealthMonitor instance's _persist_to_file() would.
+        external_entry = {
+            "cohere-reranker": {
+                "sinbin_until_wall_seconds": time.time() + _EXTERNAL_ENTRY_TTL_SECONDS,
+                "last_failure_kind": "sinbin",
+            }
+        }
+        path.write_text(json.dumps(external_entry), encoding="utf-8")
+
+        # This instance now sinbins a provider it DOES track -- triggers
+        # _persist_to_file() for THIS instance only.
+        m.sinbin("voyage-reranker")
+
+        data = _read_state_file(path)
+        assert "cohere-reranker" in data, (
+            "Externally-persisted provider must survive a write for a "
+            "different provider by this instance (lost-update race); "
+            f"got file contents: {data}"
+        )
+        assert "voyage-reranker" in data, (
+            "This instance's own sinbin write must still be persisted; "
+            f"got file contents: {data}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Scenario: clear_sinbin removes persisted state (BLOCKER 1 regression test)
 # ---------------------------------------------------------------------------
 

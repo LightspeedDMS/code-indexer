@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, asdict, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
@@ -326,6 +327,84 @@ class SearchTimeoutsConfig:
     # defense-in-depth -- the runtime deadline-propagation mechanism is the
     # primary guard).
     temporal_inline_wait_seconds: float = 60.0
+
+
+@dataclass
+class EmbeddingStatsConfig:
+    """
+    Embedding & reranker call tracking configuration (Story #1418 Phase 3).
+
+    Controls the InProcessAsyncWriter / CrossProcessBootstrapWriter periodic
+    flush cadence, the global on/off kill-switch, and the retention sweep's
+    cutoff window for the embedding_call_stats table (vendor cost
+    reconciliation). Follows the exact SearchTimeoutsConfig pattern.
+    """
+
+    # Global kill-switch. When False, EmbeddingStatsWriter.get_active()
+    # resolves to NoOpWriter regardless of what writer was previously
+    # installed (mirrors the memory_retrieval_enabled kill-switch pattern).
+    enabled: bool = True
+
+    # Periodic background-flush cadence, in seconds. Default MUST match
+    # embedding_stats_writer.py's pre-Phase-3 hardcoded
+    # _DEFAULT_FLUSH_INTERVAL_SECONDS so turning on config-driven tuning
+    # does not silently change existing behavior.
+    flush_interval_seconds: float = 30.0
+
+    # Retention sweep cutoff window, in days. Rows with occurred_at older
+    # than (now - retention_days) are deleted by the retention scheduler.
+    retention_days: int = 90
+
+
+@dataclass
+class TemporalIndexingConfig:
+    """
+    Global temporal indexing floor date configuration (Story #1404).
+
+    A single global, DB-backed "floor date" bounding ALL FUTURE
+    `cidx index --index-commits` runs across the fleet -- eliminates the
+    unbounded-history problem (multi-hour index runs, storage bloat from
+    very old commits with near-zero search value) without per-repo CLI
+    flags. Direction is "since"/newer-commits: commits dated on/after the
+    floor are indexed, older commits are skipped (maps to `git log
+    --since`). Forward-only: bounds FUTURE runs only -- never retroactively
+    prunes already-indexed old commits from existing temporal shards
+    (explicitly out of scope). None/empty = unbounded = byte-identical to
+    pre-feature full-history behavior (safety no-op).
+
+    Composes with the pre-existing per-repo `temporal_options.since_date`
+    override as "more restrictive wins" (see
+    server.services.temporal_floor_date.resolve_effective_floor_date) --
+    exactly one --since-date/since_date value is ever emitted per launch,
+    never two.
+    """
+
+    # "YYYY-MM-DD" or None/"" (unbounded -- default, full history exactly
+    # like pre-feature behavior).
+    index_floor_date: Optional[str] = None
+
+    def validate(self) -> None:
+        """Validate index_floor_date. Raises ValueError if malformed.
+
+        Mirrors temporal_search_service.parse_date_range's validation
+        shape: strptime for real-calendar-date rejection (e.g. the
+        non-existent 2026-02-30) plus a strftime round-trip for
+        zero-padding rejection (e.g. 2026-1-1).
+        """
+        value = self.index_floor_date
+        if value is None or value == "":
+            return  # unbounded -- always valid
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(
+                f"index_floor_date must be in YYYY-MM-DD format, got {value!r}"
+            )
+        if parsed.strftime("%Y-%m-%d") != value:
+            raise ValueError(
+                "index_floor_date must be zero-padded YYYY-MM-DD "
+                f"(e.g. 2025-01-01), got {value!r}"
+            )
 
 
 @dataclass
@@ -853,6 +932,22 @@ class BackgroundJobsConfig:
     # pool is built once at BackgroundJobManager.__init__ (see
     # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
     temporal_lane_concurrency: int = 2
+
+    # Memory-aware admission for heavy index jobs.
+    # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
+    # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
+    # can exceed the process/cgroup memory limit and OOM the server. When the
+    # gate is enabled, a worker consults the cgroup-aware MemoryGovernor before
+    # starting a memory-heavy op and, if under pressure, re-queues the job (it
+    # stays PENDING) and backs off — jobs wait instead of OOMing. The watermark
+    # is a percentage of the process's OWN cgroup limit, so it self-tunes to any
+    # memory.max without per-deployment tuning.
+    job_admission_memory_gate_enabled: bool = True
+    # Admit a heavy job only while cgroup used% is below this (below the
+    # governor's 85% RED/eviction line, leaving headroom for the job's growth).
+    job_admission_memory_max_used_pct: float = 80.0
+    # Seconds a worker waits after declining to admit before re-checking.
+    job_admission_backoff_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
@@ -1432,6 +1527,12 @@ class ServerConfig:
     # Issue #1398 - Query & search timeouts configuration
     search_timeouts_config: Optional[SearchTimeoutsConfig] = None
 
+    # Story #1418 Phase 3 - Embedding & reranker call tracking configuration
+    embedding_stats_config: Optional[EmbeddingStatsConfig] = None
+
+    # Story #1404 - Global temporal indexing floor date configuration
+    temporal_indexing_config: Optional[TemporalIndexingConfig] = None
+
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
     cohere_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1705,6 +1806,12 @@ class ServerConfig:
         # Issue #1398 - Initialize search timeouts config
         if self.search_timeouts_config is None:
             self.search_timeouts_config = SearchTimeoutsConfig()
+        # Story #1418 Phase 3 - Initialize embedding stats config
+        if self.embedding_stats_config is None:
+            self.embedding_stats_config = EmbeddingStatsConfig()
+        # Story #1404 - Initialize temporal indexing floor date config
+        if self.temporal_indexing_config is None:
+            self.temporal_indexing_config = TemporalIndexingConfig()
         # Story #997 - Backward-compat migration: convert old bool field to three-way string.
         # If old stored data has enforce_pace_maker_pacing_only, migrate and remove it.
         old_enforce = self.__dict__.pop("enforce_pace_maker_pacing_only", None)
@@ -2418,6 +2525,36 @@ class ServerConfigManager:
                 **{k: v for k, v in _st_dict.items() if k in _st_allowed}
             )
 
+        # Story #1418 Phase 3: Convert embedding_stats_config dict to
+        # EmbeddingStatsConfig. Same rationale as search_timeouts_config
+        # above -- without this block, the raw dict round-tripped through
+        # the runtime DB's JSON column survives unconverted and attribute
+        # access on the resulting "dict" raises AttributeError. Unknown
+        # keys filtered for rolling-upgrade safety.
+        if "embedding_stats_config" in config_dict and isinstance(
+            config_dict["embedding_stats_config"], dict
+        ):
+            _es_dict = config_dict["embedding_stats_config"]
+            _es_allowed = {f.name for f in fields(EmbeddingStatsConfig)}
+            config_dict["embedding_stats_config"] = EmbeddingStatsConfig(
+                **{k: v for k, v in _es_dict.items() if k in _es_allowed}
+            )
+
+        # Story #1404: Convert temporal_indexing_config dict to
+        # TemporalIndexingConfig. Same rationale as embedding_stats_config
+        # above -- without this block, the raw dict round-tripped through
+        # the runtime DB's JSON column survives unconverted and attribute
+        # access on the resulting "dict" raises AttributeError. Unknown
+        # keys filtered for rolling-upgrade safety.
+        if "temporal_indexing_config" in config_dict and isinstance(
+            config_dict["temporal_indexing_config"], dict
+        ):
+            _ti_dict = config_dict["temporal_indexing_config"]
+            _ti_allowed = {f.name for f in fields(TemporalIndexingConfig)}
+            config_dict["temporal_indexing_config"] = TemporalIndexingConfig(
+                **{k: v for k, v in _ti_dict.items() if k in _ti_allowed}
+            )
+
         # Epic #408: Convert ontap dict to OntapConfig
         if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
             config_dict["ontap"] = OntapConfig(**config_dict["ontap"])
@@ -2724,6 +2861,21 @@ class ServerConfigManager:
                     "search_code_handler_timeout_seconds="
                     f"{st.search_code_handler_timeout_seconds}"
                 )
+
+        # Validate embedding_stats_config (Story #1418 Phase 3)
+        if config.embedding_stats_config:
+            es = config.embedding_stats_config
+            if es.flush_interval_seconds <= 0:
+                raise ValueError(
+                    "flush_interval_seconds must be > 0, "
+                    f"got {es.flush_interval_seconds}"
+                )
+            if es.retention_days <= 0:
+                raise ValueError(f"retention_days must be > 0, got {es.retention_days}")
+
+        # Validate temporal_indexing_config (Story #1404)
+        if config.temporal_indexing_config:
+            config.temporal_indexing_config.validate()
 
         # Validate golden_repos_config (Story #3 - Phase 1, AC-M5)
         if config.golden_repos_config:

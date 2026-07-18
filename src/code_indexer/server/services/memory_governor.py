@@ -331,6 +331,28 @@ class MemoryGovernor:
             return True
         return self.band == MemoryBand.RED
 
+    def admission_allowed(self, max_used_pct: float) -> bool:
+        """True iff a new memory-heavy job may be admitted for execution.
+
+        Reactive, cgroup-aware admission gate that reuses the sampler's signal
+        (never reads /sys/fs/cgroup or psutil directly here). Fail-safe: returns
+        False until the first successful sample (band starts RED) and whenever
+        the band is RED (used_pct >= red_pct OR swap-in death-spiral), so a
+        pressured — or not-yet-observed — pod never starts another heavy index
+        job. Otherwise admits only while the last sampled cgroup used% is below
+        ``max_used_pct``, an admission watermark set below the RED/eviction line
+        to leave headroom for the admitted job's own HNSW/FTS/embedding growth.
+
+        Expressed purely as a percentage of the pod's own cgroup limit, so it
+        self-tunes to whatever memory.max the container has (4Gi, 8Gi, …) with
+        no per-deployment job-count tuning.
+        """
+        if self._first_tick:
+            return False
+        if self.band == MemoryBand.RED:
+            return False
+        return self.last_used_pct < max_used_pct
+
     def get_snapshot(self) -> dict:
         """Return the full §3.5 snapshot dict for the admin endpoint (Story 4).
 

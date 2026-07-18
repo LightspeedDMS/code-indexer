@@ -2521,14 +2521,31 @@ class RefreshScheduler:
             temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
+            # Story #1404: global temporal indexing floor date, composed
+            # with the per-repo temporal_options["since_date"] override as
+            # "more restrictive wins" -- computed unconditionally (even
+            # when temporal_options is empty/None, e.g. the Bug #642
+            # fallback branch below) so the global floor still applies with
+            # no per-repo override set. Exactly one --since-date flag is
+            # ever emitted; omitted entirely when both are unset.
+            from code_indexer.server.services.temporal_floor_date import (
+                resolve_effective_floor_date,
+                resolve_temporal_floor_date,
+            )
+
+            _per_repo_since_date = (
+                temporal_options.get("since_date") if temporal_options else None
+            )
+            _effective_since_date = resolve_effective_floor_date(
+                resolve_temporal_floor_date(), _per_repo_since_date
+            )
+            if _effective_since_date:
+                temporal_command.extend(["--since-date", _effective_since_date])
+
             if temporal_options:
                 if temporal_options.get("max_commits"):
                     temporal_command.extend(
                         ["--max-commits", str(temporal_options["max_commits"])]
-                    )
-                if temporal_options.get("since_date"):
-                    temporal_command.extend(
-                        ["--since-date", temporal_options["since_date"]]
                     )
                 diff_context = temporal_options.get("diff_context")
                 if diff_context is not None:
@@ -2622,15 +2639,18 @@ class RefreshScheduler:
             now always passes an explicit sanitized env (never relies on this
             default), so this None default only matters for a hypothetical
             future caller.
+
+            Story #1418: this is the SHARED convergence point for both the
+            semantic (Step 1) and temporal (Step 2) calls in this workflow,
+            so CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+            unconditionally (both storage modes).
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
-            # Bug #1313 round-3 regression guard: only pass the env= kwarg
-            # when it is not None, so callers that intentionally pass None
-            # (e.g. temporal in sqlite mode, to stay byte-unchanged) do not
-            # have that None overwritten here -- several pre-existing tests
-            # mock run_with_popen_progress with a strict (non-**kwargs)
-            # signature that does not accept an env kwarg at all.
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+
             _popen_kwargs: dict = dict(
                 command=command,
                 phase_name=phase_name,
@@ -2641,8 +2661,9 @@ class RefreshScheduler:
                 cwd=str(source_path),
                 error_label=error_label,
             )
-            if env is not None:
-                _popen_kwargs["env"] = env
+            _popen_kwargs["env"] = build_embedding_stats_child_env(
+                get_config_service().get_config(), base_env=env
+            )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- several pre-existing tests
             # mock run_with_popen_progress with a strict signature lacking

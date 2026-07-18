@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.64.0] - 2026-07-18
+
+### Fixed
+
+- **#1400**: eliminated the recurring forced-deferral race in the async-hybrid temporal query timeout mechanism (`execute_live_temporal_search`), superseding 11.63.0's incomplete `no_embedding_cache_shortcut`-based mitigation which still raced intermittently under concurrent load. Two real bugs fixed: (1) no well-defined `temporal_inline_wait_seconds == 0.0` contract -- the poll loop always performed a status check first regardless of budget, so a fast-completing job could win the race; (2) unbounded oversleep past the deadline -- the loop checked the deadline only after a "waiting" read, then slept the full unconditional poll interval before looping back, letting a deadline between two ticks be overshot and the following read observe "completed" purely from the extra elapsed time. Fixed by checking the deadline before every status read and capping each sleep to the remaining budget; `inline_wait_seconds <= 0.0` now short-circuits to an immediate deferred envelope with zero status checks -- a genuine race-free "always defer" contract. Default config value (60.0) is unaffected; only an operator explicitly setting 0.0 opts into the new behavior.
+
+## [11.63.0] - 2026-07-18
+
+### Fixed
+
+- **MCP `authenticate` tool dispatch broken on both `/mcp` and `/mcp-public`**: found via the post-e2e log-audit gate. The authenticated `/mcp` endpoint's generic dispatch chain never supplied `http_request`/`http_response` to `handle_authenticate` (whose signature departs from the standard `(args, user)` shape), raising a `TypeError` on every call. The public `/mcp-public` endpoint's special-cased authenticate dispatch unconditionally `await`-ed `handle_authenticate`'s return value, but that handler is sync and returns a plain dict -- also a `TypeError`, meaning the real unauthenticated login front door was completely broken. Both paths fixed; added regression tests covering both the crash and the security-relevant positive path (a valid login actually sets the HttpOnly `cidx_session` cookie).
+- **#1400 (test-only)**: intermittent 202-vs-200 race in the forced-deferred-handoff e2e tests for the async-hybrid temporal query mechanism -- a 1ms forced inline-wait made deferral likely but not guaranteed against variable-latency real embedding work. Fixed by forcing a real embedding-provider round trip via the existing `no_embedding_cache_shortcut` field.
+
+## [11.62.0] - 2026-07-18
+
+### Added
+
+- **Cluster memory-aware admission + pod-pull work-stealing**: heavy index jobs (golden-repo add, provider-index add) in cluster/PostgreSQL mode now support pod-pull work-stealing -- a job submitted on one node can be claimed and executed by any node with capacity, rather than being pinned to the submitting node. Includes a memory-gated admission control layer to avoid overloading any single node with concurrent heavy jobs.
+- **#1404**: a single global, DB-backed "temporal indexing floor date" now bounds all `cidx index --index-commits` runs across the fleet -- commits dated on/after the floor are indexed, older commits skipped. Composes with the pre-existing per-repo `since_date` override via "more restrictive wins" (the later of the two dates governs). `None`/empty is a safety no-op, byte-identical to prior full-history behavior. Includes a Web UI Config section with a floor-date field and backfill advisory note. Also fixes a bundled bug: the per-repo launch path previously emitted the wrong CLI flag (`--since` instead of `--since-date`), which crashed the child `cidx` process whenever a per-repo `since_date` was set.
+
+### Fixed
+
+- **#1430**: pod-pull-eligible job submissions stamped `executing_node` to the submitting node at insert time, while the claimer's SQL required `executing_node IS NULL` to consider a row claimable -- jobs were born unclaimable by construction, silently defeating cross-node work-stealing. Fixed by leaving `executing_node` unset for pod-pull-eligible rows only; node-scoped orphan cleanup (the only other consumer of that stamp) is unaffected.
+- **#1431**: two independent clusters of pre-existing, deterministic test failures across `tests/unit/server/repositories/` (45 tests total) traced to test-fixture staleness against several already-shipped production changes: (1) `ActivatedRepoManager`'s `clone_backend` became hard-required by Story #1034 but several test fixtures never wired one; a related in-memory-dict-vs-SQLite-backend mismatch (Bug #176), a stale `cidx init` subprocess-argv assertion (Bug #1013/#1014), an unmocked `cidx index` Popen call, and a stale `register_job_if_no_conflict` call-arg assertion (Bug #1430) were fixed in the same pass. (2) `repository_listing_manager`'s test fixture wrote golden-repo fixtures only to an in-memory dict never read by the production listing path (which reads exclusively from the SQLite backend per Bug #176's single-source-of-truth model).
+- **#1432**: concurrent writes to the provider-health "sinbin" persistence file could silently lose one provider's entry -- a lost-update race where `_build_merged_state` accepted the currently-persisted state as a parameter but never used it, so every write discarded whatever a concurrent process had just persisted for a different provider. Fixed by merging into the existing persisted state rather than overwriting it wholesale.
+- **#1429**: `fts_cache_reload_on_access` had the same `bool("false") == True` string-coercion bug as #1418's embedding-stats kill-switch -- a Web UI form posting the string `"false"` could never actually disable the setting. Fixed to use the same `_parse_bool` helper as its sibling boolean settings.
+- **#1428**: reranker API-key-preflight tests could fail deterministically (not flakily) when run after certain other test files in the same pytest process, due to a module-level `ConfigService` singleton leaking real on-disk provider credentials across test boundaries. Fixed with a global autouse fixture resetting the singleton before and after every test.
+
+## [11.61.0] - 2026-07-17
+
+### Added
+
+- **#1418**: cidx-server now tracks every real (non-cached, non-suppressed) embedding and reranker call to VoyageAI/Cohere -- provider, model, token/item counts, purpose, golden-repo/job context, success/failure, latency -- recorded asynchronously outside the hot path to a new dual-backend `embedding_call_stats` table, so operators can reconcile observed vendor usage against internal records. Works in both solo (SQLite) and clustered (PostgreSQL) server deployments; cache hits and coalesced-away duplicates never produce a row. Includes a Web UI Config section (enabled kill-switch, flush interval, retention window), a filterable Web UI dashboard, an admin REST/MCP query endpoint, and a retention sweep scheduler.
+
+### Fixed
+
+- **#1423**: `xray_search`/`xray_explore` crashed with a raw `TypeError` when `pattern_name` (a stored pattern) was combined with list-typed `repository_alias` (the omni multi-repo form), even a single-element list. Fixed by reordering repository-alias normalization to run before pattern resolution, with a defensive guard against non-string aliases and server-side exception logging closing a related silent-failure gap.
+- **#1422**: `temporal_inline_wait_seconds` was writable via the admin config API but had no read surface -- missing from both the Web UI Config screen and the JSON config-read surface. Added the missing display row and edit field alongside its `SearchTimeoutsConfig` siblings.
+- **#1420**: `quick_daemon_check()`'s directory walk didn't stop at the nearest `.code-indexer/config.json` -- it could skip past a nearer daemon-disabled config to inherit a more distant ancestor's daemon-enabled state, misrouting `cidx index`/`query`/`watch`/`clean`. Fixed so the walk always stops at the first config found, using its daemon-mode value (enabled, disabled, or malformed-treated-as-disabled) as the final answer.
+- **#1425**: concurrent xray evaluator compilation of the same cold-cache hash could clobber rustc's intermediate codegen files across jobs, producing a `rust-lld` error and a silent 0-match result for the losing job. Fixed via per-compile-attempt isolated temp build directories with an atomic publish of the finished artifact on success.
+- **#1426**: two tests in `test_cli_fast_path.py` called `is_delegatable_command()` with a stale single-argument signature, failing with `TypeError` since Bug #1417 added a required `args` parameter.
+- **#1427**: two test files sharing an identical basename in different directories (`tests/unit/server/storage/` and `tests/unit/server/services/`) broke pytest collection whenever both directories were collected together.
+
 ## [11.60.0] - 2026-07-16
 
 ### Fixed

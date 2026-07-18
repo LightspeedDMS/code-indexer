@@ -314,6 +314,10 @@ _VALID_CONFIG_SECTIONS = (
     "search_event_log",
     # Issue #1160 - Export retention config
     "export",
+    # Story #1418 Phase 3 - Embedding & reranker call tracking config
+    "embedding_stats",
+    # Story #1404 - Global temporal indexing floor date configuration
+    "temporal_indexing",
 )
 
 
@@ -6349,6 +6353,10 @@ def _get_current_config() -> dict:
         HNSWOrphanRepairSweepConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
+        # Story #1418 Phase 3 - Embedding & reranker call tracking config
+        EmbeddingStatsConfig,
+        # Story #1404 - Global temporal indexing floor date configuration
+        TemporalIndexingConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6578,6 +6586,14 @@ def _get_current_config() -> dict:
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
             "search_timeouts", asdict(SearchTimeoutsConfig())
+        ),
+        # Story #1418 Phase 3: Embedding & reranker call tracking config
+        "embedding_stats": settings.get(
+            "embedding_stats", asdict(EmbeddingStatsConfig())
+        ),
+        # Story #1404: Global temporal indexing floor date configuration
+        "temporal_indexing": settings.get(
+            "temporal_indexing", asdict(TemporalIndexingConfig())
         ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
@@ -7512,6 +7528,45 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Temporal Query Inline Sync-Wait must be >= 0.0 seconds"
             except (ValueError, TypeError):
                 return "Temporal Query Inline Sync-Wait must be a valid number"
+
+    elif section == "embedding_stats":
+        # Story #1418 Phase 3: Embedding & reranker call tracking
+        # configuration validation. Ranges mirror
+        # config_manager.validate_config's EmbeddingStatsConfig checks.
+        flush_interval = data.get("flush_interval_seconds")
+        if flush_interval is not None:
+            try:
+                val_float = float(flush_interval)
+                if val_float <= 0:
+                    return "Flush Interval must be greater than 0 seconds"
+            except (ValueError, TypeError):
+                return "Flush Interval must be a valid number"
+
+        retention_days = data.get("retention_days")
+        if retention_days is not None:
+            try:
+                val_int = int(retention_days)
+                if val_int <= 0:
+                    return "Retention Days must be greater than 0"
+            except (ValueError, TypeError):
+                return "Retention Days must be a valid number"
+
+    elif section == "temporal_indexing":
+        # Story #1404: Global temporal indexing floor date validation.
+        # Delegates to TemporalIndexingConfig.validate() (strptime +
+        # strftime round-trip shape, mirrors
+        # temporal_search_service.parse_date_range) rather than
+        # re-implementing date-format checks inline.
+        index_floor_date = data.get("index_floor_date")
+        if index_floor_date is not None:
+            from ..utils.config_manager import TemporalIndexingConfig
+
+            try:
+                TemporalIndexingConfig(
+                    index_floor_date=str(index_floor_date)
+                ).validate()
+            except ValueError as exc:
+                return str(exc)
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation
@@ -11090,6 +11145,78 @@ def _add_scan_duration(scans: List[Dict]) -> None:
             scan["duration"] = "In progress"
         else:
             scan["duration"] = "N/A"
+
+
+def _load_embedding_stats_dashboard_data(
+    backend: Optional[Any],
+    provider: Optional[str] = None,
+    purpose: Optional[str] = None,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+    limit: int = 200,
+) -> List[Dict]:
+    """Load embedding_call_stats records for the Web UI dashboard page
+    (Story #1418 Phase 3 Component 8), as plain dicts ready for Jinja
+    rendering. Returns [] when backend is unavailable (fail-soft --
+    consistent with this project's read-only reporting convention rather
+    than raising into the page render)."""
+    from dataclasses import asdict
+
+    if backend is None:
+        return []
+    records = backend.query(
+        provider=provider,
+        purpose=purpose,
+        golden_repo_alias=golden_repo_alias,
+        job_id=job_id,
+        limit=limit,
+    )
+    return [asdict(r) for r in records]
+
+
+@web_router.get("/embedding-stats", response_class=HTMLResponse)
+def embedding_stats_dashboard_page(
+    request: Request,
+    provider: Optional[str] = None,
+    purpose: Optional[str] = None,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+):
+    """Embedding & reranker call tracking dashboard (Story #1418 Phase 3
+    Component 8). Filterable volume-over-time view backed by
+    backend_registry.embedding_call_stats -- requires authenticated admin
+    session."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    backend = (
+        getattr(backend_registry, "embedding_call_stats", None)
+        if backend_registry is not None
+        else None
+    )
+    records = _load_embedding_stats_dashboard_data(
+        backend,
+        provider=provider or None,
+        purpose=purpose or None,
+        golden_repo_alias=golden_repo_alias or None,
+        job_id=job_id or None,
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "embedding_stats_dashboard.html",
+        {
+            "records": records,
+            "filters": {
+                "provider": provider or "",
+                "purpose": purpose or "",
+                "golden_repo_alias": golden_repo_alias or "",
+                "job_id": job_id or "",
+            },
+        },
+    )
 
 
 def _load_self_monitoring_data(

@@ -214,8 +214,35 @@ class VoyageRerankerClient(RerankerClient):
 
         start_ms = time.monotonic() * 1000
         try:
-            response = self._post(body)
-            response.raise_for_status()
+            # Story #1418 preflight: runs BEFORE instrument_call so a missing
+            # API key (never reaches the network) is never recorded as a
+            # real vendor call attempt.
+            self._require_api_key()
+
+            def _do_post_and_validate() -> httpx.Response:
+                """The smallest unit including BOTH the network call and its
+                status validation -- _post() only performs the network call;
+                raise_for_status() is invoked here by the CALLER, so wrapping
+                _post() alone would misclassify a vendor 4xx/5xx as
+                success=True (Story #1418)."""
+                _response = self._post(body)
+                _response.raise_for_status()
+                return _response
+
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call,
+            )
+
+            response = instrument_call(
+                provider="voyageai",
+                call_type="rerank",
+                model=self._get_model(),
+                item_count=len(documents),
+                token_count=0,
+                batch_size=len(documents),
+                purpose="query",
+                fn=_do_post_and_validate,
+            )
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=True)
         except httpx.HTTPStatusError as exc:
@@ -309,8 +336,14 @@ class VoyageRerankerClient(RerankerClient):
             body["top_k"] = top_k
         return body
 
-    def _post(self, body: Dict) -> httpx.Response:
-        """Execute a synchronous POST to the configured rerank endpoint.
+    def _require_api_key(self) -> str:
+        """Return a validated, non-empty API key or raise ValueError.
+
+        Single source of truth for the missing-key check -- used both here
+        (by _post(), for direct callers) and as an explicit preflight gate
+        in rerank() BEFORE instrument_call (Story #1418), so a missing key
+        (never reaching the network) is never recorded as a real vendor
+        call attempt.
 
         Raises:
             ValueError: If the API key is missing or empty.
@@ -321,6 +354,15 @@ class VoyageRerankerClient(RerankerClient):
                 "VoyageAI API key not found. "
                 "Set VOYAGE_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
             )
+        return api_key
+
+    def _post(self, body: Dict) -> httpx.Response:
+        """Execute a synchronous POST to the configured rerank endpoint.
+
+        Raises:
+            ValueError: If the API key is missing or empty.
+        """
+        api_key = self._require_api_key()
         # Story #1083/#1084: auth header travels on the per-request .post() call so
         # the pooled keep-alive client stays auth-agnostic — API-key rotation is
         # transparent (no client invalidation/rebuild needed).
@@ -537,8 +579,35 @@ class CohereRerankerClient(RerankerClient):
 
         start_ms = time.monotonic() * 1000
         try:
-            response = self._post(body)
-            response.raise_for_status()
+            # Story #1418 preflight: runs BEFORE instrument_call so a missing
+            # API key (never reaches the network) is never recorded as a
+            # real vendor call attempt.
+            self._require_api_key()
+
+            def _do_post_and_validate() -> httpx.Response:
+                """The smallest unit including BOTH the network call and its
+                status validation -- _post() only performs the network call;
+                raise_for_status() is invoked here by the CALLER, so wrapping
+                _post() alone would misclassify a vendor 4xx/5xx as
+                success=True (Story #1418)."""
+                _response = self._post(body)
+                _response.raise_for_status()
+                return _response
+
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call,
+            )
+
+            response = instrument_call(
+                provider="cohere",
+                call_type="rerank",
+                model=self._get_model(),
+                item_count=len(documents),
+                token_count=0,
+                batch_size=len(documents),
+                purpose="query",
+                fn=_do_post_and_validate,
+            )
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=True)
         except httpx.HTTPStatusError as exc:
@@ -562,6 +631,24 @@ class CohereRerankerClient(RerankerClient):
             raise
 
         return self._parse_response(response)
+
+    def _require_api_key(self) -> str:
+        """Return a validated, non-empty API key or raise ValueError.
+
+        Single source of truth for the missing-key check -- used both here
+        (by _post(), for direct callers) and as an explicit preflight gate
+        in rerank() BEFORE instrument_call (Story #1418).
+
+        Raises:
+            ValueError: If the API key is missing or empty.
+        """
+        api_key = self._get_api_key()
+        if not api_key or not api_key.strip():
+            raise ValueError(
+                "Cohere API key not found. "
+                "Set CO_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
+            )
+        return api_key
 
     def _get_api_key(self) -> Optional[str]:
         """Return the Cohere API key, preferring config over the CO_API_KEY env var.
@@ -659,12 +746,7 @@ class CohereRerankerClient(RerankerClient):
         Raises:
             ValueError: If the API key is missing or empty.
         """
-        api_key = self._get_api_key()
-        if not api_key or not api_key.strip():
-            raise ValueError(
-                "Cohere API key not found. "
-                "Set CO_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
-            )
+        api_key = self._require_api_key()
         # Story #1083/#1084: auth header travels on the per-request .post() call so
         # the pooled keep-alive client stays auth-agnostic — API-key rotation is
         # transparent (no client invalidation/rebuild needed).

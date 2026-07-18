@@ -610,12 +610,21 @@ class ActivatedRepoIndexManager:
         wall-clock deadline on the subprocess itself. The only legitimate
         fixed timeout in the system is the per-request outbound embedding-
         provider HTTP call.
+
+        Story #1418: this is the SHARED convergence point for every
+        `cidx index` spawn in this file (semantic, fts, temporal), so
+        CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+        unconditionally (both storage modes), before the existing
+        build_cidx_subprocess_env() PYTHONPATH sanitization.
         """
-        resolved_env = (
-            build_cidx_subprocess_env(env)
-            if env is not None
-            else build_cidx_subprocess_env()
+        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+            build_embedding_stats_child_env,
         )
+
+        env_with_stats = build_embedding_stats_child_env(
+            get_config_service().get_config(), base_env=env
+        )
+        resolved_env = build_cidx_subprocess_env(env_with_stats)
         self._seed_telemetry(repo_path)
         try:
             return run_cancellable_subprocess(
@@ -790,6 +799,18 @@ class ActivatedRepoIndexManager:
             args = ["cidx", "index", "--index-commits"]
             if clear:
                 args.append("--clear")
+
+            # Story #1404: apply the global temporal indexing floor date.
+            # No per-repo since_date concept exists at this layer (activated
+            # repos carry no temporal_options), so the global value applies
+            # directly -- omitted entirely when unset (Scenario 5 no-op).
+            from code_indexer.server.services.temporal_floor_date import (
+                resolve_temporal_floor_date,
+            )
+
+            _floor_date = resolve_temporal_floor_date()
+            if _floor_date:
+                args.extend(["--since-date", _floor_date])
 
             _temporal_env = build_temporal_child_env(get_config_service().get_config())
 

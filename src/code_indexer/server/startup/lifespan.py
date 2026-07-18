@@ -1901,6 +1901,87 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize in-process embedding-stats writer (Story #1418
+        # Phase 3). Without this, the live server process never installs a
+        # real writer -- every server-side instrumented embedding/reranker
+        # call (e.g. query-time embeddings) silently falls through to the
+        # default NoOpWriter. The `cidx index` child-subprocess path
+        # (CrossProcessBootstrapWriter) is unaffected by this block.
+        logger.info(
+            "Server startup: Initializing embedding stats writer",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                start_in_process_embedding_stats_writer,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_writer = start_in_process_embedding_stats_writer(
+                backend_registry.embedding_call_stats, get_config_service()
+            )
+            app.state.embedding_stats_writer = embedding_stats_writer
+            logger.info(
+                "Embedding stats writer started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1418",
+                    f"Failed to initialize embedding stats writer: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize embedding-stats retention sweep scheduler
+        # (Story #1418 Phase 3 Component 9)
+        logger.info(
+            "Server startup: Initializing embedding stats retention scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_retention_scheduler import (
+                EmbeddingStatsRetentionScheduler as _EmbeddingStatsRetentionScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_retention_scheduler = _EmbeddingStatsRetentionScheduler(
+                backend=backend_registry.embedding_call_stats,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            embedding_stats_retention_scheduler.start()
+            app.state.embedding_stats_retention_scheduler = (
+                embedding_stats_retention_scheduler
+            )
+            logger.info(
+                "Embedding stats retention scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1420",
+                    f"Failed to initialize embedding stats retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Dependency Map Scheduler (Story #193)
         dependency_map_service = None
         logger.info(
@@ -3078,8 +3159,23 @@ def make_lifespan(
                         DistributedJobWorkerService,
                     )
 
+                    # Memory-aware admission: give the claimer the same cgroup-aware
+                    # memory watermark the per-pod pool uses, so a pressured pod
+                    # declines cross-pod refresh claims and leaves them pending.
+                    from code_indexer.server.utils.config_manager import (
+                        BackgroundJobsConfig as _BgJobsConfig,
+                    )
+
+                    _bg_jobs_config = _BgJobsConfig()
                     _job_claimer = DistributedJobClaimer(
-                        pool=_cluster_pool, node_id=_node_id
+                        pool=_cluster_pool,
+                        node_id=_node_id,
+                        memory_gate_enabled=(
+                            _bg_jobs_config.job_admission_memory_gate_enabled
+                        ),
+                        memory_max_used_pct=(
+                            _bg_jobs_config.job_admission_memory_max_used_pct
+                        ),
                     )
                     _refresh_sched = (
                         global_lifecycle_manager.refresh_scheduler
@@ -3091,6 +3187,100 @@ def make_lifespan(
                         refresh_scheduler=_refresh_sched,
                     )
                     _cluster_services.append(("dist_job_worker", _dist_worker))
+
+                    # Pod-pull work-stealing: an always-on (NOT
+                    # leader-gated) per-pod loop that claims the memory-heavy
+                    # index ops left PENDING in the shared queue and runs them by
+                    # reconstructing from the row's metadata. The claim is
+                    # memory-gated, so a pressured pod leaves rows for a pod
+                    # with headroom. Started immediately on every postgres pod;
+                    # stopped by the _cluster_services shutdown loop.
+                    from code_indexer.server.services.index_job_claim_loop import (
+                        IndexJobClaimLoop,
+                        validate_dispatch_covers,
+                    )
+                    from code_indexer.server.repositories.background_jobs import (
+                        POD_PULL_OPS,
+                    )
+                    from code_indexer.server.app_helpers import (
+                        _execute_repository_sync,
+                        build_sync_progress_webhook_callback,
+                    )
+                    from code_indexer.server.mcp.handlers.repos import (
+                        _provider_index_job,
+                        _provider_temporal_index_job,
+                    )
+
+                    # Pod-pull dispatch executors (PR #1424 H2): each takes the
+                    # row's metadata AND a per-job progress_callback that the
+                    # IndexJobClaimLoop routes to the shared background_jobs row,
+                    # so a work-stolen op reports incremental progress to the
+                    # originating node's dashboard instead of a 0 -> 100 jump.
+                    def _pp_add_golden_repo(md, progress_callback):
+                        return golden_repo_manager.execute_add_golden_repo_work(
+                            **md, progress_callback=progress_callback
+                        )
+
+                    def _pp_change_branch(md, progress_callback):
+                        return golden_repo_manager.change_branch(
+                            md["alias"],
+                            md["target_branch"],
+                            progress_callback=progress_callback,
+                        )
+
+                    def _pp_sync_repository(md, progress_callback):
+                        # Rebuild the client webhook on THIS (executing) node from
+                        # the metadata options, then fan progress out to BOTH the
+                        # DB-backed dashboard callback and the webhook.
+                        options = md.get("options") or {}
+                        webhook_cb = build_sync_progress_webhook_callback(
+                            options.get("progress_webhook"),
+                            md["repo_id"],
+                            md["username"],
+                        )
+
+                        def _combined(progress: int) -> None:
+                            progress_callback(progress)
+                            if webhook_cb is not None:
+                                webhook_cb(progress)
+
+                        return _execute_repository_sync(
+                            repo_id=md["repo_id"],
+                            username=md["username"],
+                            options=options,
+                            activated_repo_manager=getattr(
+                                golden_repo_manager, "activated_repo_manager", None
+                            ),
+                            progress_callback=_combined,
+                        )
+
+                    def _pp_provider_index(md, progress_callback):
+                        return _provider_index_job(
+                            **md, progress_callback=progress_callback
+                        )
+
+                    def _pp_provider_temporal(md, progress_callback):
+                        return _provider_temporal_index_job(
+                            **md, progress_callback=progress_callback
+                        )
+
+                    _index_dispatch = {
+                        "add_golden_repo": _pp_add_golden_repo,
+                        "change_branch": _pp_change_branch,
+                        "sync_repository": _pp_sync_repository,
+                        "provider_index_add": _pp_provider_index,
+                        "provider_temporal_index_rebuild": _pp_provider_temporal,
+                    }
+                    # M3: fail loudly if a pod-pull op ever lacks an executor (or
+                    # vice versa) instead of silently claiming an unrunnable row.
+                    validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)
+                    _index_claim_loop = IndexJobClaimLoop(
+                        claimer=_job_claimer,
+                        dispatch=_index_dispatch,
+                        node_id=_node_id,
+                    )
+                    _index_claim_loop.start()
+                    _cluster_services.append(("index_claim_loop", _index_claim_loop))
 
                     # Story #538: Enable PG advisory locks for password changes
                     from code_indexer.server.auth.concurrency_protection import (
@@ -4386,6 +4576,53 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-037",
                         f"Error stopping activated reaper scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats writer (Story #1418 Phase 3)
+        embedding_stats_writer_state = getattr(
+            app.state, "embedding_stats_writer", None
+        )
+        if embedding_stats_writer_state is not None:
+            try:
+                from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                    stop_in_process_embedding_stats_writer,
+                )
+
+                stop_in_process_embedding_stats_writer(embedding_stats_writer_state)
+                logger.info(
+                    "Embedding stats writer stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1419",
+                        f"Error stopping embedding stats writer: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats retention scheduler (Story #1418
+        # Phase 3 Component 9)
+        embedding_stats_retention_scheduler_state = getattr(
+            app.state, "embedding_stats_retention_scheduler", None
+        )
+        if embedding_stats_retention_scheduler_state is not None:
+            try:
+                embedding_stats_retention_scheduler_state.stop()
+                logger.info(
+                    "Embedding stats retention scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1421",
+                        f"Error stopping embedding stats retention scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

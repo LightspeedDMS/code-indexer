@@ -107,6 +107,36 @@ def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _embedding_stats_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return embedding_stats settings dict from ServerConfig (Story #1418
+    Phase 3).
+
+    Surfaces EmbeddingStatsConfig's 3 fields (enabled kill-switch, writer
+    flush cadence, retention window) for the Web UI Config screen.
+    """
+    es = config.embedding_stats_config
+    assert es is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": es.enabled,
+        "flush_interval_seconds": es.flush_interval_seconds,
+        "retention_days": es.retention_days,
+    }
+
+
+def _temporal_indexing_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_indexing settings dict from ServerConfig (Story #1404).
+
+    Surfaces TemporalIndexingConfig's single field (the global temporal
+    indexing floor date) for the Web UI Config screen. None/empty means
+    unbounded (full history, pre-feature behavior).
+    """
+    ti = config.temporal_indexing_config
+    assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "index_floor_date": ti.index_floor_date,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -742,6 +772,10 @@ class ConfigService:
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
+            # Story #1418 Phase 3 - Embedding & reranker call tracking config
+            "embedding_stats": _embedding_stats_settings(config),
+            # Story #1404 - Global temporal indexing floor date configuration
+            "temporal_indexing": _temporal_indexing_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -1036,6 +1070,12 @@ class ConfigService:
         # Issue #1160 - Export retention
         elif category == "export":
             self._update_export_setting(config, key, value)
+        # Story #1418 Phase 3 - Embedding & reranker call tracking config
+        elif category == "embedding_stats":
+            self._update_embedding_stats_setting(config, key, value)
+        # Story #1404 - Global temporal indexing floor date configuration
+        elif category == "temporal_indexing":
+            self._update_temporal_indexing_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
         return True
@@ -1173,7 +1213,7 @@ class ConfigService:
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
-            cache.fts_cache_reload_on_access = bool(value)
+            cache.fts_cache_reload_on_access = _parse_bool(value)
         # Payload cache settings (Story #679).
         # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
@@ -2489,6 +2529,45 @@ class ConfigService:
             st.temporal_inline_wait_seconds = float(value)
         else:
             raise ValueError(f"Unknown search_timeouts setting: {key}")
+
+    def _update_embedding_stats_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an embedding_stats setting (Story #1418 Phase 3).
+
+        Range validation (flush_interval_seconds > 0, retention_days > 0)
+        happens later in config_manager.validate_config(), called by
+        update_setting() after this method returns (unless
+        skip_validation=True for batch updates).
+        """
+        es = config.embedding_stats_config
+        assert es is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            es.enabled = _parse_bool(value)
+        elif key == "flush_interval_seconds":
+            es.flush_interval_seconds = float(value)
+        elif key == "retention_days":
+            es.retention_days = int(value)
+        else:
+            raise ValueError(f"Unknown embedding_stats setting: {key}")
+
+    def _update_temporal_indexing_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_indexing setting (Story #1404).
+
+        Format validation (YYYY-MM-DD, real calendar date, zero-padded)
+        happens later in config_manager.validate_config() via
+        TemporalIndexingConfig.validate(), called by update_setting() after
+        this method returns (unless skip_validation=True for batch
+        updates).
+        """
+        ti = config.temporal_indexing_config
+        assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "index_floor_date":
+            ti.index_floor_date = None if value is None else str(value)
+        else:
+            raise ValueError(f"Unknown temporal_indexing setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""

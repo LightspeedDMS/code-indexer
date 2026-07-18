@@ -225,6 +225,12 @@ async def bulk_add(
             repo_path=repo_path,
             provider_name=body.provider,
             clear=False,
+            # Pod-pull: reconstruction params for _provider_index_job.
+            metadata={
+                "repo_path": repo_path,
+                "provider_name": body.provider,
+                "clear": False,
+            },
         )
         job_ids.append({"alias": alias, "job_id": str(job_id)})
 

@@ -8,11 +8,18 @@ HNSW/temporal shard data, ~2860 real commits) via the identical REST-front-
 door registration/activation pattern, so no new expensive indexing pass is
 needed.
 
-Scenario 11's exact lever: temporal_inline_wait_seconds is set to 0.001 via
-the real ConfigService (in-process -- the TestClient and this test run in
-the SAME process/interpreter, so this is a live, real config mutation, not a
+Scenario 11's exact lever: temporal_inline_wait_seconds is set to 0.0 via the
+real ConfigService (in-process -- the TestClient and this test run in the
+SAME process/interpreter, so this is a live, real config mutation, not a
 mock) to deterministically force every temporal query down the async-handoff
-path without needing a slow repo or artificial delays.
+path. 0.0 is a well-defined, race-proof "always hand off immediately"
+contract in execute_live_temporal_search (temporal_live_dispatch.py): the
+dispatch never consults job status at all in this mode, so there is no
+race to lose regardless of how fast the underlying job happens to complete.
+(An earlier version of this fixture used 0.001s, betting that real
+embedding-provider/coalescer timing would always be slower than 1ms -- that
+bet occasionally lost under concurrent load; see the temporal_live_dispatch
+module docstring for the actual root-cause fix.)
 
 Covers (front door only, no mocks, real threads via BackgroundJobManager):
   - Scenario 2/3: MCP search_code on a forced-deferred temporal query
@@ -136,10 +143,17 @@ def live_wiring_repo(
 @pytest.fixture
 def forced_deferred_inline_wait() -> Iterator[None]:
     """Scenario 11: deterministically force the async-handoff path by
-    setting temporal_inline_wait_seconds to 0.001s via the REAL
-    ConfigService (in-process -- same interpreter as the TestClient), then
-    restore the original value afterward so other tests in this module
-    (and any other module sharing this process) are unaffected."""
+    setting temporal_inline_wait_seconds to 0.0s via the REAL ConfigService
+    (in-process -- same interpreter as the TestClient), then restore the
+    original value afterward so other tests in this module (and any other
+    module sharing this process) are unaffected.
+
+    0.0 is a well-defined, race-proof contract: execute_live_temporal_search
+    never consults job status when inline_wait_seconds <= 0.0, so there is
+    NO status check to race against real embedding-provider/coalescer
+    timing -- unlike the previous 0.001s value, which merely bet that real
+    timing would always exceed 1ms (it occasionally didn't, under
+    concurrent load)."""
     from code_indexer.server.services.config_service import get_config_service
 
     config_service = get_config_service()
@@ -147,7 +161,7 @@ def forced_deferred_inline_wait() -> Iterator[None]:
         config_service.get_config().search_timeouts_config.temporal_inline_wait_seconds
     )
     config_service.update_setting(
-        "search_timeouts", "temporal_inline_wait_seconds", 0.001
+        "search_timeouts", "temporal_inline_wait_seconds", 0.0
     )
     try:
         yield
@@ -182,6 +196,29 @@ def _poll_search_job_until_completed(
     )
 
 
+def _poll_rest_query_result_until_completed(
+    test_client: TestClient, job_id: str, headers: dict
+) -> dict:
+    deadline = time.monotonic() + _POLL_SEARCH_JOB_TIMEOUT
+    last_body: dict = {}
+    while time.monotonic() < deadline:
+        resp = test_client.get(f"/api/query/result/{job_id}", headers=headers)
+        assert resp.status_code in (200, 404), (
+            f"unexpected status {resp.status_code}: {resp.text[:300]}"
+        )
+        last_body = resp.json()
+        if last_body.get("status") == "completed":
+            return last_body
+        assert last_body.get("status") != "failed", (
+            f"REST poll reported failed: {last_body}"
+        )
+        time.sleep(_POLL_SEARCH_JOB_INTERVAL)
+    raise TimeoutError(
+        f"GET /api/query/result/{job_id} did not complete in "
+        f"{_POLL_SEARCH_JOB_TIMEOUT}s; last body: {last_body}"
+    )
+
+
 class TestMcpForcedHandoffAndPoll:
     def test_search_code_forced_deferred_returns_handoff_envelope(
         self,
@@ -190,7 +227,7 @@ class TestMcpForcedHandoffAndPoll:
         auth_headers: dict,
         forced_deferred_inline_wait: None,
     ) -> None:
-        """Scenario 2/3: with the inline wait forced to 0.001s, a real
+        """Scenario 2/3: with the inline wait forced to 0.0s, a real
         temporal MCP search_code call must degrade to the async-handoff
         envelope -- success=False, a real job_id, partial_results,
         continue_polling=True, error_code=TEMPORAL_QUERY_DEFERRED."""
@@ -309,25 +346,9 @@ class TestRestForcedHandoffAndPoll:
         job_id = submit_resp.json().get("job_id")
         assert job_id
 
-        deadline = time.monotonic() + _POLL_SEARCH_JOB_TIMEOUT
-        last_body: dict = {}
-        while time.monotonic() < deadline:
-            resp = test_client.get(f"/api/query/result/{job_id}", headers=auth_headers)
-            assert resp.status_code in (200, 404), (
-                f"unexpected status {resp.status_code}: {resp.text[:300]}"
-            )
-            last_body = resp.json()
-            if last_body.get("status") == "completed":
-                break
-            assert last_body.get("status") != "failed", (
-                f"REST poll reported failed: {last_body}"
-            )
-            time.sleep(_POLL_SEARCH_JOB_INTERVAL)
-        else:
-            raise TimeoutError(
-                f"GET /api/query/result/{job_id} did not complete in "
-                f"{_POLL_SEARCH_JOB_TIMEOUT}s; last body: {last_body}"
-            )
+        last_body = _poll_rest_query_result_until_completed(
+            test_client, job_id, auth_headers
+        )
 
         assert last_body["status"] == "completed"
         assert isinstance(last_body.get("results"), list)
@@ -343,7 +364,7 @@ class TestNonTemporalQueryUnaffected:
     ) -> None:
         """Scenario 8: a semantic query with NO temporal params must never
         enter the async-handoff path, even while temporal_inline_wait_
-        seconds is forced to 0.001s -- proves the interception is gated
+        seconds is forced to 0.0s -- proves the interception is gated
         strictly on temporal-param presence."""
         resp = call_mcp_tool(
             test_client,

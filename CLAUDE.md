@@ -286,6 +286,8 @@ A registered golden repo must never end up as a "registry-orphan": a `golden_rep
 
 **Dead-code removal**: `TEMPORAL_QUERY_TIMEOUT_SECONDS` (`services/temporal/temporal_fusion_dispatch.py`) was deleted entirely — confirmed zero real consumers since Story #1291 removed the multi-provider parallel fan-out branch that used it. Exposing it as a Web-UI setting would have added a misleading dead knob to the exact problem this issue reports.
 
+**Template read-surface gap (Bug #1422)**: `temporal_inline_wait_seconds` is a 6th `SearchTimeoutsConfig` field (added by Story #1400) whose dict-level read surfaces (`_search_timeouts_settings` / `_get_current_config`) were already correctly wired, but `config_section.html`'s search-timeouts section never rendered it -- write-only, no Web UI display or edit control. Fixed by adding the missing display-table row and edit-form `<input type="number" step="0.001">` (float field, unlike its 5 integer siblings) alongside the existing 5 fields; no change to `config_service.py` or `web/routes.py` was needed.
+
 -> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
 
 ### Query-Path Drift-Safe Caching (Story #1082)

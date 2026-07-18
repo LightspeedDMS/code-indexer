@@ -172,6 +172,14 @@ def execute_live_temporal_search(
             handler_deadline_monotonic - response_reserve_seconds
         )
     waiter_deadline = min(candidate_deadlines)
+    logger.debug(
+        "execute_live_temporal_search: job_id=%s inline_wait_seconds=%.6f "
+        "waiter_budget_seconds=%.6f handler_deadline_present=%s",
+        job_id,
+        inline_wait_seconds,
+        waiter_deadline - now,
+        handler_deadline_monotonic is not None,
+    )
     # The rerank deadline is the RESPONSE budget (handler deadline minus
     # the reserve), not the (possibly shorter) waiter_deadline -- a
     # completed read's post-processing still has the full reserve window
@@ -189,11 +197,49 @@ def execute_live_temporal_search(
         )
         return snapshot
 
-    while True:
+    # Bug investigation (recurrence of the forced-deferral E2E race in
+    # test_19_temporal_live_wiring_1400.py). Two DISTINCT, real defects in
+    # the wait loop, not a probabilistic-timing issue:
+    #
+    # (1) temporal_inline_wait_seconds == 0.0 is already a valid, accepted
+    #     config value (config_manager.py only rejects < 0.0), so it gets a
+    #     well-defined, race-proof contract HERE: "always hand off
+    #     immediately" -- return the deferred envelope WITHOUT ever
+    #     consulting job status. No status check means no race to lose,
+    #     regardless of how fast the underlying job happens to complete.
+    if inline_wait_seconds <= 0.0:
+        return {
+            "status": "waiting",
+            "continue_polling": True,
+            "partial_results": [],
+            "shards_completed": 0,
+            "shards_total": None,
+            "unranked": True,
+            "job_id": job_id,
+        }
+
+    # (2) For a positive wait budget, the deadline must be checked BEFORE
+    #     every status read (never read status once the deadline has
+    #     already passed) and each sleep must be capped to the remaining
+    #     budget -- an unconditional full-interval sleep can overshoot the
+    #     deadline, after which the NEXT status read might see "completed"
+    #     purely because extra, unbudgeted wall-clock time elapsed during
+    #     that overshoot. `result` holds the last KNOWN status; it stays a
+    #     "waiting" envelope if the deadline expires before any read ever
+    #     ran (e.g. an already-tiny budget consumed by submission/setup).
+    result: Dict[str, Any] = {
+        "status": "waiting",
+        "continue_polling": True,
+        "partial_results": [],
+        "shards_completed": 0,
+        "shards_total": None,
+        "unranked": True,
+    }
+    while time.monotonic() < waiter_deadline:
         job_status = background_job_manager.get_job_status(
             job_id, worker_input.username, is_admin
         )
-        result: Dict[str, Any] = poll_temporal_job_status(
+        result = poll_temporal_job_status(
             job_status,
             _read_snapshot,
             access_filtering_service,
@@ -204,9 +250,10 @@ def execute_live_temporal_search(
         )
         if result["status"] != "waiting":
             break
-        if time.monotonic() >= waiter_deadline:
+        remaining = waiter_deadline - time.monotonic()
+        if remaining <= 0.0:
             break
-        time.sleep(_POLL_INTERVAL_SECONDS)
+        time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
 
     result["job_id"] = job_id
     return result

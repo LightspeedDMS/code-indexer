@@ -16,6 +16,7 @@
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
+- [feedback_fix_every_issue_found_no_deferral.md](feedback_fix_every_issue_found_no_deferral.md) - During active implementation work, fix every issue found (even out-of-scope pre-existing ones) in the same session — filing a bug is for ordering work, never for deferring the fix; parallelize independent fixes
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
@@ -56,6 +57,7 @@
 - [feedback_active_monitoring_check_back.md](feedback_active_monitoring_check_back.md) - Never stay idle while background agents/jobs run — set a check-back timer and verify progress often; detect stalls early instead of waiting on a completion ping that never comes if it hangs
 - [feedback_study_anomalies_deeply.md](feedback_study_anomalies_deeply.md) - When you see odd/anomalous behavior, study it in depth to root cause and prove the classification with FACTS — never dismiss as "artifact/benign/cosmetic" without evidence; "odd" itself is a claim needing facts
 - [feedback_never_stop_never_blame_env.md](feedback_never_stop_never_blame_env.md) - NEVER self-abort a mission or blame the environment for slow tests; a stalled subagent is a RETRY not a blocker; do NOT kill a working subagent on a frozen output-file or "no git changes yet" — those are not stall signals
+- [feedback_agent_stall_detection_needs_reply_not_just_mtime.md](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - Output-file mtime staleness triggers a PING, not a kill; wait for an actual reply (not just "queued for delivery") before concluding a real stall
 
 ## Architectural Invariants
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
