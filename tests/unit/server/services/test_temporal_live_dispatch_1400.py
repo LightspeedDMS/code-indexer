@@ -267,6 +267,206 @@ class TestSlowQueryDegradesToHandoff:
         )
 
 
+class TestZeroInlineWaitImmediateHandoffContract:
+    """Bug investigation (recurrence of the forced-deferral E2E race in
+    test_19_temporal_live_wiring_1400.py): temporal_inline_wait_seconds ==
+    0.0 is already a valid, accepted config value (config_manager.py only
+    rejects < 0.0), so it deserves a well-defined, race-proof contract:
+    "always hand off immediately" -- submit-or-join the job and return the
+    deferred envelope WITHOUT ever consulting job status. Since there is no
+    status check at all in this mode, there is no race to lose, regardless
+    of how fast the underlying job happens to complete (real embedding
+    round trip, cache hit, or a job absorbed into an in-flight coalescer
+    batch under load)."""
+
+    class _AssertNeverCalledBackgroundJobManager:
+        """Deterministic fake -- NOT a mock of the code under test. Fails
+        the test loudly if execute_live_temporal_search ever consults job
+        status when inline_wait_seconds <= 0.0."""
+
+        def __init__(self, job_id: str) -> None:
+            self._job_id = job_id
+
+        def submit_job(self, *args, **kwargs):
+            return self._job_id
+
+        def get_job_status(self, job_id, username, is_admin=False):
+            raise AssertionError(
+                "get_job_status must never be called when "
+                "inline_wait_seconds <= 0.0 -- the well-defined immediate-"
+                "handoff contract has no status check of any kind"
+            )
+
+    def test_zero_inline_wait_returns_waiting_without_any_status_check(
+        self, tmp_path, payload_cache
+    ):
+        from code_indexer.server.services.temporal_live_dispatch import (
+            execute_live_temporal_search,
+        )
+
+        worker_input = _make_worker_input(tmp_path, query_text="zero wait query")
+        result = execute_live_temporal_search(
+            worker_input=worker_input,
+            background_job_manager=self._AssertNeverCalledBackgroundJobManager(
+                "job-zero"
+            ),
+            payload_cache=payload_cache,
+            access_filtering_service=_FakeAccessFilteringService(),
+            is_admin=False,
+            inline_wait_seconds=0.0,
+            handler_deadline_monotonic=None,
+            response_reserve_seconds=1.0,
+            dedup_cache=TemporalDedupCache(),
+            worker_fn=lambda *a, **kw: {"result_ready": True},
+        )
+
+        assert result["status"] == "waiting"
+        assert result["continue_polling"] is True
+        assert result["job_id"] == "job-zero"
+        assert result["partial_results"] == []
+
+
+class TestDeadlineStrictlyRespectedNoLateStatusRead:
+    """Bug investigation: the OLD loop checked the deadline AFTER a status
+    read returned "waiting", then slept the FULL _POLL_INTERVAL_SECONDS
+    unconditionally (never capped to the remaining budget) before looping
+    back to read status AGAIN -- with no deadline check guarding that
+    second read. So a job that transitioned to "completed" during the
+    unconditional-sleep overshoot window was reported as "completed" even
+    though the wait budget had already been exhausted before that read
+    ever happened. The fix checks the deadline BEFORE every status read
+    (never reads status once the deadline has passed) and caps each sleep
+    to the remaining budget."""
+
+    class _DeadlineRaceBackgroundJobManager:
+        """Deterministic fake -- NOT a mock of the code under test. Reports
+        "running" for the first `calls_before_completed` get_job_status
+        calls, then "completed" from the next call onward. Records the
+        number of calls made. Using a CALL-COUNT trigger (rather than real
+        worker timing) removes the real-thread-scheduling variance that
+        made an earlier real-worker-based version of this test flaky --
+        the only remaining source of timing variance is the loop's own
+        real-clock behavior, which is what this test actually verifies."""
+
+        def __init__(self, job_id: str, calls_before_completed: int) -> None:
+            self._job_id = job_id
+            self._calls_before_completed = calls_before_completed
+            self.call_count = 0
+
+        def submit_job(self, *args, **kwargs):
+            return self._job_id
+
+        def get_job_status(self, job_id, username, is_admin=False):
+            self.call_count += 1
+            if self.call_count <= self._calls_before_completed:
+                return {"status": "running", "error": None}
+            return {"status": "completed", "error": None}
+
+    def test_late_completion_after_deadline_is_not_reported_as_completed(
+        self, tmp_path, payload_cache
+    ):
+        """With inline_wait_seconds=0.27 (NOT an exact multiple of the 50ms
+        poll interval), the fixed deadline-first/remaining-capped loop
+        makes exactly 6 status checks (at t~0/.05/.10/.15/.20/.25, then a
+        final capped sleep of ~0.02s brings it to the 0.27s deadline,
+        where the loop exits WITHOUT a 7th check). The fake is calibrated
+        so ONLY a 7th-or-later call would ever report "completed" -- a
+        call that must never happen once the deadline has passed. This
+        exact test reliably FAILS against the OLD unconditional-full-
+        interval-sleep loop (verified empirically: the old loop's 6th
+        sleep overshoots to t~0.30, making an illegitimate 7th call that
+        the fake resolves as "completed")."""
+        from code_indexer.server.services.temporal_live_dispatch import (
+            execute_live_temporal_search,
+        )
+
+        job_id = "deadline-race-job"
+        store_temporal_snapshot(
+            payload_cache,
+            job_id,
+            {
+                "results": [{"file_path": "should-not-appear.py"}],
+                "shards_completed": 1,
+                "shards_total": 1,
+                "ctx": {"requested_limit": 10},
+            },
+            terminal=True,
+        )
+        fake_bgm = self._DeadlineRaceBackgroundJobManager(
+            job_id, calls_before_completed=6
+        )
+
+        worker_input = _make_worker_input(tmp_path, query_text="deadline race query")
+        result = execute_live_temporal_search(
+            worker_input=worker_input,
+            background_job_manager=fake_bgm,
+            payload_cache=payload_cache,
+            access_filtering_service=_FakeAccessFilteringService(),
+            is_admin=False,
+            inline_wait_seconds=0.27,
+            handler_deadline_monotonic=None,
+            response_reserve_seconds=1.0,
+            dedup_cache=TemporalDedupCache(),
+            worker_fn=lambda *a, **kw: {"result_ready": True},
+        )
+
+        assert result["status"] == "waiting", (
+            "a status read that would report 'completed' must never happen "
+            "once the deadline has passed -- the returned status must be "
+            f"the last KNOWN 'waiting' result, got: {result}"
+        )
+        assert fake_bgm.call_count <= 6, (
+            "the 7th (would-be 'completed') get_job_status call must never "
+            f"happen once the deadline has passed, got {fake_bgm.call_count} calls"
+        )
+
+
+class TestWaiterBudgetObservability:
+    """Bug investigation (recurrence of the forced-deferral E2E race in
+    test_19_temporal_live_wiring_1400.py): a DEBUG log line recording the
+    actual inline_wait_seconds value and the computed waiter budget
+    (waiter_deadline - now) received by THIS call, to make a future
+    deadline-not-honored regression immediately diagnosable from server
+    logs rather than requiring ad hoc instrumentation."""
+
+    def test_logs_inline_wait_seconds_and_waiter_budget(
+        self, tmp_path, payload_cache, bgm, caplog
+    ):
+        import logging
+
+        from code_indexer.server.services.temporal_live_dispatch import (
+            execute_live_temporal_search,
+        )
+
+        worker_input = _make_worker_input(tmp_path, query_text="observability query")
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.server.services.temporal_live_dispatch"
+        ):
+            execute_live_temporal_search(
+                worker_input=worker_input,
+                background_job_manager=bgm,
+                payload_cache=payload_cache,
+                access_filtering_service=_FakeAccessFilteringService(),
+                is_admin=False,
+                inline_wait_seconds=0.001,
+                handler_deadline_monotonic=None,
+                response_reserve_seconds=1.0,
+                dedup_cache=TemporalDedupCache(),
+                worker_fn=_make_instant_worker(payload_cache),
+            )
+
+        matching = [
+            r
+            for r in caplog.records
+            if "waiter_budget" in r.getMessage()
+            and "inline_wait_seconds=0.001000" in r.getMessage()
+        ]
+        assert matching, (
+            "expected a DEBUG log line recording inline_wait_seconds=0.001000 "
+            f"and waiter_budget; got records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+
 class TestConfigServiceThreading:
     def test_config_service_forwarded_to_poll_temporal_job_status(
         self, tmp_path, payload_cache, bgm
