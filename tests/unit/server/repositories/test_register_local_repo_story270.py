@@ -87,7 +87,9 @@ class TestRegisterLocalRepoCidxInit:
 
         # Verify cidx init was called with correct cwd
         cidx_init_calls = [
-            c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]
+            c
+            for c in mock_run.call_args_list
+            if c[0][0] == ["cidx", "init", "--no-override-file"]
         ]
         assert len(cidx_init_calls) == 1, (
             f"Expected exactly one 'cidx init' call, got {len(cidx_init_calls)}. "
@@ -124,7 +126,9 @@ class TestRegisterLocalRepoCidxInit:
 
         # Verify cidx init was NOT called
         cidx_init_calls = [
-            c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]
+            c
+            for c in mock_run.call_args_list
+            if c[0][0] == ["cidx", "init", "--no-override-file"]
         ]
         assert len(cidx_init_calls) == 0, (
             f"Expected no 'cidx init' call when .code-indexer/ exists, "
@@ -171,7 +175,8 @@ class TestRegisterLocalRepoCidxInit:
             (
                 i
                 for i, item in enumerate(call_order)
-                if item[0] == "subprocess" and item[1] == ["cidx", "init"]
+                if item[0] == "subprocess"
+                and item[1] == ["cidx", "init", "--no-override-file"]
             ),
             None,
         )
@@ -195,7 +200,7 @@ class TestRegisterLocalRepoCidxInit:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(
-                1, ["cidx", "init"], stderr="cidx not found"
+                1, ["cidx", "init", "--no-override-file"], stderr="cidx not found"
             )
 
             # Should NOT raise despite cidx init failure
@@ -249,7 +254,9 @@ class TestRegisterLocalRepoCidxInit:
             )
 
         cidx_init_calls = [
-            c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]
+            c
+            for c in mock_run.call_args_list
+            if c[0][0] == ["cidx", "init", "--no-override-file"]
         ]
         assert len(cidx_init_calls) == 1
         assert cidx_init_calls[0][1].get("check") is True, (
@@ -277,7 +284,11 @@ class TestRegisterLocalRepoCidxInit:
             assert result1 is True
 
             first_call_count = len(
-                [c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]]
+                [
+                    c
+                    for c in mock_run.call_args_list
+                    if c[0][0] == ["cidx", "init", "--no-override-file"]
+                ]
             )
 
             # Second registration (duplicate - returns False early)
@@ -289,7 +300,11 @@ class TestRegisterLocalRepoCidxInit:
             assert result2 is False
 
             second_call_count = len(
-                [c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]]
+                [
+                    c
+                    for c in mock_run.call_args_list
+                    if c[0][0] == ["cidx", "init", "--no-override-file"]
+                ]
             )
 
         # cidx init should NOT have been called again on duplicate

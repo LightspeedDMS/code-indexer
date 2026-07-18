@@ -35,10 +35,19 @@ _SRC_ROOT = _REPO_ROOT / "src" / "code_indexer"
 # call) AND update this map -- updating the map alone without wiring will
 # not make this test pass, because the second assertion below checks that
 # build_temporal_child_env is referenced too.
+#
+# Story #1404: server/mcp/handlers/repos.py used to appear here (it is the
+# REAL architectural launch site -- it still calls build_temporal_child_env
+# at the call site immediately before building/spawning the command -- see
+# _provider_temporal_index_job) but the "--index-commits" literal itself was
+# extracted verbatim into _temporal_index_cmd.py (server/mcp/handlers/) to
+# keep repos.py under the 2500-line anti-bloat limit. Since this map tracks
+# files CONTAINING the literal (not launch sites in the abstract), repos.py
+# no longer belongs in it; _temporal_index_cmd.py is listed instead, in
+# _NON_LAUNCH_SITE_EXCEPTIONS below, because it never spawns a subprocess.
 _KNOWN_TEMPORAL_LAUNCH_SITES = {
     "server/repositories/golden_repo_manager.py": 2,
     "global_repos/refresh_scheduler.py": 1,
-    "server/mcp/handlers/repos.py": 1,
     "server/services/activated_repo_index_manager.py": 1,
 }
 
@@ -58,8 +67,14 @@ _KNOWN_TEMPORAL_LAUNCH_SITES = {
 #     CIDX_TEMPORAL_PG_BOOTSTRAP_DIR fail-loud wiring in cli.py's standalone
 #     branch is always exercised. Never constructs or spawns a
 #     `["cidx", ..., "--index-commits", ...]` command list itself.
+#   - _temporal_index_cmd.py (Story #1404): a pure argv-builder helper
+#     extracted from repos.py to stay under the 2500-line anti-bloat limit --
+#     never spawns a subprocess itself; its sole caller
+#     (repos.py::_provider_temporal_index_job) calls build_temporal_child_env
+#     and passes the result as env= to _run_provider_subprocess BEFORE
+#     calling this helper to build the argv list.
 _NON_LAUNCH_SITE_EXCEPTIONS = frozenset(
-    {"cli.py", "cli_daemon_fast.py", "cli_fast_entry.py"}
+    {"cli.py", "cli_daemon_fast.py", "cli_fast_entry.py", "_temporal_index_cmd.py"}
 )
 
 _LITERAL = '"--index-commits"'

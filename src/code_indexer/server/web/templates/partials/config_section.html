@@ -1048,6 +1048,60 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Temporal Indexing Floor Date Settings Section (Story #1404) -->
+<details class="config-section" id="section-temporal-indexing">
+    <summary>
+        <h2>Temporal Indexing</h2>
+    </summary>
+    <p class="section-description">
+        A single global floor date bounding ALL FUTURE temporal `cidx index --index-commits`
+        runs across the fleet. Commits dated on/after the floor are indexed; older commits are
+        skipped. Forward-only: bounds future runs only, does NOT retroactively prune
+        already-indexed old commits. Leave empty for unbounded (full history, the pre-feature
+        default). When a per-repo floor date is also set for a golden repo, the MORE
+        RESTRICTIVE (later) of the two dates governs.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-temporal-indexing">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Global Floor Date</td>
+                    <td class="config-value">{{ config.temporal_indexing.index_floor_date or 'Unbounded (full history)' }}</td>
+                    <td class="config-description">YYYY-MM-DD or empty for unbounded; default empty</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('temporal-indexing')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-temporal-indexing" method="post" action="/admin/config/temporal_indexing" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.temporal_indexing %}
+            <div class="validation-error">{{ validation_errors.temporal_indexing }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label>
+                    Global Floor Date
+                    <input type="date" id="temporal-indexing-floor-date" name="index_floor_date" value="{{ config.temporal_indexing.index_floor_date or '' }}">
+                    <small>
+                        Leave empty for unbounded (full history, default). Commits dated on/after
+                        this date are indexed; older commits are skipped. Note: lowering or
+                        clearing a floor date that was previously more restrictive causes the
+                        next incremental temporal run to treat the entire pre-floor backlog as
+                        new work -- a large, potentially multi-hour, unattended backfill.
+                    </small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('temporal-indexing')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- X-Ray Search Settings Section (Story #977) -->
 <details class="config-section" id="section-xray">
     <summary>

@@ -123,6 +123,20 @@ def _embedding_stats_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _temporal_indexing_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_indexing settings dict from ServerConfig (Story #1404).
+
+    Surfaces TemporalIndexingConfig's single field (the global temporal
+    indexing floor date) for the Web UI Config screen. None/empty means
+    unbounded (full history, pre-feature behavior).
+    """
+    ti = config.temporal_indexing_config
+    assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "index_floor_date": ti.index_floor_date,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -760,6 +774,8 @@ class ConfigService:
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config
             "embedding_stats": _embedding_stats_settings(config),
+            # Story #1404 - Global temporal indexing floor date configuration
+            "temporal_indexing": _temporal_indexing_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -1057,6 +1073,9 @@ class ConfigService:
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
         elif category == "embedding_stats":
             self._update_embedding_stats_setting(config, key, value)
+        # Story #1404 - Global temporal indexing floor date configuration
+        elif category == "temporal_indexing":
+            self._update_temporal_indexing_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
         return True
@@ -1194,7 +1213,7 @@ class ConfigService:
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
-            cache.fts_cache_reload_on_access = bool(value)
+            cache.fts_cache_reload_on_access = _parse_bool(value)
         # Payload cache settings (Story #679).
         # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
@@ -2531,6 +2550,24 @@ class ConfigService:
             es.retention_days = int(value)
         else:
             raise ValueError(f"Unknown embedding_stats setting: {key}")
+
+    def _update_temporal_indexing_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_indexing setting (Story #1404).
+
+        Format validation (YYYY-MM-DD, real calendar date, zero-padded)
+        happens later in config_manager.validate_config() via
+        TemporalIndexingConfig.validate(), called by update_setting() after
+        this method returns (unless skip_validation=True for batch
+        updates).
+        """
+        ti = config.temporal_indexing_config
+        assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "index_floor_date":
+            ti.index_floor_date = None if value is None else str(value)
+        else:
+            raise ValueError(f"Unknown temporal_indexing setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""

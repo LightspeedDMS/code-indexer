@@ -800,6 +800,18 @@ class ActivatedRepoIndexManager:
             if clear:
                 args.append("--clear")
 
+            # Story #1404: apply the global temporal indexing floor date.
+            # No per-repo since_date concept exists at this layer (activated
+            # repos carry no temporal_options), so the global value applies
+            # directly -- omitted entirely when unset (Scenario 5 no-op).
+            from code_indexer.server.services.temporal_floor_date import (
+                resolve_temporal_floor_date,
+            )
+
+            _floor_date = resolve_temporal_floor_date()
+            if _floor_date:
+                args.extend(["--since-date", _floor_date])
+
             _temporal_env = build_temporal_child_env(get_config_service().get_config())
 
             result = self._run_subprocess_with_telemetry(

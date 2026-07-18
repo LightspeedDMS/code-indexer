@@ -46,7 +46,14 @@ def manager(mock_data_dir):
 
     # Mock background_job_manager dependency
     # Execute worker functions synchronously for testing
-    def mock_submit_job(operation_type, func, submitter_username, is_admin, repo_alias):
+    def mock_submit_job(
+        operation_type,
+        func,
+        submitter_username,
+        is_admin,
+        repo_alias,
+        metadata=None,
+    ):
         func()  # Execute worker synchronously
         return f"test-job-{repo_alias}"
 

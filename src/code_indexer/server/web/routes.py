@@ -316,6 +316,8 @@ _VALID_CONFIG_SECTIONS = (
     "export",
     # Story #1418 Phase 3 - Embedding & reranker call tracking config
     "embedding_stats",
+    # Story #1404 - Global temporal indexing floor date configuration
+    "temporal_indexing",
 )
 
 
@@ -6353,6 +6355,8 @@ def _get_current_config() -> dict:
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
         EmbeddingStatsConfig,
+        # Story #1404 - Global temporal indexing floor date configuration
+        TemporalIndexingConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6586,6 +6590,10 @@ def _get_current_config() -> dict:
         # Story #1418 Phase 3: Embedding & reranker call tracking config
         "embedding_stats": settings.get(
             "embedding_stats", asdict(EmbeddingStatsConfig())
+        ),
+        # Story #1404: Global temporal indexing floor date configuration
+        "temporal_indexing": settings.get(
+            "temporal_indexing", asdict(TemporalIndexingConfig())
         ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
@@ -7542,6 +7550,23 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Retention Days must be greater than 0"
             except (ValueError, TypeError):
                 return "Retention Days must be a valid number"
+
+    elif section == "temporal_indexing":
+        # Story #1404: Global temporal indexing floor date validation.
+        # Delegates to TemporalIndexingConfig.validate() (strptime +
+        # strftime round-trip shape, mirrors
+        # temporal_search_service.parse_date_range) rather than
+        # re-implementing date-format checks inline.
+        index_floor_date = data.get("index_floor_date")
+        if index_floor_date is not None:
+            from ..utils.config_manager import TemporalIndexingConfig
+
+            try:
+                TemporalIndexingConfig(
+                    index_floor_date=str(index_floor_date)
+                ).validate()
+            except ValueError as exc:
+                return str(exc)
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation

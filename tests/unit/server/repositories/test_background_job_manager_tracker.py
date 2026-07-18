@@ -199,6 +199,11 @@ class TestBGMSubmitJobTrackerRegistration:
                     metadata=None,
                     is_admin=False,
                     actor_username="testuser",
+                    # Bug #1430: stamp_executing_node=not is_pod_pull_eligible.
+                    # This test is non-cluster (use_sqlite=True), so
+                    # is_pod_pull_eligible is False and stamp_executing_node
+                    # is True.
+                    stamp_executing_node=True,
                 )
                 # Legacy non-atomic register_job must NOT be called (Bug #1065)
                 mock_legacy.assert_not_called()

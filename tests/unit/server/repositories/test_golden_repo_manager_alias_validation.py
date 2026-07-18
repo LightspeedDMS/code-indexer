@@ -41,7 +41,12 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
         # Wire background_job_manager mock so acceptance tests can reach
         # background-job submission (same pattern as test_golden_repo_manager_locking.py).
         def _mock_submit_job(
-            operation_type, func, submitter_username, is_admin, repo_alias
+            operation_type,
+            func,
+            submitter_username,
+            is_admin,
+            repo_alias,
+            metadata=None,
         ):
             return f"test-job-{repo_alias}"
 
