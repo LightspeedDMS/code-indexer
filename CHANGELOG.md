@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.64.0] - 2026-07-18
+
+### Fixed
+
+- **#1400**: eliminated the recurring forced-deferral race in the async-hybrid temporal query timeout mechanism (`execute_live_temporal_search`), superseding 11.63.0's incomplete `no_embedding_cache_shortcut`-based mitigation which still raced intermittently under concurrent load. Two real bugs fixed: (1) no well-defined `temporal_inline_wait_seconds == 0.0` contract -- the poll loop always performed a status check first regardless of budget, so a fast-completing job could win the race; (2) unbounded oversleep past the deadline -- the loop checked the deadline only after a "waiting" read, then slept the full unconditional poll interval before looping back, letting a deadline between two ticks be overshot and the following read observe "completed" purely from the extra elapsed time. Fixed by checking the deadline before every status read and capping each sleep to the remaining budget; `inline_wait_seconds <= 0.0` now short-circuits to an immediate deferred envelope with zero status checks -- a genuine race-free "always defer" contract. Default config value (60.0) is unaffected; only an operator explicitly setting 0.0 opts into the new behavior.
+
 ## [11.63.0] - 2026-07-18
 
 ### Fixed
