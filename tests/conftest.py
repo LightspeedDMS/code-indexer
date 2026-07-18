@@ -412,6 +412,62 @@ def clear_rate_limiters():
         pass  # Rate limiter might not be available in all test contexts
 
 
+# Bug #1428: `get_config_service()` (config_service.py) is a bare
+# module-level singleton (`_config_service`) with no built-in per-test
+# isolation. Merely IMPORTING `code_indexer.server.mcp.handlers` (or any
+# transitive import of `git_operations_service.py`, which constructs its
+# own module-level `GitOperationsService()` at import time -- see
+# `_get_git_operations_service()`) is enough to construct the REAL
+# ConfigService, which lazily connects to this developer's actual on-disk
+# ~/.cidx-server DB and can return REAL provider API keys. Once
+# constructed, the singleton persists for the rest of the pytest PROCESS
+# (not just the importing test), so any later, unrelated test that calls
+# `get_config_service()` without its own isolation (e.g. the reranker
+# API-key-preflight tests, which patch only `os.environ`) silently
+# inherits real credentials -- confirmed root cause of Bug #1428:
+# test_admin_embedding_stats_query_1418.py (imports
+# code_indexer.server.mcp.handlers.admin) poisoning
+# test_reranker_clients_stats_1418.py when run in the same pytest process.
+#
+# Roughly 100+ test files already work around this locally with a
+# per-file `reset_config_service()` autouse fixture (e.g.
+# tests/unit/server/test_bug83_app_initialization.py). This global
+# fixture supersedes the need for new local copies; existing local copies
+# are harmless no-ops layered on top since reset_config_service() is
+# idempotent.
+#
+# Both import paths are reset (Bug #1370 established this dual-path
+# pattern is necessary): `code_indexer.server...` (PYTHONPATH=./src, used
+# by most unit tests) and `src.code_indexer.server...` (used by some
+# integration tests loading the package via the project-root prefix).
+_CONFIG_SERVICE_MODULE_NAMES = [
+    "code_indexer.server.services.config_service",
+    "src.code_indexer.server.services.config_service",
+]
+
+
+def _reset_config_service_singletons() -> None:
+    import importlib
+
+    for module_name in _CONFIG_SERVICE_MODULE_NAMES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        module.reset_config_service()
+
+
+@pytest.fixture(autouse=True)
+def _reset_config_service_singleton():
+    """Reset the ConfigService module-level singleton before/after each test.
+
+    See Bug #1428 module-level comment above for full rationale.
+    """
+    _reset_config_service_singletons()
+    yield
+    _reset_config_service_singletons()
+
+
 # Bug #1370: module-level `rich.console.Console()` singletons that cache
 # color/terminal detection at import time. See
 # tests/unit/cli/test_console_singleton_test_isolation_bug1370.py for the
