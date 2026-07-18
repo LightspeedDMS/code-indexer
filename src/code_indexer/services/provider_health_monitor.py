@@ -194,22 +194,40 @@ class ProviderHealthMonitor:
     def _build_merged_state(self, existing: Dict[str, object]) -> Dict[str, object]:
         """Merge current in-memory sin-bin state into existing persisted state (Story #691).
 
-        Converts monotonic expiry timestamps to wall-clock timestamps.
-        Entries with non-positive remaining time are not written.
-        Reads self._sinbin_until under self._data_lock.
+        Starts from `existing` (the just-read persisted file, read under the
+        same lock acquisition as this call) so that entries persisted by a
+        sibling process/instance for a DIFFERENT provider are preserved. Only
+        providers this instance is authoritative for -- i.e. present in
+        self._sinbin_rounds, a key set exclusively by sinbin()/clear_sinbin(),
+        never by _load_from_file() -- are overlaid or removed:
+          - still actively sinbinned (positive remaining time): entry
+            written/refreshed with a fresh wall-clock expiry.
+          - cleared or expired: entry removed from the merged result, even if
+            `existing` still has a stale copy (BLOCKER 1 clear_sinbin fix).
+
+        Providers this instance has only ever loaded via _load_from_file()
+        (or never touched at all) are left exactly as found in `existing`,
+        so a concurrent writer for one provider never discards another
+        provider's concurrently-persisted state (lost-update race fix).
+
+        Reads self._sinbin_until / self._sinbin_rounds under self._data_lock.
         """
         now_wall = time.time()
         now_mono = time.monotonic()
-        merged: Dict[str, object] = {}
+        merged: Dict[str, object] = dict(existing)
         with self._data_lock:
             current_sinbin = dict(self._sinbin_until)
-        for provider, mono_expiry in current_sinbin.items():
-            remaining = mono_expiry - now_mono
+            owned_providers = set(self._sinbin_rounds.keys())
+        for provider in owned_providers:
+            mono_expiry = current_sinbin.get(provider)
+            remaining = mono_expiry - now_mono if mono_expiry is not None else -1.0
             if remaining > 0:
                 merged[provider] = {
                     "sinbin_until_wall_seconds": now_wall + remaining,
                     "last_failure_kind": "sinbin",
                 }
+            else:
+                merged.pop(provider, None)
         return merged
 
     def _persist_to_file(self) -> None:
