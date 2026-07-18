@@ -1213,7 +1213,7 @@ class ConfigService:
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
-            cache.fts_cache_reload_on_access = bool(value)
+            cache.fts_cache_reload_on_access = _parse_bool(value)
         # Payload cache settings (Story #679).
         # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
