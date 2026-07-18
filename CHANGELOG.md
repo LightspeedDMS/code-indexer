@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.63.0] - 2026-07-18
+
+### Fixed
+
+- **MCP `authenticate` tool dispatch broken on both `/mcp` and `/mcp-public`**: found via the post-e2e log-audit gate. The authenticated `/mcp` endpoint's generic dispatch chain never supplied `http_request`/`http_response` to `handle_authenticate` (whose signature departs from the standard `(args, user)` shape), raising a `TypeError` on every call. The public `/mcp-public` endpoint's special-cased authenticate dispatch unconditionally `await`-ed `handle_authenticate`'s return value, but that handler is sync and returns a plain dict -- also a `TypeError`, meaning the real unauthenticated login front door was completely broken. Both paths fixed; added regression tests covering both the crash and the security-relevant positive path (a valid login actually sets the HttpOnly `cidx_session` cookie).
+- **#1400 (test-only)**: intermittent 202-vs-200 race in the forced-deferred-handoff e2e tests for the async-hybrid temporal query mechanism -- a 1ms forced inline-wait made deferral likely but not guaranteed against variable-latency real embedding work. Fixed by forcing a real embedding-provider round trip via the existing `no_embedding_cache_shortcut` field.
+
 ## [11.62.0] - 2026-07-18
 
 ### Added

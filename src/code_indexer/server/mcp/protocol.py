@@ -232,6 +232,8 @@ async def _invoke_handler(
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
     timeout_seconds: float = HANDLER_TIMEOUT_SECONDS,
+    http_request: Optional[Request] = None,
+    http_response: Optional[Response] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -252,6 +254,12 @@ async def _invoke_handler(
             run_in_executor. Defaults to HANDLER_TIMEOUT_SECONDS (60s).
             Typed as float because asyncio.wait_for accepts Optional[float].
             Use _resolve_handler_timeout(tool_name) to get per-tool overrides.
+        http_request: The real FastAPI Request object, injected into handlers
+            that declare an `http_request` parameter (e.g. handle_authenticate,
+            which needs it to mirror the /mcp-public special-case handling).
+        http_response: The real FastAPI Response object, injected into handlers
+            that declare an `http_response` parameter (e.g. handle_authenticate,
+            which needs it to set the HttpOnly cidx_session cookie).
 
     Returns:
         Handler result
@@ -274,8 +282,30 @@ async def _invoke_handler(
         # The explicit marker replaces the fragile VAR_KEYWORD heuristic.
         extra_kwargs["session_key"] = elevation_key
 
+    # Inject the real FastAPI Request/Response objects for handlers with a
+    # special (Request, Response) signature -- currently only
+    # handle_authenticate, which needs http_response to set an HttpOnly
+    # cidx_session cookie. Mirrors the session_state/session_key injection
+    # pattern above so any future handler declaring these params works
+    # identically regardless of which endpoint dispatches it.
+    if http_request is not None and "http_request" in sig.parameters:
+        extra_kwargs["http_request"] = http_request
+    if http_response is not None and "http_response" in sig.parameters:
+        extra_kwargs["http_response"] = http_response
+
+    # Every handler except handle_authenticate declares `user` as its second
+    # positional parameter. handle_authenticate's second positional parameter
+    # is literally named `http_request` (special Request/Response signature),
+    # so unconditionally passing `user` positionally would bind it into that
+    # slot and collide with the http_request/http_response kwargs injected
+    # above ("got multiple values for argument"). Only include `user` in the
+    # positional call args when the handler actually declares it.
+    call_args: Tuple[Any, ...] = (
+        (arguments, user) if "user" in sig.parameters else (arguments,)
+    )
+
     if is_async:
-        return await handler(arguments, user, **extra_kwargs)
+        return await handler(*call_args, **extra_kwargs)
     else:
         # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
         # branch enforces an outer asyncio.wait_for timeout (the async
@@ -289,7 +319,7 @@ async def _invoke_handler(
                 time.monotonic() + timeout_seconds
             )
         loop = asyncio.get_running_loop()
-        bound = functools.partial(handler, arguments, user, **extra_kwargs)
+        bound = functools.partial(handler, *call_args, **extra_kwargs)
         try:
             return await asyncio.wait_for(
                 loop.run_in_executor(None, bound),
@@ -543,6 +573,8 @@ async def handle_tools_call(
     user: User,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
+    http_request: Optional[Request] = None,
+    http_response: Optional[Response] = None,
 ) -> Dict[str, Any]:
     """
     Handle tools/call method - dispatches to actual tool handlers.
@@ -553,6 +585,12 @@ async def handle_tools_call(
         session_id: Optional MCP session ID for session state management
         elevation_key: JWT jti for TOTP elevation window lookup.
             Takes precedence over session_id when injecting session_key.
+        http_request: The real FastAPI Request object (threaded from
+            mcp_endpoint), passed through to _invoke_handler for handlers
+            that declare an http_request parameter (e.g. authenticate).
+        http_response: The real FastAPI Response object (threaded from
+            mcp_endpoint), passed through to _invoke_handler for handlers
+            that declare an http_response parameter (e.g. authenticate).
 
     Returns:
         Dictionary with call result
@@ -710,6 +748,8 @@ async def handle_tools_call(
                 session_id=session_id,
                 elevation_key=elevation_key,
                 timeout_seconds=handler_timeout,
+                http_request=http_request,
+                http_response=http_response,
             )
 
         # Execute through span interceptor
@@ -741,6 +781,8 @@ async def handle_tools_call(
             session_id=session_id,
             elevation_key=elevation_key,
             timeout_seconds=handler_timeout,
+            http_request=http_request,
+            http_response=http_response,
         )
 
     # Bug #350: Protocol-level API metrics tracking.
@@ -757,6 +799,8 @@ async def process_jsonrpc_request(
     user: User,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
+    http_request: Optional[Request] = None,
+    http_response: Optional[Response] = None,
 ) -> Dict[str, Any]:
     """
     Process a single JSON-RPC 2.0 request.
@@ -767,6 +811,12 @@ async def process_jsonrpc_request(
         session_id: Optional MCP session ID for session state management
         elevation_key: JWT jti for TOTP elevation window lookup.
             Passed through to handle_tools_call for session_key injection.
+        http_request: The real FastAPI Request object (threaded from
+            mcp_endpoint), passed through to handle_tools_call for handlers
+            that declare an http_request parameter (e.g. authenticate).
+        http_response: The real FastAPI Response object (threaded from
+            mcp_endpoint), passed through to handle_tools_call for handlers
+            that declare an http_response parameter (e.g. authenticate).
 
     Returns:
         JSON-RPC response dictionary (success or error)
@@ -827,7 +877,12 @@ async def process_jsonrpc_request(
             return create_jsonrpc_response(result, request_id)
         elif method == "tools/call":
             result = await handle_tools_call(
-                params, user, session_id=session_id, elevation_key=elevation_key
+                params,
+                user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                http_request=http_request,
+                http_response=http_response,
             )
             return create_jsonrpc_response(result, request_id)
         else:
@@ -868,6 +923,8 @@ async def process_batch_request(
     user: User,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
+    http_request: Optional[Request] = None,
+    http_response: Optional[Response] = None,
 ) -> List[Dict[str, Any]]:
     """
     Process a batch of JSON-RPC 2.0 requests.
@@ -878,6 +935,14 @@ async def process_batch_request(
         session_id: Optional MCP session ID for session state management
         elevation_key: JWT jti for TOTP elevation window lookup.
             Passed through to each process_jsonrpc_request call.
+        http_request: The real FastAPI Request object (threaded from
+            mcp_endpoint), passed through to each process_jsonrpc_request
+            call for handlers that declare an http_request parameter
+            (e.g. authenticate).
+        http_response: The real FastAPI Response object (threaded from
+            mcp_endpoint), passed through to each process_jsonrpc_request
+            call for handlers that declare an http_response parameter
+            (e.g. authenticate).
 
     Returns:
         List of JSON-RPC response dictionaries
@@ -886,7 +951,12 @@ async def process_batch_request(
 
     for request in batch:
         response = await process_jsonrpc_request(
-            request, user, session_id=session_id, elevation_key=elevation_key
+            request,
+            user,
+            session_id=session_id,
+            elevation_key=elevation_key,
+            http_request=http_request,
+            http_response=http_response,
         )
         responses.append(response)
 
@@ -962,14 +1032,24 @@ async def mcp_endpoint(
     # Check if batch request (array) or single request (object)
     if isinstance(body, list):
         return await process_batch_request(
-            body, current_user, session_id=session_id, elevation_key=elevation_key
+            body,
+            current_user,
+            session_id=session_id,
+            elevation_key=elevation_key,
+            http_request=request,
+            http_response=response,
         )
     elif isinstance(body, dict):
         # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
         # Still process internally for side effects (e.g. notifications/initialized state).
         is_notification = "id" not in body
         jsonrpc_result = await process_jsonrpc_request(
-            body, current_user, session_id=session_id, elevation_key=elevation_key
+            body,
+            current_user,
+            session_id=session_id,
+            elevation_key=elevation_key,
+            http_request=request,
+            http_response=response,
         )
         if is_notification:
             return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
@@ -1216,9 +1296,22 @@ async def process_public_jsonrpc_request(
                         -32601, "authenticate tool not yet implemented", request_id
                     )
                 handler = HANDLER_REGISTRY["authenticate"]
-                result = await handler(
-                    params.get("arguments", {}), http_request, http_response
-                )
+                auth_arguments = params.get("arguments", {})
+                # handle_authenticate is currently a sync function. Calling
+                # `await handler(...)` unconditionally on a sync function's
+                # plain dict return value raises "object dict can't be used
+                # in 'await' expression". Dispatch via run_in_executor for
+                # sync handlers (mirrors _invoke_handler's sync/async
+                # distinction) so this special case keeps working regardless
+                # of whether a future implementation becomes async.
+                if asyncio.iscoroutinefunction(handler):
+                    result = await handler(auth_arguments, http_request, http_response)
+                else:
+                    loop = asyncio.get_running_loop()
+                    bound = functools.partial(
+                        handler, auth_arguments, http_request, http_response
+                    )
+                    result = await loop.run_in_executor(None, bound)
                 return create_jsonrpc_response(result, request_id)
 
             if user is None:
