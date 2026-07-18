@@ -202,6 +202,12 @@ class TestMcpForcedHandoffAndPoll:
                 "query_text": "temporal query async hybrid execution",
                 "time_range_all": True,
                 "limit": 5,
+                # Force a real embedding round trip so the background worker
+                # cannot complete before the loop's first status check --
+                # prevents the intermittent 200-vs-202 forced-handoff race
+                # when temporal_inline_wait_seconds is forced to 1ms by the
+                # forced_deferred_inline_wait fixture.
+                "no_embedding_cache_shortcut": True,
             },
             auth_headers,
         )
@@ -234,6 +240,7 @@ class TestMcpForcedHandoffAndPoll:
                 "query_text": "quarterly shard routing temporal indexer",
                 "time_range_all": True,
                 "limit": 5,
+                "no_embedding_cache_shortcut": True,
             },
             auth_headers,
         )
@@ -273,6 +280,7 @@ class TestRestForcedHandoffAndPoll:
                 "repository_alias": live_wiring_repo,
                 "time_range_all": True,
                 "limit": 5,
+                "no_embedding_cache_shortcut": True,
             },
             headers=auth_headers,
         )
@@ -302,6 +310,7 @@ class TestRestForcedHandoffAndPoll:
                 "repository_alias": live_wiring_repo,
                 "time_range_all": True,
                 "limit": 5,
+                "no_embedding_cache_shortcut": True,
             },
             headers=auth_headers,
         )
