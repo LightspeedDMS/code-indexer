@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.66.0] - 2026-07-19
+
+### Fixed
+
+- **#1441** (production hotfix): golden-repo refresh was failing fleet-wide in production with `ModuleNotFoundError: No module named 'psycopg'` since v11.64.0's embedding-stats bootstrap wiring (#1418). Root cause: the CLI's `NoOpWriter` fail-open fallback was itself transitively not psycopg-free (`embedding_stats_writer.py` -> `embedding_call_stats.py` -> `connection_pool.py` -> `import psycopg`), so on any interpreter lacking psycopg (the CLI's own separate Python environment, distinct from a postgres-mode server's venv) the fallback itself crashed a second time. Fixed by deferring `EmbeddingCallRecord`/`ConnectionPool` imports under `TYPE_CHECKING` in both modules (both were only ever used in type annotations), making `NoOpWriter` genuinely psycopg-free. Proven via a real `cidx index` subprocess under a genuine psycopg import blocker (not a mock) -- the exact production failure now exits 0 with the documented fail-open WARNING instead of crashing.
+- **#1440**: Bug #1392's CLI/hnswlib sync mechanism (`_ensure_cli_hnswlib_capability()`) has been silently inert on every deployment since it was introduced -- confirmed via live investigation on 3 staging cluster nodes, every auto-update run for a full week logged a skip because `cidx-auto-update.service` has no explicit `PATH=` and systemd's compiled-in default never includes a per-user `~/.local/bin`. Production avoided this only by coincidence (its CLI installs system-wide to `/usr/local/bin`, which is on the systemd default). Fixed in two parts, per this project's now-explicit rule that bootstrap changes must be automated in both places: (1) the install template now sets an explicit `PATH=` covering both known install shapes; (2) a new idempotent self-heal method, `_ensure_auto_update_service_has_cli_path()`, repairs an already-deployed unit file automatically on its next auto-update cycle -- no manual operator step required.
+
 ## [11.65.0] - 2026-07-18
 
 ### Fixed

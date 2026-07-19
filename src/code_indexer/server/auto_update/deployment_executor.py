@@ -2280,6 +2280,145 @@ class DeploymentExecutor:
             return False
 
     # ------------------------------------------------------------------
+    # Issue #1440: self-heal Environment="PATH=..." on already-deployed
+    # cidx-auto-update.service files (predating the systemd unit template
+    # fix, which only benefits fresh installs).
+    # ------------------------------------------------------------------
+
+    def _inject_auto_update_path_env_into_content(
+        self, content: str, expected_line: str
+    ) -> str:
+        """Build new auto-update service file content with PATH env injected.
+
+        Strips any stale Environment="PATH=..." entries -- a marker-specific
+        prefix match, NOT a bare "PATH" substring check, since a line such as
+        Environment="CIDX_SERVER_REPO_PATH=..." also contains the substring
+        "PATH" and must be preserved untouched -- then inserts expected_line
+        immediately after the last existing Environment= line. When no
+        Environment= lines are present, inserts after the [Service] header.
+
+        Args:
+            content: Current service file content.
+            expected_line: The full Environment="PATH=..." line to add.
+
+        Returns:
+            Updated service file content string (newline-terminated).
+        """
+        filtered = [
+            line
+            for line in content.splitlines()
+            if not line.strip().startswith('Environment="PATH=')
+        ]
+
+        last_env_index = -1
+        for i, line in enumerate(filtered):
+            if line.strip().startswith("Environment="):
+                last_env_index = i
+
+        if last_env_index >= 0:
+            insert_after = last_env_index
+        else:
+            # No Environment= lines: insert after [Service] header
+            insert_after = next(
+                (i for i, line in enumerate(filtered) if line.strip() == "[Service]"),
+                len(filtered) - 1,
+            )
+
+        new_lines = []
+        for i, line in enumerate(filtered):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(expected_line)
+
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_auto_update_service_has_cli_path(self) -> bool:
+        """Self-heal cidx-auto-update.service missing Environment="PATH=...".
+
+        Issue #1440: the systemd unit TEMPLATE was fixed to include
+        Environment="PATH={HOME}/.local/bin:..." (needed for npm/node/Codex
+        CLI discovery inside the auto-update subprocess), but that only
+        benefits FRESH installs. Already-deployed hosts (confirmed: staging's
+        3 cluster nodes) predate the fix and have ZERO Environment="PATH="
+        lines at all. This self-heals those hosts on the next auto-update
+        deploy cycle without requiring manual operator intervention.
+
+        Scope decision: only the "PATH line entirely absent" case is
+        actively repaired (the confirmed real-world state). A line that
+        already contains ".local/bin" in some differently-ordered form is
+        treated as already-correct (no-op) purely to avoid duplicating or
+        corrupting an existing PATH line -- a dedicated repair path for a
+        partial/malformed PATH is explicitly out of scope.
+
+        Returns:
+            True if config is correct or was updated, False on error.
+        """
+        try:
+            auto_update_service = (
+                SYSTEMD_UNIT_DIR / f"{AUTO_UPDATE_SERVICE_NAME}.service"
+            )
+            current_content = self._read_service_file(auto_update_service)
+            if current_content is None:
+                return False
+
+            service_user = self._extract_service_user(current_content)
+            if service_user:
+                user_home = Path(pwd.getpwnam(service_user).pw_dir)
+            else:
+                # A oneshot with no explicit User= runs as root under systemd.
+                user_home = Path(pwd.getpwnam("root").pw_dir)
+
+            expected_line = (
+                f'Environment="PATH={user_home}/.local/bin:/usr/local/sbin:'
+                f'/usr/local/bin:/usr/sbin:/usr/bin"'
+            )
+
+            if expected_line in current_content:
+                logger.debug(
+                    "Auto-update service PATH already correctly configured",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Defensive secondary check: a differently-ordered but
+            # functionally-equivalent PATH line (already contains .local/bin)
+            # is treated as already-correct to avoid duplicating/competing
+            # PATH entries.
+            if any(
+                line.strip().startswith('Environment="PATH=') and ".local/bin" in line
+                for line in current_content.splitlines()
+            ):
+                logger.debug(
+                    "Auto-update service PATH already contains .local/bin "
+                    "in a differently-ordered form; leaving as-is",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            logger.info(
+                f"Injecting {expected_line} into auto-update service",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._inject_auto_update_path_env_into_content(
+                current_content, expected_line
+            )
+            if not self._write_service_file_and_reload(
+                auto_update_service, new_content
+            ):
+                return False
+
+            if not self._restart_auto_update_service():
+                return False
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Error ensuring auto-update PATH: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Bug #897 mitigation 2: MALLOC_ARENA_MAX=2 in the server unit file
     # ------------------------------------------------------------------
 
@@ -3889,6 +4028,20 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-058",
                     "CIDX_DATA_DIR could not be verified/injected — "
                     "restart signal and redeploy marker paths may diverge",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.55: Issue #1440 - Self-heal auto-updater service missing
+        # Environment="PATH=..." (breaks npm/node discovery for already-deployed
+        # hosts predating the #1440 template fix; fresh installs get it from
+        # the template, this heals already-deployed units).
+        if not self._ensure_auto_update_service_has_cli_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-210",
+                    "Auto-updater PATH could not be verified/injected — "
+                    "npm/node discovery may fail in auto-update subprocess",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
