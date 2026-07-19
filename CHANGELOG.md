@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.69.0] - 2026-07-19
+
+### Fixed
+
+- **#1444**: `/healthz` and `/api/system/health` permanently reported `unhealthy` (503) on every solo/SQLite install (production included), even though the server was genuinely healthy throughout. Root cause: `database_health_service.py`'s `_resolve_db_path()` special-cased `payload_cache.db` to `data/golden-repos/.cache/payload_cache.db` -- a path nothing ever writes to. The real file lives at `data/payload_cache.db` (same directory as `cidx_server.db`/`api_metrics.db`, per `storage/factory.py`'s `_create_sqlite_backends()`; confirmed via the live runtime wiring in `service_init.py`/`lifespan.py` that `PayloadCache`'s SQLite persistence is fully delegated to `PayloadCacheSqliteBackend`, never the vestigial `.cache`-subdir path). Fixed by resolving `payload_cache.db` the same way as its data-dir siblings. Two pre-existing tests were found to have been silently asserting the buggy path as correct (building their fixture there, never checking per-database `status`, only coarse list shape) -- fixed alongside the root cause, plus a new end-to-end test creating a real SQLite file at the corrected path and asserting `HEALTHY` status.
+
 ## [11.68.0] - 2026-07-19
 
 ### Fixed
