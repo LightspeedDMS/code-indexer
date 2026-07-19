@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.68.0] - 2026-07-19
+
+### Fixed
+
+- **#1443**: `python-frontmatter>=1.0.0` (unbounded) resolved to `1.2.0`, whose `util.py` imports `typing.TypeGuard` -- unavailable in the Python 3.9 stdlib (this project's own `requires-python` floor), so `import frontmatter` raised `ImportError` on every Python 3.9 host (confirmed: staging and production both run 3.9.25). Degraded gracefully via `wiki_service.py`'s existing try/except (wiki front-matter parsing silently disabled), so no crash, but a real silent feature gap. Fixed by capping the pin for `python_version < '3.10'` at `<1.2.0` (verified: 1.1.0 is the last pre-1.2.0 release, confirmed importable and correct on Python 3.9.25 in an isolated venv); hosts on 3.10+ keep the original unbounded behavior unchanged.
+
 ## [11.67.0] - 2026-07-19
 
 ### Fixed

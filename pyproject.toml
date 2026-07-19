@@ -84,7 +84,14 @@ dependencies = [
     "markdown>=3.4.0",
     "bleach>=6.0.0",
     # Wiki front matter parsing
-    "python-frontmatter>=1.0.0",
+    # Bug #1443: python-frontmatter==1.2.0's util.py imports typing.TypeGuard,
+    # which does not exist in the Python 3.9 stdlib (this project's requires-python
+    # floor). The wheel declares no Requires-Python guard, so pip happily resolves
+    # the unbounded pin to 1.2.0 on 3.9 and `import frontmatter` raises ImportError.
+    # Verified: 1.1.0 is the last pre-1.2.0 release, is available on PyPI, and
+    # imports + parses correctly on Python 3.9.25 in an isolated venv.
+    "python-frontmatter>=1.0.0,<1.2.0 ; python_version < '3.10'",
+    "python-frontmatter>=1.0.0 ; python_version >= '3.10'",
     # Excel export for query analytics (Story #1160)
     "openpyxl>=3.1.0",
     # MFA/TOTP dependencies (Epic #556)
