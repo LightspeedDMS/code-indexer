@@ -106,7 +106,9 @@ def _max_recorder_gap(blocking_fn, *, min_call_seconds):
     return max(gaps), call_duration
 
 
-def _assert_gil_released(max_gap: float, call_duration: float, *, native_call_name: str) -> None:
+def _assert_gil_released(
+    max_gap: float, call_duration: float, *, native_call_name: str
+) -> None:
     gap_ratio = max_gap / call_duration
     assert gap_ratio < MAX_GAP_RATIO, (
         f"recorder thread was silent for {gap_ratio:.1%} of {native_call_name}'s "
@@ -163,7 +165,9 @@ class TestHNSWIndexReleasesGIL:
         )
         _assert_gil_released(max_gap, call_duration, native_call_name="load_index()")
 
-    def test_save_index_releases_gil_during_native_call(self, built_collection, tmp_path):
+    def test_save_index_releases_gil_during_native_call(
+        self, built_collection, tmp_path
+    ):
         """Same proof as above, for the native save_index() call reached
         through HNSWIndexManager's own internal `_save_hnsw_index` wrapper
         (the exact code path build_index()/rebuild_from_vectors() use)."""
