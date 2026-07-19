@@ -178,6 +178,47 @@ class TestCompletedWithSnapshot:
         assert result["continue_polling"] is False
         assert len(result["results"]) == 1
 
+    def test_completed_includes_total_results_matching_len_results(self):
+        """Bug #1434: the completed-poll response omitted total_results
+        even though the inline (non-deferred) temporal REST response
+        includes it alongside results[]. A realistic multi-result snapshot
+        must yield total_results == len(results)."""
+        multi_results = [
+            {"file_path": "a.py"},
+            {"file_path": "b.py"},
+            {"file_path": "c.py"},
+        ]
+        result = poll_temporal_job_status(
+            job_status={"status": "completed"},
+            read_snapshot_fn=lambda: _snapshot(multi_results),
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        assert result["status"] == "completed"
+        assert "total_results" in result
+        assert result["total_results"] == len(result["results"])
+        assert result["total_results"] == 3
+
+    def test_completed_total_results_matches_inline_response_semantics(self):
+        """Regression (Bug #1434's own suggested test): total_results must
+        carry IDENTICAL semantics between the inline completed REST
+        response (routers/inline_query.py: total_results=len(results)) and
+        this polled completed response, for the same underlying result
+        set."""
+        multi_results = [{"file_path": "a.py"}, {"file_path": "b.py"}]
+        result = poll_temporal_job_status(
+            job_status={"status": "completed"},
+            read_snapshot_fn=lambda: _snapshot(multi_results),
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        # Mirrors the inline path's own computation exactly:
+        # `total_results: len(results)` in inline_query.py.
+        inline_style_total_results = len(result["results"])
+        assert result["total_results"] == inline_style_total_results
+
 
 class TestCompletedWithoutSnapshotIsExpiry:
     def test_completed_but_missing_snapshot_is_expired_not_found(self):
