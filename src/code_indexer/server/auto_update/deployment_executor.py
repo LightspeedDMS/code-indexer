@@ -2280,6 +2280,145 @@ class DeploymentExecutor:
             return False
 
     # ------------------------------------------------------------------
+    # Issue #1440: self-heal Environment="PATH=..." on already-deployed
+    # cidx-auto-update.service files (predating the systemd unit template
+    # fix, which only benefits fresh installs).
+    # ------------------------------------------------------------------
+
+    def _inject_auto_update_path_env_into_content(
+        self, content: str, expected_line: str
+    ) -> str:
+        """Build new auto-update service file content with PATH env injected.
+
+        Strips any stale Environment="PATH=..." entries -- a marker-specific
+        prefix match, NOT a bare "PATH" substring check, since a line such as
+        Environment="CIDX_SERVER_REPO_PATH=..." also contains the substring
+        "PATH" and must be preserved untouched -- then inserts expected_line
+        immediately after the last existing Environment= line. When no
+        Environment= lines are present, inserts after the [Service] header.
+
+        Args:
+            content: Current service file content.
+            expected_line: The full Environment="PATH=..." line to add.
+
+        Returns:
+            Updated service file content string (newline-terminated).
+        """
+        filtered = [
+            line
+            for line in content.splitlines()
+            if not line.strip().startswith('Environment="PATH=')
+        ]
+
+        last_env_index = -1
+        for i, line in enumerate(filtered):
+            if line.strip().startswith("Environment="):
+                last_env_index = i
+
+        if last_env_index >= 0:
+            insert_after = last_env_index
+        else:
+            # No Environment= lines: insert after [Service] header
+            insert_after = next(
+                (i for i, line in enumerate(filtered) if line.strip() == "[Service]"),
+                len(filtered) - 1,
+            )
+
+        new_lines = []
+        for i, line in enumerate(filtered):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(expected_line)
+
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_auto_update_service_has_cli_path(self) -> bool:
+        """Self-heal cidx-auto-update.service missing Environment="PATH=...".
+
+        Issue #1440: the systemd unit TEMPLATE was fixed to include
+        Environment="PATH={HOME}/.local/bin:..." (needed for npm/node/Codex
+        CLI discovery inside the auto-update subprocess), but that only
+        benefits FRESH installs. Already-deployed hosts (confirmed: staging's
+        3 cluster nodes) predate the fix and have ZERO Environment="PATH="
+        lines at all. This self-heals those hosts on the next auto-update
+        deploy cycle without requiring manual operator intervention.
+
+        Scope decision: only the "PATH line entirely absent" case is
+        actively repaired (the confirmed real-world state). A line that
+        already contains ".local/bin" in some differently-ordered form is
+        treated as already-correct (no-op) purely to avoid duplicating or
+        corrupting an existing PATH line -- a dedicated repair path for a
+        partial/malformed PATH is explicitly out of scope.
+
+        Returns:
+            True if config is correct or was updated, False on error.
+        """
+        try:
+            auto_update_service = (
+                SYSTEMD_UNIT_DIR / f"{AUTO_UPDATE_SERVICE_NAME}.service"
+            )
+            current_content = self._read_service_file(auto_update_service)
+            if current_content is None:
+                return False
+
+            service_user = self._extract_service_user(current_content)
+            if service_user:
+                user_home = Path(pwd.getpwnam(service_user).pw_dir)
+            else:
+                # A oneshot with no explicit User= runs as root under systemd.
+                user_home = Path(pwd.getpwnam("root").pw_dir)
+
+            expected_line = (
+                f'Environment="PATH={user_home}/.local/bin:/usr/local/sbin:'
+                f'/usr/local/bin:/usr/sbin:/usr/bin"'
+            )
+
+            if expected_line in current_content:
+                logger.debug(
+                    "Auto-update service PATH already correctly configured",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Defensive secondary check: a differently-ordered but
+            # functionally-equivalent PATH line (already contains .local/bin)
+            # is treated as already-correct to avoid duplicating/competing
+            # PATH entries.
+            if any(
+                line.strip().startswith('Environment="PATH=') and ".local/bin" in line
+                for line in current_content.splitlines()
+            ):
+                logger.debug(
+                    "Auto-update service PATH already contains .local/bin "
+                    "in a differently-ordered form; leaving as-is",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            logger.info(
+                f"Injecting {expected_line} into auto-update service",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._inject_auto_update_path_env_into_content(
+                current_content, expected_line
+            )
+            if not self._write_service_file_and_reload(
+                auto_update_service, new_content
+            ):
+                return False
+
+            if not self._restart_auto_update_service():
+                return False
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Error ensuring auto-update PATH: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Bug #897 mitigation 2: MALLOC_ARENA_MAX=2 in the server unit file
     # ------------------------------------------------------------------
 
@@ -2402,6 +2541,93 @@ class DeploymentExecutor:
             )
             return False
 
+    def _build_pip_install_cmd(self, python_path: str, tmpdir: str) -> list:
+        """Build a `pip install -e .` command for the given interpreter.
+
+        Bug #1442: factored out of `pip_install()` so `_ensure_cli_dependencies_
+        synced()` can target a wholly different interpreter (the CLI's
+        system-wide Python, resolved via `_get_cli_python_interpreter()`)
+        while reusing the IDENTICAL sudo / --break-system-packages decision
+        logic, instead of duplicating it.
+
+        Bug #1245: Use sudo only for system installs. For a user-install
+        layout (code-indexer in ~/.local), sudo would target /root/.local —
+        the wrong site-packages and read-only on immutable hosts.
+        Bug #1234: Probe with use_sudo matching the install so we test the
+        SAME pip binary (system pip for sudo installs, user pip for user
+        installs).
+        Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+        sudo's env_reset. For user installs, the environment is inherited
+        as-is.
+
+        Args:
+            python_path: Interpreter to install into.
+            tmpdir: Writable temp dir to pass through as TMPDIR (sudo path only).
+
+        Returns:
+            The full pip install command as a list of argv tokens.
+        """
+        use_sudo = not self._is_user_install(python_path)
+        pip_cmd = (
+            [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
+            if use_sudo
+            else [python_path, "-m", "pip", "install"]
+        )
+        if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
+            pip_cmd.append("--break-system-packages")
+        pip_cmd.extend(["-e", "."])
+        return pip_cmd
+
+    def _run_pip_install_cmd(self, pip_cmd: list) -> Any:
+        """Run a pip install command built by `_build_pip_install_cmd()`.
+
+        Bug #1442: factored out of `pip_install()` alongside `_build_pip_
+        install_cmd()` so `_ensure_cli_dependencies_synced()` reuses the same
+        belt-and-suspenders retry (if pip rejects --break-system-packages,
+        retry once without it) instead of duplicating it.
+
+        Args:
+            pip_cmd: Command built by `_build_pip_install_cmd()`.
+
+        Returns:
+            The subprocess.CompletedProcess of the final attempt (retried
+            attempt if the initial one was rejected for --break-system-packages).
+        """
+        result = subprocess.run(
+            pip_cmd,
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True,
+        )
+
+        # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+        if (
+            result.returncode != 0
+            and "--break-system-packages" in pip_cmd
+            and "no such option" in result.stderr
+        ):
+            logger.warning(
+                "pip install rejected --break-system-packages; retrying without flag",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+            result = subprocess.run(
+                retry_cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+        return result
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2413,57 +2639,9 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
-            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
-            # a writable temp dir under systemd PrivateTmp=yes.
             tmpdir = self._deploy_tmpdir()
-            # Bug #1245: Use sudo only for system installs. For a user-install layout
-            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
-            # site-packages and read-only on immutable hosts.
-            use_sudo = not self._is_user_install(python_path)
-            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
-            # pip binary (system pip for sudo installs, user pip for user installs).
-            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
-            # sudo's env_reset. For user installs, the environment is inherited as-is.
-            pip_cmd = (
-                [
-                    "sudo",
-                    "env",
-                    f"TMPDIR={tmpdir}",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                ]
-                if use_sudo
-                else [python_path, "-m", "pip", "install"]
-            )
-            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
-                pip_cmd.append("--break-system-packages")
-            pip_cmd.extend(["-e", "."])
-            result = subprocess.run(
-                pip_cmd,
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-            )
-
-            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
-            if (
-                result.returncode != 0
-                and "--break-system-packages" in pip_cmd
-                and "no such option" in result.stderr
-            ):
-                logger.warning(
-                    "pip install rejected --break-system-packages; retrying without flag",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
-                result = subprocess.run(
-                    retry_cmd,
-                    cwd=self.repo_path,
-                    capture_output=True,
-                    text=True,
-                )
+            pip_cmd = self._build_pip_install_cmd(python_path, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
 
             if result.returncode != 0:
                 logger.error(
@@ -2484,6 +2662,74 @@ class DeploymentExecutor:
             logger.exception(
                 f"Pip install exception: {e}",
                 extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _ensure_cli_dependencies_synced(self) -> bool:
+        """Ensure the CLI's system-wide Python env has ALL current dependencies.
+
+        Bug #1442: `pip_install()` runs `pip install -e .` on every deploy
+        cycle, but ONLY against `_get_server_python()` (the server's pipx
+        venv). The CLI's SEPARATE system-wide Python environment (resolved
+        via `_get_cli_python_interpreter()`, Bug #1392) is an editable
+        install against this SAME live repo checkout, but was never re-synced
+        after its one-time `cidx-first-boot.sh` install -- so its package
+        metadata drifts to whatever was installed long ago, missing any
+        dependency added since (confirmed on production via live
+        ModuleNotFoundError reproduction for openpyxl, PIL, pyotp,
+        frontmatter, qrcode, tree_sitter_languages, langfuse).
+
+        Orchestration: resolve CLI interpreter (None -> nothing to sync yet,
+        mirrors `_ensure_cli_hnswlib_capability()`'s early return) -> build
+        and run the SAME `pip install -e .` command shape `pip_install()`
+        uses (via the shared `_build_pip_install_cmd()`/`_run_pip_install_
+        cmd()` helpers) -> loud WARNING on failure.
+
+        Returns:
+            True if synced or nothing to sync yet; False if the pip install
+            genuinely failed or raised (non-fatal to the overall deploy --
+            never raises).
+        """
+        cli_python = self._get_cli_python_interpreter()
+        if cli_python is None:
+            logger.info(
+                "No system-wide 'cidx' CLI entrypoint found on PATH -- "
+                "skipping CLI dependency sync (nothing to sync yet)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        try:
+            tmpdir = self._deploy_tmpdir()
+            pip_cmd = self._build_pip_install_cmd(cli_python, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
+
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-211",
+                        f"Failed to sync CLI Python environment ({cli_python}) "
+                        f"dependencies via pip install -e .: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Successfully synced CLI Python environment ({cli_python}) "
+                "dependencies via pip install -e .",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    f"Exception while syncing CLI Python environment "
+                    f"({cli_python}) dependencies: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             )
             return False
 
@@ -3851,6 +4097,31 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 1.8 (Bug #1442): Ensure the CLI's SEPARATE system-wide Python
+        # environment has ALL current dependencies, not just hnswlib. Step 2
+        # below (pip_install()) only ever targets _get_server_python() (the
+        # server's own pipx venv) -- the CLI's system-wide interpreter is an
+        # editable install against this SAME live repo checkout, but was
+        # never re-synced after its one-time cidx-first-boot.sh install, so
+        # it drifts to whatever was installed long ago (confirmed on
+        # production via live ModuleNotFoundError reproduction for openpyxl,
+        # PIL, pyotp, frontmatter, qrcode, tree_sitter_languages, langfuse).
+        #
+        # Non-fatal (same rationale as Step 1.7): this targets a wholly
+        # INDEPENDENT Python environment from the one cidx-server itself
+        # runs under, so a failure here must not block the server's own
+        # restart/config steps, which are unaffected by it.
+        if not self._ensure_cli_dependencies_synced():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    "CLI system-wide dependency sync failed -- indexing "
+                    "subprocesses may still fail with ModuleNotFoundError for "
+                    "dependencies added since the CLI's last install.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 2: Pip install
         if not self.pip_install():
             logger.error(
@@ -3889,6 +4160,20 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-058",
                     "CIDX_DATA_DIR could not be verified/injected — "
                     "restart signal and redeploy marker paths may diverge",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.55: Issue #1440 - Self-heal auto-updater service missing
+        # Environment="PATH=..." (breaks npm/node discovery for already-deployed
+        # hosts predating the #1440 template fix; fresh installs get it from
+        # the template, this heals already-deployed units).
+        if not self._ensure_auto_update_service_has_cli_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-210",
+                    "Auto-updater PATH could not be verified/injected — "
+                    "npm/node discovery may fail in auto-update subprocess",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )

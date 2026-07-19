@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.73.0] - 2026-07-19
+
+### Fixed
+
+- **#1447**: `test_inline_repos_sync_job_params.py::test_submit_job_without_params_kwarg_succeeds` intermittently stuck at job status `"pending"` under full-chunk parallel test execution. Two distinct issues coincided: (1) `test_bug1063_part4_dashboard_bounded_fetch.py` constructed real SQLite-backed `BackgroundJobManager` instances without initializing the schema first and without ever shutting them down, producing real `"no such table: background_jobs"` errors from its own tests (a real bug, fixed, but not the actual cause of the target flake); (2) the real root cause -- `test_inline_auth_api_keys_hybrid_auth_1283.py`'s module-level `import code_indexer.server.app` triggers a module-level `create_app()` that installs a genuine `MemoryGovernor` singleton with a real background sampling thread, never torn down; since the target job's `operation_type` (`sync_repository`) is memory-heavy and the admission gate is enabled by default, the leaked governor's admission gate re-queued the job with backoff past the test's wait window. Fixed by initializing schema + registering shutdown finalizers in the first file, and eagerly stopping/clearing the leaked governor at module-import time in the second (co-located with the leak it reverses, since pytest imports all collected modules during collection before any test runs -- a module-local fixture teardown alone would fire too late if a sibling module ran first). Verified via multiple clean combined runs including an independently-constructed adversarial ordering. Test-suite reliability fix only, no production code touched.
+
+## [11.72.0] - 2026-07-19
+
+### Fixed
+
+- **#1448**: `test_pod_pull_work_stealing_roundtrip_bug1424.py`'s `TestPodPullRoundTrip` and `TestPodPullRoundTripRealSubmitBug1430` classes only cleared the global `MemoryGovernor` singleton in teardown, never in setup. If an earlier test in the same pytest worker left a pressured governor installed, `DistributedJobClaimer.claim_next_job()`'s memory gate blocked job admission, causing `_process_one_job()` to return `False` instead of `True`. Confirmed `clear_memory_governor()` (sets the singleton to `None`) is sufficient to fix this without injecting a permissive sample, since `claim_next_job()` fails open when no governor is installed -- a fresh `MemoryGovernor()` instance, by contrast, genuinely starts pressured (`band=RED`) and would still block. Added the reset to both classes' setup paths; verified via a genuine before/after reproduction (temporarily reverted, confirmed the exact original failure, restored the fix, confirmed it resolves). Test-suite reliability fix only, no production code touched.
+
+## [11.71.0] - 2026-07-19
+
+### Fixed
+
+- **#1446**: `server-fast-automation.sh`'s "services/" chunk intermittently failed 4-5 unrelated pod-pull tests with `MaintenanceModeError`, even though none of them touch maintenance mode. Root cause: `MaintenanceState` (`maintenance_service.py`) is a module-level singleton; `test_maintenance_service.py` reset it at the start of each of its own tests but never after, so a maintenance-entering test running before unrelated tests in the same pytest worker left the singleton dirty for the rest of that process. Added an autouse fixture resetting state both before and after every test in the file, closing the pollution vector; confirmed via a combined run (this file + the affected pod-pull test files) that the `MaintenanceModeError` no longer reproduces. Test-suite reliability fix only -- `MaintenanceState` is explicitly non-persisted (cleared on real server restart), so this had no production impact.
+
+## [11.70.0] - 2026-07-19
+
+### Fixed
+
+- **#1445**: `e2e-automation.sh` Phase 3's mandatory post-test log-audit gate intermittently failed on a single non-allowlisted WARNING from `temporal_snapshot_store` -- the intentional, already-shipped retry-and-log behavior from #1421 (temporal snapshot reassembly race detection, released as v11.60.0). The underlying test suite passed cleanly; only the zero-tolerance log audit flagged it. Added `"concurrent checkpoint rewrite detected during reassembly"` to `LOG_AUDIT_ALLOWLIST`, verified narrow enough that it cannot mask the distinct terminal `TemporalSnapshotReassemblyError` (all-retries-exhausted) failure message, which remains correctly non-allowlisted.
+
+## [11.69.0] - 2026-07-19
+
+### Fixed
+
+- **#1444**: `/healthz` and `/api/system/health` permanently reported `unhealthy` (503) on every solo/SQLite install (production included), even though the server was genuinely healthy throughout. Root cause: `database_health_service.py`'s `_resolve_db_path()` special-cased `payload_cache.db` to `data/golden-repos/.cache/payload_cache.db` -- a path nothing ever writes to. The real file lives at `data/payload_cache.db` (same directory as `cidx_server.db`/`api_metrics.db`, per `storage/factory.py`'s `_create_sqlite_backends()`; confirmed via the live runtime wiring in `service_init.py`/`lifespan.py` that `PayloadCache`'s SQLite persistence is fully delegated to `PayloadCacheSqliteBackend`, never the vestigial `.cache`-subdir path). Fixed by resolving `payload_cache.db` the same way as its data-dir siblings. Two pre-existing tests were found to have been silently asserting the buggy path as correct (building their fixture there, never checking per-database `status`, only coarse list shape) -- fixed alongside the root cause, plus a new end-to-end test creating a real SQLite file at the corrected path and asserting `HEALTHY` status.
+
+## [11.68.0] - 2026-07-19
+
+### Fixed
+
+- **#1443**: `python-frontmatter>=1.0.0` (unbounded) resolved to `1.2.0`, whose `util.py` imports `typing.TypeGuard` -- unavailable in the Python 3.9 stdlib (this project's own `requires-python` floor), so `import frontmatter` raised `ImportError` on every Python 3.9 host (confirmed: staging and production both run 3.9.25). Degraded gracefully via `wiki_service.py`'s existing try/except (wiki front-matter parsing silently disabled), so no crash, but a real silent feature gap. Fixed by capping the pin for `python_version < '3.10'` at `<1.2.0` (verified: 1.1.0 is the last pre-1.2.0 release, confirmed importable and correct on Python 3.9.25 in an isolated venv); hosts on 3.10+ keep the original unbounded behavior unchanged.
+
+## [11.67.0] - 2026-07-19
+
+### Fixed
+
+- **#1442**: production's `cidx` CLI runs under a genuinely separate Python environment from the server (its own pipx venv) -- the auto-updater's deploy pipeline only ever ran `pip install -e .` against the server's environment, never the CLI's, so the CLI's dependencies froze at whatever the host's one-time bootstrap installed and silently drifted from the server's as the codebase grew. Confirmed on production via live investigation: `openpyxl`, `PIL`, `pyotp`, `python-frontmatter`, `qrcode`, `tree_sitter_languages`, and `langfuse` all missing under the CLI's interpreter despite being current, required dependencies. Fixed with a new self-heal step, `_ensure_cli_dependencies_synced()`, mirroring the existing Bug #1392 CLI-hnswlib-sync pattern: resolves the CLI's interpreter via the same `_get_cli_python_interpreter()` discovery, runs `pip install -e .` against it on every deploy cycle, non-fatal on failure (an independent environment's failure must never block the server's own restart). `pip_install()`'s sudo/`--break-system-packages` command construction was factored into shared helpers so both call sites stay in sync rather than duplicating that logic.
+
+## [11.66.0] - 2026-07-19
+
+### Fixed
+
+- **#1441** (production hotfix): golden-repo refresh was failing fleet-wide in production with `ModuleNotFoundError: No module named 'psycopg'` since v11.64.0's embedding-stats bootstrap wiring (#1418). Root cause: the CLI's `NoOpWriter` fail-open fallback was itself transitively not psycopg-free (`embedding_stats_writer.py` -> `embedding_call_stats.py` -> `connection_pool.py` -> `import psycopg`), so on any interpreter lacking psycopg (the CLI's own separate Python environment, distinct from a postgres-mode server's venv) the fallback itself crashed a second time. Fixed by deferring `EmbeddingCallRecord`/`ConnectionPool` imports under `TYPE_CHECKING` in both modules (both were only ever used in type annotations), making `NoOpWriter` genuinely psycopg-free. Proven via a real `cidx index` subprocess under a genuine psycopg import blocker (not a mock) -- the exact production failure now exits 0 with the documented fail-open WARNING instead of crashing.
+- **#1440**: Bug #1392's CLI/hnswlib sync mechanism (`_ensure_cli_hnswlib_capability()`) has been silently inert on every deployment since it was introduced -- confirmed via live investigation on 3 staging cluster nodes, every auto-update run for a full week logged a skip because `cidx-auto-update.service` has no explicit `PATH=` and systemd's compiled-in default never includes a per-user `~/.local/bin`. Production avoided this only by coincidence (its CLI installs system-wide to `/usr/local/bin`, which is on the systemd default). Fixed in two parts, per this project's now-explicit rule that bootstrap changes must be automated in both places: (1) the install template now sets an explicit `PATH=` covering both known install shapes; (2) a new idempotent self-heal method, `_ensure_auto_update_service_has_cli_path()`, repairs an already-deployed unit file automatically on its next auto-update cycle -- no manual operator step required.
+
+## [11.65.0] - 2026-07-18
+
+### Fixed
+
+- **#1437**: hnswlib fork's `load_index()`/`save_index()` never released the Python GIL, freezing the entire server process (Web UI + MCP) for the duration of every HNSW shard load during temporal queries. Fixed in the fork (`py::call_guard<py::gil_scoped_release>()`, commit `e03aa236`); re-pinned `pyproject.toml` and the `third_party/hnswlib` submodule. Proven with a real concurrent-thread progress test (0.078% max freeze during a 1.08s load, vs. the ~100% a held GIL would produce).
+- **#1433**: `/health` had no probe of golden-repo storage readability, so a node with broken NFS/CoW storage kept reporting healthy and HAProxy kept routing to it. Added a bounded-timeout readability probe folded into overall status. Also added a new unauthenticated `GET /healthz` liveness endpoint (both `/health` and `/api/system/health` require auth, so an unauthenticated load-balancer probe could never see the real signal) exposing only the coarse status enum, mapped to HTTP 200/503, protected by a short TTL cache against unauthenticated-flood amplification. HAProxy setup docs updated to check `/healthz` instead of the inert `/docs`.
+- **#1436**: self-monitoring's LLM-response JSON extractor committed to the first balanced bracket/brace substring found, failing ~47% of scans when a stray fragment preceded the real JSON payload. Now tries every candidate in order.
+- **#1434**: deferred temporal query poll-completion response (`GET /api/query/result/{job_id}`) omitted `total_results`, unlike the inline response. Added, matching inline semantics.
+
+### Added
+
+- **#1435**: REST's `POST /api/query` temporal path now has an outer handler-deadline safety net (new `rest_query_handler_timeout_seconds` config field) mirroring MCP's existing protection, so a misconfigured `temporal_inline_wait_seconds` is bounded on both front doors identically.
+
 ## [11.64.0] - 2026-07-18
 
 ### Fixed

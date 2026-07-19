@@ -155,8 +155,46 @@ class TestExtractJsonWithProsePreamble:
         assert result == {"path": "C:\\tmp\\x", "status": "SUCCESS"}
 
 
+class TestExtractJsonWithStrayFragmentBeforePayload:
+    """Issue #1436: a stray bracket/brace fragment embedded inline in prose
+    (NOT on its own clean line, so ``_strip_noise_lines`` cannot remove it)
+    appears BEFORE the real, valid JSON payload later in the same string.
+    The extractor must try candidates in order and return the first one that
+    actually parses, rather than locking onto the first balanced span found.
+    """
+
+    def test_stray_bracket_fragment_before_real_json_object_is_recovered(self):
+        # "[ref]" is a balanced bracket span but not valid JSON; the real
+        # payload follows later in the same string, inline (no clean line
+        # boundary the old line-based noise stripping could exploit).
+        raw = (
+            'See [ref] before the real payload: {"status":"SUCCESS","issues_created":3}'
+        )
+        result = extract_json_from_llm_response(raw)
+        assert result == {"status": "SUCCESS", "issues_created": 3}
+
+    def test_stray_brace_fragment_before_real_json_object_is_recovered(self):
+        # "{ incomplete" opens a brace that never balances against the rest
+        # of the string on its own; the real payload's own braces should be
+        # found as a separate, later, successfully-parsing candidate.
+        raw = (
+            "Note: config { incomplete real payload follows: "
+            '{"status":"SUCCESS","issues_created":7}'
+        )
+        result = extract_json_from_llm_response(raw)
+        assert result == {"status": "SUCCESS", "issues_created": 7}
+
+
 class TestExtractJsonErrors:
     """Genuinely empty / garbage responses must raise a clear error."""
+
+    def test_no_candidate_parses_raises_value_error(self):
+        # Multiple bracket/brace candidates exist, but NONE of them are
+        # valid JSON -- must raise loudly, never silently return a wrong or
+        # partial result (anti-silent-failure).
+        raw = "[not json] and {also not json}"
+        with pytest.raises(ValueError):
+            extract_json_from_llm_response(raw)
 
     def test_empty_string_raises(self):
         with pytest.raises(ValueError) as exc:

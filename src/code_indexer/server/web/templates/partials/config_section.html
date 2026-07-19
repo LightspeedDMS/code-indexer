@@ -929,6 +929,11 @@ function saveLlmCredsConfig() {
                     <td class="config-value">{{ config.search_timeouts.temporal_inline_wait_seconds }}</td>
                     <td class="config-description">Async-hybrid temporal query foreground sync-wait window before handing off to the background-job path; default 60.0, must stay below the Semantic/Temporal Search Tool Timeout (grace budget)</td>
                 </tr>
+                <tr>
+                    <td class="config-label">REST Query Handler Timeout</td>
+                    <td class="config-value">{{ config.search_timeouts.rest_query_handler_timeout_seconds }}</td>
+                    <td class="config-description">Outer handler-deadline cap for POST /api/query's temporal branch, bounding the async-hybrid inline wait the same way the Semantic/Temporal Search Tool Timeout bounds it for MCP; default 180, range 30-600</td>
+                </tr>
             </table>
             <div class="form-actions">
                 <button class="outline small" onclick="toggleEditMode('search-timeouts')">Edit</button>
@@ -970,6 +975,11 @@ function saveLlmCredsConfig() {
                     Temporal Inline Wait (seconds)
                     <input type="number" id="search-timeouts-temporal-inline-wait" name="temporal_inline_wait_seconds" value="{{ config.search_timeouts.temporal_inline_wait_seconds }}" min="0" step="0.001">
                     <small>Minimum: 0 seconds, must stay below the Semantic/Temporal Search Tool Timeout minus a 1s grace budget (default: 60.0). Async-hybrid temporal query foreground sync-wait window before handing off to the background-job path.</small>
+                </label>
+                <label>
+                    REST Query Handler Timeout (seconds)
+                    <input type="number" id="search-timeouts-rest-query" name="rest_query_handler_timeout_seconds" value="{{ config.search_timeouts.rest_query_handler_timeout_seconds }}" min="30" max="600">
+                    <small>Range: 30-600 seconds (default: 180). Outer handler-deadline cap for POST /api/query's temporal branch -- bounds the async-hybrid inline wait for REST callers the same way the Semantic/Temporal Search Tool Timeout bounds it for MCP.</small>
                 </label>
             </div>
             <div class="form-actions">

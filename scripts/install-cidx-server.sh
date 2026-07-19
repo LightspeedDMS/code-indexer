@@ -1040,6 +1040,7 @@ install_auto_update_service() {
     local unit_content
     unit_content="$(cat "${service_template}")"
     unit_content="${unit_content//\{USER\}/$(whoami)}"
+    unit_content="${unit_content//\{HOME\}/${HOME}}"
     unit_content="${unit_content//\{REPO_PATH\}/${INSTALL_DIR}}"
     unit_content="${unit_content//\{BRANCH\}/${AUTO_UPDATE_BRANCH}}"
 

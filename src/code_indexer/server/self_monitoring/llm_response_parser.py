@@ -23,7 +23,7 @@ The line-stripping mirrors the spirit of pace-maker's own ``_strip_llm_noise``
 """
 
 import json
-from typing import Any
+from typing import Any, Iterator, Optional
 
 # Prefix of the pace-maker telemetry preamble line.
 _PACEMAKER_PREFIX = "§"
@@ -62,65 +62,93 @@ def _strip_code_fences(text: str) -> str:
     return "\n".join(lines)
 
 
-def _find_first_balanced_json(text: str) -> str:
-    """Return the first balanced top-level ``{...}`` or ``[...]`` substring.
+def _iter_balanced_json_candidates(text: str) -> Iterator[str]:
+    """Yield every balanced top-level ``{...}``/``[...]`` substring in order.
 
     String-literal aware: braces/brackets inside double-quoted JSON strings
     (honoring backslash escapes) do NOT affect nesting depth, so a ``}`` inside
-    a string value cannot prematurely close the object.
+    a string value cannot prematurely close the object -- this applies to
+    EVERY candidate scan, not just the first.
 
-    Raises:
-        ValueError: if no balanced top-level object/array is found.
+    Scans for successive opening ``{``/``[`` positions. When an opener is
+    found and its matching closer is located (depth returns to zero), the
+    balanced span is yielded and scanning resumes for the next candidate
+    starting just past that span's end -- so nested/overlapping spans are
+    never yielded as separate top-level candidates.
+
+    When an opener has no matching closer by the end of the text (a stray,
+    unbalanced fragment -- e.g. a partial markdown reference like ``[ref]``
+    followed later by real JSON), that broken candidate is skipped: scanning
+    simply resumes at the very next character position looking for another
+    opening bracket/brace. This is what lets a real JSON payload later in the
+    same string still be found even when an earlier stray bracket/brace
+    fragment can never be closed.
     """
     open_to_close = {"{": "}", "[": "]"}
+    n = len(text)
+    pos = 0
 
-    start = -1
-    opener = ""
-    closer = ""
-    for i, ch in enumerate(text):
-        if ch in open_to_close:
-            start = i
-            opener = ch
-            closer = open_to_close[ch]
-            break
+    while pos < n:
+        start = -1
+        opener = ""
+        for i in range(pos, n):
+            if text[i] in open_to_close:
+                start = i
+                opener = text[i]
+                break
 
-    if start == -1:
-        raise ValueError("No JSON object or array found in LLM response")
+        if start == -1:
+            return
 
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
+        closer = open_to_close[opener]
+        depth = 0
+        in_string = False
+        escaped = False
+        end = -1
+        for i in range(start, n):
+            ch = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+
+        if end == -1:
+            # Unbalanced -- skip this broken candidate, keep scanning.
+            pos = start + 1
             continue
-        if ch == '"':
-            in_string = True
-        elif ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
 
-    raise ValueError(
-        "Unbalanced JSON in LLM response: opening "
-        f"'{opener}' has no matching '{closer}'"
-    )
+        yield text[start : end + 1]
+        pos = end + 1
 
 
 def extract_json_from_llm_response(text: str) -> Any:
     """Extract and parse the JSON payload from a noisy LLM response.
 
     Strips pace-maker ``§`` telemetry lines, ``Warning:`` prose lines, and
-    markdown code fences, then locates the first balanced top-level JSON
-    object/array and parses it.
+    markdown code fences, then tries EVERY balanced top-level JSON
+    object/array candidate found in the remaining text, in order, and
+    returns the parsed result of the first one that actually parses via
+    ``json.loads``.
+
+    A response can contain a stray leading bracket/brace fragment that is
+    NOT on its own clean line (so the line-based noise stripping above
+    cannot remove it) -- e.g. a partial markdown reference like ``[ref]`` --
+    followed later by a fully valid JSON payload. Locking onto only the
+    first balanced span would wrongly fail on such input, so every
+    candidate is tried before giving up (issue #1436).
 
     Args:
         text: Raw stdout captured from a Claude CLI invocation.
@@ -130,9 +158,9 @@ def extract_json_from_llm_response(text: str) -> Any:
 
     Raises:
         ValueError: if ``text`` is empty/whitespace, contains no balanced
-            JSON object/array, or the extracted payload is not valid JSON.
-            A failed/garbage response is reported loudly -- never silently
-            coerced into a success.
+            JSON object/array candidate, or none of the candidates found are
+            valid JSON. A failed/garbage response is reported loudly --
+            never silently coerced into a success.
         TypeError: if ``text`` is not a string.
     """
     if not isinstance(text, str):
@@ -149,9 +177,20 @@ def extract_json_from_llm_response(text: str) -> Any:
             "LLM response contained only telemetry/preamble noise, no JSON payload"
         )
 
-    candidate = _find_first_balanced_json(cleaned)
+    candidates = list(_iter_balanced_json_candidates(cleaned))
 
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Extracted LLM payload is not valid JSON: {e}")
+    if not candidates:
+        raise ValueError("No JSON object or array found in LLM response")
+
+    last_error: Optional[json.JSONDecodeError] = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as e:
+            last_error = e
+            continue
+
+    raise ValueError(
+        f"Extracted LLM payload is not valid JSON: tried {len(candidates)} "
+        f"candidate(s), none parsed; last error: {last_error}"
+    )

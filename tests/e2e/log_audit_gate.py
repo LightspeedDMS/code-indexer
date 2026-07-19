@@ -366,6 +366,22 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # "no repo_alias" notice firing as an EXPECTED side effect of that correct
     # design choice, not a defect.
     "Job submitted without repo_alias for operation 'temporal_query'",
+    # Issue #1445 (Bug #1421, temporal_snapshot_store.py:211-219): the temporal
+    # worker checkpoints while a query is in flight, so read_temporal_snapshot()
+    # can legitimately observe a concurrent checkpoint rewrite mid-reassembly
+    # (a later page vanishing, total_pages changing between two page reads, or
+    # a spliced-across-generations JSON parse failure). This is Bug #1421's
+    # OWN designed self-healing path: on any attempt before the last, it logs
+    # this WARNING and transparently retries the whole reassembly from page 0
+    # against the latest write (bounded by _MAX_REASSEMBLY_RETRY_ATTEMPTS).
+    # Benign: it is the intentional retry-and-succeed signal, not an error --
+    # only exhausting ALL retry attempts raises TemporalSnapshotReassemblyError
+    # (logged separately at ERROR, which is NOT allowlisted here and would
+    # correctly still fail the gate). Anchored on the exact static phrase from
+    # the logger.warning(...) format string; the terminal-failure ERROR log
+    # uses different wording ("reassembly failed after %d attempts") and is
+    # unaffected by this entry.
+    "concurrent checkpoint rewrite detected during reassembly",
 ]
 
 

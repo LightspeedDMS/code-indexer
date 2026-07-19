@@ -154,6 +154,7 @@ def poll_temporal_job_status(
         "status": "completed",
         "continue_polling": False,
         "results": results,
+        "total_results": len(results),
         "shards_completed": k,
         "shards_total": n,
         "unranked": unranked,

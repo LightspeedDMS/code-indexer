@@ -18,9 +18,21 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
-from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
+if TYPE_CHECKING:
+    # Bug #1441: this is a type-annotation-only need (all annotations in
+    # this module are lazy strings via `from __future__ import
+    # annotations` above) -- ConnectionPool is used ONLY as the type
+    # annotation on EmbeddingCallStatsPostgresBackend.__init__, never
+    # constructed or isinstance-checked here. A real top-level import
+    # would pull in `import psycopg` unconditionally (connection_pool.py),
+    # even for callers that only need the SQLite backend or NoOpWriter's
+    # zero-dependency fallback path -- see cli.py's
+    # _install_embedding_stats_writer_for_index().
+    from code_indexer.server.storage.postgres.connection_pool import (
+        ConnectionPool,
+    )
 
 logger = logging.getLogger(__name__)
 

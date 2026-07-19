@@ -154,8 +154,6 @@ class TestDatabaseHealthCaching:
             # Create necessary subdirectories
             data_dir = Path(temp_dir) / "data"
             data_dir.mkdir(parents=True)
-            golden_cache = Path(temp_dir) / "data" / "golden-repos" / ".cache"
-            golden_cache.mkdir(parents=True)
 
             # Create all databases matching DATABASE_DISPLAY_NAMES
             db_paths = {
@@ -165,7 +163,10 @@ class TestDatabaseHealthCaching:
                 "refresh_tokens.db": Path(temp_dir) / "refresh_tokens.db",
                 "groups.db": Path(temp_dir) / "groups.db",
                 "scip_audit.db": Path(temp_dir) / "scip_audit.db",
-                "payload_cache.db": golden_cache / "payload_cache.db",
+                # Bug #1444: payload_cache.db lives directly under data_dir,
+                # same as cidx_server.db/api_metrics.db -- NOT under a
+                # golden-repos/.cache subdirectory.
+                "payload_cache.db": data_dir / "payload_cache.db",
                 "api_metrics.db": data_dir / "api_metrics.db",
                 "query_embedding_cache.db": data_dir / "query_embedding_cache.db",
             }
@@ -552,8 +553,6 @@ class TestDatabaseHealthErrorCases:
             # Create necessary subdirectories
             data_dir = Path(temp_dir) / "data"
             data_dir.mkdir(parents=True)
-            golden_cache = Path(temp_dir) / "data" / "golden-repos" / ".cache"
-            golden_cache.mkdir(parents=True)
 
             # Create all databases matching DATABASE_DISPLAY_NAMES
             db_paths = {
@@ -563,7 +562,10 @@ class TestDatabaseHealthErrorCases:
                 "refresh_tokens.db": Path(temp_dir) / "refresh_tokens.db",
                 "groups.db": Path(temp_dir) / "groups.db",
                 "scip_audit.db": Path(temp_dir) / "scip_audit.db",
-                "payload_cache.db": golden_cache / "payload_cache.db",
+                # Bug #1444: payload_cache.db lives directly under data_dir,
+                # same as cidx_server.db/api_metrics.db -- NOT under a
+                # golden-repos/.cache subdirectory.
+                "payload_cache.db": data_dir / "payload_cache.db",
                 "api_metrics.db": data_dir / "api_metrics.db",
             }
 

@@ -7504,6 +7504,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 120,
             ),
             ("reranker_timeout_seconds", "Reranker HTTP Timeout", 5, 120),
+            (
+                "rest_query_handler_timeout_seconds",
+                "REST Query Handler Timeout",
+                30,
+                600,
+            ),
         ):
             field_value = data.get(field_name)
             if field_value is not None:

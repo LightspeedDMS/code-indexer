@@ -387,6 +387,12 @@ Runtime settings belong in the Web UI Config Screen via `get_config_service().ge
 
 ### Auto-Updater Idempotent Deployment
 
+**ABSOLUTE RULE, NO EXCEPTIONS**: any change to how the server/CLI is bootstrapped -- systemd unit content, environment variables, PATH, file locations, service wiring, anything a fresh host needs at install time -- MUST be automated in BOTH places, always:
+1. **The installer** (`scripts/install-cidx-server.sh` and/or the relevant template under `src/code_indexer/server/auto_update/templates/`), so a brand-new host gets it correctly from the start.
+2. **The auto-updater**, via an idempotent `_ensure_X_config()`-style self-heal method in `deployment_executor.py` (see the many existing `_ensure_*`/`_render_*_content` pairs in that file for the established pattern: read current unit content, detect the specific gap, inject/rewrite only what's needed, write+reload, no-op if already correct), so an ALREADY-DEPLOYED host repairs itself automatically on its next deploy cycle.
+
+A template-only or installer-only fix is NOT sufficient and must never be treated as done. Bug #1440 is the concrete lesson: a template fix for a missing systemd `PATH=` line was correctly designed and reviewed, but it only affects fresh installs -- it left 3 already-running staging cluster nodes permanently broken, silently, because nothing ever re-renders an already-deployed unit file on its own. Production cannot rely on a manual operator re-running an install script. If a bootstrap gap is found on a live host, the fix is incomplete until an automated self-heal path exists that would have (and provably does, verified via the REAL auto-update mechanism firing naturally -- not manual SSH edits) repaired that exact host without any human touching it.
+
 All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
 
 -> Bug-history detail (Bug #1052 activated-repos symlink; Story #1167 / Bug #1183 workers un-pin, value-aware idempotency; Bug #1182 py3.12/PrivateTmp lock self-heal): docs/architecture-invariants.md#auto-updater-and-pace-maker | Full reference: docs/auto-update.md
