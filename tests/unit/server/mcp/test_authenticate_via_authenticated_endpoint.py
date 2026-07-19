@@ -91,7 +91,7 @@ def _extract_cidx_session_set_cookie(resp) -> str:
         candidates = [single] if single else []
     for header_value in candidates:
         if header_value.startswith("cidx_session="):
-            return header_value
+            return str(header_value)
     return ""
 
 
