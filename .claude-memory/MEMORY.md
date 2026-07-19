@@ -62,6 +62,7 @@
 - [feedback_agent_stall_detection_needs_reply_not_just_mtime.md](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - Output-file mtime staleness triggers a PING, not a kill; wait for an actual reply (not just "queued for delivery") before concluding a real stall
 
 ## Architectural Invariants
+- [project_verify_both_staging_environments.md](project_verify_both_staging_environments.md) - Standing rule: every release verification must check BOTH the clustered (postgres/HAProxy) AND solo (SQLite) staging environments, always — production is solo, so solo-only bugs (e.g. #1444) are invisible on the cluster
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER RRF coalescing, BEFORE truncation — mandatory pipeline order
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - FIXED v10.125.0 (#1100): scheduler now uses registry tracking backend (PG in cluster mode); validate against PG, not SQLite

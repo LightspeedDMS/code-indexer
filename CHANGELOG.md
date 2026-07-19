@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.71.0] - 2026-07-19
+
+### Fixed
+
+- **#1446**: `server-fast-automation.sh`'s "services/" chunk intermittently failed 4-5 unrelated pod-pull tests with `MaintenanceModeError`, even though none of them touch maintenance mode. Root cause: `MaintenanceState` (`maintenance_service.py`) is a module-level singleton; `test_maintenance_service.py` reset it at the start of each of its own tests but never after, so a maintenance-entering test running before unrelated tests in the same pytest worker left the singleton dirty for the rest of that process. Added an autouse fixture resetting state both before and after every test in the file, closing the pollution vector; confirmed via a combined run (this file + the affected pod-pull test files) that the `MaintenanceModeError` no longer reproduces. Test-suite reliability fix only -- `MaintenanceState` is explicitly non-persisted (cleared on real server restart), so this had no production impact.
+
 ## [11.70.0] - 2026-07-19
 
 ### Fixed
