@@ -282,10 +282,9 @@ class DatabaseHealthService:
             "cidx_server.db",
             "api_metrics.db",
             "query_embedding_cache.db",
+            "payload_cache.db",
         ):
             return self.server_dir / "data" / file_name
-        elif file_name == "payload_cache.db":
-            return self.server_dir / "data" / "golden-repos" / ".cache" / file_name
         else:
             return self.server_dir / file_name
 
