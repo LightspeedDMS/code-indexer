@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.65.0] - 2026-07-18
+
+### Fixed
+
+- **#1437**: hnswlib fork's `load_index()`/`save_index()` never released the Python GIL, freezing the entire server process (Web UI + MCP) for the duration of every HNSW shard load during temporal queries. Fixed in the fork (`py::call_guard<py::gil_scoped_release>()`, commit `e03aa236`); re-pinned `pyproject.toml` and the `third_party/hnswlib` submodule. Proven with a real concurrent-thread progress test (0.078% max freeze during a 1.08s load, vs. the ~100% a held GIL would produce).
+- **#1433**: `/health` had no probe of golden-repo storage readability, so a node with broken NFS/CoW storage kept reporting healthy and HAProxy kept routing to it. Added a bounded-timeout readability probe folded into overall status. Also added a new unauthenticated `GET /healthz` liveness endpoint (both `/health` and `/api/system/health` require auth, so an unauthenticated load-balancer probe could never see the real signal) exposing only the coarse status enum, mapped to HTTP 200/503, protected by a short TTL cache against unauthenticated-flood amplification. HAProxy setup docs updated to check `/healthz` instead of the inert `/docs`.
+- **#1436**: self-monitoring's LLM-response JSON extractor committed to the first balanced bracket/brace substring found, failing ~47% of scans when a stray fragment preceded the real JSON payload. Now tries every candidate in order.
+- **#1434**: deferred temporal query poll-completion response (`GET /api/query/result/{job_id}`) omitted `total_results`, unlike the inline response. Added, matching inline semantics.
+
+### Added
+
+- **#1435**: REST's `POST /api/query` temporal path now has an outer handler-deadline safety net (new `rest_query_handler_timeout_seconds` config field) mirroring MCP's existing protection, so a misconfigured `temporal_inline_wait_seconds` is bounded on both front doors identically.
+
 ## [11.64.0] - 2026-07-18
 
 ### Fixed
