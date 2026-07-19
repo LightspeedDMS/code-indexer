@@ -42,8 +42,83 @@ from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.web.auth import SessionData
 
 
+def _stop_and_clear_governor_now() -> None:
+    """Bug #1447: stop() whatever MemoryGovernor is currently installed and
+    clear the process-wide singleton, RIGHT NOW (synchronously).
+
+    The `import code_indexer.server.app` line above triggers that module's
+    top-level `app = create_app()`, which calls initialize_services() and
+    installs a REAL MemoryGovernor with a REAL sampler thread
+    (services/memory_governor.py) as an unavoidable side effect -- nothing
+    else in the suite ever tears that down. Left alone, it keeps sampling
+    real system memory for the rest of the single-process pytest chunk and
+    can end up denying admission for an unrelated heavy job
+    (BackgroundJobManager._admission_blocked) run by a completely different
+    test later in the same process.
+
+    This must run EAGERLY, at module-import time, rather than being
+    deferred to a fixture: pytest imports ALL collected test modules during
+    COLLECTION, before ANY test in ANY file runs. A fixture-based teardown
+    only fires after THIS module's own tests finish, which is too late if
+    some other module elsewhere in the same directory happens to be
+    collected (and executed) earlier -- the leaked real governor would
+    still be live during that whole window. Calling this function
+    immediately, at import time (below), closes that window entirely
+    regardless of collection/execution order.
+    """
+    from code_indexer.server.services.memory_governor import (
+        get_memory_governor,
+        clear_memory_governor,
+    )
+
+    governor = get_memory_governor()
+    if governor is not None:
+        governor.stop()
+    clear_memory_governor()
+
+
+_stop_and_clear_governor_now()
+
+
 _SESSION_COOKIE_VALUE = "session-fixture-value"
 _TEST_JWT_SECRET = "test-secret-key-1283"
+
+
+def test_stop_and_clear_governor_now_stops_and_clears_installed_governor():
+    """Bug #1447 RED: _stop_and_clear_governor_now() -- a plain, synchronous
+    (non-fixture, non-generator) function -- must call stop() on whatever
+    MemoryGovernor is installed and then clear the singleton.
+
+    It must be plain and synchronous (not a fixture) because pytest imports
+    ALL collected test modules during COLLECTION, before ANY test in ANY
+    file runs. A fixture-based teardown only fires after THIS module's own
+    tests finish, which is too late if an unrelated module elsewhere in the
+    same directory happens to be collected (and its tests run) earlier --
+    the leaked real governor would still be live during that window. Calling
+    this function eagerly, immediately after the
+    `import code_indexer.server.app` line below, closes that window
+    entirely regardless of collection/execution order.
+    """
+    from code_indexer.server.services import memory_governor as mg
+
+    class _StubGovernor:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self, timeout: float = 5.0) -> None:
+            self.stopped = True
+
+    stub = _StubGovernor()
+    mg.set_memory_governor(stub)
+    try:
+        _stop_and_clear_governor_now()
+
+        assert stub.stopped is True, "stop() must be called on the installed governor"
+        assert mg.get_memory_governor() is None, (
+            "the governor singleton must be cleared"
+        )
+    finally:
+        mg.clear_memory_governor()
 
 
 @pytest.fixture(autouse=True)
