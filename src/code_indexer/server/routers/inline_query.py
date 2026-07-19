@@ -8,6 +8,7 @@ Zero behavior change: same path, method, response models, and handler logic.
 """
 
 import logging
+import time
 from typing import Optional, Tuple
 
 from fastapi import (
@@ -198,6 +199,19 @@ def _execute_temporal_via_live_dispatch_rest(
         else False
     )
 
+    # Issue #1435: REST's own outer handler-deadline cap, mirroring MCP's
+    # protocol.py _invoke_handler (time.monotonic() + timeout_seconds)
+    # exactly. Threading a real value through here (instead of the
+    # previous hardcoded None) makes execute_live_temporal_search's
+    # waiter_deadline = min(inline_wait, handler_deadline - reserve)
+    # computation correctly bound REST's inline wait too -- no route
+    # cancellation involved, purely a shorter "waiting" handoff when the
+    # operator-configured temporal_inline_wait_seconds is too large.
+    handler_deadline_monotonic = (
+        time.monotonic()
+        + config_service.get_config().search_timeouts_config.rest_query_handler_timeout_seconds
+    )
+
     dispatch_result = execute_live_temporal_search(
         worker_input=worker_input,
         background_job_manager=bjm,
@@ -205,7 +219,7 @@ def _execute_temporal_via_live_dispatch_rest(
         access_filtering_service=access_filtering_service,
         is_admin=is_admin,
         inline_wait_seconds=inline_wait_seconds,
-        handler_deadline_monotonic=None,
+        handler_deadline_monotonic=handler_deadline_monotonic,
         response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
         config_service=config_service,
     )

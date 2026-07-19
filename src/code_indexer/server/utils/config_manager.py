@@ -316,6 +316,15 @@ class SearchTimeoutsConfig:
     # Range 5-120s.
     reranker_timeout_seconds: int = 15
 
+    # Issue #1435: outer handler-deadline cap for POST /api/query's
+    # temporal branch, threaded through to execute_live_temporal_search as
+    # handler_deadline_monotonic -- gives REST the same belt-and-suspenders
+    # bound on the async-hybrid inline wait that MCP's search_code tool
+    # already gets via search_code_handler_timeout_seconds (mirrors that
+    # field's default and range exactly, since REST and MCP serve the same
+    # underlying query). Range 30-600s.
+    rest_query_handler_timeout_seconds: int = 180
+
     # Story #1400 (CRITICAL 5, FINAL LOCKED DESIGN): async-hybrid temporal
     # query foreground sync-wait window, in seconds. FLOAT (unlike the five
     # integer fields above) because sub-second values (e.g. 0.001) are the
@@ -2841,6 +2850,11 @@ class ServerConfigManager:
                 raise ValueError(
                     "reranker_timeout_seconds must be between 5 and 120, "
                     f"got {st.reranker_timeout_seconds}"
+                )
+            if not (30 <= st.rest_query_handler_timeout_seconds <= 600):
+                raise ValueError(
+                    "rest_query_handler_timeout_seconds must be between 30 and 600, "
+                    f"got {st.rest_query_handler_timeout_seconds}"
                 )
             # Story #1400 CRITICAL 5: grace-budget cross-field check.
             if st.temporal_inline_wait_seconds < 0.0:

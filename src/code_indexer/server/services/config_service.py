@@ -101,6 +101,9 @@ def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
         "write_mode_handler_timeout_seconds": st.write_mode_handler_timeout_seconds,
         "embedding_provider_timeout_seconds": st.embedding_provider_timeout_seconds,
         "reranker_timeout_seconds": st.reranker_timeout_seconds,
+        # Issue #1435: outer handler-deadline cap for POST /api/query's
+        # temporal branch.
+        "rest_query_handler_timeout_seconds": st.rest_query_handler_timeout_seconds,
         # Story #1400 CRITICAL 5: async-hybrid temporal query inline
         # sync-wait window (float seconds).
         "temporal_inline_wait_seconds": st.temporal_inline_wait_seconds,
@@ -2522,6 +2525,8 @@ class ConfigService:
             st.embedding_provider_timeout_seconds = int(value)
         elif key == "reranker_timeout_seconds":
             st.reranker_timeout_seconds = int(value)
+        elif key == "rest_query_handler_timeout_seconds":
+            st.rest_query_handler_timeout_seconds = int(value)
         elif key == "temporal_inline_wait_seconds":
             # Story #1400 CRITICAL 5/6: the ONE float field among six --
             # sub-second precision (e.g. 0.001) is the documented E2E lever

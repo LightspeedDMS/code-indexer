@@ -177,5 +177,56 @@ class TestSearchEventTelemetry:
         assert enqueued_record.result_count == 2
 
 
+class TestHandlerDeadlineMonotonicWiring:
+    """Issue #1435: REST must now thread a real, computed
+    handler_deadline_monotonic through to execute_live_temporal_search,
+    mirroring MCP's protocol.py _invoke_handler
+    (time.monotonic() + timeout_seconds) instead of the previous hardcoded
+    None -- giving REST the same outer safety-margin cap on the temporal
+    inline wait that MCP already has."""
+
+    def test_dispatch_called_with_non_none_handler_deadline_bracketed_by_configured_timeout(
+        self, app_and_client, tmp_path
+    ):
+        import time
+
+        from code_indexer.server.services.config_service import ConfigService
+
+        _app, client = app_and_client
+        real_config_service = ConfigService(server_dir_path=str(tmp_path / "cfgsvc"))
+        real_config_service.update_setting(
+            "search_timeouts", "rest_query_handler_timeout_seconds", 45
+        )
+
+        fake_result = {
+            "status": "completed",
+            "job_id": "job-789",
+            "results": [],
+            "shards_completed": 1,
+            "shards_total": 1,
+            "unranked": True,
+        }
+        with (
+            patch(
+                "code_indexer.server.services.config_service.get_config_service",
+                return_value=real_config_service,
+            ),
+            patch(
+                "code_indexer.server.routers.inline_query.execute_live_temporal_search",
+                return_value=fake_result,
+            ) as mock_dispatch,
+        ):
+            before = time.monotonic()
+            client.post("/api/query", json=_temporal_payload())
+            after = time.monotonic()
+
+        _call_args, call_kwargs = mock_dispatch.call_args
+        deadline = call_kwargs["handler_deadline_monotonic"]
+
+        assert deadline is not None
+        assert isinstance(deadline, float)
+        assert before + 45 <= deadline <= after + 45
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

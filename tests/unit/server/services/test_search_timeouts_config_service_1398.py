@@ -28,6 +28,7 @@ class TestGetAllSettingsSurfacesSearchTimeouts:
         assert section["write_mode_handler_timeout_seconds"] == 720
         assert section["embedding_provider_timeout_seconds"] == 30
         assert section["reranker_timeout_seconds"] == 15
+        assert section["rest_query_handler_timeout_seconds"] == 180
 
 
 class TestUpdateSettingSearchTimeouts:
@@ -69,6 +70,15 @@ class TestUpdateSettingSearchTimeouts:
         svc = _make_service(tmp_path)
         svc.update_setting("search_timeouts", "reranker_timeout_seconds", 25)
         assert svc.get_config().search_timeouts_config.reranker_timeout_seconds == 25
+
+    def test_update_rest_query_handler_timeout_seconds(self, tmp_path) -> None:
+        """Issue #1435."""
+        svc = _make_service(tmp_path)
+        svc.update_setting("search_timeouts", "rest_query_handler_timeout_seconds", 240)
+        assert (
+            svc.get_config().search_timeouts_config.rest_query_handler_timeout_seconds
+            == 240
+        )
 
     def test_unknown_key_raises_value_error(self, tmp_path) -> None:
         import pytest

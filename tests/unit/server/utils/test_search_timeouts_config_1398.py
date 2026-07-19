@@ -43,6 +43,12 @@ class TestSearchTimeoutsConfigDefaults:
     def test_default_reranker_timeout_seconds(self) -> None:
         assert SearchTimeoutsConfig().reranker_timeout_seconds == 15
 
+    def test_default_rest_query_handler_timeout_seconds(self) -> None:
+        """Issue #1435: outer handler-deadline cap for POST /api/query's
+        temporal branch -- mirrors search_code_handler_timeout_seconds's
+        default since REST and MCP serve the same underlying query."""
+        assert SearchTimeoutsConfig().rest_query_handler_timeout_seconds == 180
+
     def test_fields_are_overridable(self) -> None:
         cfg = SearchTimeoutsConfig(
             search_code_handler_timeout_seconds=200,
@@ -50,12 +56,14 @@ class TestSearchTimeoutsConfigDefaults:
             write_mode_handler_timeout_seconds=800,
             embedding_provider_timeout_seconds=45,
             reranker_timeout_seconds=20,
+            rest_query_handler_timeout_seconds=210,
         )
         assert cfg.search_code_handler_timeout_seconds == 200
         assert cfg.default_handler_timeout_seconds == 90
         assert cfg.write_mode_handler_timeout_seconds == 800
         assert cfg.embedding_provider_timeout_seconds == 45
         assert cfg.reranker_timeout_seconds == 20
+        assert cfg.rest_query_handler_timeout_seconds == 210
 
 
 class TestServerConfigWiresSearchTimeoutsConfig:
@@ -95,6 +103,7 @@ class TestDictToServerConfigDeserializesSearchTimeouts:
                 "write_mode_handler_timeout_seconds": 750,
                 "embedding_provider_timeout_seconds": 40,
                 "reranker_timeout_seconds": 25,
+                "rest_query_handler_timeout_seconds": 220,
             },
         }
         config = manager._dict_to_server_config(config_dict)
@@ -108,6 +117,7 @@ class TestDictToServerConfigDeserializesSearchTimeouts:
         assert config.search_timeouts_config.write_mode_handler_timeout_seconds == 750
         assert config.search_timeouts_config.embedding_provider_timeout_seconds == 40
         assert config.search_timeouts_config.reranker_timeout_seconds == 25
+        assert config.search_timeouts_config.rest_query_handler_timeout_seconds == 220
 
     def test_dict_to_server_config_filters_unknown_keys_for_rolling_upgrade(
         self, tmp_path
@@ -196,6 +206,26 @@ class TestValidateConfigEnforcesSearchTimeoutsRanges:
         manager = self._manager(tmp_path)
         config = self._base_config(tmp_path)
         config.search_timeouts_config.reranker_timeout_seconds = 0
+        with pytest.raises(ValueError):
+            manager.validate_config(config)
+
+    def test_rest_query_handler_timeout_too_low_rejected(self, tmp_path) -> None:
+        """Issue #1435: rest_query_handler_timeout_seconds range mirrors
+        search_code_handler_timeout_seconds's 30-600 range exactly."""
+        import pytest
+
+        manager = self._manager(tmp_path)
+        config = self._base_config(tmp_path)
+        config.search_timeouts_config.rest_query_handler_timeout_seconds = 29
+        with pytest.raises(ValueError):
+            manager.validate_config(config)
+
+    def test_rest_query_handler_timeout_too_high_rejected(self, tmp_path) -> None:
+        import pytest
+
+        manager = self._manager(tmp_path)
+        config = self._base_config(tmp_path)
+        config.search_timeouts_config.rest_query_handler_timeout_seconds = 601
         with pytest.raises(ValueError):
             manager.validate_config(config)
 
