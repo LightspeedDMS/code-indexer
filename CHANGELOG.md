@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.73.0] - 2026-07-19
+
+### Fixed
+
+- **#1447**: `test_inline_repos_sync_job_params.py::test_submit_job_without_params_kwarg_succeeds` intermittently stuck at job status `"pending"` under full-chunk parallel test execution. Two distinct issues coincided: (1) `test_bug1063_part4_dashboard_bounded_fetch.py` constructed real SQLite-backed `BackgroundJobManager` instances without initializing the schema first and without ever shutting them down, producing real `"no such table: background_jobs"` errors from its own tests (a real bug, fixed, but not the actual cause of the target flake); (2) the real root cause -- `test_inline_auth_api_keys_hybrid_auth_1283.py`'s module-level `import code_indexer.server.app` triggers a module-level `create_app()` that installs a genuine `MemoryGovernor` singleton with a real background sampling thread, never torn down; since the target job's `operation_type` (`sync_repository`) is memory-heavy and the admission gate is enabled by default, the leaked governor's admission gate re-queued the job with backoff past the test's wait window. Fixed by initializing schema + registering shutdown finalizers in the first file, and eagerly stopping/clearing the leaked governor at module-import time in the second (co-located with the leak it reverses, since pytest imports all collected modules during collection before any test runs -- a module-local fixture teardown alone would fire too late if a sibling module ran first). Verified via multiple clean combined runs including an independently-constructed adversarial ordering. Test-suite reliability fix only, no production code touched.
+
 ## [11.72.0] - 2026-07-19
 
 ### Fixed
