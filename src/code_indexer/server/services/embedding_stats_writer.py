@@ -19,9 +19,20 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from queue import Empty, Full, Queue
-from typing import Any, Callable, ClassVar, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, List, Optional
 
-from code_indexer.server.services.embedding_call_stats import EmbeddingCallRecord
+if TYPE_CHECKING:
+    # Bug #1441: this is a type-annotation-only need (all annotations in
+    # this module are lazy strings via `from __future__ import
+    # annotations` above) -- NOT a runtime dependency. NoOpWriter (the
+    # last-resort, ZERO-dependency fallback writer) and EmbeddingStatsWriter
+    # itself must import cleanly on an interpreter with no postgres
+    # packages installed at all; a real top-level import here would pull
+    # in embedding_call_stats.py -> connection_pool.py -> `import psycopg`
+    # unconditionally, defeating that guarantee.
+    from code_indexer.server.services.embedding_call_stats import (
+        EmbeddingCallRecord,
+    )
 
 logger = logging.getLogger(__name__)
 

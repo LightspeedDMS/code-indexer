@@ -2862,22 +2862,49 @@ def _install_embedding_stats_writer_for_index() -> None:
     Lazy imports: server/psycopg machinery is only touched when the
     bootstrap dir env var is actually present (server-orchestrated child),
     never for standalone/solo CLI usage -- preserves the CLI import budget.
+
+    Bug #1441: the import of install_embedding_stats_writer_from_bootstrap
+    (and the call itself) is wrapped in a broad try/except -- on any
+    interpreter lacking psycopg (confirmed in production, where the
+    `cidx index` child subprocess's interpreter is separate from the
+    postgres-capable server venv), the bare import used to raise
+    ModuleNotFoundError BEFORE install_embedding_stats_writer_from_bootstrap's
+    own internal fail-open try/except ever got a chance to run, crashing
+    the entire `cidx index` invocation. This outer guard restores the
+    documented "FAIL-OPEN, never fail-loud" contract at the one boundary
+    that function's own try/except cannot cover: the act of importing/
+    calling it in the first place.
     """
     bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
     if bootstrap_dir:
-        from .server.storage.postgres.embedding_stats_child_wiring import (
-            install_embedding_stats_writer_from_bootstrap,
-        )
+        try:
+            from .server.storage.postgres.embedding_stats_child_wiring import (
+                install_embedding_stats_writer_from_bootstrap,
+            )
 
-        writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
-        # Best-effort final flush on normal process exit (sys.exit(0/1),
-        # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM, which
-        # is the accepted fail-open tradeoff documented on
-        # CrossProcessBootstrapWriter. Only registered when a real writer
-        # was installed (never for the NoOpWriter branch below, which has
-        # nothing to flush).
-        if hasattr(writer, "stop"):
-            atexit.register(writer.stop)
+            writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+            # Best-effort final flush on normal process exit (sys.exit(0/1),
+            # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM,
+            # which is the accepted fail-open tradeoff documented on
+            # CrossProcessBootstrapWriter. Only registered when a real
+            # writer was installed (never for the NoOpWriter branch below,
+            # which has nothing to flush).
+            if hasattr(writer, "stop"):
+                atexit.register(writer.stop)
+        except Exception as exc:
+            logger.warning(
+                "_install_embedding_stats_writer_for_index: failed to install "
+                "embedding-stats writer from bootstrap_dir=%s -- falling back "
+                "to NoOpWriter: %s",
+                bootstrap_dir,
+                exc,
+            )
+            from .server.services.embedding_stats_writer import (
+                EmbeddingStatsWriter,
+                NoOpWriter,
+            )
+
+            EmbeddingStatsWriter.set_active(NoOpWriter())
     else:
         from .server.services.embedding_stats_writer import (
             EmbeddingStatsWriter,
