@@ -13,6 +13,7 @@
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - When N agents edit the same uncommitted tree in parallel, each prompt must explicitly forbid git checkout/restore/reset/clean/stash outside its own file list
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
+- [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
