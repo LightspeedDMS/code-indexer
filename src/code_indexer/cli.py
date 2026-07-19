@@ -11246,6 +11246,12 @@ def server_install_auto_update(ctx, branch):
             console.print("❌ Error: Cannot detect current user", style="red")
             sys.exit(1)
 
+        # Bug #1440: resolve current_user's home directory for the unit's
+        # PATH= environment line (must include ~/.local/bin so the systemd
+        # unit's PATH search can find a pip/pipx `cidx` entrypoint there --
+        # systemd's compiled-in default PATH never includes it).
+        home_dir = os.path.expanduser(f"~{current_user}")
+
         # Get absolute path to current git repository
         try:
             repo_path = subprocess.check_output(
@@ -11261,6 +11267,7 @@ def server_install_auto_update(ctx, branch):
         # Read service template and substitute placeholders
         service_content = service_template.read_text()
         service_content = service_content.replace("{USER}", current_user)
+        service_content = service_content.replace("{HOME}", home_dir)
         service_content = service_content.replace("{REPO_PATH}", repo_path)
         service_content = service_content.replace("{BRANCH}", branch)
 
