@@ -2541,6 +2541,93 @@ class DeploymentExecutor:
             )
             return False
 
+    def _build_pip_install_cmd(self, python_path: str, tmpdir: str) -> list:
+        """Build a `pip install -e .` command for the given interpreter.
+
+        Bug #1442: factored out of `pip_install()` so `_ensure_cli_dependencies_
+        synced()` can target a wholly different interpreter (the CLI's
+        system-wide Python, resolved via `_get_cli_python_interpreter()`)
+        while reusing the IDENTICAL sudo / --break-system-packages decision
+        logic, instead of duplicating it.
+
+        Bug #1245: Use sudo only for system installs. For a user-install
+        layout (code-indexer in ~/.local), sudo would target /root/.local —
+        the wrong site-packages and read-only on immutable hosts.
+        Bug #1234: Probe with use_sudo matching the install so we test the
+        SAME pip binary (system pip for sudo installs, user pip for user
+        installs).
+        Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+        sudo's env_reset. For user installs, the environment is inherited
+        as-is.
+
+        Args:
+            python_path: Interpreter to install into.
+            tmpdir: Writable temp dir to pass through as TMPDIR (sudo path only).
+
+        Returns:
+            The full pip install command as a list of argv tokens.
+        """
+        use_sudo = not self._is_user_install(python_path)
+        pip_cmd = (
+            [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
+            if use_sudo
+            else [python_path, "-m", "pip", "install"]
+        )
+        if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
+            pip_cmd.append("--break-system-packages")
+        pip_cmd.extend(["-e", "."])
+        return pip_cmd
+
+    def _run_pip_install_cmd(self, pip_cmd: list) -> Any:
+        """Run a pip install command built by `_build_pip_install_cmd()`.
+
+        Bug #1442: factored out of `pip_install()` alongside `_build_pip_
+        install_cmd()` so `_ensure_cli_dependencies_synced()` reuses the same
+        belt-and-suspenders retry (if pip rejects --break-system-packages,
+        retry once without it) instead of duplicating it.
+
+        Args:
+            pip_cmd: Command built by `_build_pip_install_cmd()`.
+
+        Returns:
+            The subprocess.CompletedProcess of the final attempt (retried
+            attempt if the initial one was rejected for --break-system-packages).
+        """
+        result = subprocess.run(
+            pip_cmd,
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True,
+        )
+
+        # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+        if (
+            result.returncode != 0
+            and "--break-system-packages" in pip_cmd
+            and "no such option" in result.stderr
+        ):
+            logger.warning(
+                "pip install rejected --break-system-packages; retrying without flag",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+            result = subprocess.run(
+                retry_cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+        return result
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2552,57 +2639,9 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
-            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
-            # a writable temp dir under systemd PrivateTmp=yes.
             tmpdir = self._deploy_tmpdir()
-            # Bug #1245: Use sudo only for system installs. For a user-install layout
-            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
-            # site-packages and read-only on immutable hosts.
-            use_sudo = not self._is_user_install(python_path)
-            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
-            # pip binary (system pip for sudo installs, user pip for user installs).
-            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
-            # sudo's env_reset. For user installs, the environment is inherited as-is.
-            pip_cmd = (
-                [
-                    "sudo",
-                    "env",
-                    f"TMPDIR={tmpdir}",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                ]
-                if use_sudo
-                else [python_path, "-m", "pip", "install"]
-            )
-            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
-                pip_cmd.append("--break-system-packages")
-            pip_cmd.extend(["-e", "."])
-            result = subprocess.run(
-                pip_cmd,
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-            )
-
-            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
-            if (
-                result.returncode != 0
-                and "--break-system-packages" in pip_cmd
-                and "no such option" in result.stderr
-            ):
-                logger.warning(
-                    "pip install rejected --break-system-packages; retrying without flag",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
-                result = subprocess.run(
-                    retry_cmd,
-                    cwd=self.repo_path,
-                    capture_output=True,
-                    text=True,
-                )
+            pip_cmd = self._build_pip_install_cmd(python_path, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
 
             if result.returncode != 0:
                 logger.error(
@@ -2623,6 +2662,74 @@ class DeploymentExecutor:
             logger.exception(
                 f"Pip install exception: {e}",
                 extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _ensure_cli_dependencies_synced(self) -> bool:
+        """Ensure the CLI's system-wide Python env has ALL current dependencies.
+
+        Bug #1442: `pip_install()` runs `pip install -e .` on every deploy
+        cycle, but ONLY against `_get_server_python()` (the server's pipx
+        venv). The CLI's SEPARATE system-wide Python environment (resolved
+        via `_get_cli_python_interpreter()`, Bug #1392) is an editable
+        install against this SAME live repo checkout, but was never re-synced
+        after its one-time `cidx-first-boot.sh` install -- so its package
+        metadata drifts to whatever was installed long ago, missing any
+        dependency added since (confirmed on production via live
+        ModuleNotFoundError reproduction for openpyxl, PIL, pyotp,
+        frontmatter, qrcode, tree_sitter_languages, langfuse).
+
+        Orchestration: resolve CLI interpreter (None -> nothing to sync yet,
+        mirrors `_ensure_cli_hnswlib_capability()`'s early return) -> build
+        and run the SAME `pip install -e .` command shape `pip_install()`
+        uses (via the shared `_build_pip_install_cmd()`/`_run_pip_install_
+        cmd()` helpers) -> loud WARNING on failure.
+
+        Returns:
+            True if synced or nothing to sync yet; False if the pip install
+            genuinely failed or raised (non-fatal to the overall deploy --
+            never raises).
+        """
+        cli_python = self._get_cli_python_interpreter()
+        if cli_python is None:
+            logger.info(
+                "No system-wide 'cidx' CLI entrypoint found on PATH -- "
+                "skipping CLI dependency sync (nothing to sync yet)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        try:
+            tmpdir = self._deploy_tmpdir()
+            pip_cmd = self._build_pip_install_cmd(cli_python, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
+
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-211",
+                        f"Failed to sync CLI Python environment ({cli_python}) "
+                        f"dependencies via pip install -e .: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Successfully synced CLI Python environment ({cli_python}) "
+                "dependencies via pip install -e .",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    f"Exception while syncing CLI Python environment "
+                    f"({cli_python}) dependencies: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             )
             return False
 
@@ -3986,6 +4093,31 @@ class DeploymentExecutor:
                     "indexing subprocesses may still fail with AttributeError "
                     "on check_integrity()/repair_orphans(). See "
                     "docs/hnswlib-custom-build.md.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 1.8 (Bug #1442): Ensure the CLI's SEPARATE system-wide Python
+        # environment has ALL current dependencies, not just hnswlib. Step 2
+        # below (pip_install()) only ever targets _get_server_python() (the
+        # server's own pipx venv) -- the CLI's system-wide interpreter is an
+        # editable install against this SAME live repo checkout, but was
+        # never re-synced after its one-time cidx-first-boot.sh install, so
+        # it drifts to whatever was installed long ago (confirmed on
+        # production via live ModuleNotFoundError reproduction for openpyxl,
+        # PIL, pyotp, frontmatter, qrcode, tree_sitter_languages, langfuse).
+        #
+        # Non-fatal (same rationale as Step 1.7): this targets a wholly
+        # INDEPENDENT Python environment from the one cidx-server itself
+        # runs under, so a failure here must not block the server's own
+        # restart/config steps, which are unaffected by it.
+        if not self._ensure_cli_dependencies_synced():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    "CLI system-wide dependency sync failed -- indexing "
+                    "subprocesses may still fail with ModuleNotFoundError for "
+                    "dependencies added since the CLI's last install.",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

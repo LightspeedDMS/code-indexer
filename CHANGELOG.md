@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.67.0] - 2026-07-19
+
+### Fixed
+
+- **#1442**: production's `cidx` CLI runs under a genuinely separate Python environment from the server (its own pipx venv) -- the auto-updater's deploy pipeline only ever ran `pip install -e .` against the server's environment, never the CLI's, so the CLI's dependencies froze at whatever the host's one-time bootstrap installed and silently drifted from the server's as the codebase grew. Confirmed on production via live investigation: `openpyxl`, `PIL`, `pyotp`, `python-frontmatter`, `qrcode`, `tree_sitter_languages`, and `langfuse` all missing under the CLI's interpreter despite being current, required dependencies. Fixed with a new self-heal step, `_ensure_cli_dependencies_synced()`, mirroring the existing Bug #1392 CLI-hnswlib-sync pattern: resolves the CLI's interpreter via the same `_get_cli_python_interpreter()` discovery, runs `pip install -e .` against it on every deploy cycle, non-fatal on failure (an independent environment's failure must never block the server's own restart). `pip_install()`'s sudo/`--break-system-packages` command construction was factored into shared helpers so both call sites stay in sync rather than duplicating that logic.
+
 ## [11.66.0] - 2026-07-19
 
 ### Fixed

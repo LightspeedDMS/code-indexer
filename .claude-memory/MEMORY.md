@@ -14,6 +14,7 @@
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
+- [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - When install-footprint purity conflicts with reliability (e.g. an "unneeded" extra dependency), default to installing it — recurrence-of-bug-class elimination beats minimal footprint
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
