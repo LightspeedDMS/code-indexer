@@ -201,6 +201,14 @@ def _pending_row(job_id, op, metadata, created_at):
 
 
 class TestPodPullRoundTrip:
+    def setup_method(self):
+        # Bug #1448: a prior, unrelated test may have left the module-level
+        # memory_governor singleton installed and pressured (RED band).
+        # Reset it BEFORE each test runs (not just after) so this class's
+        # assumption of "no memory pressure" always holds regardless of
+        # test ordering/pollution from other tests in the same worker.
+        mg.clear_memory_governor()
+
     def teardown_method(self):
         mg.clear_memory_governor()
 
@@ -366,6 +374,11 @@ def simple_job() -> Dict[str, Any]:
 
 class TestPodPullRoundTripRealSubmitBug1430:
     def setup_method(self):
+        # Bug #1448: reset the module-level memory_governor singleton BEFORE
+        # the test runs (not just in teardown_method below) so a pressured
+        # governor left behind by a prior, unrelated test cannot leak into
+        # this class's claim/execute/complete round trip.
+        mg.clear_memory_governor()
         self.tmp = tempfile.mkdtemp()
         self.db_path = str(Path(self.tmp) / "jobs.db")
         _create_schema(self.db_path)
@@ -439,3 +452,106 @@ class TestPodPullRoundTripRealSubmitBug1430:
         assert seen == {"alias": "repoA"}
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1448: setup-time (not just teardown-time) memory-governor reset.
+#
+# TestPodPullRoundTrip / TestPodPullRoundTripRealSubmitBug1430 only cleared
+# the module-level memory_governor singleton in teardown_method. If an
+# earlier, unrelated test in the same pytest worker process left the
+# singleton pointing at a pressured (RED-band) governor object and never
+# cleaned it up, the FIRST test method run in either class here would
+# inherit that leftover pressured governor -- DistributedJobClaimer's
+# fail-open gate only bypasses the check when the governor is None; an
+# actually-installed pressured governor object blocks the claim -- causing
+# `loop._process_one_job()` to return False instead of True.
+# ---------------------------------------------------------------------------
+
+
+class TestSetupMethodClearsMemoryPressureBug1448:
+    def teardown_method(self):
+        mg.clear_memory_governor()
+
+    def test_pod_pull_round_trip_setup_clears_leftover_pressure(self):
+        # Simulate a prior, unrelated test leaving the module-level governor
+        # singleton installed and pressured: a freshly constructed
+        # MemoryGovernor starts in band=RED with _first_tick=True, so
+        # admission_allowed() returns False until a real sample arrives.
+        leftover_pressured_governor = mg.MemoryGovernor(start_sampler=False)
+        assert leftover_pressured_governor.band == mg.MemoryBand.RED
+        mg.set_memory_governor(leftover_pressured_governor)
+
+        # This is exactly what pytest does before every test method in
+        # TestPodPullRoundTrip. Bug #1448: that class had no setup_method,
+        # so nothing cleared the leftover pressured governor before the
+        # test body ran.
+        instance = TestPodPullRoundTrip()
+        instance.setup_method()
+
+        # Fix under test: setup_method must clear the leftover governor so
+        # the claimer's fail-open gate (governor is None) applies, exactly
+        # like it does at the start of a fresh pytest worker.
+        assert mg.get_memory_governor() is None
+
+        # And the actual round-trip must now succeed despite the pollution
+        # left behind by "the prior test".
+        now = datetime.now(timezone.utc)
+        row = _pending_row("j1", "add_golden_repo", {"alias": "repoA"}, now)
+        table = _ClaimerJobsTable([row], now)
+        claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-1")
+
+        def add_executor(metadata, progress_callback):
+            return {"success": True, "alias": metadata["alias"]}
+
+        loop = IndexJobClaimLoop(
+            claimer=claimer,
+            dispatch={"add_golden_repo": add_executor},
+            node_id="node-1",
+        )
+        assert loop._process_one_job() is True, (
+            "Bug #1448: a memory-pressured governor leftover from a prior "
+            "test leaked into TestPodPullRoundTrip because it had no "
+            "setup_method resetting the singleton -- only a teardown_method."
+        )
+
+    def test_real_submit_round_trip_setup_clears_leftover_pressure(self):
+        # Same leftover-pollution scenario, but against
+        # TestPodPullRoundTripRealSubmitBug1430, whose setup_method builds a
+        # real SQLite-backed JobTracker/BackgroundJobManager but (before the
+        # fix) never cleared the memory-governor singleton either.
+        leftover_pressured_governor = mg.MemoryGovernor(start_sampler=False)
+        mg.set_memory_governor(leftover_pressured_governor)
+
+        instance = TestPodPullRoundTripRealSubmitBug1430()
+        try:
+            instance.setup_method()
+
+            assert mg.get_memory_governor() is None, (
+                "Bug #1448: TestPodPullRoundTripRealSubmitBug1430.setup_method "
+                "must clear a leftover pressured memory-governor singleton."
+            )
+
+            job_id = instance.manager.submit_job(
+                "add_golden_repo",
+                simple_job,
+                submitter_username="admin",
+                is_admin=True,
+                repo_alias="repoA",
+                metadata={"alias": "repoA"},
+            )
+            row = _real_submitted_pending_row(instance.db_path, job_id)
+            table = _ClaimerJobsTable([row], datetime.now(timezone.utc))
+            claimer = DistributedJobClaimer(pool=_make_pool(table), node_id="node-2")
+
+            def add_executor(metadata, progress_callback):
+                return {"success": True, "alias": metadata["alias"]}
+
+            loop = IndexJobClaimLoop(
+                claimer=claimer,
+                dispatch={"add_golden_repo": add_executor},
+                node_id="node-2",
+            )
+            assert loop._process_one_job() is True
+        finally:
+            instance.teardown_method()

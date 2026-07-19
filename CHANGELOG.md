@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.72.0] - 2026-07-19
+
+### Fixed
+
+- **#1448**: `test_pod_pull_work_stealing_roundtrip_bug1424.py`'s `TestPodPullRoundTrip` and `TestPodPullRoundTripRealSubmitBug1430` classes only cleared the global `MemoryGovernor` singleton in teardown, never in setup. If an earlier test in the same pytest worker left a pressured governor installed, `DistributedJobClaimer.claim_next_job()`'s memory gate blocked job admission, causing `_process_one_job()` to return `False` instead of `True`. Confirmed `clear_memory_governor()` (sets the singleton to `None`) is sufficient to fix this without injecting a permissive sample, since `claim_next_job()` fails open when no governor is installed -- a fresh `MemoryGovernor()` instance, by contrast, genuinely starts pressured (`band=RED`) and would still block. Added the reset to both classes' setup paths; verified via a genuine before/after reproduction (temporarily reverted, confirmed the exact original failure, restored the fix, confirmed it resolves). Test-suite reliability fix only, no production code touched.
+
 ## [11.71.0] - 2026-07-19
 
 ### Fixed
