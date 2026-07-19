@@ -100,6 +100,32 @@ class TestIsAllowlisted:
         entry = _make_entry(message=first_pattern.upper())
         assert is_allowlisted(entry) is True
 
+    def test_bug1421_temporal_snapshot_reassembly_retry_warning_is_allowlisted(self):
+        """Issue #1445: the Bug #1421 concurrent-checkpoint-rewrite retry WARNING
+        (temporal_snapshot_store.py's read_temporal_snapshot()) is the intentional,
+        already-shipped self-healing retry path -- not an error condition -- and
+        must be allowlisted so the zero-tolerance log-audit gate does not fail
+        Phase 3 when this rare race actually triggers during a real e2e run.
+
+        This is the exact message shape rendered by the logger.warning(...) call
+        at temporal_snapshot_store.py:211-219, with a real job UUID and
+        attempt/page numbers substituted in place of the %s/%d format fields.
+        """
+        message = (
+            "temporal snapshot job 3f9c1a2e-8b7d-4e11-9a2c-5d6e7f8a9b0c: "
+            "concurrent checkpoint rewrite detected during reassembly "
+            "(attempt 1/5) -- retrying from page 0 against the latest write: "
+            "Temporal snapshot for job "
+            "'3f9c1a2e-8b7d-4e11-9a2c-5d6e7f8a9b0c' total_pages changed "
+            "mid-reassembly (25 -> 30) while reading page 15."
+        )
+        entry = _make_entry(
+            level="WARNING",
+            message=message,
+            source="code_indexer.server.services.temporal_snapshot_store",
+        )
+        assert is_allowlisted(entry) is True
+
 
 # ==========================================================================
 # AC2 + Watermark: filter_new_entries tests
