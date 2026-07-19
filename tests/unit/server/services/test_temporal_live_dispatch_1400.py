@@ -266,6 +266,52 @@ class TestSlowQueryDegradesToHandoff:
             "own 5s completion delay"
         )
 
+    def test_rest_configured_deadline_caps_wait_shorter_than_generous_temporal_inline_wait(
+        self, tmp_path, payload_cache, bgm
+    ):
+        """Issue #1435: REST's routers/inline_query.py now computes
+        handler_deadline_monotonic = time.monotonic() +
+        rest_query_handler_timeout_seconds (mirroring MCP's protocol.py
+        _invoke_handler exactly) and threads it through instead of the
+        previous hardcoded None. This test reproduces that exact REST-side
+        computation with rest_query_handler_timeout_seconds configured
+        SMALLER than the generous temporal_inline_wait_seconds default
+        (60.0s) and proves the effective waiter_deadline inside
+        execute_live_temporal_search is bound by the REST timeout, not by
+        the (larger) inline wait -- closing the functional gap the issue
+        describes without requiring any route-cancellation machinery."""
+        from code_indexer.server.services.temporal_live_dispatch import (
+            execute_live_temporal_search,
+        )
+
+        worker_input = _make_worker_input(tmp_path, query_text="rest-capped query")
+        rest_query_handler_timeout_seconds = 0.15
+        response_reserve_seconds = 0.05
+        handler_deadline_monotonic = (
+            time.monotonic() + rest_query_handler_timeout_seconds
+        )
+        started = time.monotonic()
+        result = execute_live_temporal_search(
+            worker_input=worker_input,
+            background_job_manager=bgm,
+            payload_cache=payload_cache,
+            access_filtering_service=_FakeAccessFilteringService(),
+            is_admin=False,
+            inline_wait_seconds=60.0,  # temporal_inline_wait_seconds default -- generous
+            handler_deadline_monotonic=handler_deadline_monotonic,
+            response_reserve_seconds=response_reserve_seconds,
+            dedup_cache=TemporalDedupCache(),
+            worker_fn=_make_slow_worker(payload_cache, delay_seconds=5.0),
+        )
+        elapsed = time.monotonic() - started
+
+        assert result["status"] == "waiting"
+        assert elapsed < 5.0, (
+            f"waiter ran for {elapsed:.2f}s -- the REST-configured "
+            "handler_deadline_monotonic should have capped it well before "
+            "inline_wait_seconds=60 or the worker's own 5s completion delay"
+        )
+
 
 class TestZeroInlineWaitImmediateHandoffContract:
     """Bug investigation (recurrence of the forced-deferral E2E race in

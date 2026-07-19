@@ -61,6 +61,19 @@ def test_template_posts_to_admin_config_search_timeouts():
     assert 'action="/admin/config/search_timeouts"' in section
 
 
+def test_template_contains_rest_query_handler_timeout_input():
+    """Issue #1435: the 7th SearchTimeoutsConfig field must be editable
+    alongside its siblings, following the exact pattern of the other 5
+    integer fields (not the float temporal_inline_wait_seconds field)."""
+    section = _extract_section(_read_template())
+    assert 'name="rest_query_handler_timeout_seconds"' in section
+
+
+def test_template_displays_rest_query_handler_timeout_value():
+    section = _extract_section(_read_template())
+    assert "config.search_timeouts.rest_query_handler_timeout_seconds" in section
+
+
 def test_default_handler_timeout_label_notes_sync_dispatch_only():
     """The Web UI label for default_handler_timeout_seconds specifically
     (not just the section generally) must explicitly note the sync/async

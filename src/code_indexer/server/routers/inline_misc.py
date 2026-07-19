@@ -1,18 +1,24 @@
 """
 Miscellaneous and system route handlers extracted from inline_routes.py.
 
-Part of the inline_routes.py modularization effort. Contains 6 route handlers:
+Part of the inline_routes.py modularization effort. Contains 7 route handlers:
 - GET /health
+- GET /healthz
 - GET /cache/stats
 - GET /api/system/health
 - GET /.well-known/oauth-authorization-server
 - GET /.well-known/oauth-protected-resource
 - GET /favicon.ico
 
-Zero behavior change: same paths, methods, response models, and handler logic.
+Zero behavior change to the pre-existing 6 handlers: same paths, methods,
+response models, and handler logic. GET /healthz is new (Bug #1433
+follow-up) -- see its docstring below.
 """
 
 import logging
+import threading
+import time
+from typing import Optional
 
 from fastapi import (
     FastAPI,
@@ -21,8 +27,9 @@ from fastapi import (
     status,
     Depends,
 )
+from fastapi.responses import JSONResponse
 
-from ..models.api_models import HealthCheckResponse
+from ..models.api_models import HealthCheckResponse, HealthStatus
 from ..auth import dependencies
 from ..logging_utils import format_error_log
 from ..middleware.correlation import get_correlation_id
@@ -38,6 +45,75 @@ from ..app_helpers import (
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# Security fix (Bug #1433 follow-up): /healthz is deliberately unauthenticated
+# AND AdmissionControlMiddleware exempts any path starting with "/health"
+# (so "/healthz".startswith("/health") bypasses the one global backpressure
+# mechanism) -- without a cache here, an unauthenticated caller could flood
+# this route at unbounded concurrency, each request forking a subprocess
+# (golden-repos readability probe) and opening several fresh DB connections.
+# This short-TTL, process-local cache is scoped ONLY to /healthz's own
+# consumption of the computed status -- health_service.get_system_health()
+# itself is NOT touched/cached, so /health and /api/system/health (whose
+# docstrings explicitly say "uncached for real-time data") are unaffected.
+# 2 seconds is transparent to a real load balancer's probe cadence
+# (typically every 2-10s per backend) while collapsing a flood into
+# roughly one real computation per interval.
+_HEALTHZ_CACHE_TTL_SECONDS = 2.0
+_healthz_cache_lock = threading.Lock()
+_healthz_cached_status: Optional[HealthStatus] = None
+_healthz_cached_at: float = 0.0
+# Private alias so tests can control elapsed time deterministically by
+# patching ONLY this reference -- never the process-global time.monotonic,
+# which the ASGI test client's event loop also depends on for scheduling
+# (patching it globally with a finite side_effect list hangs the loop).
+_healthz_monotonic = time.monotonic
+
+
+def _reset_healthz_cache() -> None:
+    """Test-support helper: clears the /healthz TTL cache state so tests
+    don't leak a cached status across test cases. Not used by production
+    code paths."""
+    global _healthz_cached_status, _healthz_cached_at
+    with _healthz_cache_lock:
+        _healthz_cached_status = None
+        _healthz_cached_at = 0.0
+
+
+def _get_healthz_status() -> HealthStatus:
+    """Returns the overall health status for the /healthz probe, served
+    from the short-TTL cache above whenever a prior real computation is
+    still fresh.
+
+    The lock only guards the small shared-state read/write -- it is
+    released before (and re-acquired after) the potentially slow real
+    health_service.get_system_health() call, so concurrent requests never
+    block on each other waiting for that computation; a benign race on a
+    cache miss can still result in more than one real computation, which
+    is an acceptable, self-correcting cost (not a correctness issue) for
+    this pure per-process performance optimization.
+
+    On a cache miss, calls health_service.get_system_health() for real and
+    updates the cache only on success -- if that call raises, the
+    exception propagates uncached (the cache is left exactly as it was),
+    so the very next request retries for real instead of being stuck
+    serving a stale error.
+    """
+    global _healthz_cached_status, _healthz_cached_at
+    now = _healthz_monotonic()
+    with _healthz_cache_lock:
+        if (
+            _healthz_cached_status is not None
+            and (now - _healthz_cached_at) < _HEALTHZ_CACHE_TTL_SECONDS
+        ):
+            return _healthz_cached_status
+
+    status_value: HealthStatus = health_service.get_system_health().status
+
+    with _healthz_cache_lock:
+        _healthz_cached_status = status_value
+        _healthz_cached_at = now
+    return status_value
 
 
 def register_misc_routes(
@@ -191,6 +267,65 @@ def register_misc_routes(
                 "uptime": None,
                 "active_jobs": 0,
             }
+
+    # Public liveness/readiness probe for load balancers (Bug #1433 follow-up).
+    # Both /health and /api/system/health require authentication, so an
+    # unauthenticated HAProxy `httpchk` probe never sees the real health
+    # JSON -- the golden-repos storage-failure signal added for Bug #1433
+    # never reaches the load balancer's up/down decision. This endpoint is
+    # the standard industry pattern: a minimal, public liveness probe
+    # separate from the authenticated detailed-diagnostics endpoint.
+    @app.get("/healthz")
+    def healthz():
+        """
+        Public, unauthenticated liveness/readiness probe for load balancers.
+
+        Deliberately minimal: returns ONLY {"status": ...} -- never the
+        detailed services/system/failure_reasons fields exposed by the
+        authenticated /api/system/health endpoint. Any additional field
+        here would be an unnecessary information-disclosure surface for an
+        unauthenticated caller.
+
+        Maps the computed overall status to the HTTP status code itself
+        (200 for healthy/degraded, 503 for unhealthy) so a load balancer
+        configured with a plain `option httpchk GET /healthz` -- with no
+        body-parsing `http-check expect` directive -- still routes
+        correctly. Degraded is still serviceable and is NOT drained.
+
+        Fails safe: if the underlying health check itself raises, this
+        never propagates a raw 500/traceback to an unauthenticated caller
+        -- it logs the error and returns a conservative 503 "unhealthy".
+
+        Served from a short-TTL, process-local cache (see
+        _get_healthz_status() above) so an unauthenticated flood cannot
+        trigger unbounded subprocess/DB work per request -- this route is
+        exempt from AdmissionControlMiddleware's backpressure (any path
+        starting with "/health" bypasses it), so the cache is this route's
+        own amplification guard.
+        """
+        try:
+            overall_status = _get_healthz_status()
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-060",
+                    f"Liveness probe (/healthz) failed: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": HealthStatus.UNHEALTHY.value},
+            )
+
+        if overall_status == HealthStatus.UNHEALTHY:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": overall_status.value},
+            )
+
+        return {"status": overall_status.value}
 
     # Cache statistics endpoint (Story #526: HNSW Index Cache monitoring)
     @app.get("/cache/stats")
