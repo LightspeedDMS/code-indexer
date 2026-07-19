@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.70.0] - 2026-07-19
+
+### Fixed
+
+- **#1445**: `e2e-automation.sh` Phase 3's mandatory post-test log-audit gate intermittently failed on a single non-allowlisted WARNING from `temporal_snapshot_store` -- the intentional, already-shipped retry-and-log behavior from #1421 (temporal snapshot reassembly race detection, released as v11.60.0). The underlying test suite passed cleanly; only the zero-tolerance log audit flagged it. Added `"concurrent checkpoint rewrite detected during reassembly"` to `LOG_AUDIT_ALLOWLIST`, verified narrow enough that it cannot mask the distinct terminal `TemporalSnapshotReassemblyError` (all-retries-exhausted) failure message, which remains correctly non-allowlisted.
+
 ## [11.69.0] - 2026-07-19
 
 ### Fixed
