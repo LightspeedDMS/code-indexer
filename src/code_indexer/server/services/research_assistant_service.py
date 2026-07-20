@@ -1287,6 +1287,9 @@ class ResearchAssistantService:
         Return allow rules for Claude CLI permission enforcement.
 
         Story #554: scoped Write/Edit for cidx-meta.
+        Bug #1451: the bare Write(path) rule from Story #554 is removed —
+        Claude CLI >= 2.1.215 rejects it outright for file-permission checks
+        and only honors Edit(path) rules, which already cover file edits.
         Story #872: adds cidx-db-query.sh for SQLite/PostgreSQL access.
         Story #929 Item #17: Bash(systemctl restart cidx-server) removed — restart authority
         is delegated to the auto-updater flag; the RA has no security access for restarts.
@@ -1300,7 +1303,11 @@ class ResearchAssistantService:
             "Glob",
             "Grep",
             "TodoWrite",
-            f"Write({cidx_meta_path}/**)",
+            # Bug #1451: bare Write(path) allow rules are hard-rejected by
+            # Claude CLI >= 2.1.215 for file-permission checks ("only
+            # Edit(path) rules are matched"). The Edit(...) rule below
+            # already grants the file-editing access this redundant Write
+            # rule was attempting to grant, so it is intentionally omitted.
             f"Edit({cidx_meta_path}/**)",
         ]
         if cleanup_script_rule is not None:
