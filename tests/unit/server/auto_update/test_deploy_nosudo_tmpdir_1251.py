@@ -176,7 +176,7 @@ def _run_execute_with_real_pip_steps(
             )
         is_pybind11 = "pybind11" in cmd
         is_hnswlib_build = "--force-reinstall" in cmd
-        is_pip_install_dash_e = "-e" in cmd and "." in cmd
+        is_pip_install_dash_e = "-e" in cmd and ".[cluster]" in cmd
         if is_pybind11 or is_hnswlib_build or is_pip_install_dash_e:
             tmpdir_at_call[tuple(cmd)] = os.environ.get("TMPDIR")
         return Mock(returncode=0, stdout="", stderr="")
@@ -323,7 +323,7 @@ class TestNoSudoSubprocessesInheritTmpdir:
         assert result is True, f"execute() must succeed in this scenario; calls={calls}"
         expected = executor._deploy_tmpdir()  # type: ignore[attr-defined]
         pip_install_calls = [
-            cmd for cmd in tmpdir_at_call if "-e" in cmd and "." in cmd
+            cmd for cmd in tmpdir_at_call if "-e" in cmd and ".[cluster]" in cmd
         ]
         assert pip_install_calls, (
             f"Expected a pip install -e . call; all calls: {calls}"
