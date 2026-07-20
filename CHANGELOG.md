@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.75.0] - 2026-07-19
+
+### Fixed
+
+- **#1451**: Research Assistant Claude CLI invocations were failing 100% of the time in production with `Claude CLI failed: Permission allow rule (...): Write(/opt/code-indexer/.cidx-server/golden-repos/cidx-meta/**) is not matched by file permission checks — only Edit(path) rules are.`. Root cause: `_allow_rules()` (`server/services/research_assistant_service.py`) has, since Story #554, emitted both a `Write({cidx_meta_path}/**)` and an `Edit({cidx_meta_path}/**)` allow rule scoped to the cidx-meta working directory. Claude Code CLI >= 2.1.215 now hard-rejects the bare `Write(path)` rule format for file-permission checks -- per the CLI's own error message, only `Edit(path)` rules are honored, and they already cover all file-editing tools. Fixed by removing the redundant, now-fatal `Write(...)` rule; the retained `Edit(...)` rule grants the same file-editing access unaided. Confirmed via `grep -rln '"Write('` across `src/` that this was the only bare `Write(path)` rule construction site in the codebase. Updated the stale regression test (`tests/unit/server/services/test_research_assistant_permissions_bug738.py::TestExistingAllowRulesPreserved`) that previously asserted the Write rule's presence to instead assert its absence, closing the gap that let this class of bug ship undetected.
+
 ## [11.74.0] - 2026-07-19
 
 ### Fixed
