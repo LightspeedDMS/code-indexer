@@ -349,7 +349,7 @@ class TestPipInstallUsesServerPython:
             "install",
             "--break-system-packages",
             "-e",
-            ".",
+            ".[cluster]",
         ]
 
     def test_pip_install_falls_back_when_get_server_python_fails(self, executor):

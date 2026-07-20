@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.74.0] - 2026-07-19
+
+### Fixed
+
+- **#1450**: `_build_pip_install_cmd()` (`server/auto_update/deployment_executor.py`, factored out by #1442) always built a plain `pip install -e .` command shared by BOTH `pip_install()` (server's pipx venv, every deploy cycle) and `_ensure_cli_dependencies_synced()` (CLI's separate system-Python interpreter, #1442's self-heal, every deploy cycle). `psycopg[binary]`/`psycopg-pool` are declared under `[project.optional-dependencies] cluster` in `pyproject.toml` -- NOT the base `dependencies` list -- so a bare `-e .` never installed them into the CLI's interpreter. `server/storage/postgres/connection_pool.py` does an unconditional module-level `import psycopg` regardless of storage_mode (a deliberate, already-documented invariant), transitively imported during `cidx index` execution via `cli.py`'s `_install_embedding_stats_writer_for_index()`, so every `cidx index` subprocess run through the CLI's system-Python interpreter crashed with `ModuleNotFoundError: No module named 'psycopg'` (wrapped as `RuntimeError: semantic indexing on source failed for ...`). Confirmed live in production (recurring `cidx-meta-global`/`k8s-wildfly-sandboxes-*-global` refresh failures) and reproduced on a solo staging VM running the exact same code at the exact same version via the real automated deploy mechanism. Fixed by requesting the `cluster` extras group (`.[cluster]` instead of bare `.`) in this single shared helper, closing the gap for both callers at once, self-healing on the next deploy cycle with zero operator action.
+
 ## [11.73.0] - 2026-07-19
 
 ### Fixed

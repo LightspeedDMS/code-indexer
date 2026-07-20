@@ -267,6 +267,91 @@ class TestSharedPipInstallHelperReuse:
         assert expected_cmd[0] != "sudo", "User install must NOT use sudo"
 
 
+class TestBuildPipInstallCmdClusterExtras:
+    """Bug #1450: `_build_pip_install_cmd()` must request the `cluster`
+    extras group (`.[cluster]`) instead of a bare `.`, in BOTH the sudo
+    (system-install) and non-sudo (user-install) branches.
+
+    `psycopg[binary]`/`psycopg-pool` are declared under
+    `[project.optional-dependencies] cluster` in pyproject.toml -- NOT the
+    base `dependencies` list -- so a plain `pip install -e .` never pulls
+    them in. `server/storage/postgres/connection_pool.py` does an
+    unconditional module-level `import psycopg` (a deliberate, documented
+    invariant, regardless of storage_mode), and `cli.py`'s
+    `_install_embedding_stats_writer_for_index()` transitively imports it
+    during `cidx index` execution. Because this single shared helper backs
+    BOTH `pip_install()` (server's pipx venv) and
+    `_ensure_cli_dependencies_synced()` (CLI's system-Python interpreter,
+    Bug #1442's self-heal), the CLI's system-Python interpreter never got
+    psycopg -- confirmed live in production (recurring
+    `cidx-meta-global`/`k8s-wildfly-sandboxes-*-global` refresh failures)
+    and reproduced on a solo staging VM via the real automated deploy
+    mechanism: `ModuleNotFoundError: No module named 'psycopg'`, wrapped as
+    `RuntimeError: semantic indexing on source failed for ...`.
+    """
+
+    def test_sudo_branch_uses_cluster_extras(
+        self, tmp_path: Path, patched_data_dir: Path
+    ) -> None:
+        interpreter = _setup_cli_entrypoint(tmp_path)
+        # A nonexistent, non-"/.local/" parent directory under tmp_path is
+        # both unwritable (os.access returns False for a missing path) and
+        # never created by this test -> _is_user_install() returns False
+        # (system install) -> sudo branch, without hardcoding any real
+        # environment-specific system path.
+        install_path = str(
+            tmp_path
+            / "no-such-system-root"
+            / "site-packages"
+            / "code_indexer"
+            / "__init__.py"
+        )
+        calls: list = []
+
+        executor = _executor(tmp_path)
+        with (
+            patch("shutil.which", return_value=str(tmp_path / "cidx")),
+            patch(
+                "subprocess.run",
+                side_effect=_make_explicit_dispatch(calls, install_path),
+            ),
+        ):
+            cmd = executor._build_pip_install_cmd(
+                str(interpreter), executor._deploy_tmpdir()
+            )
+
+        assert cmd[0] == "sudo", "System install must use sudo"
+        assert cmd[-2:] == ["-e", ".[cluster]"], (
+            f"Expected the trailing tokens to be -e .[cluster] (Bug #1450); got: {cmd}"
+        )
+
+    def test_user_install_branch_uses_cluster_extras(
+        self, tmp_path: Path, patched_data_dir: Path
+    ) -> None:
+        interpreter = _setup_cli_entrypoint(tmp_path)
+        install_dir = tmp_path / "editable" / "code_indexer"
+        install_dir.mkdir(parents=True)
+        install_path = str(install_dir / "__init__.py")
+        calls: list = []
+
+        executor = _executor(tmp_path)
+        with (
+            patch("shutil.which", return_value=str(tmp_path / "cidx")),
+            patch(
+                "subprocess.run",
+                side_effect=_make_explicit_dispatch(calls, install_path),
+            ),
+        ):
+            cmd = executor._build_pip_install_cmd(
+                str(interpreter), executor._deploy_tmpdir()
+            )
+
+        assert cmd[0] != "sudo", "User install must NOT use sudo"
+        assert cmd[-2:] == ["-e", ".[cluster]"], (
+            f"Expected the trailing tokens to be -e .[cluster] (Bug #1450); got: {cmd}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # execute() wiring -- mirrors the established pattern from
 # test_deployment_executor_hnswlib_cli_sync_1392.py's _NOOP_EXECUTE_STEPS /

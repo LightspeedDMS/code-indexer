@@ -2542,13 +2542,31 @@ class DeploymentExecutor:
             return False
 
     def _build_pip_install_cmd(self, python_path: str, tmpdir: str) -> list:
-        """Build a `pip install -e .` command for the given interpreter.
+        """Build a `pip install -e .[cluster]` command for the given interpreter.
 
         Bug #1442: factored out of `pip_install()` so `_ensure_cli_dependencies_
         synced()` can target a wholly different interpreter (the CLI's
         system-wide Python, resolved via `_get_cli_python_interpreter()`)
         while reusing the IDENTICAL sudo / --break-system-packages decision
         logic, instead of duplicating it.
+
+        Bug #1450: requests the `cluster` extras group (`.[cluster]`)
+        instead of a bare `.`. `psycopg[binary]`/`psycopg-pool` are declared
+        under `[project.optional-dependencies] cluster` in pyproject.toml --
+        NOT the base `dependencies` list -- so a plain `-e .` never installs
+        them. `server/storage/postgres/connection_pool.py` does an
+        unconditional module-level `import psycopg` regardless of
+        storage_mode (a deliberate, documented invariant), and it is
+        transitively imported during `cidx index` execution. Since this
+        helper backs BOTH `pip_install()` (server's pipx venv) and
+        `_ensure_cli_dependencies_synced()` (CLI's system-Python
+        interpreter), the CLI interpreter never received psycopg --
+        confirmed live in production (recurring `cidx-meta-global`/
+        `k8s-wildfly-sandboxes-*-global` refresh failures) and reproduced on
+        a solo staging VM via the real automated deploy mechanism:
+        `ModuleNotFoundError: No module named 'psycopg'`. `.[cluster]` is a
+        single argv token (no shell involved -- passed directly to
+        `subprocess.run` as a list), so no quoting/escaping concerns.
 
         Bug #1245: Use sudo only for system installs. For a user-install
         layout (code-indexer in ~/.local), sudo would target /root/.local —
@@ -2583,7 +2601,7 @@ class DeploymentExecutor:
         )
         if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
             pip_cmd.append("--break-system-packages")
-        pip_cmd.extend(["-e", "."])
+        pip_cmd.extend(["-e", ".[cluster]"])
         return pip_cmd
 
     def _run_pip_install_cmd(self, pip_cmd: list) -> Any:
