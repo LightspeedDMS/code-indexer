@@ -8,10 +8,11 @@ and git diff-index for change detection.
 import logging
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from .update_strategy import UpdateStrategy
 
 
@@ -88,14 +89,20 @@ class GitPullUpdater(UpdateStrategy):
     Uses git diff-index for change detection and git pull for updates.
     """
 
-    def __init__(self, repo_path: str):
+    def __init__(self, repo_path: str, git_backend: Optional[GitBackend] = None):
         """
         Initialize git pull updater.
 
         Args:
             repo_path: Path to git repository
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                locally via utils.git_runner), which reproduces today's behavior;
+                server wiring can inject the configured backend instead.
         """
         self.repo_path = Path(repo_path)
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
 
         if not self.repo_path.exists():
             # Bug #1338: this is the ORPHAN case (registry row present, clone
@@ -118,37 +125,40 @@ class GitPullUpdater(UpdateStrategy):
             RuntimeError: If git command fails
         """
         try:
-            # First, fetch latest refs from remote
-            fetch_result = subprocess.run(
-                ["git", "fetch", "origin"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=build_non_interactive_git_env(),
-            )
-
-            if fetch_result.returncode != 0:
+            # First, fetch latest refs from remote.
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's `git fetch origin`, with the same non-interactive SSH env).
+            # The seam raises CalledProcessError on a non-zero exit, so it is
+            # caught INLINE here to rebuild the identical classification +
+            # GitFetchError shape the returncode check used to produce.
+            try:
+                self._git_backend.fetch(str(self.repo_path), timeout=30)
+            except subprocess.CalledProcessError as fetch_exc:
                 # Story #295: Raise instead of silently returning False so the
                 # refresh scheduler can classify the error and trigger re-clone
                 # for corruption or after repeated transient failures.
                 from .git_error_classifier import classify_fetch_error
 
-                category = classify_fetch_error(fetch_result.stderr)
+                category = classify_fetch_error(fetch_exc.stderr)
                 logger.warning(
                     f"Git fetch failed for {self.repo_path} "
-                    f"(category={category}): {fetch_result.stderr}"
+                    f"(category={category}): {fetch_exc.stderr}"
                 )
                 raise GitFetchError(
                     f"Git fetch failed for {self.repo_path}",
                     category=category,
-                    stderr=fetch_result.stderr,
+                    stderr=fetch_exc.stderr,
                 )
 
             # Detect detached HEAD (e.g. repo pinned to a tag or specific commit).
             # git symbolic-ref -q HEAD returns rc=0 on a branch, rc!=0 when detached.
             # A detached/pinned ref is immutable for refresh purposes — skip the
             # upstream comparison entirely and return False gracefully.
+            # EVO-64678: deliberately NOT routed through the git seam. The seam's
+            # symbolic_ref(short=False) runs `git symbolic-ref HEAD` — WITHOUT the
+            # `-q` that suppresses git's "ref HEAD is not a symbolic ref" stderr on
+            # a detached HEAD, which is exactly the case this check exists to
+            # detect. Swapping it would change the emitted command and its stderr.
             symbolic_ref_result = subprocess.run(
                 ["git", "symbolic-ref", "-q", "HEAD"],
                 cwd=str(self.repo_path),
@@ -164,6 +174,10 @@ class GitPullUpdater(UpdateStrategy):
                 return False
 
             # Check for commits on remote not in local using HEAD..@{upstream}
+            # EVO-64678: left raw — the git seam has no `git log` method, and no
+            # existing method reproduces `log HEAD..@{upstream} --oneline`
+            # (rev_list_count() counts commits but emits a different command and
+            # cannot report the per-commit lines logged below).
             log_result = subprocess.run(
                 ["git", "log", "HEAD..@{upstream}", "--oneline"],
                 cwd=str(self.repo_path),
@@ -205,18 +219,23 @@ class GitPullUpdater(UpdateStrategy):
             Current branch name, or "main" as fallback
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=30,
+            # EVO-64678: via the git seam. rev_parse() emits the same
+            # `git rev-parse --abbrev-ref HEAD`, already strips stdout, and
+            # raises CalledProcessError on a non-zero exit — caught below so the
+            # "(returncode=N)" warning keeps its exact shape.
+            branch: str = self._git_backend.rev_parse(
+                str(self.repo_path), "--abbrev-ref", "HEAD", timeout=30
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+            if branch:
+                return branch
             logger.warning(
                 f"git rev-parse failed for {self.repo_path} "
-                f"(returncode={result.returncode}), falling back to 'main'"
+                f"(returncode=0), falling back to 'main'"
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                f"git rev-parse failed for {self.repo_path} "
+                f"(returncode={e.returncode}), falling back to 'main'"
             )
         except subprocess.TimeoutExpired:
             logger.warning(
@@ -241,29 +260,25 @@ class GitPullUpdater(UpdateStrategy):
         Raises:
             RuntimeError: If fetch or reset fails
         """
-        fetch_result = subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=str(self.repo_path),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=build_non_interactive_git_env(),
-        )
-        if fetch_result.returncode != 0:
+        # EVO-64678: fetch + reset routed through the git seam. Both raise
+        # CalledProcessError on a non-zero exit, so each is caught INLINE to
+        # rebuild the identical RuntimeError message the returncode checks
+        # produced. The seam methods return None, so the git stdout that used to
+        # be appended to the success INFO logs is no longer available.
+        try:
+            self._git_backend.fetch(str(self.repo_path), timeout=30)
+        except subprocess.CalledProcessError as fetch_exc:
             raise RuntimeError(
                 f"Git fetch failed for {self.repo_path} during reset to "
-                f"origin/{branch}: {fetch_result.stderr}"
+                f"origin/{branch}: {fetch_exc.stderr}"
             )
 
-        reset_result = subprocess.run(
-            ["git", "reset", "--hard", f"origin/{branch}"],
-            cwd=str(self.repo_path),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if reset_result.returncode != 0:
-            reset_stderr = reset_result.stderr
+        try:
+            self._git_backend.reset(
+                str(self.repo_path), "hard", f"origin/{branch}", timeout=30
+            )
+        except subprocess.CalledProcessError as reset_exc:
+            reset_stderr = reset_exc.stderr
             # Bug #1013: Untracked files would be overwritten — remove and retry once
             if "untracked working tree files would be overwritten" in reset_stderr:
                 conflicting = _parse_untracked_overwrite_filenames(reset_stderr)
@@ -281,21 +296,17 @@ class GitPullUpdater(UpdateStrategy):
                     if artifact.exists():
                         artifact.unlink()
                         logger.info(f"Removed conflicting untracked file: {artifact}")
-                retry_reset = subprocess.run(
-                    ["git", "reset", "--hard", f"origin/{branch}"],
-                    cwd=str(self.repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if retry_reset.returncode != 0:
+                try:
+                    self._git_backend.reset(
+                        str(self.repo_path), "hard", f"origin/{branch}", timeout=30
+                    )
+                except subprocess.CalledProcessError as retry_exc:
                     raise RuntimeError(
                         f"Git reset --hard origin/{branch} failed after untracked-file "
-                        f"cleanup for {self.repo_path}: {retry_reset.stderr}"
+                        f"cleanup for {self.repo_path}: {retry_exc.stderr}"
                     )
                 logger.info(
-                    f"Successfully reset {self.repo_path} to origin/{branch} after cleanup: "
-                    f"{retry_reset.stdout.strip()}"
+                    f"Successfully reset {self.repo_path} to origin/{branch} after cleanup"
                 )
                 return
             raise RuntimeError(
@@ -303,10 +314,7 @@ class GitPullUpdater(UpdateStrategy):
                 f"{reset_stderr}"
             )
 
-        logger.info(
-            f"Successfully reset {self.repo_path} to origin/{branch}: "
-            f"{reset_result.stdout.strip()}"
-        )
+        logger.info(f"Successfully reset {self.repo_path} to origin/{branch}")
 
     def update(self, force_reset: bool = False) -> None:
         """
@@ -333,19 +341,22 @@ class GitPullUpdater(UpdateStrategy):
             RuntimeError: If git operation fails
         """
         try:
-            # Story #726: Defense in depth - check for local modifications
-            status_result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            # Story #726: Defense in depth - check for local modifications.
+            # EVO-64678: via the git seam. status_porcelain() returns raw stdout
+            # and raises CalledProcessError on a non-zero exit; the raw call used
+            # `check=False` and simply skipped the modified-file handling when
+            # git failed, so the inline catch reproduces that tolerance exactly.
+            try:
+                status_stdout = self._git_backend.status_porcelain(
+                    str(self.repo_path), timeout=10
+                )
+            except subprocess.CalledProcessError:
+                status_stdout = ""
 
             modified_files = []
-            if status_result.returncode == 0 and status_result.stdout.strip():
+            if status_stdout.strip():
                 # Filter out untracked files (??) - only warn/reset for tracked modifications
-                all_files = status_result.stdout.strip().splitlines()
+                all_files = status_stdout.strip().splitlines()
                 modified_files = [f for f in all_files if not f.startswith("??")]
                 # Bug #1013: Remove known cidx untracked artifacts before pull
                 _remove_cidx_untracked_artifacts(self.repo_path, all_files)
@@ -358,22 +369,22 @@ class GitPullUpdater(UpdateStrategy):
                     f"Modified files: {' '.join(modified_files)}"
                 )
 
-                # Reset local modifications to allow clean pull
-                reset_result = subprocess.run(
-                    ["git", "reset", "--hard", "HEAD"],
-                    cwd=str(self.repo_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if reset_result.returncode != 0:
+                # Reset local modifications to allow clean pull.
+                # EVO-64678: via the git seam. reset() raises
+                # CalledProcessError on a non-zero exit; caught inline so the
+                # failure stays NON-fatal ("Proceeding with pull anyway"),
+                # exactly as the returncode check did.
+                try:
+                    self._git_backend.reset(
+                        str(self.repo_path), "hard", "HEAD", timeout=30
+                    )
+                except subprocess.CalledProcessError as reset_exc:
                     logger.warning(
-                        f"Git reset failed for {self.repo_path}: {reset_result.stderr}. "
+                        f"Git reset failed for {self.repo_path}: {reset_exc.stderr}. "
                         "Proceeding with pull anyway."
                     )
                 else:
-                    logger.info(f"Git reset successful: {reset_result.stdout.strip()}")
+                    logger.info("Git reset successful")
 
             if force_reset:
                 # AC3/AC4: Force reset path — skip git pull, go straight to
@@ -388,17 +399,17 @@ class GitPullUpdater(UpdateStrategy):
 
             logger.info(f"Executing git pull for {self.repo_path}")
 
-            result = subprocess.run(
-                ["git", "pull"],
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=build_non_interactive_git_env(),
-            )
-
-            if result.returncode != 0:
-                stderr = result.stderr
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's plain `git pull` with the non-interactive SSH env). The
+            # seam raises CalledProcessError on a non-zero exit, so the whole
+            # former `if result.returncode != 0:` body moves into the inline
+            # handler below with its stderr-driven branches unchanged. pull()
+            # returns None, so git's stdout is no longer appended to the success
+            # INFO logs.
+            try:
+                self._git_backend.pull(str(self.repo_path), timeout=120)
+            except subprocess.CalledProcessError as pull_exc:
+                stderr = pull_exc.stderr
                 # AC1: Divergent branch detection — intercept and auto-recover
                 if (
                     "divergent branches" in stderr
@@ -436,29 +447,22 @@ class GitPullUpdater(UpdateStrategy):
                             logger.info(
                                 f"Removed conflicting untracked file: {artifact}"
                             )
-                    retry = subprocess.run(
-                        ["git", "pull"],
-                        cwd=str(self.repo_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        env=build_non_interactive_git_env(),
-                    )
-                    if retry.returncode == 0:
-                        logger.info(
-                            f"Git pull retry successful after removing untracked files: "
-                            f"{retry.stdout.strip()}"
+                    try:
+                        self._git_backend.pull(str(self.repo_path), timeout=120)
+                    except subprocess.CalledProcessError as retry_exc:
+                        raise RuntimeError(
+                            f"Git pull failed after untracked-file cleanup for "
+                            f"{self.repo_path}: {retry_exc.stderr}"
                         )
-                        return
-                    raise RuntimeError(
-                        f"Git pull failed after untracked-file cleanup for "
-                        f"{self.repo_path}: {retry.stderr}"
+                    logger.info(
+                        "Git pull retry successful after removing untracked files"
                     )
+                    return
 
                 # AC2: Non-divergence errors are not intercepted
                 raise RuntimeError(f"Git pull failed for {self.repo_path}: {stderr}")
 
-            logger.info(f"Git pull successful: {result.stdout.strip()}")
+            logger.info("Git pull successful")
 
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"Git pull timed out for {self.repo_path}")

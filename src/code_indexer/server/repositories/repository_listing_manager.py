@@ -254,7 +254,12 @@ class RepositoryListingManager:
         clone_path = golden_repo["clone_path"]
 
         try:
-            # Get remote branches using git ls-remote
+            # Get remote branches using git ls-remote.
+            # NOTE: left raw on purpose (EVO-64678) — GitBackend.ls_remote() is a
+            # reachability probe: it returns bool, passes no --heads, and swallows
+            # a non-zero exit. This call site needs the refs/heads stdout and the
+            # returncode/stderr to build its RepositoryListingError, so the seam
+            # cannot express it without losing what the caller receives.
             result = subprocess.run(
                 ["git", "ls-remote", "--heads", clone_path],
                 cwd=clone_path,

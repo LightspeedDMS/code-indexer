@@ -49,6 +49,32 @@ def _proc(returncode=0, stdout="", stderr=""):
     return result
 
 
+def _queue(results):
+    """Build a ``subprocess.run`` side_effect that honors ``check=True``.
+
+    EVO-64678: GitPullUpdater now routes git through the ``LocalGitBackend``
+    seam, which calls ``run_git_command(..., check=True)``. A plain list
+    side_effect hands the caller a non-zero ``CompletedProcess`` WITHOUT
+    raising -- something the real ``subprocess.run`` never does under
+    ``check=True`` -- so the queued failures below would be silently seen as
+    successes. This wrapper reproduces subprocess.run's own check semantics:
+    a queued ``returncode != 0`` raises ``CalledProcessError`` carrying the
+    same stdout/stderr, exactly as in production. Results are still handed out
+    in order, and each call is still recorded on ``mock_run.call_args_list``.
+    """
+    queued = list(results)
+
+    def _side_effect(cmd, **kwargs):
+        result = queued.pop(0)
+        if kwargs.get("check") and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+        return result
+
+    return _side_effect
+
+
 # ---------------------------------------------------------------------------
 # AC1: Auto-recovery from divergent branch
 # ---------------------------------------------------------------------------
@@ -75,13 +101,15 @@ class TestDivergentBranchAutoRecovery:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,  # git status --porcelain
-                git_pull_fail,  # git pull -> fails with divergent branches
-                git_rev_parse,  # git rev-parse --abbrev-ref HEAD
-                git_fetch,  # git fetch origin
-                git_reset,  # git reset --hard origin/main
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,  # git status --porcelain
+                    git_pull_fail,  # git pull -> fails with divergent branches
+                    git_rev_parse,  # git rev-parse --abbrev-ref HEAD
+                    git_fetch,  # git fetch origin
+                    git_reset,  # git reset --hard origin/main
+                ]
+            )
             # Should NOT raise - auto-recovery succeeds
             updater.update()
 
@@ -111,13 +139,15 @@ class TestDivergentBranchAutoRecovery:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_pull_fail,
-                git_rev_parse,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_pull_fail,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update()  # Should not raise
 
         reset_call = mock_run.call_args_list[4]
@@ -135,13 +165,15 @@ class TestDivergentBranchAutoRecovery:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_pull_fail,
-                git_rev_parse,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_pull_fail,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update()
 
         reset_call = mock_run.call_args_list[4]
@@ -160,7 +192,7 @@ class TestDivergentBranchAutoRecovery:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_ok]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_ok])
             updater.update()
 
         # Only 2 calls: status + pull
@@ -189,7 +221,7 @@ class TestNonDivergentErrors:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_fail]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_fail])
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -209,7 +241,7 @@ class TestNonDivergentErrors:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_fail]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_fail])
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -228,7 +260,7 @@ class TestNonDivergentErrors:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_fail]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_fail])
 
             with pytest.raises(RuntimeError):
                 updater.update()
@@ -244,7 +276,7 @@ class TestNonDivergentErrors:
         git_pull_fail = _proc(returncode=1, stderr=original_error)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_fail]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_fail])
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -273,12 +305,14 @@ class TestForceResetPath:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,  # git status --porcelain
-                git_rev_parse,  # git rev-parse --abbrev-ref HEAD
-                git_fetch,  # git fetch origin
-                git_reset,  # git reset --hard origin/main
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,  # git status --porcelain
+                    git_rev_parse,  # git rev-parse --abbrev-ref HEAD
+                    git_fetch,  # git fetch origin
+                    git_reset,  # git reset --hard origin/main
+                ]
+            )
             updater.update(force_reset=True)
 
         calls = mock_run.call_args_list
@@ -300,12 +334,14 @@ class TestForceResetPath:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_rev_parse,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update(force_reset=True)
 
         calls = mock_run.call_args_list
@@ -325,12 +361,14 @@ class TestForceResetPath:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_rev_parse,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update(force_reset=True)
 
         reset_cmd = mock_run.call_args_list[3][0][0]
@@ -344,7 +382,7 @@ class TestForceResetPath:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_ok]
+            mock_run.side_effect = _queue([git_status_ok, git_pull_ok])
             # Should use normal pull path (no rev-parse, no fetch, no reset)
             updater.update()
 
@@ -374,12 +412,14 @@ class TestBranchDetectionFallback:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_rev_parse_fail,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_rev_parse_fail,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update(force_reset=True)
 
         reset_cmd = mock_run.call_args_list[3][0][0]
@@ -397,13 +437,15 @@ class TestBranchDetectionFallback:
         git_reset = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_pull_fail,
-                git_rev_parse_fail,
-                git_fetch,
-                git_reset,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_pull_fail,
+                    git_rev_parse_fail,
+                    git_fetch,
+                    git_reset,
+                ]
+            )
             updater.update()
 
         reset_cmd = mock_run.call_args_list[4][0][0]
@@ -452,12 +494,14 @@ class TestRecoveryFailureHandling:
         git_fetch_fail = _proc(returncode=1, stderr="fatal: could not read from remote")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_pull_fail,
-                git_rev_parse,
-                git_fetch_fail,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_pull_fail,
+                    git_rev_parse,
+                    git_fetch_fail,
+                ]
+            )
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -478,13 +522,15 @@ class TestRecoveryFailureHandling:
         git_reset_fail = _proc(returncode=1, stderr="error: could not reset")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_pull_fail,
-                git_rev_parse,
-                git_fetch,
-                git_reset_fail,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_pull_fail,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset_fail,
+                ]
+            )
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -503,11 +549,13 @@ class TestRecoveryFailureHandling:
         git_fetch_fail = _proc(returncode=1, stderr="fatal: network error")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_rev_parse,
-                git_fetch_fail,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_rev_parse,
+                    git_fetch_fail,
+                ]
+            )
 
             with pytest.raises(RuntimeError):
                 updater.update(force_reset=True)
@@ -522,12 +570,14 @@ class TestRecoveryFailureHandling:
         git_reset_fail = _proc(returncode=1, stderr="error: reset failed")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_ok,
-                git_rev_parse,
-                git_fetch,
-                git_reset_fail,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_ok,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset_fail,
+                ]
+            )
 
             with pytest.raises(RuntimeError):
                 updater.update(force_reset=True)
@@ -554,11 +604,13 @@ class TestStory726DefensePreserved:
         git_pull_ok = _proc(returncode=0, stdout="Updating 1234567..abcdefg")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_dirty,
-                git_reset_head,
-                git_pull_ok,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_dirty,
+                    git_reset_head,
+                    git_pull_ok,
+                ]
+            )
             updater.update()
 
         calls = mock_run.call_args_list
@@ -578,13 +630,15 @@ class TestStory726DefensePreserved:
         git_reset_origin = _proc(returncode=0)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status_dirty,
-                git_reset_head,
-                git_rev_parse,
-                git_fetch,
-                git_reset_origin,
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status_dirty,
+                    git_reset_head,
+                    git_rev_parse,
+                    git_fetch,
+                    git_reset_origin,
+                ]
+            )
             updater.update(force_reset=True)
 
         calls = mock_run.call_args_list

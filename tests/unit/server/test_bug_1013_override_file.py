@@ -32,6 +32,32 @@ def _proc(returncode=0, stdout="", stderr=""):
     return result
 
 
+def _queue(results):
+    """Build a ``subprocess.run`` side_effect that honors ``check=True``.
+
+    EVO-64678: GitPullUpdater now routes git through the ``LocalGitBackend``
+    seam, which calls ``run_git_command(..., check=True)``. A plain list
+    side_effect hands the caller a non-zero ``CompletedProcess`` WITHOUT
+    raising -- something the real ``subprocess.run`` never does under
+    ``check=True`` -- so the queued failures below would be silently seen as
+    successes. This wrapper reproduces subprocess.run's own check semantics:
+    a queued ``returncode != 0`` raises ``CalledProcessError`` carrying the
+    same stdout/stderr, exactly as in production. Results are still handed out
+    in order, and each call is still recorded on ``mock_run.call_args_list``.
+    """
+    queued = list(results)
+
+    def _side_effect(cmd, **kwargs):
+        result = queued.pop(0)
+        if kwargs.get("check") and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+        return result
+
+    return _side_effect
+
+
 # ---------------------------------------------------------------------------
 # Level 1 — CLI flag: --no-override-file
 # ---------------------------------------------------------------------------
@@ -133,7 +159,7 @@ class TestPrePullCleanup:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_ok]
+            mock_run.side_effect = _queue([git_status, git_pull_ok])
             updater.update()
 
         assert not override_file.exists(), (
@@ -152,7 +178,7 @@ class TestPrePullCleanup:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_ok]
+            mock_run.side_effect = _queue([git_status, git_pull_ok])
             updater.update()
 
         assert not lang_file.exists(), (
@@ -170,7 +196,7 @@ class TestPrePullCleanup:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_ok]
+            mock_run.side_effect = _queue([git_status, git_pull_ok])
             updater.update()
 
         assert other_file.exists(), (
@@ -189,7 +215,7 @@ class TestPrePullCleanup:
         git_pull_ok = _proc(returncode=0, stdout="Already up to date.")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_ok]
+            mock_run.side_effect = _queue([git_status, git_pull_ok])
             updater.update()
 
         assert override_file.exists(), (
@@ -227,7 +253,9 @@ class TestUntrackedFilesErrorRecovery:
         git_pull_retry_ok = _proc(returncode=0, stdout="Updating abc..def")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_fail, git_pull_retry_ok]
+            mock_run.side_effect = _queue(
+                [git_status, git_pull_fail, git_pull_retry_ok]
+            )
             updater.update()
 
         assert not override_file.exists(), (
@@ -258,7 +286,9 @@ class TestUntrackedFilesErrorRecovery:
         git_pull_retry_ok = _proc(returncode=0, stdout="Updating abc..def")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_fail, git_pull_retry_ok]
+            mock_run.side_effect = _queue(
+                [git_status, git_pull_fail, git_pull_retry_ok]
+            )
             updater.update()
 
         assert not override_file.exists(), ".code-indexer-override.yaml must be removed"
@@ -275,7 +305,7 @@ class TestUntrackedFilesErrorRecovery:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_fail]
+            mock_run.side_effect = _queue([git_status, git_pull_fail])
             with pytest.raises(RuntimeError, match="Git pull failed"):
                 updater.update()
 
@@ -291,7 +321,9 @@ class TestUntrackedFilesErrorRecovery:
         git_pull_retry_fail = _proc(returncode=1, stderr="fatal: cannot merge diverged")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status, git_pull_fail, git_pull_retry_fail]
+            mock_run.side_effect = _queue(
+                [git_status, git_pull_fail, git_pull_retry_fail]
+            )
             with pytest.raises(RuntimeError):
                 updater.update()
 
@@ -320,14 +352,16 @@ class TestUntrackedFilesErrorRecovery:
         git_reset_ok = _proc(returncode=0, stdout="HEAD is now at abc123")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                git_status,  # status check
-                git_pull_fail,  # pull fails with divergent
-                git_rev_parse,  # detect branch
-                git_fetch,  # fetch origin
-                git_reset_fail,  # reset --hard fails with untracked
-                git_reset_ok,  # reset --hard succeeds after cleanup
-            ]
+            mock_run.side_effect = _queue(
+                [
+                    git_status,  # status check
+                    git_pull_fail,  # pull fails with divergent
+                    git_rev_parse,  # detect branch
+                    git_fetch,  # fetch origin
+                    git_reset_fail,  # reset --hard fails with untracked
+                    git_reset_ok,  # reset --hard succeeds after cleanup
+                ]
+            )
             updater.update()
 
         assert not override_file.exists(), (

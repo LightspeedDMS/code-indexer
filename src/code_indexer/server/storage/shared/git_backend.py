@@ -33,17 +33,12 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Protocol, Sequence, runtime_checkable
 
 from code_indexer.utils.git_runner import (
     run_git_command,
     run_git_command_with_retry,
 )
-
-try:
-    from typing import Protocol, runtime_checkable
-except ImportError:  # pragma: no cover
-    from typing_extensions import Protocol, runtime_checkable  # type: ignore  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
