@@ -13,6 +13,7 @@ Tests the core functionality of activated repository management including:
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -514,32 +515,32 @@ class TestActivatedRepoManager:
         with open(os.path.join(user_dir, f"{user_alias}_metadata.json"), "w") as f:
             json.dump(repo_data, f)
 
-        # Mock git operations that simulate branch not existing anywhere
+        # Mock git operations that simulate branch not existing anywhere.
+        # EVO-64678: git now runs through the git seam, which invokes
+        # subprocess.run(..., check=True). Since subprocess.run itself is
+        # mocked here, this stub must reproduce that contract: a non-zero
+        # returncode with check=True raises CalledProcessError.
         def mock_subprocess_side_effect(cmd, **kwargs):
             mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
             if cmd == ["git", "remote", "get-url", "origin"]:
                 # Mock remote URL check
-                mock_result.returncode = 0
                 mock_result.stdout = "https://github.com/test/repo.git"
-                return mock_result
             elif cmd == ["git", "fetch", "origin"]:
                 # Mock successful fetch
-                mock_result.returncode = 0
-                return mock_result
-            elif cmd == ["git", "checkout", "-B", new_branch, f"origin/{new_branch}"]:
-                # Mock remote branch checkout failure (branch doesn't exist on remote)
+                pass
+            elif cmd in (
+                # Mock remote branch checkout failure (branch doesn't exist on
+                # remote) and local branch checkout failure (not local either)
+                ["git", "checkout", "-B", new_branch, f"origin/{new_branch}"],
+                ["git", "checkout", new_branch],
+            ):
                 mock_result.returncode = 1
                 mock_result.stderr = (
                     "error: pathspec 'nonexistent-branch' did not match"
                 )
-                return mock_result
-            elif cmd == ["git", "checkout", new_branch]:
-                # Mock local branch checkout failure (branch doesn't exist locally)
-                mock_result.returncode = 1
-                mock_result.stderr = (
-                    "error: pathspec 'nonexistent-branch' did not match"
-                )
-                return mock_result
             elif cmd == [
                 "git",
                 "show-ref",
@@ -549,15 +550,18 @@ class TestActivatedRepoManager:
             ]:
                 # Mock: no origin branch exists locally
                 mock_result.returncode = 1
-                return mock_result
             elif cmd == ["git", "show-ref", new_branch]:
                 # Mock: branch doesn't exist in any form
                 mock_result.returncode = 1
-                return mock_result
-            else:
-                # Default success for other commands
-                mock_result.returncode = 0
-                return mock_result
+
+            if kwargs.get("check") and mock_result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    mock_result.returncode,
+                    cmd,
+                    output=mock_result.stdout,
+                    stderr=mock_result.stderr,
+                )
+            return mock_result
 
         mock_subprocess.side_effect = mock_subprocess_side_effect
 

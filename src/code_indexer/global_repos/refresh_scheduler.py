@@ -30,7 +30,6 @@ from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
@@ -50,6 +49,7 @@ from code_indexer.server.services.cidx_meta_backup import (
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
@@ -194,6 +194,7 @@ class RefreshScheduler:
         job_tracker: Optional["JobTracker"] = None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -219,6 +220,10 @@ class RefreshScheduler:
                 golden_repos_metadata table alongside the -global-alias-keyed
                 global_repos table (self.registry) -- the two are structurally separate
                 stores for the same logical repo and can otherwise drift independently.
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                locally via utils.git_runner), which reproduces today's behavior;
+                server wiring can inject the configured backend via
+                build_git_backend() at startup.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -228,6 +233,9 @@ class RefreshScheduler:
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
         self._snapshot_manager = snapshot_manager
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -980,24 +988,26 @@ class RefreshScheduler:
             shutil.rmtree(str(temp_clone))
 
         try:
-            clone_result = subprocess.run(
-                ["git", "clone", repo_url, str(temp_clone)],
-                capture_output=True,
-                text=True,
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's `git clone <url> <dest>` with the same non-interactive SSH
+            # env). retry stays False so a failed clone is NOT re-attempted --
+            # a retry would hit "destination path already exists" and report a
+            # different error. CalledProcessError is caught FIRST so the
+            # non-zero-exit log keeps its bare "<stderr>" shape, distinct from
+            # the timeout/OSError "<Type>: <exc>" shape below.
+            self._git_backend.clone(
+                repo_url,
+                str(temp_clone),
                 timeout=self.CLONE_TIMEOUT_SECONDS,
-                env=build_non_interactive_git_env(),
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
-            logger.critical(
-                f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
-            )
+        except subprocess.CalledProcessError as e:
+            logger.critical(f"Auto re-clone FAILED for {alias_name}: {e.stderr}")
             if temp_clone.exists():
                 shutil.rmtree(str(temp_clone))
             return False
-
-        if clone_result.returncode != 0:
+        except (subprocess.TimeoutExpired, OSError) as e:
             logger.critical(
-                f"Auto re-clone FAILED for {alias_name}: {clone_result.stderr}"
+                f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
             )
             if temp_clone.exists():
                 shutil.rmtree(str(temp_clone))
@@ -2096,7 +2106,12 @@ class RefreshScheduler:
                                 # no-ops here. #1338: caught by TYPE, never by
                                 # message-substring matching.
                                 try:
-                                    updater = GitPullUpdater(master_path)
+                                    # EVO-64678: thread our backend through, or a
+                                    # delegated RefreshScheduler would silently keep
+                                    # running git locally inside GitPullUpdater.
+                                    updater = GitPullUpdater(
+                                        master_path, git_backend=self._git_backend
+                                    )
                                 except OrphanedRepoError as orphan_exc:
                                     logger.warning(
                                         "Golden repo %s is orphaned (registry row "
@@ -2118,6 +2133,17 @@ class RefreshScheduler:
                             # pulling.  If the clone was switched to a wrong branch by any previous
                             # operation, reset it now so we don't perpetuate the contamination.
                             try:
+                                # EVO-64678: deliberately NOT routed through the
+                                # git seam. `branch --show-current` prints an
+                                # EMPTY line with rc=0 on a detached HEAD, and
+                                # the comparison below relies on that (empty
+                                # current_branch => no checkout). The seam's
+                                # current_branch()/symbolic_ref() run
+                                # `symbolic-ref --short HEAD`, which instead
+                                # FAILS on a detached HEAD -- that would abort
+                                # the whole verification block via the outer
+                                # handler. Different command, different
+                                # semantics: left raw.
                                 branch_result = subprocess.run(
                                     ["git", "branch", "--show-current"],
                                     cwd=master_path,
@@ -2148,6 +2174,10 @@ class RefreshScheduler:
 
                                 if not default_branch:
                                     try:
+                                        # EVO-64678: left raw. The seam's
+                                        # symbolic_ref() hardcodes the HEAD ref;
+                                        # it cannot express
+                                        # `refs/remotes/origin/HEAD`.
                                         symref_result = subprocess.run(
                                             [
                                                 "git",
@@ -2180,17 +2210,23 @@ class RefreshScheduler:
                                         f"Base clone for {alias_name} on '{current_branch}' instead of "
                                         f"'{default_branch}', resetting to default branch"
                                     )
-                                    checkout_result = subprocess.run(
-                                        ["git", "checkout", default_branch],
-                                        cwd=master_path,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=30,
-                                    )
-                                    if checkout_result.returncode != 0:
+                                    # EVO-64678: via the git seam. checkout()
+                                    # raises CalledProcessError on a non-zero
+                                    # exit, caught inline so the ERROR log keeps
+                                    # its exact shape and (as before) does NOT
+                                    # abort the surrounding verification block.
+                                    try:
+                                        self._git_backend.checkout(
+                                            master_path,
+                                            default_branch,
+                                            timeout=30,
+                                        )
+                                    except (
+                                        subprocess.CalledProcessError
+                                    ) as checkout_exc:
                                         logger.error(
                                             f"Failed to reset {alias_name} to {default_branch}: "
-                                            f"{checkout_result.stderr}"
+                                            f"{checkout_exc.stderr}"
                                         )
                             except Exception as e:
                                 logger.warning(
@@ -2873,16 +2909,14 @@ class RefreshScheduler:
             if git_dir.exists():
                 logger.info("Running git update-index --refresh to fix CoW timestamps")
                 try:
-                    result = self._run_subprocess(
-                        ["git", "update-index", "--refresh"],
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=git_update_timeout,
-                        check=False,  # Non-fatal
+                    # EVO-64678: via the git seam. update_index_refresh() runs
+                    # with check=False -- a non-zero exit is normal here -- so
+                    # this stays as tolerant as the raw call it replaces. It
+                    # returns None, so git's stderr is no longer available for
+                    # the previous DEBUG log.
+                    self._git_backend.update_index_refresh(
+                        str(versioned_path), timeout=git_update_timeout
                     )
-                    if result.returncode != 0:
-                        logger.debug(f"git update-index output: {result.stderr}")
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git update-index timed out after {git_update_timeout} seconds"
@@ -2890,16 +2924,15 @@ class RefreshScheduler:
 
                 logger.info("Running git restore . to clean up timestamp changes")
                 try:
-                    result = self._run_subprocess(
-                        ["git", "restore", "."],
-                        cwd=str(versioned_path),
-                        capture_output=True,
-                        text=True,
-                        timeout=git_restore_timeout,
-                        check=False,  # Non-fatal
+                    # EVO-64678: via the git seam. restore() runs with
+                    # check=True, so CalledProcessError is caught here to keep
+                    # the raw call's non-fatal (check=False) behavior and log
+                    # git's stderr at DEBUG exactly as before.
+                    self._git_backend.restore(
+                        str(versioned_path), ".", timeout=git_restore_timeout
                     )
-                    if result.returncode != 0:
-                        logger.debug(f"git restore output: {result.stderr}")
+                except subprocess.CalledProcessError as restore_exc:
+                    logger.debug(f"git restore output: {restore_exc.stderr}")
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git restore timed out after {git_restore_timeout} seconds"

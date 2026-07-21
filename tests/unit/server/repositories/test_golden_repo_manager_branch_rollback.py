@@ -60,6 +60,24 @@ def manager(data_dir):
     return mgr
 
 
+def _assert_rollback_checkout(mock_run):
+    """Assert exactly one rollback ``git checkout main`` ran on the base clone.
+
+    EVO-64678: the rollback now routes through the git seam
+    (``LocalGitBackend`` -> ``utils.git_runner``), which still lands on the
+    globally patched ``subprocess.run`` but supplies its own ``cwd`` as a
+    ``Path`` plus ``text``/``timeout``/``env`` kwargs. The invariant under test
+    is unchanged: one checkout of the previous branch, on the base clone, with
+    ``check=True``.
+    """
+    assert mock_run.call_count == 1
+    args, kwargs = mock_run.call_args
+    assert args[0] == ["git", "checkout", "main"]
+    assert str(kwargs["cwd"]) == "/golden-repos/my-repo"
+    assert kwargs["check"] is True
+    assert kwargs["capture_output"] is True
+
+
 # ---------------------------------------------------------------------------
 # Rollback behaviour tests
 # ---------------------------------------------------------------------------
@@ -85,12 +103,7 @@ class TestChangeBranchRollback:
             with pytest.raises(RuntimeError, match="index failed"):
                 manager.change_branch("my-repo", "feature-x")
 
-        mock_run.assert_called_once_with(
-            ["git", "checkout", "main"],
-            cwd="/golden-repos/my-repo",
-            check=True,
-            capture_output=True,
-        )
+        _assert_rollback_checkout(mock_run)
 
     def test_rollback_called_when_cow_snapshot_fails(self, manager):
         """When _cb_cow_snapshot raises, git checkout <previous_branch> is run."""
@@ -112,12 +125,7 @@ class TestChangeBranchRollback:
             with pytest.raises(RuntimeError, match="snapshot failed"):
                 manager.change_branch("my-repo", "feature-x")
 
-        mock_run.assert_called_once_with(
-            ["git", "checkout", "main"],
-            cwd="/golden-repos/my-repo",
-            check=True,
-            capture_output=True,
-        )
+        _assert_rollback_checkout(mock_run)
 
     def test_original_exception_reraised_when_rollback_fails(self, manager):
         """When rollback itself fails, original exception is still re-raised."""

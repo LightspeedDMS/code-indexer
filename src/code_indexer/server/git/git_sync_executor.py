@@ -35,6 +35,7 @@ from ...utils.git_runner import (
 from ..services.git_state_manager import GitStateManager
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 
 
 # Configure logging
@@ -118,6 +119,7 @@ class GitSyncExecutor:
         repository_path: Path,
         backup_dir: Optional[Path] = None,
         auto_index_on_changes: bool = True,
+        git_backend: Optional[GitBackend] = None,
     ):
         """
         Initialize GitSyncExecutor.
@@ -126,7 +128,15 @@ class GitSyncExecutor:
             repository_path: Path to the git repository
             backup_dir: Optional directory for backups (defaults to repo/.git/cidx_backups)
             auto_index_on_changes: Automatically trigger cidx index when changes detected
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                in-process), i.e. exactly today's behavior; the server injects the
+                configured backend via build_git_backend() at startup.
         """
+        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
+
         self.repository_path = Path(repository_path).resolve()
         self.backup_dir = backup_dir or self.repository_path / ".git" / "cidx_backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
@@ -341,16 +351,16 @@ class GitSyncExecutor:
             commit_hash = get_current_commit(self.repository_path)
 
             # Check for uncommitted changes
-            status_result = run_git_command(
-                ["git", "status", "--porcelain"], cwd=self.repository_path
+            # EVO-64678: via the git seam (git status --porcelain).
+            status_stdout = self._git_backend.status_porcelain(
+                str(self.repository_path)
             )
-            has_uncommitted_changes = bool(status_result.stdout.strip())
+            has_uncommitted_changes = bool(status_stdout.strip())
 
             # Check if HEAD is detached
             try:
-                run_git_command(
-                    ["git", "symbolic-ref", "HEAD"], cwd=self.repository_path
-                )
+                # EVO-64678: via the git seam (git symbolic-ref HEAD, no --short).
+                self._git_backend.symbolic_ref(str(self.repository_path), short=False)
                 is_detached_head = False
             except subprocess.CalledProcessError:
                 is_detached_head = True
@@ -360,26 +370,30 @@ class GitSyncExecutor:
             is_behind_remote = False
             try:
                 # Check if remote tracking branch exists
-                run_git_command(
-                    [
-                        "git",
-                        "rev-parse",
-                        "--abbrev-ref",
-                        "--symbolic-full-name",
-                        "@{u}",
-                    ],
-                    cwd=self.repository_path,
+                # EVO-64678: via the git seam (git rev-parse ...).
+                self._git_backend.rev_parse(
+                    str(self.repository_path),
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{u}",
                 )
 
-                # Fetch to get latest remote state
+                # Fetch to get latest remote state.
+                # NOTE: left raw on purpose — the seam's fetch() always emits a
+                # remote (default "origin"), whereas a bare `git fetch` follows
+                # branch.<name>.remote for the current branch. That remote is
+                # exactly the @{u} this block measures against, so forcing
+                # "origin" would not be a no-op. See EVO-64678.
                 run_git_command(["git", "fetch"], cwd=self.repository_path)
 
                 # Check if behind remote
-                behind_result = run_git_command(
-                    ["git", "rev-list", "--count", "HEAD..@{u}"],
-                    cwd=self.repository_path,
+                # EVO-64678: via the git seam (git rev-list --count HEAD..@{u}).
+                is_behind_remote = (
+                    self._git_backend.rev_list_count(
+                        str(self.repository_path), "HEAD..@{u}"
+                    )
+                    > 0
                 )
-                is_behind_remote = int(behind_result.stdout.strip()) > 0
 
             except subprocess.CalledProcessError:
                 # No remote tracking branch
@@ -555,7 +569,11 @@ class GitSyncExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # Execute git command
+        # Execute git command.
+        # NOTE: left raw on purpose (EVO-64678) — GitBackend.pull() takes no env,
+        # so routing through the seam would silently drop the caller-configured
+        # `GIT_SSH_COMMAND ... -i <key_path>` built above by configure_ssh_auth().
+        # Convert once the seam grows an env/extra_env parameter.
         try:
             result = run_git_command(cmd, cwd=self.repository_path, env=env)
             logger.info(
@@ -616,11 +634,13 @@ class GitSyncExecutor:
             return []
 
         try:
-            result = run_git_command(
-                ["git", "diff", "--name-only", before_commit, after_commit],
-                cwd=self.repository_path,
+            # EVO-64678: via the git seam. `git diff --name-only A B` and
+            # `git diff --name-only A..B` are synonymous, and the seam already
+            # strips/drops blank lines exactly like the old comprehension.
+            changed_files: List[str] = self._git_backend.diff_name_only(
+                str(self.repository_path), f"{before_commit}..{after_commit}"
             )
-            return [line.strip() for line in result.stdout.split("\n") if line.strip()]
+            return changed_files
         except subprocess.CalledProcessError as e:
             logger.warning(
                 format_error_log(
@@ -637,11 +657,11 @@ class GitSyncExecutor:
             return 0
 
         try:
-            result = run_git_command(
-                ["git", "rev-list", "--count", f"{before_commit}..{after_commit}"],
-                cwd=self.repository_path,
+            # EVO-64678: via the git seam (git rev-list --count A..B).
+            commits_pulled: int = self._git_backend.rev_list_count(
+                str(self.repository_path), f"{before_commit}..{after_commit}"
             )
-            return int(result.stdout.strip())
+            return commits_pulled
         except subprocess.CalledProcessError as e:
             logger.warning(
                 format_error_log(

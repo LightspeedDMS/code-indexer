@@ -1,0 +1,526 @@
+"""
+Git backend abstraction for cidx's internal git operations.
+
+EVO-64616 Phase 2 (EVO-64678) — the git sibling of ``CloneBackend``
+(``storage/shared/clone_backend.py``). cidx's job is semantic search; it should
+do **no git work itself**. Today git runs as scattered raw
+``subprocess.run(["git", ...])`` across the golden-repo and activated-repo
+managers. This module introduces a single seam so those call sites route through
+a pluggable backend:
+
+- ``LocalGitBackend``  — runs git via the existing ``utils.git_runner`` helper
+  (SSH-safe env + ``safe.directory`` handling). This is the DEFAULT and
+  reproduces today's behavior.
+- ``GitMcpBackend``    — (Phase 3, shipped as the ``cidx_git_backend`` plugin)
+  delegates each operation to the git-mcp spoke. Not defined here.
+
+The Protocol uses structural subtyping (``typing.Protocol``), NOT inheritance,
+mirroring ``CloneBackend``. Selection is config-driven in
+``startup/git_backend_wiring.py``; default ``local`` = zero regression.
+
+**Timeouts are part of the contract.** Every call site today passes a
+config-driven timeout (``git_clone_timeout``, ``git_pull_timeout``, ...), so
+every method accepts one and a refactor can preserve it exactly. ``None`` means
+"no timeout", matching ``subprocess.run``.
+
+**Failures raise.** Methods run with ``check=True`` unless documented otherwise,
+so a non-zero exit raises ``subprocess.CalledProcessError`` — whose ``stderr``
+callers already use to build their own errors (e.g. ``GitOperationError``).
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from pathlib import Path
+from typing import List, Optional, Protocol, Sequence, runtime_checkable
+
+from code_indexer.utils.git_runner import (
+    run_git_command,
+    run_git_command_with_retry,
+)
+
+logger = logging.getLogger(__name__)
+
+Timeout = Optional[float]
+
+
+# ---------------------------------------------------------------------------
+# Protocol definition
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class GitBackend(Protocol):
+    """Structural interface for cidx's internal git operations."""
+
+    # -- remote-URL operations ------------------------------------------------
+    def ls_remote(self, url: str, timeout: Timeout = None) -> bool:
+        """``git ls-remote <url>`` -> True when the remote is reachable."""
+        ...  # pragma: no cover
+
+    def clone(
+        self,
+        url: str,
+        dest_path: str,
+        branch: Optional[str] = None,
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        """``git [-c core.fsync=none] clone [--branch B] <url> <dest_path>``.
+
+        ``retry`` is opt-in: today's call sites use a plain single-shot run, and
+        a silent retry would change failure behavior (a retried clone hits
+        "destination path already exists" and reports a different error).
+        """
+        ...  # pragma: no cover
+
+    # -- fetch / pull / merge -------------------------------------------------
+    def fetch(
+        self,
+        repo_path: str,
+        remote: str = "origin",
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        """``git [-c core.fsync=none] fetch <remote>`` (``retry`` opt-in)."""
+        ...  # pragma: no cover
+
+    def pull(
+        self,
+        repo_path: str,
+        remote: Optional[str] = None,
+        branch: Optional[str] = None,
+        mode: str = "default",
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase."""
+        ...  # pragma: no cover
+
+    def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
+        """``git merge <ref>``."""
+        ...  # pragma: no cover
+
+    # -- checkout / branch ----------------------------------------------------
+    def checkout(
+        self,
+        repo_path: str,
+        ref: str,
+        create: bool = False,
+        force_new: bool = False,
+        force: bool = False,
+        start_point: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> None:
+        """``git checkout [-f] [-b|-B] <ref> [<start_point>]``."""
+        ...  # pragma: no cover
+
+    def current_branch(self, repo_path: str, timeout: Timeout = None) -> str:
+        """Short current branch name (``symbolic-ref --short HEAD``)."""
+        ...  # pragma: no cover
+
+    def list_branches(
+        self,
+        repo_path: str,
+        remote: bool = False,
+        all_refs: bool = False,
+        fmt: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> List[str]:
+        """``git branch [-a|-r] [--format=<fmt>]`` -> non-empty stripped lines."""
+        ...  # pragma: no cover
+
+    # -- inspection -----------------------------------------------------------
+    def rev_parse(self, repo_path: str, *args: str, timeout: Timeout = None) -> str:
+        """``git rev-parse <args...>`` -> stripped stdout."""
+        ...  # pragma: no cover
+
+    def rev_list_count(
+        self, repo_path: str, range_expr: str, timeout: Timeout = None
+    ) -> int:
+        """``git rev-list --count <range_expr>`` -> int."""
+        ...  # pragma: no cover
+
+    def symbolic_ref(
+        self, repo_path: str, short: bool = True, timeout: Timeout = None
+    ) -> str:
+        """``git symbolic-ref [--short] HEAD``."""
+        ...  # pragma: no cover
+
+    def status_porcelain(self, repo_path: str, timeout: Timeout = None) -> str:
+        """``git status --porcelain`` -> raw stdout."""
+        ...  # pragma: no cover
+
+    def diff_name_only(
+        self, repo_path: str, spec: str, timeout: Timeout = None
+    ) -> List[str]:
+        """``git diff --name-only <spec>`` -> paths (spec may be ``A..B``)."""
+        ...  # pragma: no cover
+
+    def ls_files(self, repo_path: str, timeout: Timeout = None) -> List[str]:
+        """``git ls-files`` -> tracked paths."""
+        ...  # pragma: no cover
+
+    def show_ref(
+        self, repo_path: str, *args: str, timeout: Timeout = None
+    ) -> subprocess.CompletedProcess:
+        """``git show-ref <args...>`` — ``check=False``; caller reads returncode."""
+        ...  # pragma: no cover
+
+    # -- mutation -------------------------------------------------------------
+    def reset(
+        self, repo_path: str, mode: str, target: str, timeout: Timeout = None
+    ) -> None:
+        """``git reset --<mode> <target>``."""
+        ...  # pragma: no cover
+
+    def restore(
+        self, repo_path: str, pathspec: str = ".", timeout: Timeout = None
+    ) -> None:
+        """``git restore <pathspec>``."""
+        ...  # pragma: no cover
+
+    def update_index_refresh(self, repo_path: str, timeout: Timeout = None) -> None:
+        """``git update-index --refresh`` — ``check=False`` (non-zero is normal)."""
+        ...  # pragma: no cover
+
+    def config_set(
+        self, repo_path: str, key: str, value: str, timeout: Timeout = None
+    ) -> None:
+        """``git config <key> <value>`` (local, persistent)."""
+        ...  # pragma: no cover
+
+    # -- remotes --------------------------------------------------------------
+    def remote_list(
+        self, repo_path: str, verbose: bool = False, timeout: Timeout = None
+    ) -> str:
+        """``git remote [-v]`` -> raw stdout."""
+        ...  # pragma: no cover
+
+    def remote_get_url(self, repo_path: str, name: str, timeout: Timeout = None) -> str:
+        """``git remote get-url <name>`` -> stripped stdout."""
+        ...  # pragma: no cover
+
+    def remote_add(
+        self, repo_path: str, name: str, url: str, timeout: Timeout = None
+    ) -> None:
+        """``git remote add <name> <url>``."""
+        ...  # pragma: no cover
+
+    def remote_set_url(
+        self, repo_path: str, name: str, url: str, timeout: Timeout = None
+    ) -> None:
+        """``git remote set-url <name> <url>``."""
+        ...  # pragma: no cover
+
+    def remote_rename(
+        self, repo_path: str, old: str, new: str, timeout: Timeout = None
+    ) -> None:
+        """``git remote rename <old> <new>``."""
+        ...  # pragma: no cover
+
+    def remote_remove(self, repo_path: str, name: str, timeout: Timeout = None) -> None:
+        """``git remote remove <name>``."""
+        ...  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# LocalGitBackend — current behavior, via utils.git_runner
+# ---------------------------------------------------------------------------
+
+
+class LocalGitBackend:
+    """Runs git locally through ``utils.git_runner`` (the default backend).
+
+    Every method reproduces the ``git`` invocation the call sites use today.
+    Env handling (SSH-safe + ``safe.directory``) is delegated to
+    ``run_git_command``; network-touching operations use the retrying variant,
+    matching current behavior.
+    """
+
+    # -- single funnel: every git invocation goes through here -----------------
+    @staticmethod
+    def _run(
+        cmd: Sequence[str],
+        cwd: Path,
+        *,
+        check: bool = True,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> subprocess.CompletedProcess:
+        runner = run_git_command_with_retry if retry else run_git_command
+        result: subprocess.CompletedProcess = runner(
+            list(cmd), cwd=cwd, check=check, timeout=timeout
+        )
+        return result
+
+    @staticmethod
+    def _lines(stdout: object) -> List[str]:
+        return [line.strip() for line in str(stdout).splitlines() if line.strip()]
+
+    # -- remote-URL operations ------------------------------------------------
+    def ls_remote(self, url: str, timeout: Timeout = None) -> bool:
+        try:
+            # ls-remote needs no repo cwd; run from the current directory.
+            self._run(["git", "ls-remote", url], Path.cwd(), timeout=timeout)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def clone(
+        self,
+        url: str,
+        dest_path: str,
+        branch: Optional[str] = None,
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        cmd = ["git"]
+        if no_fsync:
+            cmd += ["-c", "core.fsync=none"]
+        cmd += ["clone"]
+        if branch:
+            cmd += ["--branch", branch]
+        cmd += [url, dest_path]
+        # The clone target does not exist yet — run from its parent.
+        self._run(cmd, Path(dest_path).parent, timeout=timeout, retry=retry)
+
+    # -- fetch / pull / merge -------------------------------------------------
+    def fetch(
+        self,
+        repo_path: str,
+        remote: str = "origin",
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        cmd = ["git"]
+        if no_fsync:
+            cmd += ["-c", "core.fsync=none"]
+        cmd += ["fetch", remote]
+        self._run(cmd, Path(repo_path), timeout=timeout, retry=retry)
+
+    def pull(
+        self,
+        repo_path: str,
+        remote: Optional[str] = None,
+        branch: Optional[str] = None,
+        mode: str = "default",
+        no_fsync: bool = False,
+        timeout: Timeout = None,
+        retry: bool = False,
+    ) -> None:
+        cmd = ["git"]
+        if no_fsync:
+            cmd += ["-c", "core.fsync=none"]
+        cmd += ["pull"]
+        mode_flags = {"ff-only": "--ff-only", "no-ff": "--no-ff", "rebase": "--rebase"}
+        if mode in mode_flags:
+            cmd.append(mode_flags[mode])
+        if remote:
+            cmd.append(remote)
+        if branch:
+            cmd.append(branch)
+        self._run(cmd, Path(repo_path), timeout=timeout, retry=retry)
+
+    def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
+        self._run(["git", "merge", ref], Path(repo_path), timeout=timeout)
+
+    # -- checkout / branch ----------------------------------------------------
+    def checkout(
+        self,
+        repo_path: str,
+        ref: str,
+        create: bool = False,
+        force_new: bool = False,
+        force: bool = False,
+        start_point: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> None:
+        cmd = ["git", "checkout"]
+        if force:
+            cmd.append("-f")
+        if force_new:
+            cmd.append("-B")
+        elif create:
+            cmd.append("-b")
+        cmd.append(ref)
+        if start_point:
+            cmd.append(start_point)
+        self._run(cmd, Path(repo_path), timeout=timeout)
+
+    def current_branch(self, repo_path: str, timeout: Timeout = None) -> str:
+        result = self._run(
+            ["git", "symbolic-ref", "--short", "HEAD"], Path(repo_path), timeout=timeout
+        )
+        return str(result.stdout).strip()
+
+    def list_branches(
+        self,
+        repo_path: str,
+        remote: bool = False,
+        all_refs: bool = False,
+        fmt: Optional[str] = None,
+        timeout: Timeout = None,
+    ) -> List[str]:
+        cmd = ["git", "branch"]
+        if all_refs:
+            cmd.append("-a")
+        elif remote:
+            cmd.append("-r")
+        if fmt is not None:
+            cmd.append(f"--format={fmt}")
+        return self._lines(self._run(cmd, Path(repo_path), timeout=timeout).stdout)
+
+    # -- inspection -----------------------------------------------------------
+    def rev_parse(self, repo_path: str, *args: str, timeout: Timeout = None) -> str:
+        result = self._run(
+            ["git", "rev-parse", *args], Path(repo_path), timeout=timeout
+        )
+        return str(result.stdout).strip()
+
+    def rev_list_count(
+        self, repo_path: str, range_expr: str, timeout: Timeout = None
+    ) -> int:
+        result = self._run(
+            ["git", "rev-list", "--count", range_expr], Path(repo_path), timeout=timeout
+        )
+        return int(str(result.stdout).strip() or "0")
+
+    def symbolic_ref(
+        self, repo_path: str, short: bool = True, timeout: Timeout = None
+    ) -> str:
+        cmd = ["git", "symbolic-ref"]
+        if short:
+            cmd.append("--short")
+        cmd.append("HEAD")
+        return str(self._run(cmd, Path(repo_path), timeout=timeout).stdout).strip()
+
+    def status_porcelain(self, repo_path: str, timeout: Timeout = None) -> str:
+        result = self._run(
+            ["git", "status", "--porcelain"], Path(repo_path), timeout=timeout
+        )
+        return str(result.stdout)
+
+    def diff_name_only(
+        self, repo_path: str, spec: str, timeout: Timeout = None
+    ) -> List[str]:
+        result = self._run(
+            ["git", "diff", "--name-only", spec], Path(repo_path), timeout=timeout
+        )
+        return self._lines(result.stdout)
+
+    def ls_files(self, repo_path: str, timeout: Timeout = None) -> List[str]:
+        result = self._run(["git", "ls-files"], Path(repo_path), timeout=timeout)
+        return [line for line in str(result.stdout).splitlines() if line]
+
+    def show_ref(
+        self, repo_path: str, *args: str, timeout: Timeout = None
+    ) -> subprocess.CompletedProcess:
+        return self._run(
+            ["git", "show-ref", *args], Path(repo_path), check=False, timeout=timeout
+        )
+
+    # -- mutation -------------------------------------------------------------
+    def reset(
+        self, repo_path: str, mode: str, target: str, timeout: Timeout = None
+    ) -> None:
+        self._run(
+            ["git", "reset", f"--{mode}", target], Path(repo_path), timeout=timeout
+        )
+
+    def restore(
+        self, repo_path: str, pathspec: str = ".", timeout: Timeout = None
+    ) -> None:
+        self._run(["git", "restore", pathspec], Path(repo_path), timeout=timeout)
+
+    def update_index_refresh(self, repo_path: str, timeout: Timeout = None) -> None:
+        # --refresh returns non-zero when the index is merely out of date; non-fatal.
+        self._run(
+            ["git", "update-index", "--refresh"],
+            Path(repo_path),
+            check=False,
+            timeout=timeout,
+        )
+
+    def config_set(
+        self, repo_path: str, key: str, value: str, timeout: Timeout = None
+    ) -> None:
+        self._run(["git", "config", key, value], Path(repo_path), timeout=timeout)
+
+    # -- remotes --------------------------------------------------------------
+    def remote_list(
+        self, repo_path: str, verbose: bool = False, timeout: Timeout = None
+    ) -> str:
+        cmd = ["git", "remote"]
+        if verbose:
+            cmd.append("-v")
+        return str(self._run(cmd, Path(repo_path), timeout=timeout).stdout)
+
+    def remote_get_url(self, repo_path: str, name: str, timeout: Timeout = None) -> str:
+        result = self._run(
+            ["git", "remote", "get-url", name], Path(repo_path), timeout=timeout
+        )
+        return str(result.stdout).strip()
+
+    def remote_add(
+        self, repo_path: str, name: str, url: str, timeout: Timeout = None
+    ) -> None:
+        self._run(["git", "remote", "add", name, url], Path(repo_path), timeout=timeout)
+
+    def remote_set_url(
+        self, repo_path: str, name: str, url: str, timeout: Timeout = None
+    ) -> None:
+        self._run(
+            ["git", "remote", "set-url", name, url], Path(repo_path), timeout=timeout
+        )
+
+    def remote_rename(
+        self, repo_path: str, old: str, new: str, timeout: Timeout = None
+    ) -> None:
+        self._run(
+            ["git", "remote", "rename", old, new], Path(repo_path), timeout=timeout
+        )
+
+    def remote_remove(self, repo_path: str, name: str, timeout: Timeout = None) -> None:
+        self._run(["git", "remote", "remove", name], Path(repo_path), timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+VALID_GIT_BACKENDS = ("local", "delegated")
+
+
+class GitBackendFactory:
+    """Create a GitBackend from a backend name.
+
+    Mirrors ``CloneBackendFactory``. ``local`` (the default) -> ``LocalGitBackend``.
+    ``delegated`` is supplied by the entry-point plugin seam
+    (``services.git_backend_plugin``) in Phase 3; it raises here unless a
+    plugin-provided backend is injected, so the core never silently no-ops.
+    """
+
+    @staticmethod
+    def create(
+        backend: str = "local", *, delegated_backend: Optional[GitBackend] = None
+    ) -> GitBackend:
+        if backend == "local":
+            return LocalGitBackend()
+        if backend == "delegated":
+            if delegated_backend is None:
+                raise RuntimeError(
+                    "git_backend='delegated' selected but no delegated backend was "
+                    "provided. The cidx_git_backend plugin (EVO-64678 Phase 3) must "
+                    "supply a GitMcpBackend via the code_indexer.git_backend seam."
+                )
+            return delegated_backend
+        raise ValueError(
+            f"Unknown git_backend {backend!r}; valid values are {VALID_GIT_BACKENDS}."
+        )

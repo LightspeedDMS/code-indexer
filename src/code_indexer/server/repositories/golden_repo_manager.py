@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
-from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
@@ -196,6 +196,7 @@ class GoldenRepoManager:
         resource_config: Optional["ServerResourceConfig"] = None,
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
     ):
         """
         Initialize golden repository manager.
@@ -204,12 +205,20 @@ class GoldenRepoManager:
             data_dir: Data directory path (REQUIRED - no default)
             resource_config: Resource configuration (timeouts, limits)
             db_path: Path to SQLite database file (optional, auto-computed from data_dir if not provided)
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                in-process), i.e. exactly today's behavior; the server injects the
+                configured backend via build_git_backend() at startup.
 
         Raises:
             ValueError: If data_dir is None or empty
         """
         if not data_dir or not data_dir.strip():
             raise ValueError("data_dir is required and cannot be None or empty")
+
+        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
 
         self.data_dir = data_dir
         self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")
@@ -1367,15 +1376,13 @@ class GoldenRepoManager:
             True if repository is valid and accessible, False otherwise
         """
         try:
-            # Use git ls-remote to check if repository is accessible
-            result = subprocess.run(
-                ["git", "ls-remote", repo_url],
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_clone_timeout,
-                env=build_non_interactive_git_env(),
+            # Use git ls-remote to check if repository is accessible.
+            # EVO-64678: via the git seam; ls_remote() maps a non-zero exit to
+            # False, and a timeout still propagates to the handler below.
+            reachable: bool = self._git_backend.ls_remote(
+                repo_url, timeout=self.resource_config.git_clone_timeout
             )
-            return result.returncode == 0
+            return reachable
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.debug(
                 "Repository accessibility check failed for %s: %s", repo_url, e
@@ -1552,22 +1559,21 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            cmd = ["git", "-c", "core.fsync=none", "clone"]
-            if branch:
-                cmd.extend(["--branch", branch])
-            cmd.extend([repo_url, clone_path])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_pull_timeout,
-                env=build_non_interactive_git_env(),
-            )
-
-            if result.returncode != 0:
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's behavior). CalledProcessError is caught here, before the
+            # outer SubprocessError handler, so the failure message keeps its
+            # exact "failed with code N: <stderr>" shape.
+            try:
+                self._git_backend.clone(
+                    repo_url,
+                    clone_path,
+                    branch=branch,
+                    no_fsync=True,
+                    timeout=self.resource_config.git_pull_timeout,
+                )
+            except subprocess.CalledProcessError as e:
                 raise GitOperationError(
-                    f"Git clone failed with code {result.returncode}: {result.stderr}"
+                    f"Git clone failed with code {e.returncode}: {e.stderr}"
                 )
 
             return clone_path
@@ -1589,15 +1595,15 @@ class GoldenRepoManager:
             the old behavior that always hardcoded 'main' regardless.
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=clone_path,
-                capture_output=True,
-                text=True,
-                check=True,
+            # EVO-64678: via the git seam. rev_parse() already strips stdout and
+            # raises CalledProcessError on failure, which the handler below
+            # catches exactly as before.
+            branch: str = self._git_backend.rev_parse(
+                clone_path,
+                "--abbrev-ref",
+                "HEAD",
                 timeout=self.resource_config.git_pull_timeout,
             )
-            branch = result.stdout.strip()
             if not branch:
                 logger.warning(
                     "git rev-parse returned empty output for cloned repo at %s. "
@@ -2513,27 +2519,28 @@ class GoldenRepoManager:
             if not os.path.exists(repo_path):
                 return ["main"]  # Default fallback
 
-            # Get branches using git command
-            result = subprocess.run(
-                ["git", "branch", "-r"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_untracked_file_timeout,
-            )
-
-            if result.returncode == 0:
-                branches = []
-                for line in result.stdout.strip().split("\n"):
-                    if line.strip():
-                        # Clean up branch name (remove origin/ prefix)
-                        branch = line.strip().replace("origin/", "")
-                        if branch and branch != "HEAD":
-                            branches.append(branch)
-
-                return branches if branches else ["main"]
-            else:
+            # Get branches using git command.
+            # EVO-64678: via the git seam. The raw call used check=False and
+            # returned ["main"] on a non-zero exit; list_branches() raises
+            # instead, so CalledProcessError is caught here to keep that exact
+            # tolerant behavior (and to avoid the generic warning below).
+            try:
+                remote_branch_lines = self._git_backend.list_branches(
+                    repo_path,
+                    remote=True,
+                    timeout=self.resource_config.git_untracked_file_timeout,
+                )
+            except subprocess.CalledProcessError:
                 return ["main"]
+
+            branches = []
+            for line in remote_branch_lines:
+                # Clean up branch name (remove origin/ prefix)
+                branch = line.replace("origin/", "")
+                if branch and branch != "HEAD":
+                    branches.append(branch)
+
+            return branches if branches else ["main"]
 
         except Exception as e:
             logging.warning(f"Failed to get branches for {repo_path}: {str(e)}")
@@ -2785,25 +2792,22 @@ class GoldenRepoManager:
         self, base_clone_path: str, target_branch: str, git_timeout: int
     ) -> None:
         """Fetch remote and validate that target_branch exists (AC3)."""
-        subprocess.run(
-            ["git", "-c", "core.fsync=none", "fetch", "origin"],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
+        # EVO-64678: both git calls route through the seam. Both ran with
+        # check=True, and the seam raises CalledProcessError on a non-zero exit,
+        # so failures propagate to change_branch() exactly as before.
+        self._git_backend.fetch(
+            base_clone_path,
+            remote="origin",
+            no_fsync=True,
             timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
         )
-        result = subprocess.run(
-            ["git", "branch", "-r"],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
-            timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
+        remote_branches = set(
+            self._git_backend.list_branches(
+                base_clone_path,
+                remote=True,
+                timeout=git_timeout,
+            )
         )
-        remote_branches = {b.strip() for b in result.stdout.splitlines() if b.strip()}
         if f"origin/{target_branch}" not in remote_branches:
             available = sorted(remote_branches)
             raise ValueError(
@@ -2815,23 +2819,19 @@ class GoldenRepoManager:
         self, base_clone_path: str, target_branch: str, git_timeout: int
     ) -> None:
         """Checkout target branch and pull latest commits."""
-        subprocess.run(
-            ["git", "checkout", target_branch],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
+        # EVO-64678: both git calls route through the seam; check=True semantics
+        # are preserved (the seam raises CalledProcessError on non-zero exit).
+        self._git_backend.checkout(
+            base_clone_path,
+            target_branch,
             timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
         )
-        subprocess.run(
-            ["git", "-c", "core.fsync=none", "pull", "origin", target_branch],
-            cwd=base_clone_path,
-            capture_output=True,
-            text=True,
+        self._git_backend.pull(
+            base_clone_path,
+            remote="origin",
+            branch=target_branch,
+            no_fsync=True,
             timeout=git_timeout,
-            check=True,
-            env=build_non_interactive_git_env(),
         )
 
     def _cb_cidx_index(self, base_clone_path: str) -> None:
@@ -2931,22 +2931,20 @@ class GoldenRepoManager:
             # Lazy import to keep cidx --help fast (per CLAUDE.md)
             from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-            # Get list of files in target branch via git ls-files on the snapshot
-            result = subprocess.run(
-                ["git", "ls-files"],
-                cwd=snapshot_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
+            # Get list of files in target branch via git ls-files on the snapshot.
+            # EVO-64678: via the git seam. ls_files() raises instead of returning
+            # a non-zero result, so CalledProcessError is caught inline to keep
+            # the identical warning text (and the outer handler's message shape).
+            try:
+                branch_files = set(
+                    self._git_backend.ls_files(snapshot_path, timeout=60)
+                )
+            except subprocess.CalledProcessError as git_exc:
                 logger.warning(
                     f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{result.stderr} - skipping FTS cleanup"
+                    f"{git_exc.stderr} - skipping FTS cleanup"
                 )
                 return
-
-            branch_files = set(result.stdout.splitlines())
 
             # Open existing FTS index in snapshot (create_new=False to not wipe it)
             fts_manager = TantivyIndexManager(fts_index_dir)
@@ -3010,22 +3008,19 @@ class GoldenRepoManager:
                 FilesystemVectorStore,
             )
 
-            # Get list of files in target branch via git ls-files on the snapshot
-            result = subprocess.run(
-                ["git", "ls-files"],
-                cwd=snapshot_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
+            # Get list of files in target branch via git ls-files on the snapshot.
+            # EVO-64678: via the git seam; see _cb_fts_branch_cleanup for why the
+            # CalledProcessError is caught inline rather than by the outer handler.
+            try:
+                branch_files = set(
+                    self._git_backend.ls_files(snapshot_path, timeout=60)
+                )
+            except subprocess.CalledProcessError as git_exc:
                 logger.warning(
                     f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{result.stderr} - skipping HNSW cleanup"
+                    f"{git_exc.stderr} - skipping HNSW cleanup"
                 )
                 return
-
-            branch_files = set(result.stdout.splitlines())
 
             store = FilesystemVectorStore(index_dir)
             collections = store.list_collections()
@@ -3260,13 +3255,10 @@ class GoldenRepoManager:
                     )
             except Exception as exc:
                 # Bug #469: Rollback git HEAD to previous branch on partial failure.
+                # EVO-64678: via the git seam. The raw call passed no timeout,
+                # so none is passed here; check=True is preserved by the seam.
                 try:
-                    subprocess.run(
-                        ["git", "checkout", previous_branch],
-                        cwd=base,
-                        check=True,
-                        capture_output=True,
-                    )
+                    self._git_backend.checkout(base, previous_branch)
                 except Exception as rollback_exc:
                     logger.error(
                         "[change_branch] Rollback to '%s' failed for '%s': %s",

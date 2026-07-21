@@ -11,6 +11,7 @@ from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -33,7 +34,6 @@ from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..services.job_tracker import DuplicateJobError
-from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
 
 
@@ -179,6 +179,7 @@ class ActivatedRepoManager:
         background_job_manager: Optional[BackgroundJobManager] = None,
         clone_backend: Optional["CloneBackend"] = None,
         index_manager: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
     ):
         """
         Initialize activated repository manager.
@@ -193,7 +194,16 @@ class ActivatedRepoManager:
                 reindex after activation/switch/sync on non-default branches
                 (Bug #1203). When None, post-activation reindex is skipped
                 (safe for legacy callers until lifespan wires this in).
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                in-process), i.e. exactly today's behavior; the server injects the
+                configured backend via build_git_backend() at startup. Distinct
+                from clone_backend (EVO-64616), which covers CoW cloning only.
         """
+        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
+
         if data_dir:
             self.data_dir = data_dir
         else:
@@ -1162,40 +1172,36 @@ class ActivatedRepoManager:
                     f"Attempting to fetch from remote for repository '{user_alias}'"
                 )
                 fetch_attempted = True
-                fetch_result = subprocess.run(
-                    ["git", "fetch", "origin"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    env=build_non_interactive_git_env(),
-                )
-
-                if fetch_result.returncode == 0:
+                # EVO-64678: via the git seam. A non-zero exit now surfaces as
+                # CalledProcessError, caught here so the fallback path and the
+                # warning message keep their exact previous shape.
+                try:
+                    self._git_backend.fetch(repo_dir, "origin", timeout=60)
                     fetch_successful = True
                     self.logger.info(
                         f"Successfully fetched from remote for repository '{user_alias}'"
                     )
-                else:
+                except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {fetch_result.stderr}. "
+                        f"Git fetch failed for repository '{user_alias}': {e.stderr}. "
                         f"Attempting local branch switching as fallback."
                     )
 
             # Step 3: Check for uncommitted changes
             uncommitted_changes = []
-            git_status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            # EVO-64678: via the git seam; a failed status is tolerated exactly
+            # as the old `returncode == 0` guard tolerated it.
+            try:
+                git_status_output = self._git_backend.status_porcelain(
+                    repo_dir, timeout=30
+                )
+            except subprocess.CalledProcessError:
+                git_status_output = ""
 
-            if git_status.returncode == 0 and git_status.stdout.strip():
+            if git_status_output.strip():
                 uncommitted_changes = [
                     line.strip()[3:]
-                    for line in git_status.stdout.strip().split("\n")
+                    for line in git_status_output.strip().split("\n")
                     if line.strip()
                 ]
 
@@ -1233,23 +1239,21 @@ class ActivatedRepoManager:
             if not branch_switch_success and create:
                 # Try to create new branch
                 try:
-                    create_result = subprocess.run(
-                        ["git", "checkout", "-b", branch_name],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-
-                    if create_result.returncode == 0:
+                    # EVO-64678: via the git seam. CalledProcessError is caught
+                    # inline so the failure stays a WARNING (never an escalation
+                    # to the enclosing SubprocessError handler).
+                    try:
+                        self._git_backend.checkout(
+                            repo_dir, branch_name, create=True, timeout=30
+                        )
                         branch_switch_success = True
                         branch_created = True
                         self.logger.info(
                             f"Created new branch '{branch_name}' in repository '{user_alias}'"
                         )
-                    else:
+                    except subprocess.CalledProcessError as e:
                         self.logger.warning(
-                            f"Failed to create branch '{branch_name}': {create_result.stderr}"
+                            f"Failed to create branch '{branch_name}': {e.stderr}"
                         )
 
                 except subprocess.TimeoutExpired:
@@ -1353,16 +1357,16 @@ class ActivatedRepoManager:
 
         try:
             # First try to get current branch from git directly
-            result = subprocess.run(
-                ["git", "symbolic-ref", "--short", "HEAD"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if result.returncode == 0:
-                return result.stdout.strip()
+            # EVO-64678: via the git seam (same `git symbolic-ref --short HEAD`).
+            # A non-zero exit (e.g. detached HEAD) raises CalledProcessError,
+            # caught here so the metadata fallback below still runs.
+            try:
+                current_branch: str = self._git_backend.current_branch(
+                    repo_dir, timeout=30
+                )
+                return current_branch
+            except subprocess.CalledProcessError:
+                pass
 
             # Fallback to metadata if git command fails
             repo_data = self._load_metadata(username, user_alias)
@@ -1446,24 +1450,22 @@ class ActivatedRepoManager:
                 f"Syncing repository '{user_alias}' with golden repository"
             )
 
-            fetch_result = subprocess.run(
-                ["git", "fetch", "golden"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=build_non_interactive_git_env(),
-            )
-
-            if fetch_result.returncode != 0:
+            # EVO-64678: via the git seam. CalledProcessError is caught here,
+            # before the enclosing SubprocessError-family handlers, so both the
+            # "not accessible" error and the local-only fallback keep their
+            # exact previous shape.
+            try:
+                self._git_backend.fetch(repo_dir, "golden", timeout=120)
+            except subprocess.CalledProcessError as e:
+                fetch_stderr = e.stderr or ""
                 # Check if this is a network/access error or missing remote
-                if "not a git repository" in fetch_result.stderr.lower():
+                if "not a git repository" in fetch_stderr.lower():
                     raise GitOperationError(
-                        f"Golden repository not accessible for sync: {fetch_result.stderr}"
+                        f"Golden repository not accessible for sync: {fetch_stderr}"
                     )
                 else:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {fetch_result.stderr}"
+                        f"Git fetch failed for repository '{user_alias}': {fetch_stderr}"
                     )
                     # Continue with local-only sync message
                     return {
@@ -1474,15 +1476,16 @@ class ActivatedRepoManager:
 
             # Step 2: Check if there are changes to merge
             # Compare current branch with golden branch
-            diff_result = subprocess.run(
-                ["git", "diff", f"HEAD..golden/{current_branch}", "--name-only"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            # EVO-64678: via the git seam; a failed diff is tolerated exactly as
+            # the old `returncode == 0` guard tolerated it (treated as "no changes").
+            try:
+                changed_files = self._git_backend.diff_name_only(
+                    repo_dir, f"HEAD..golden/{current_branch}", timeout=30
+                )
+            except subprocess.CalledProcessError:
+                changed_files = []
 
-            has_changes = diff_result.returncode == 0 and diff_result.stdout.strip()
+            has_changes = bool(changed_files)
 
             if not has_changes:
                 # No changes to sync
@@ -1493,19 +1496,19 @@ class ActivatedRepoManager:
                 }
 
             # Step 3: Merge changes from golden
-            merge_result = subprocess.run(
-                ["git", "merge", f"golden/{current_branch}"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-
-            if merge_result.returncode != 0:
+            # EVO-64678: via the git seam. CalledProcessError is rebuilt into the
+            # identical conflict/failure messages from e.stdout/e.stderr.
+            try:
+                self._git_backend.merge(
+                    repo_dir, f"golden/{current_branch}", timeout=120
+                )
+            except subprocess.CalledProcessError as e:
+                merge_stdout = e.stdout or ""
+                merge_stderr = e.stderr or ""
                 # Merge conflict or error
                 if (
-                    "conflict" in merge_result.stdout.lower()
-                    or "conflict" in merge_result.stderr.lower()
+                    "conflict" in merge_stdout.lower()
+                    or "conflict" in merge_stderr.lower()
                 ):
                     raise GitOperationError(
                         f"Sync failed due to merge conflicts in repository '{user_alias}'. "
@@ -1513,7 +1516,7 @@ class ActivatedRepoManager:
                     )
                 else:
                     raise GitOperationError(
-                        f"Sync failed for repository '{user_alias}': {merge_result.stderr}"
+                        f"Sync failed for repository '{user_alias}': {merge_stderr}"
                     )
 
             # Step 4: Update metadata timestamp
@@ -1534,11 +1537,8 @@ class ActivatedRepoManager:
                     self._run_branch_delta_index(repo_dir, user_alias)
 
             # Step 5: Return success message with details
-            changed_files = (
-                diff_result.stdout.strip().split("\n")
-                if diff_result.stdout.strip()
-                else []
-            )
+            # changed_files was computed from the diff above (EVO-64678: the seam
+            # returns the same stripped, non-empty --name-only lines).
 
             self.logger.info(
                 f"Successfully synced repository '{user_alias}' with golden repository"
@@ -1603,41 +1603,27 @@ class ActivatedRepoManager:
             current_branch = repo_data.get("current_branch", "master")
 
             # Get list of local branches
-            local_branches_result = subprocess.run(
-                ["git", "branch", "--format=%(refname:short)"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if local_branches_result.returncode != 0:
-                raise GitOperationError(
-                    f"Failed to list local branches: {local_branches_result.stderr}"
+            # EVO-64678: via the git seam; list_branches() already returns the
+            # stripped, non-empty lines the old comprehension produced.
+            try:
+                local_branches = self._git_backend.list_branches(
+                    repo_dir, fmt="%(refname:short)", timeout=30
                 )
-
-            local_branches = [
-                branch.strip()
-                for branch in local_branches_result.stdout.strip().split("\n")
-                if branch.strip()
-            ]
+            except subprocess.CalledProcessError as e:
+                raise GitOperationError(f"Failed to list local branches: {e.stderr}")
 
             # Get list of remote branches
-            remote_branches_result = subprocess.run(
-                ["git", "branch", "-r", "--format=%(refname:short)"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
             remote_branches = []
-            if remote_branches_result.returncode == 0:
+            try:
                 remote_branches = [
-                    branch.strip()
-                    for branch in remote_branches_result.stdout.strip().split("\n")
-                    if branch.strip() and not branch.strip().endswith("/HEAD")
+                    branch
+                    for branch in self._git_backend.list_branches(
+                        repo_dir, remote=True, fmt="%(refname:short)", timeout=30
+                    )
+                    if not branch.endswith("/HEAD")
                 ]
+            except subprocess.CalledProcessError:
+                remote_branches = []
 
             # Get detailed branch information
             all_branches = []
@@ -2072,15 +2058,17 @@ class ActivatedRepoManager:
             # Switch to requested branch if different from default
             if branch_name != golden_repo.default_branch:
                 update_progress(70, f"Switching to branch '{branch_name}'")
-                result = subprocess.run(
-                    ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
-                    cwd=activated_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-
-                if result.returncode != 0:
+                # EVO-64678: via the git seam; CalledProcessError is caught here
+                # so the rollback + error message are byte-for-byte unchanged.
+                try:
+                    self._git_backend.checkout(
+                        activated_repo_path,
+                        branch_name,
+                        force_new=True,
+                        start_point=f"origin/{branch_name}",
+                        timeout=60,
+                    )
+                except subprocess.CalledProcessError as e:
                     # Activation failure: branch checkout failed — roll back
                     # the cloned directory.  Path is trusted: activated_repo_path
                     # = self.activated_repos_dir / username / user_alias,
@@ -2091,7 +2079,7 @@ class ActivatedRepoManager:
                     # rename-to-trash path does not apply.
                     shutil.rmtree(activated_repo_path, ignore_errors=True)
                     raise GitOperationError(
-                        f"Failed to switch to branch '{branch_name}': {result.stderr}"
+                        f"Failed to switch to branch '{branch_name}': {e.stderr}"
                     )
                 update_progress(80, f"Successfully switched to branch '{branch_name}'")
             else:
@@ -2117,29 +2105,27 @@ class ActivatedRepoManager:
                 update_progress(
                     85, f"Setting git config user.email to {git_committer_email}"
                 )
-                result = subprocess.run(
-                    ["git", "config", "user.email", git_committer_email],
-                    cwd=activated_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
+                # EVO-64678: via the git seam; failures stay non-fatal WARNINGs.
+                try:
+                    self._git_backend.config_set(
+                        activated_repo_path,
+                        "user.email",
+                        git_committer_email,
+                        timeout=30,
+                    )
+                except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Failed to set git config user.email: {result.stderr}"
+                        f"Failed to set git config user.email: {e.stderr}"
                     )
 
                 # Set git config user.name (generic for all CIDX users)
-                result = subprocess.run(
-                    ["git", "config", "user.name", "CIDX User"],
-                    cwd=activated_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if result.returncode != 0:
+                try:
+                    self._git_backend.config_set(
+                        activated_repo_path, "user.name", "CIDX User", timeout=30
+                    )
+                except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Failed to set git config user.name: {result.stderr}"
+                        f"Failed to set git config user.name: {e.stderr}"
                     )
 
                 self.logger.info(
@@ -3143,32 +3129,32 @@ class ActivatedRepoManager:
 
             # Step 2: Detect and convert bare repositories (Story #636)
             # Golden repos are stored as bare, but activated repos need working trees
-            result = subprocess.run(
-                ["git", "rev-parse", "--is-bare-repository"],
-                cwd=dest_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            is_bare = result.returncode == 0 and result.stdout.strip() == "true"
+            # EVO-64678: via the git seam. A non-zero rev-parse used to mean
+            # is_bare=False; CalledProcessError is caught to keep that (it must
+            # NOT reach the enclosing handler, which deletes the clone).
+            try:
+                is_bare = (
+                    self._git_backend.rev_parse(
+                        dest_path, "--is-bare-repository", timeout=10
+                    )
+                    == "true"
+                )
+            except subprocess.CalledProcessError:
+                is_bare = False
 
             if is_bare:
                 self.logger.info(
                     f"Detected bare repository clone, converting to non-bare: {dest_path}"
                 )
 
-                # Convert bare to non-bare
-                result = subprocess.run(
-                    ["git", "config", "core.bare", "false"],
-                    cwd=dest_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if result.returncode != 0:
+                # Convert bare to non-bare (EVO-64678: via the git seam)
+                try:
+                    self._git_backend.config_set(
+                        dest_path, "core.bare", "false", timeout=30
+                    )
+                except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
-                        f"Failed to set core.bare=false: {result.stderr}"
+                        f"Failed to set core.bare=false: {e.stderr}"
                     )
 
                 # Move git internals to .git subdirectory
@@ -3195,18 +3181,14 @@ class ActivatedRepoManager:
                                 os.remove(dst_item)
                         shutil.move(src_item, dst_item)
 
-                # Checkout working tree
-                result = subprocess.run(
-                    ["git", "checkout", "-f", "HEAD"],
-                    cwd=dest_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-
-                if result.returncode != 0:
+                # Checkout working tree (EVO-64678: via the git seam)
+                try:
+                    self._git_backend.checkout(
+                        dest_path, "HEAD", force=True, timeout=60
+                    )
+                except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"git checkout -f HEAD failed (non-fatal): {result.stderr}"
+                        f"git checkout -f HEAD failed (non-fatal): {e.stderr}"
                     )
 
                 self.logger.info(
@@ -3226,36 +3208,26 @@ class ActivatedRepoManager:
                 # decisive lever -- set it BEFORE the refresh below AND
                 # before _configure_git_structure's `git status` (persisted
                 # in dest_path/.git/config, read by both call sites).
-                checkstat_result = subprocess.run(
-                    ["git", "config", "--local", "core.checkStat", "minimal"],
-                    cwd=dest_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if checkstat_result.returncode != 0:
+                # EVO-64678: via the git seam. config_set writes the repo-local
+                # config (git's default location), same as the explicit --local.
+                try:
+                    self._git_backend.config_set(
+                        dest_path, "core.checkStat", "minimal", timeout=30
+                    )
+                except subprocess.CalledProcessError as e:
                     self.logger.warning(
                         "git config core.checkStat=minimal failed (non-fatal): "
-                        f"{checkstat_result.stderr}"
+                        f"{e.stderr}"
                     )
 
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
                 self.logger.info(
                     "Running git update-index --refresh to fix CoW clone timestamps"
                 )
-                result = subprocess.run(
-                    ["git", "update-index", "--refresh"],
-                    cwd=dest_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-
-                if result.returncode != 0:
-                    self.logger.warning(
-                        f"git update-index --refresh failed (non-fatal): {result.stderr}"
-                    )
+                # EVO-64678: via the git seam. update_index_refresh() runs with
+                # check=False -- a non-zero exit here is normal and was already
+                # non-fatal.
+                self._git_backend.update_index_refresh(dest_path, timeout=60)
 
                 # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
                 # unconditionally to "clean up" CoW clone timestamp changes.
@@ -3269,34 +3241,34 @@ class ActivatedRepoManager:
                 # DISCARD any genuinely different content -- a real content
                 # difference immediately after a CoW clone would be abnormal,
                 # so surface it with a WARNING instead of destroying it.
-                status_result = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=dest_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
+                # EVO-64678: via the git seam. A failed status used to skip the
+                # check entirely; CalledProcessError is caught to keep that (an
+                # empty result yields no tracked lines and therefore no warning).
+                try:
+                    status_output = self._git_backend.status_porcelain(
+                        dest_path, timeout=60
+                    )
+                except subprocess.CalledProcessError:
+                    status_output = ""
 
-                if status_result.returncode == 0:
-                    # Bug #1347: `git status --porcelain` always reports the
-                    # untracked `.code-indexer/` index directory (`??` lines)
-                    # after every activation -- that is expected, normal
-                    # state, not a sign of trouble. `git restore` only ever
-                    # affects TRACKED files, so an untracked entry was never
-                    # at risk of being discarded. Filter out untracked (`??`)
-                    # lines and warn ONLY on genuine tracked-change lines.
-                    tracked_lines = [
-                        line
-                        for line in status_result.stdout.splitlines()
-                        if line.strip() and not line.startswith("??")
-                    ]
-                    if tracked_lines:
-                        self.logger.warning(
-                            "git status reports unexpected TRACKED changes "
-                            "after CoW clone refresh; NOT running git "
-                            "restore (would discard content): "
-                            + "; ".join(tracked_lines)
-                        )
+                # Bug #1347: `git status --porcelain` always reports the
+                # untracked `.code-indexer/` index directory (`??` lines)
+                # after every activation -- that is expected, normal
+                # state, not a sign of trouble. `git restore` only ever
+                # affects TRACKED files, so an untracked entry was never
+                # at risk of being discarded. Filter out untracked (`??`)
+                # lines and warn ONLY on genuine tracked-change lines.
+                tracked_lines = [
+                    line
+                    for line in status_output.splitlines()
+                    if line.strip() and not line.startswith("??")
+                ]
+                if tracked_lines:
+                    self.logger.warning(
+                        "git status reports unexpected TRACKED changes "
+                        "after CoW clone refresh; NOT running git "
+                        "restore (would discard content): " + "; ".join(tracked_lines)
+                    )
 
             # Step 3: Fix cidx config paths (only if .code-indexer/ exists)
             code_indexer_dir = os.path.join(dest_path, ".code-indexer")
@@ -3376,37 +3348,25 @@ class ActivatedRepoManager:
             ActivatedRepoError: If git remote configuration fails
         """
         try:
-            # Verify remote configuration
-            result = subprocess.run(
-                ["git", "remote", "-v"],
-                cwd=dest_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if result.returncode == 0:
-                self.logger.info(
-                    f"Git remotes configured for {dest_path}: {result.stdout.strip()}"
+            # Verify remote configuration (EVO-64678: via the git seam)
+            try:
+                remotes_output = self._git_backend.remote_list(
+                    dest_path, verbose=True, timeout=30
                 )
-            else:
+                self.logger.info(
+                    f"Git remotes configured for {dest_path}: {remotes_output.strip()}"
+                )
+            except subprocess.CalledProcessError as e:
                 self.logger.warning(
-                    f"Could not verify git remotes for {dest_path}: {result.stderr}"
+                    f"Could not verify git remotes for {dest_path}: {e.stderr}"
                 )
 
             # Fetch from origin to ensure all remote branches are available
-            result = subprocess.run(
-                ["git", "fetch", "origin"],
-                cwd=dest_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                env=build_non_interactive_git_env(),
-            )
-
-            if result.returncode != 0:
+            try:
+                self._git_backend.fetch(dest_path, "origin", timeout=60)
+            except subprocess.CalledProcessError as e:
                 self.logger.warning(
-                    f"Could not fetch from origin in {dest_path}: {result.stderr}"
+                    f"Could not fetch from origin in {dest_path}: {e.stderr}"
                 )
 
         except subprocess.TimeoutExpired:
@@ -3432,32 +3392,27 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If remote configuration fails
         """
-        # Try to add remote
-        result = subprocess.run(
-            ["git", "remote", "add", remote_name, url],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=self.GIT_COMMAND_TIMEOUT,
-        )
-
-        if result.returncode != 0:
+        # Try to add remote (EVO-64678: via the git seam; the "already exists"
+        # branch is driven off the CalledProcessError's stderr, unchanged)
+        try:
+            self._git_backend.remote_add(
+                repo_path, remote_name, url, timeout=self.GIT_COMMAND_TIMEOUT
+            )
+        except subprocess.CalledProcessError as add_error:
+            add_stderr = add_error.stderr or ""
             # If remote already exists, update it
-            if "already exists" in result.stderr:
-                result = subprocess.run(
-                    ["git", "remote", "set-url", remote_name, url],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.GIT_COMMAND_TIMEOUT,
-                )
-                if result.returncode != 0:
+            if "already exists" in add_stderr:
+                try:
+                    self._git_backend.remote_set_url(
+                        repo_path, remote_name, url, timeout=self.GIT_COMMAND_TIMEOUT
+                    )
+                except subprocess.CalledProcessError as set_url_error:
                     raise ActivatedRepoError(
-                        f"Failed to update {remote_name} remote: {result.stderr}"
+                        f"Failed to update {remote_name} remote: {set_url_error.stderr}"
                     )
             else:
                 raise ActivatedRepoError(
-                    f"Failed to add {remote_name} remote: {result.stderr}"
+                    f"Failed to add {remote_name} remote: {add_stderr}"
                 )
 
     def _configure_git_structure(self, source_path: str, dest_path: str) -> None:
@@ -3485,20 +3440,16 @@ class ActivatedRepoManager:
         """
         try:
             # Step 1: Extract GitHub/GitLab URL from golden repo's origin
-            github_url_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=source_path,
-                capture_output=True,
-                text=True,
-                timeout=self.GIT_COMMAND_TIMEOUT,
-            )
-
-            if github_url_result.returncode == 0:
-                github_url = github_url_result.stdout.strip()
+            # EVO-64678: via the git seam; "no origin" now arrives as
+            # CalledProcessError, caught here to keep the local-path fallback.
+            try:
+                github_url = self._git_backend.remote_get_url(
+                    source_path, "origin", timeout=self.GIT_COMMAND_TIMEOUT
+                )
                 self.logger.info(
                     f"Extracted GitHub/GitLab URL from golden repo: {github_url}"
                 )
-            else:
+            except subprocess.CalledProcessError:
                 # Fallback: If golden repo has no origin, use local path
                 github_url = source_path
                 self.logger.warning(
@@ -3512,17 +3463,14 @@ class ActivatedRepoManager:
             self._add_or_update_remote(dest_path, "golden", source_path)
 
             # Step 4: Fetch from golden (local, fast) to ensure remote branches are available
-            result = subprocess.run(
-                ["git", "fetch", "golden"],
-                cwd=dest_path,
-                capture_output=True,
-                text=True,
-                timeout=self.GIT_FETCH_TIMEOUT,
-            )
-
-            if result.returncode != 0:
+            # EVO-64678: via the git seam.
+            try:
+                self._git_backend.fetch(
+                    dest_path, "golden", timeout=self.GIT_FETCH_TIMEOUT
+                )
+            except subprocess.CalledProcessError as e:
                 raise ActivatedRepoError(
-                    f"Failed to fetch from golden remote: {result.stderr}"
+                    f"Failed to fetch from golden remote: {e.stderr}"
                 )
 
             # Step 5: Verify git structure is working
@@ -3583,19 +3531,15 @@ class ActivatedRepoManager:
         """
         try:
             # Check if origin remote exists and get its URL
-            origin_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=self.GIT_COMMAND_TIMEOUT,
-            )
-
-            if origin_result.returncode != 0:
+            # EVO-64678: via the git seam; CalledProcessError == the old
+            # `returncode != 0` "no origin remote" case.
+            try:
+                origin_url = self._git_backend.remote_get_url(
+                    repo_dir, "origin", timeout=self.GIT_COMMAND_TIMEOUT
+                )
+            except subprocess.CalledProcessError:
                 # No origin remote - nothing to migrate
                 return False
-
-            origin_url = origin_result.stdout.strip()
 
             # Check if origin points to local path (legacy setup)
             if origin_url.startswith("/"):
@@ -3604,16 +3548,11 @@ class ActivatedRepoManager:
                 )
 
                 # Get GitHub URL from golden repo's origin
-                github_url_result = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    cwd=golden_repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.GIT_COMMAND_TIMEOUT,
-                )
-
-                if github_url_result.returncode == 0:
-                    github_url = github_url_result.stdout.strip()
+                # EVO-64678: via the git seam (CalledProcessError == no origin).
+                try:
+                    github_url = self._git_backend.remote_get_url(
+                        golden_repo_path, "origin", timeout=self.GIT_COMMAND_TIMEOUT
+                    )
 
                     # Validate GitHub URL is not another local path (Story #636)
                     if github_url.startswith("/"):
@@ -3621,7 +3560,7 @@ class ActivatedRepoManager:
                             f"Cannot migrate: golden repo origin is local path, not remote URL: {github_url}"
                         )
                         return False
-                else:
+                except subprocess.CalledProcessError:
                     # Fallback: Use golden repo path if it has no origin
                     github_url = golden_repo_path
                     self.logger.warning(
@@ -3629,43 +3568,37 @@ class ActivatedRepoManager:
                     )
 
                 # Check if golden remote already exists (Bug #639 fix)
-                golden_check_result = subprocess.run(
-                    ["git", "remote", "get-url", "golden"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.GIT_COMMAND_TIMEOUT,
-                )
+                try:
+                    existing_golden_url: Optional[str] = (
+                        self._git_backend.remote_get_url(
+                            repo_dir, "golden", timeout=self.GIT_COMMAND_TIMEOUT
+                        )
+                    )
+                except subprocess.CalledProcessError:
+                    existing_golden_url = None
 
                 # If golden exists, remove it first to avoid "already exists" error
-                if golden_check_result.returncode == 0:
+                if existing_golden_url is not None:
                     self.logger.info(
-                        f"Removing existing golden remote before migration: {golden_check_result.stdout.strip()}"
+                        f"Removing existing golden remote before migration: {existing_golden_url}"
                     )
-                    remove_result = subprocess.run(
-                        ["git", "remote", "remove", "golden"],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.GIT_COMMAND_TIMEOUT,
-                    )
-                    if remove_result.returncode != 0:
+                    try:
+                        self._git_backend.remote_remove(
+                            repo_dir, "golden", timeout=self.GIT_COMMAND_TIMEOUT
+                        )
+                    except subprocess.CalledProcessError as e:
                         raise ActivatedRepoError(
-                            f"Failed to remove existing golden remote: {remove_result.stderr}"
+                            f"Failed to remove existing golden remote: {e.stderr}"
                         )
 
                 # Rename origin to golden
-                rename_result = subprocess.run(
-                    ["git", "remote", "rename", "origin", "golden"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.GIT_COMMAND_TIMEOUT,
-                )
-
-                if rename_result.returncode != 0:
+                try:
+                    self._git_backend.remote_rename(
+                        repo_dir, "origin", "golden", timeout=self.GIT_COMMAND_TIMEOUT
+                    )
+                except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
-                        f"Failed to rename origin to golden: {rename_result.stderr}"
+                        f"Failed to rename origin to golden: {e.stderr}"
                     )
 
                 # Add new origin pointing to GitHub
@@ -3677,15 +3610,12 @@ class ActivatedRepoManager:
                 return True
 
             # Check if golden remote exists (dual remote setup)
-            golden_result = subprocess.run(
-                ["git", "remote", "get-url", "golden"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=self.GIT_COMMAND_TIMEOUT,
-            )
-
-            if golden_result.returncode != 0:
+            # EVO-64678: via the git seam (CalledProcessError == no golden remote).
+            try:
+                self._git_backend.remote_get_url(
+                    repo_dir, "golden", timeout=self.GIT_COMMAND_TIMEOUT
+                )
+            except subprocess.CalledProcessError:
                 # origin is GitHub URL but no golden remote - add it
                 self._add_or_update_remote(repo_dir, "golden", golden_repo_path)
                 self.logger.info(
@@ -3855,19 +3785,15 @@ class ActivatedRepoManager:
         """
         try:
             # Check if origin remote exists
-            result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode != 0:
+            # EVO-64678: via the git seam; CalledProcessError == the old
+            # `returncode != 0` "no origin remote configured" case.
+            try:
+                origin_url = self._git_backend.remote_get_url(
+                    repo_dir, "origin", timeout=10
+                )
+            except subprocess.CalledProcessError:
                 # No origin remote configured
                 return False, "No origin remote configured"
-
-            origin_url = result.stdout.strip()
 
             # Analyze remote URL to determine if fetching makes sense
             if not origin_url:
@@ -3923,24 +3849,26 @@ class ActivatedRepoManager:
         """
         try:
             # Switch to branch (create tracking branch if needed)
-            result = subprocess.run(
-                ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode == 0:
-                self.logger.info(
-                    f"Successfully switched to remote tracking branch '{branch_name}' in repository '{user_alias}'"
+            # EVO-64678: via the git seam; CalledProcessError reproduces the old
+            # `returncode != 0` DEBUG-and-return-False path.
+            try:
+                self._git_backend.checkout(
+                    repo_dir,
+                    branch_name,
+                    force_new=True,
+                    start_point=f"origin/{branch_name}",
+                    timeout=60,
                 )
-                return True
-            else:
+            except subprocess.CalledProcessError as e:
                 self.logger.debug(
-                    f"Failed to switch to remote tracking branch '{branch_name}': {result.stderr}"
+                    f"Failed to switch to remote tracking branch '{branch_name}': {e.stderr}"
                 )
                 return False
+
+            self.logger.info(
+                f"Successfully switched to remote tracking branch '{branch_name}' in repository '{user_alias}'"
+            )
+            return True
 
         except subprocess.TimeoutExpired:
             self.logger.warning(
@@ -3972,75 +3900,59 @@ class ActivatedRepoManager:
         """
         try:
             # Strategy 1: Try direct checkout (branch already exists locally)
-            result = subprocess.run(
-                ["git", "checkout", branch_name],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode == 0:
+            # EVO-64678: via the git seam; each CalledProcessError falls through
+            # to the next strategy exactly as the old returncode checks did.
+            try:
+                self._git_backend.checkout(repo_dir, branch_name, timeout=60)
                 self.logger.info(
                     f"Successfully switched to local branch '{branch_name}' in repository '{user_alias}'"
                 )
                 return True
+            except subprocess.CalledProcessError:
+                pass
 
             # Strategy 2: Try to create branch from local origin branch (if it exists)
-            result = subprocess.run(
-                [
-                    "git",
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    f"refs/remotes/origin/{branch_name}",
-                ],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
+            # show_ref() runs with check=False, so the returncode test is preserved.
+            result = self._git_backend.show_ref(
+                repo_dir,
+                "--verify",
+                "--quiet",
+                f"refs/remotes/origin/{branch_name}",
                 timeout=30,
             )
 
             if result.returncode == 0:
                 # Origin branch exists locally, create tracking branch
-                result = subprocess.run(
-                    ["git", "checkout", "-b", branch_name, f"origin/{branch_name}"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-
-                if result.returncode == 0:
+                try:
+                    self._git_backend.checkout(
+                        repo_dir,
+                        branch_name,
+                        create=True,
+                        start_point=f"origin/{branch_name}",
+                        timeout=60,
+                    )
                     self.logger.info(
                         f"Successfully created local branch '{branch_name}' from origin in repository '{user_alias}'"
                     )
                     return True
+                except subprocess.CalledProcessError:
+                    pass
 
             # Strategy 3: Check if branch exists in any form we can switch to
-            result = subprocess.run(
-                ["git", "show-ref", branch_name],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            result = self._git_backend.show_ref(repo_dir, branch_name, timeout=30)
 
             if result.returncode == 0:
                 # Branch exists somewhere, try force checkout
-                result = subprocess.run(
-                    ["git", "checkout", "-B", branch_name],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-
-                if result.returncode == 0:
+                try:
+                    self._git_backend.checkout(
+                        repo_dir, branch_name, force_new=True, timeout=60
+                    )
                     self.logger.info(
                         f"Successfully force-switched to branch '{branch_name}' in repository '{user_alias}'"
                     )
                     return True
+                except subprocess.CalledProcessError:
+                    pass
 
             # All strategies failed
             self.logger.info(
@@ -4148,36 +4060,35 @@ class ActivatedRepoManager:
                 return ["main"]  # Default fallback
 
             # Get all branches (local and remote)
-            result = subprocess.run(
-                ["git", "branch", "-a"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                branches = []
-                for line in result.stdout.strip().split("\n"):
-                    if line.strip():
-                        # Clean up branch name (remove prefixes and current marker)
-                        branch = line.strip().replace("*", "").strip()
-
-                        # Skip remote tracking references in favor of clean names
-                        if branch.startswith("remotes/origin/"):
-                            branch = branch.replace("remotes/origin/", "")
-
-                        if (
-                            branch
-                            and branch not in ["HEAD", "HEAD -> origin/main"]
-                            and not branch.startswith("remotes/")
-                        ):
-                            if branch not in branches:  # Avoid duplicates
-                                branches.append(branch)
-
-                return branches if branches else ["main"]
-            else:
+            # EVO-64678: via the git seam; list_branches() yields the same
+            # stripped, non-empty lines, and CalledProcessError reproduces the
+            # old `returncode != 0` -> ["main"] fallback.
+            try:
+                branch_lines = self._git_backend.list_branches(
+                    repo_path, all_refs=True, timeout=10
+                )
+            except subprocess.CalledProcessError:
                 return ["main"]
+
+            branches = []
+            for line in branch_lines:
+                if line.strip():
+                    # Clean up branch name (remove prefixes and current marker)
+                    branch = line.strip().replace("*", "").strip()
+
+                    # Skip remote tracking references in favor of clean names
+                    if branch.startswith("remotes/origin/"):
+                        branch = branch.replace("remotes/origin/", "")
+
+                    if (
+                        branch
+                        and branch not in ["HEAD", "HEAD -> origin/main"]
+                        and not branch.startswith("remotes/")
+                    ):
+                        if branch not in branches:  # Avoid duplicates
+                            branches.append(branch)
+
+            return branches if branches else ["main"]
 
         except Exception as e:
             self.logger.warning(

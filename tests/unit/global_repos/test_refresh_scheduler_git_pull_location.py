@@ -120,7 +120,9 @@ class TestGitPullLocation:
 
         captured_git_pull_paths = []
 
-        def capture_git_pull(path):
+        # **kwargs absorbs git_backend= (EVO-64678: the scheduler threads its git
+        # seam through). This test only asserts WHICH path is used.
+        def capture_git_pull(path, **kwargs):
             captured_git_pull_paths.append(path)
             mock_updater = Mock()
             mock_updater.has_changes.return_value = True
@@ -181,7 +183,9 @@ class TestGitPullLocation:
 
         captured_git_pull_paths = []
 
-        def capture_git_pull(path):
+        # **kwargs absorbs git_backend= (EVO-64678: the scheduler threads its git
+        # seam through). This test only asserts WHICH path is used.
+        def capture_git_pull(path, **kwargs):
             captured_git_pull_paths.append(path)
             mock_updater = Mock()
             mock_updater.has_changes.return_value = True
