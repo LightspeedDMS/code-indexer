@@ -124,6 +124,7 @@ BOOTSTRAP_KEYS = frozenset(
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
+        "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )

@@ -1396,6 +1396,9 @@ class ServerConfig:
     ontap: Optional[OntapConfig] = None  # ONTAP FlexClone settings for cluster mode
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
     clone_backend: str = "local"  # Story #510: "local", "ontap", "cow-daemon", or "delegated" (EVO-64616)
+    git_backend: str = (
+        "local"  # EVO-64678: "local" (in-process git) or "delegated" (git-mcp)
+    )
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings
