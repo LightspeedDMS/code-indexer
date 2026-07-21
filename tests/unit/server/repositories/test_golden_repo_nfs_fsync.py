@@ -40,6 +40,12 @@ def _make_manager():
     resource_config = MagicMock()
     resource_config.git_pull_timeout = _FAKE_GIT_TIMEOUT
     manager.resource_config = resource_config
+    # EVO-64678: __init__ is bypassed here, so wire the git seam explicitly.
+    # LocalGitBackend still reaches subprocess.run (via git_runner), so the
+    # -c core.fsync=none assertions below are unchanged.
+    from code_indexer.server.storage.shared.git_backend import LocalGitBackend
+
+    manager._git_backend = LocalGitBackend()
     return manager
 
 

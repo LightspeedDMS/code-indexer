@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 # Story #876 D4 — cluster-atomic lifecycle registration hook.
@@ -196,6 +197,7 @@ class GoldenRepoManager:
         resource_config: Optional["ServerResourceConfig"] = None,
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
+        git_backend: Optional[GitBackend] = None,
     ):
         """
         Initialize golden repository manager.
@@ -204,12 +206,20 @@ class GoldenRepoManager:
             data_dir: Data directory path (REQUIRED - no default)
             resource_config: Resource configuration (timeouts, limits)
             db_path: Path to SQLite database file (optional, auto-computed from data_dir if not provided)
+            git_backend: EVO-64678 git seam. Defaults to LocalGitBackend (git run
+                in-process), i.e. exactly today's behavior; the server injects the
+                configured backend via build_git_backend() at startup.
 
         Raises:
             ValueError: If data_dir is None or empty
         """
         if not data_dir or not data_dir.strip():
             raise ValueError("data_dir is required and cannot be None or empty")
+
+        # EVO-64678: all git runs through this seam. Default local => no behavior change.
+        self._git_backend: GitBackend = (
+            git_backend if git_backend is not None else LocalGitBackend()
+        )
 
         self.data_dir = data_dir
         self.golden_repos_dir = os.path.join(self.data_dir, "golden-repos")
@@ -1367,15 +1377,12 @@ class GoldenRepoManager:
             True if repository is valid and accessible, False otherwise
         """
         try:
-            # Use git ls-remote to check if repository is accessible
-            result = subprocess.run(
-                ["git", "ls-remote", repo_url],
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_clone_timeout,
-                env=build_non_interactive_git_env(),
+            # Use git ls-remote to check if repository is accessible.
+            # EVO-64678: via the git seam; ls_remote() maps a non-zero exit to
+            # False, and a timeout still propagates to the handler below.
+            return self._git_backend.ls_remote(
+                repo_url, timeout=self.resource_config.git_clone_timeout
             )
-            return result.returncode == 0
         except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             logger.debug(
                 "Repository accessibility check failed for %s: %s", repo_url, e
@@ -1552,22 +1559,21 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            cmd = ["git", "-c", "core.fsync=none", "clone"]
-            if branch:
-                cmd.extend(["--branch", branch])
-            cmd.extend([repo_url, clone_path])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.resource_config.git_pull_timeout,
-                env=build_non_interactive_git_env(),
-            )
-
-            if result.returncode != 0:
+            # EVO-64678: routed through the git seam (default LocalGitBackend ==
+            # today's behavior). CalledProcessError is caught here, before the
+            # outer SubprocessError handler, so the failure message keeps its
+            # exact "failed with code N: <stderr>" shape.
+            try:
+                self._git_backend.clone(
+                    repo_url,
+                    clone_path,
+                    branch=branch,
+                    no_fsync=True,
+                    timeout=self.resource_config.git_pull_timeout,
+                )
+            except subprocess.CalledProcessError as e:
                 raise GitOperationError(
-                    f"Git clone failed with code {result.returncode}: {result.stderr}"
+                    f"Git clone failed with code {e.returncode}: {e.stderr}"
                 )
 
             return clone_path
@@ -1589,15 +1595,15 @@ class GoldenRepoManager:
             the old behavior that always hardcoded 'main' regardless.
         """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=clone_path,
-                capture_output=True,
-                text=True,
-                check=True,
+            # EVO-64678: via the git seam. rev_parse() already strips stdout and
+            # raises CalledProcessError on failure, which the handler below
+            # catches exactly as before.
+            branch = self._git_backend.rev_parse(
+                clone_path,
+                "--abbrev-ref",
+                "HEAD",
                 timeout=self.resource_config.git_pull_timeout,
             )
-            branch = result.stdout.strip()
             if not branch:
                 logger.warning(
                     "git rev-parse returned empty output for cloned repo at %s. "

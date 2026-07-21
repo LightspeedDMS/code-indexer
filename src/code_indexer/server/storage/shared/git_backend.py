@@ -71,8 +71,14 @@ class GitBackend(Protocol):
         branch: Optional[str] = None,
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
-        """``git [-c core.fsync=none] clone [--branch B] <url> <dest_path>``."""
+        """``git [-c core.fsync=none] clone [--branch B] <url> <dest_path>``.
+
+        ``retry`` is opt-in: today's call sites use a plain single-shot run, and
+        a silent retry would change failure behavior (a retried clone hits
+        "destination path already exists" and reports a different error).
+        """
         ...  # pragma: no cover
 
     # -- fetch / pull / merge -------------------------------------------------
@@ -82,8 +88,9 @@ class GitBackend(Protocol):
         remote: str = "origin",
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
-        """``git [-c core.fsync=none] fetch <remote>``."""
+        """``git [-c core.fsync=none] fetch <remote>`` (``retry`` opt-in)."""
         ...  # pragma: no cover
 
     def pull(
@@ -94,6 +101,7 @@ class GitBackend(Protocol):
         mode: str = "default",
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
         """``git pull [<remote> <branch>]``; mode = default|ff-only|no-ff|rebase."""
         ...  # pragma: no cover
@@ -275,6 +283,7 @@ class LocalGitBackend:
         branch: Optional[str] = None,
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
         cmd = ["git"]
         if no_fsync:
@@ -284,7 +293,7 @@ class LocalGitBackend:
             cmd += ["--branch", branch]
         cmd += [url, dest_path]
         # The clone target does not exist yet — run from its parent.
-        self._run(cmd, Path(dest_path).parent, timeout=timeout, retry=True)
+        self._run(cmd, Path(dest_path).parent, timeout=timeout, retry=retry)
 
     # -- fetch / pull / merge -------------------------------------------------
     def fetch(
@@ -293,12 +302,13 @@ class LocalGitBackend:
         remote: str = "origin",
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
         cmd = ["git"]
         if no_fsync:
             cmd += ["-c", "core.fsync=none"]
         cmd += ["fetch", remote]
-        self._run(cmd, Path(repo_path), timeout=timeout, retry=True)
+        self._run(cmd, Path(repo_path), timeout=timeout, retry=retry)
 
     def pull(
         self,
@@ -308,6 +318,7 @@ class LocalGitBackend:
         mode: str = "default",
         no_fsync: bool = False,
         timeout: Timeout = None,
+        retry: bool = False,
     ) -> None:
         cmd = ["git"]
         if no_fsync:
@@ -320,7 +331,7 @@ class LocalGitBackend:
             cmd.append(remote)
         if branch:
             cmd.append(branch)
-        self._run(cmd, Path(repo_path), timeout=timeout, retry=True)
+        self._run(cmd, Path(repo_path), timeout=timeout, retry=retry)
 
     def merge(self, repo_path: str, ref: str, timeout: Timeout = None) -> None:
         self._run(["git", "merge", ref], Path(repo_path), timeout=timeout)

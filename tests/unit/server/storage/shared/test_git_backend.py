@@ -55,7 +55,7 @@ def test_local_backend_satisfies_protocol(backend):
 
 
 def test_clone_default(backend):
-    with patch(RETRY, return_value=_cp()) as m:
+    with patch(PLAIN, return_value=_cp()) as m:
         backend.clone("https://x/y.git", "/tmp/repos/y")
         assert _cmd(m) == ["git", "clone", "https://x/y.git", "/tmp/repos/y"]
         # clone target does not exist yet -> run from its parent
@@ -63,7 +63,7 @@ def test_clone_default(backend):
 
 
 def test_clone_branch_and_no_fsync(backend):
-    with patch(RETRY, return_value=_cp()) as m:
+    with patch(PLAIN, return_value=_cp()) as m:
         backend.clone("https://x/y.git", "/tmp/repos/y", branch="dev", no_fsync=True)
         assert _cmd(m) == [
             "git",
@@ -87,7 +87,7 @@ def test_ls_remote_success_and_failure(backend):
 
 def test_fetch_named_remote(backend):
     """cidx fetches from a 'golden' remote, not just origin."""
-    with patch(RETRY, return_value=_cp()) as m:
+    with patch(PLAIN, return_value=_cp()) as m:
         backend.fetch("/r", remote="golden")
         assert _cmd(m) == ["git", "fetch", "golden"]
         assert _kw(m)["cwd"] == Path("/r")
@@ -103,7 +103,7 @@ def test_fetch_named_remote(backend):
     ],
 )
 def test_pull_modes(backend, mode, flag):
-    with patch(RETRY, return_value=_cp()) as m:
+    with patch(PLAIN, return_value=_cp()) as m:
         backend.pull("/r", remote="origin", branch="main", mode=mode)
         assert _cmd(m) == ["git", "pull"] + ([flag] if flag else []) + [
             "origin",
@@ -226,7 +226,7 @@ def test_other_operations_check_by_default(backend):
 
 def test_timeout_is_passed_through_not_dropped(backend):
     """Call sites pass git_clone_timeout / git_pull_timeout etc; don't lose them."""
-    with patch(RETRY, return_value=_cp()) as m:
+    with patch(PLAIN, return_value=_cp()) as m:
         backend.clone("https://x/y.git", "/tmp/repos/y", timeout=1800)
         assert _kw(m)["timeout"] == 1800
         backend.fetch("/r", timeout=300)
@@ -249,12 +249,28 @@ def test_timeout_defaults_to_none(backend):
         assert _kw(m)["timeout"] is None
 
 
-def test_network_operations_use_the_retrying_runner(backend):
-    """clone/fetch/pull retry transient failures today — keep that."""
-    with patch(RETRY, return_value=_cp()) as retry, patch(PLAIN, return_value=_cp()):
+def test_network_operations_do_not_retry_by_default(backend):
+    """Today's call sites are single-shot subprocess.run — don't add a silent retry.
+
+    A retried clone would hit "destination path already exists" and surface a
+    different error than the one callers turn into GitOperationError.
+    """
+    with (
+        patch(RETRY, return_value=_cp()) as retry,
+        patch(PLAIN, return_value=_cp()) as plain,
+    ):
         backend.clone("u", "/tmp/a/b")
         backend.fetch("/r")
         backend.pull("/r")
+        assert retry.call_count == 0
+        assert plain.call_count == 3
+
+
+def test_retry_is_opt_in(backend):
+    with patch(RETRY, return_value=_cp()) as retry, patch(PLAIN, return_value=_cp()):
+        backend.clone("u", "/tmp/a/b", retry=True)
+        backend.fetch("/r", retry=True)
+        backend.pull("/r", retry=True)
         assert retry.call_count == 3
 
 
