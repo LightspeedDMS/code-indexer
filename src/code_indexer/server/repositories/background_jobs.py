@@ -2897,11 +2897,13 @@ class BackgroundJobManager:
                     user = (job.username or "").lower()
                     op = (job.operation_type or "").lower()
                     err = (job.error or "").lower()
+                    job_id_lower = (job.job_id or "").lower()
                     if not (
                         search_lower in repo
                         or search_lower in user
                         or search_lower in op
                         or search_lower in err
+                        or search_lower in job_id_lower
                     ):
                         continue
 

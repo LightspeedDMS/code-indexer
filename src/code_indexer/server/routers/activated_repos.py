@@ -9,7 +9,7 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -101,20 +101,6 @@ class AddIndexResponse(BaseModel):
     job_id: str
     message: str
     index_type: str
-
-
-class HealthCheckResponse(BaseModel):
-    """Response for GET /api/activated-repos/{user_alias}/health."""
-
-    user_alias: str
-    overall_healthy: bool = Field(description="Whether all collections are healthy")
-    status: str = Field(description="Overall status: 'healthy' or 'unhealthy'")
-    total_collections: int = Field(description="Total number of collections checked")
-    healthy_count: int = Field(description="Number of healthy collections")
-    unhealthy_count: int = Field(description="Number of unhealthy collections")
-    collections: List[Dict[str, Any]] = Field(
-        description="Per-collection health details"
-    )
 
 
 class HealthCheckJobResponse(BaseModel):
@@ -540,97 +526,6 @@ async def add_index_type(
                 else status.HTTP_500_INTERNAL_SERVER_ERROR
             ),
             detail=f"Failed to add index type: {str(e)}",
-        )
-
-
-@router.get(
-    "/{user_alias}/health",
-    response_model=HealthCheckResponse,
-    responses={
-        200: {"description": "Health check completed successfully"},
-        404: {"description": "Activated repository not found"},
-        500: {"description": "Failed to check health"},
-    },
-)
-async def get_health(
-    user_alias: str,
-    current_user: User = Depends(get_current_user_hybrid),
-    owner: Optional[str] = Query(
-        None, description="Repository owner username (admin only)"
-    ),
-) -> HealthCheckResponse:
-    """
-    Get health check status for an activated repository.
-
-    Uses HNSWHealthService to check the integrity of HNSW indexes.
-
-    Args:
-        user_alias: User's alias for the activated repository
-        current_user: Authenticated user (injected by auth dependency)
-        owner: Optional owner username (only used if current_user is admin)
-
-    Returns:
-        HealthCheckResponse with overall status and collection-level health
-
-    Raises:
-        HTTPException 404: Repository not found
-        HTTPException 500: Failed to check health
-    """
-    try:
-        # Get activated repo manager
-        activated_manager = _get_activated_repo_manager()
-
-        # Determine which username to use
-        # Admin users can specify owner parameter to check other users' repos
-        # Non-admin users always use their own username (owner parameter ignored)
-        if owner and current_user.role == UserRole.ADMIN:
-            target_username = owner
-        else:
-            target_username = current_user.username
-
-        # Get repository path
-        repo_path = activated_manager.get_activated_repo_path(
-            target_username, user_alias
-        )
-
-        # Check if repository exists
-        repo_path_obj = Path(repo_path)
-        if not repo_path_obj.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Activated repository '{user_alias}' not found",
-            )
-
-        # Bug #1394: shared aggregator (bounded-concurrency batch checks +
-        # per-collection exception isolation), reusing the SAME shared
-        # HNSWHealthService singleton the golden-repo health router uses
-        # instead of building a fresh, cache-less instance per request.
-        index_dir = repo_path_obj / ".code-indexer" / "index"
-        result = compute_repository_health(
-            user_alias,
-            index_dir,
-            get_shared_health_service(),
-            force_refresh=False,
-        )
-
-        health_status = "healthy" if result.overall_healthy else "unhealthy"
-        return HealthCheckResponse(
-            user_alias=user_alias,
-            overall_healthy=result.overall_healthy,
-            status=health_status,
-            total_collections=result.total_collections,
-            healthy_count=result.healthy_count,
-            unhealthy_count=result.unhealthy_count,
-            collections=[c.model_dump() for c in result.collections],
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get health for {user_alias}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to check health: {str(e)}",
         )
 
 

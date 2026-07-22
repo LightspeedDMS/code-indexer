@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.76.0] - 2026-07-21
+
+### Fixed
+
+- **#1449**: Server crashed reading non-UTF-8 file content (e.g. files containing binary or Latin-1 byte sequences that aren't valid UTF-8). Fixed by passing `errors="replace"` at both file-read sites in `server/services/file_service.py`, so invalid byte sequences are substituted with the Unicode replacement character instead of raising `UnicodeDecodeError`.
+- **#1452**: Jobs panel filter chain was broken across multiple independent surfaces. The status filter dropdown offered a dead `"queued"` option that never matched any stored job status. Dashboard job-count tiles linked to the Jobs panel using a `status` query param while the panel's own filtering logic expected `status_filter`, and similarly linked search using `search` instead of `search_text`, so tile clicks silently failed to pre-filter the list. Separately, the jobs search predicate matched job type/alias/user but never `job_id`, so searching by job id returned no results. Fixed across all four independent backend implementations that maintain their own filtering logic (SQLite backend, PostgreSQL backend, in-memory/repository layer, and the web routes merge layer) plus the affected templates (`jobs.html`, `partials/dashboard_job_counts.html`, `partials/dashboard_stats.html`, `partials/jobs_list.html`, `partials/repos_list.html`).
+- **#1453**: `check_hnsw_health` (MCP) and the legacy synchronous REST health-check endpoints for golden and activated repos could hang or time out the calling connection on large indexes, since HNSW integrity verification is a genuinely long-running operation with no natural time bound. Converted `check_hnsw_health` to the standard async job-submission pattern (submit, then poll for status/result) and removed the legacy synchronous REST `GET .../health` endpoints entirely, since they are fully superseded by the existing async `POST .../health/check` siblings already used elsewhere.
+
 ## [11.75.0] - 2026-07-19
 
 ### Fixed
