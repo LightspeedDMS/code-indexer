@@ -324,6 +324,108 @@ class TestNoopWhenLocalBackend:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bug #1464 parity gap: a symlink pointing at a stale/mismatched target must
+# be SELF-HEALED (atomically re-pointed) rather than warned about forever --
+# closing the gap between this function and its golden-repos twin
+# (_ensure_golden_repos_symlink_for_cow_daemon), which already self-heals via
+# _reconcile_existing_golden_repos_symlink. The repair only ever re-points
+# the symlink -- it must NEVER touch, move, or delete real directory data on
+# either the old or new target side.
+# ---------------------------------------------------------------------------
+
+
+class TestSelfHealsWhenSymlinkPointsElsewhere:
+    def test_symlink_to_unexpected_target_is_repaired(
+        self,
+        executor: DeploymentExecutor,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """End-to-end through the full symlink-setup step: a symlink
+        pointing at a stale/incorrect target is repaired to the correct
+        mount_point target, rather than left pointing at the wrong target
+        with only a WARNING logged forever (parity with golden-repos'
+        Bug #1464 self-heal)."""
+        mount_point = tmp_path / "cow-storage"
+        wrong_target = tmp_path / "somewhere-else"
+        wrong_target.mkdir(parents=True)
+
+        data_dir = tmp_path / ".cidx-server"
+        data_dir_data = data_dir / "data"
+        data_dir_data.mkdir(parents=True)
+
+        link_path = data_dir_data / "activated-repos"
+        os.symlink(str(wrong_target), str(link_path))
+
+        config = _make_cow_config(mount_point=str(mount_point))
+
+        with caplog.at_level(logging.INFO):
+            result = _run_step(executor, data_dir, config)
+
+        assert result is True
+        assert os.readlink(str(link_path)) == str(mount_point / "activated-repos"), (
+            "a mismatched symlink must be repaired to the correct "
+            "mount_point target, not left pointing at the stale target"
+        )
+
+
+class TestReconcileSelfHealsMismatchedSymlinkBug1464:
+    def test_reconcile_repairs_mismatched_symlink_to_new_target(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Direct unit test of the static reconcile method: an existing
+        symlink pointing at a stale target is atomically re-pointed to the
+        new target. Real data at both the old and new target directories
+        must remain completely untouched -- only the symlink itself moves."""
+        old_target = tmp_path / "old-daemon-local" / "activated-repos"
+        old_target.mkdir(parents=True)
+        old_sentinel = old_target / "some-user-data.txt"
+        old_sentinel.write_text("real data at the old (stale) target")
+
+        new_target = tmp_path / "mnt-cow-storage" / "activated-repos"
+        new_target.mkdir(parents=True)
+        new_sentinel = new_target / "some-user-data.txt"
+        new_sentinel.write_text("real data at the new (correct) target")
+
+        link_path = tmp_path / "activated-repos"
+        os.symlink(str(old_target), str(link_path))
+
+        with caplog.at_level(logging.INFO):
+            result = DeploymentExecutor._reconcile_existing_activated_repos_symlink(
+                link_path, new_target
+            )
+
+        assert result is True
+        assert os.readlink(str(link_path)) == str(new_target), (
+            "symlink must be atomically re-pointed to the new target"
+        )
+        assert old_sentinel.exists() and old_sentinel.read_text() == (
+            "real data at the old (stale) target"
+        ), "the old target's real data must never be touched, moved, or deleted"
+        assert new_sentinel.exists() and new_sentinel.read_text() == (
+            "real data at the new (correct) target"
+        ), "the new target's real data must never be touched, moved, or deleted"
+
+    def test_reconcile_still_noops_when_already_correct(self, tmp_path: Path) -> None:
+        """Preserve the existing already-correct no-op branch unchanged."""
+        target = tmp_path / "mnt-cow-storage" / "activated-repos"
+        target.mkdir(parents=True)
+        link_path = tmp_path / "activated-repos"
+        os.symlink(str(target), str(link_path))
+        stat_before = os.lstat(str(link_path))
+
+        result = DeploymentExecutor._reconcile_existing_activated_repos_symlink(
+            link_path, target
+        )
+
+        stat_after = os.lstat(str(link_path))
+        assert result is True
+        assert stat_before.st_ino == stat_after.st_ino, (
+            "an already-correct symlink must remain a true no-op"
+        )
+
+
 class TestNoopWhenCowDaemonConfigMissing:
     def test_noop_when_cow_daemon_config_is_none(
         self,
