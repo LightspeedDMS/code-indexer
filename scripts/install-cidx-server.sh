@@ -1100,6 +1100,46 @@ SERVICEEOF
 }
 
 # ---------------------------------------------------------------------------
+# Step: git safe.directory wildcard (Bug #1466)
+#
+# CoW-daemon-owned golden-repos/activated-repos may be owned by a different
+# OS user than the one running cidx-server (e.g. the CoW daemon's own user
+# vs a dedicated code-indexer service account), which trips git's "dubious
+# ownership" check on every git subprocess invocation that touches them. A
+# single blanket `safe.directory=*` grant for the service account is
+# idempotent and covers all present and future golden/activated repos
+# regardless of which directory they live in. Mirrors
+# DeploymentExecutor._ensure_git_safe_directory_wildcard() in
+# deployment_executor.py (the auto-updater's self-heal twin for
+# already-deployed hosts).
+# ---------------------------------------------------------------------------
+
+ensure_git_safe_directory_wildcard() {
+    info "--- Git safe.directory wildcard (Bug #1466) ---"
+    local service_user
+    service_user="$(whoami)"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "  [dry-run] sudo -u ${service_user} git config --global --add safe.directory '*' (idempotent)"
+        return 0
+    fi
+
+    local configured
+    configured="$(sudo -u "${service_user}" git config --global --get-all safe.directory 2>/dev/null || true)"
+
+    if echo "${configured}" | grep -qxF '*'; then
+        info "Git safe.directory wildcard already configured for ${service_user}"
+        return 0
+    fi
+
+    if sudo -u "${service_user}" git config --global --add safe.directory '*'; then
+        info "Added git safe.directory wildcard for ${service_user}"
+    else
+        warn "Failed to add git safe.directory wildcard (non-fatal)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Step: auto-update systemd service + timer
 #
 # Renders cidx-auto-update.service from the SAME template used by
@@ -1313,6 +1353,7 @@ main() {
     write_config
     install_pace_maker
     create_systemd_service
+    ensure_git_safe_directory_wildcard
     install_auto_update_service
 
     if [[ "${CLUSTER_MODE}" == "true" ]]; then

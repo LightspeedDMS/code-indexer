@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.79.0] - 2026-07-22
+
+### Fixed
+
+- **#1466**: Golden-repo git operations (refresh, branch listing, change detection, per-user activation) failed with git's "dubious ownership" error whenever a repo's on-disk owner differed from the running service account -- e.g. CoW-mounted golden repos owned by the CoW daemon's own operator account while cidx-server runs as a dedicated service account. Fixed with a global self-heal: `git config --global --add safe.directory '*'` for the service account, mirroring the existing `_ensure_git_safe_directory()` pattern (which covers a different, specific path and is untouched). Wired into both the auto-updater (`DeploymentExecutor`) and the installer (`install-cidx-server.sh`) for parity. Proven harmless in solo mode (this project's actual production deployment shape) via a real-git-binary test asserting `git status` on a same-owner repo is byte-identical before and after the grant.
+
 ## [11.78.0] - 2026-07-22
 
 ### Fixed

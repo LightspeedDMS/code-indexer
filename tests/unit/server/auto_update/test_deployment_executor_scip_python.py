@@ -228,6 +228,9 @@ def test_execute_wires_ensure_scip_python(executor, caplog):
         patch.object(executor, "pip_install", return_value=True),
         patch.object(executor, "ensure_ripgrep", return_value=True),
         patch.object(executor, "_ensure_rust_toolchain", return_value=True),
+        patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
         patch("shutil.which", return_value=None),
         caplog.at_level(logging.WARNING),
     ):

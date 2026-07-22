@@ -3391,6 +3391,121 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_git_safe_directory_wildcard(self) -> bool:
+        """Ensure a blanket git safe.directory='*' grant is configured for the
+        service user (Bug #1466).
+
+        Unlike _ensure_git_safe_directory() above (which grants ONE specific
+        path -- the cidx-server source checkout itself), this grants a
+        wildcard so EVERY present and future repository the service account's
+        git operations touch is covered, regardless of directory. This closes
+        the gap left by _ensure_git_safe_directory(): CoW-daemon-owned golden
+        repos / activated repos (e.g. on a CoW-mounted storage path) are
+        typically owned by a different OS user than the service account
+        (code-indexer), which trips git's "dubious ownership" check on every
+        git subprocess invocation that touches them -- not just the one repo
+        _ensure_git_safe_directory() already covers.
+
+        Returns:
+            True if config is correct or was updated or not needed, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-215",
+                        f"Service file not found: {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True  # Not a fatal error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Extract User from service file
+            service_user = self._extract_service_user(content)
+
+            # If no User= line, skip (service runs as current user)
+            if not service_user:
+                logger.debug(
+                    "No User= line in service file, skipping wildcard git "
+                    "safe.directory config",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Check if the wildcard is already configured
+            check_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--get-all",
+                    "safe.directory",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if check_result.returncode == 0:
+                configured_paths = check_result.stdout.strip().split("\n")
+                if "*" in configured_paths:
+                    logger.debug(
+                        f"Git safe.directory wildcard already configured for "
+                        f"{service_user}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Add the wildcard safe.directory configuration
+            add_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--add",
+                    "safe.directory",
+                    "*",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if add_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-216",
+                        f"Failed to add git safe.directory wildcard: "
+                        f"{add_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Added git safe.directory wildcard for {service_user}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-217",
+                    f"Error configuring git safe.directory wildcard: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def _ensure_sudoers_restart(self) -> bool:
         """Ensure sudoers rule exists for service user to restart systemd service.
 
@@ -4165,6 +4280,12 @@ class DeploymentExecutor:
 
         # Step 5: Ensure git safe.directory configured
         self._ensure_git_safe_directory()
+
+        # Step 5.5: Bug #1466 - Ensure blanket git safe.directory='*' wildcard
+        # configured for the service account, covering CoW-daemon-owned
+        # golden-repos/activated-repos (owned by a different OS user than the
+        # service account) regardless of which directory they live in.
+        self._ensure_git_safe_directory_wildcard()
 
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
