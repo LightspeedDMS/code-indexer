@@ -371,6 +371,9 @@ class TestExecuteCallsEnsureAutoUpdater:
     """Tests for execute() calling _ensure_auto_updater_uses_server_python()."""
 
     @patch.object(
+        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
+    )
+    @patch.object(
         DeploymentExecutor, "_ensure_auto_updater_uses_server_python", return_value=True
     )
     @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
@@ -398,6 +401,7 @@ class TestExecuteCallsEnsureAutoUpdater:
         mock_ensure_git_safe,
         mock_ensure_ripgrep,
         mock_ensure_auto_updater,
+        mock_ensure_git_safe_wildcard,
         executor,
     ):
         """Test that execute() calls _ensure_auto_updater_uses_server_python()."""
@@ -406,6 +410,9 @@ class TestExecuteCallsEnsureAutoUpdater:
         assert result is True
         mock_ensure_auto_updater.assert_called_once()
 
+    @patch.object(
+        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
+    )
     @patch.object(
         DeploymentExecutor,
         "_ensure_auto_updater_uses_server_python",
@@ -436,6 +443,7 @@ class TestExecuteCallsEnsureAutoUpdater:
         mock_ensure_git_safe,
         mock_ensure_ripgrep,
         mock_ensure_auto_updater,
+        mock_ensure_git_safe_wildcard,
         executor,
     ):
         """Test that execute() continues even if _ensure_auto_updater_uses_server_python fails."""

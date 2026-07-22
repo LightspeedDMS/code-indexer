@@ -122,6 +122,9 @@ def _all_steps_except_rust(executor: DeploymentExecutor) -> Iterator[None]:
         patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
         patch.object(executor, "_ensure_nfs_research_symlinks", return_value=True),
         patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
+        patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
     ):
         yield
 
