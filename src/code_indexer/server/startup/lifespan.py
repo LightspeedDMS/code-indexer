@@ -972,9 +972,66 @@ def make_lifespan(
                             activated_repo_manager=arm,
                             background_job_manager=background_job_manager,
                         )
+                    else:
+                        # Bug #1462: silent-skip guard #3 -- golden_repo_manager
+                        # has no activated_repo_manager. Without this log the
+                        # only symptom is a much-later, confusingly-unrelated
+                        # "invoked without clone_backend -- wiring bug" error at
+                        # activation time, with no correlation back here.
+                        logger.error(
+                            format_error_log(
+                                "APP-GENERAL-1462-C",
+                                "Skipping clone_backend wiring into "
+                                "ActivatedRepoManager: "
+                                "golden_repo_manager.activated_repo_manager is "
+                                "None/missing. Repository activation (CoW "
+                                "clone) will fail on this node until the "
+                                "underlying issue is resolved and the server "
+                                "is restarted.",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
+                else:
+                    # Bug #1462: silent-skip guard #2 -- golden_repo_manager is
+                    # None. Without this log the only symptom is a much-later,
+                    # confusingly-unrelated "invoked without clone_backend --
+                    # wiring bug" error at activation time, with no
+                    # correlation back here.
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1462-B",
+                            "Skipping clone_backend wiring into "
+                            "ActivatedRepoManager: golden_repo_manager is "
+                            "None. Repository activation (CoW clone) will "
+                            "fail on this node until the underlying issue is "
+                            "resolved and the server is restarted.",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
                 global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
                     snapshot_manager
+                )
+            else:
+                # Bug #1462: silent-skip guard #1 -- snapshot_manager is None
+                # (VersionedSnapshotManager failed to initialize at startup;
+                # see the earlier APP-GENERAL-510 error for the root cause).
+                # Without this log the only symptom is a much-later,
+                # confusingly-unrelated "invoked without clone_backend --
+                # wiring bug" error at activation time, with no correlation
+                # back to the real cause.
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1462",
+                        "Skipping clone_backend wiring into "
+                        "ActivatedRepoManager: snapshot_manager is None "
+                        "(VersionedSnapshotManager failed to initialize at "
+                        "startup -- see the earlier APP-GENERAL-510 error "
+                        "for the root cause). Repository activation (CoW "
+                        "clone) will fail on this node until the underlying "
+                        "issue is resolved and the server is restarted.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
                 )
 
             logger.info(
