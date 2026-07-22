@@ -346,3 +346,129 @@ ln() {
             f"the symlink failure and rollback must be logged loudly: "
             f"stderr={result.stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1464 (shell parity): _resolve_cow_symlink_target has the same harmful
+# daemon-host special case as deployment_executor.py's
+# _resolve_golden_repos_symlink_target had before Bug #1464's Part 1 fix --
+# it special-cases COW_LOCAL_BIND=true + a resolved COW_DAEMON_STORAGE_PATH
+# to use the daemon-local form instead of {NFS_MOUNT}/{link_name}. That
+# assumes the code-indexer service account can locally traverse the daemon
+# operator's storage path, which is false on at least one real cluster node
+# (0700 home dir owned by a different user). The target must always be the
+# NFS mount_point form, matching the Python fix exactly.
+# ---------------------------------------------------------------------------
+
+
+def _run_resolve_target(
+    nfs_mount: Path,
+    link_name: str = "golden-repos",
+    cow_local_bind: bool = False,
+    daemon_storage_path: str = "",
+) -> subprocess.CompletedProcess:
+    """Source the real script and invoke _resolve_cow_symlink_target()
+    directly, capturing its stdout (the resolved target path)."""
+    bash_snippet = f"""
+source {str(_SCRIPT_PATH)!r}
+NFS_MOUNT={str(nfs_mount)!r}
+COW_LOCAL_BIND={"true" if cow_local_bind else "false"}
+COW_DAEMON_STORAGE_PATH={daemon_storage_path!r}
+_resolve_cow_symlink_target {link_name!r}
+"""
+    return subprocess.run(
+        ["bash", "-c", bash_snippet],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@skip_if_no_script
+class TestResolveTargetAlwaysUsesNfsMountBug1464:
+    def test_resolve_target_ignores_daemon_local_bind_and_storage_path(
+        self, tmp_path: Path
+    ) -> None:
+        nfs_mount = tmp_path / "mnt-cow-storage"
+        daemon_storage_path = tmp_path / "srv-cow-xfs"
+
+        result = _run_resolve_target(
+            nfs_mount,
+            link_name="golden-repos",
+            cow_local_bind=True,
+            daemon_storage_path=str(daemon_storage_path),
+        )
+
+        assert result.returncode == 0, (
+            f"bash invocation itself must not fail: stderr={result.stderr!r}"
+        )
+        resolved = result.stdout.strip()
+        assert resolved == str(nfs_mount / "golden-repos"), (
+            "target must always be {NFS_MOUNT}/golden-repos, even with "
+            f"COW_LOCAL_BIND=true and COW_DAEMON_STORAGE_PATH set: "
+            f"got {resolved!r}"
+        )
+
+    def test_resolve_target_for_activated_repos_ignores_daemon_local_bind(
+        self, tmp_path: Path
+    ) -> None:
+        """Same fix, applied to activated-repos too -- _resolve_cow_symlink_target
+        is a single function shared by both link types."""
+        nfs_mount = tmp_path / "mnt-cow-storage"
+        daemon_storage_path = tmp_path / "srv-cow-xfs"
+
+        result = _run_resolve_target(
+            nfs_mount,
+            link_name="activated-repos",
+            cow_local_bind=True,
+            daemon_storage_path=str(daemon_storage_path),
+        )
+
+        assert result.returncode == 0
+        resolved = result.stdout.strip()
+        assert resolved == str(nfs_mount / "activated-repos"), f"got {resolved!r}"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1464 (shell parity): _reconcile_existing_cow_symlink_entry must
+# SELF-HEAL a mismatched symlink target (atomic re-point), not only WARN
+# forever -- mirroring deployment_executor.py's
+# _reconcile_existing_golden_repos_symlink fix. The repair must never touch
+# real directory data on either the old or new target side.
+# ---------------------------------------------------------------------------
+
+
+@skip_if_no_script
+class TestReconcileSelfHealsMismatchedSymlinkBug1464:
+    def test_mismatched_symlink_is_repaired_to_new_target(self, tmp_path: Path) -> None:
+        old_target = tmp_path / "old-daemon-local" / "golden-repos"
+        old_target.mkdir(parents=True)
+        old_sentinel = old_target / "some-repo-data.txt"
+        old_sentinel.write_text("real data at the old (stale) target")
+
+        new_target = tmp_path / "mnt-cow-storage" / "golden-repos"
+        new_target.mkdir(parents=True)
+        new_sentinel = new_target / "some-repo-data.txt"
+        new_sentinel.write_text("real data at the new (correct) target")
+
+        link_path = tmp_path / "golden-repos"
+        os.symlink(str(old_target), str(link_path))
+
+        result = _run_reconcile(link_path, new_target)
+
+        assert result.returncode == 0, (
+            f"bash invocation itself must not fail: stderr={result.stderr!r}"
+        )
+        assert "__RECONCILE_RC__:0" in result.stdout, (
+            f"function must return 0 (fully handled): stdout={result.stdout!r}"
+        )
+        assert os.readlink(str(link_path)) == str(new_target), (
+            "symlink must be repaired to point at the new target: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert old_sentinel.read_text() == "real data at the old (stale) target", (
+            "the old target's real data must never be touched, moved, or deleted"
+        )
+        assert new_sentinel.read_text() == "real data at the new (correct) target", (
+            "the new target's real data must never be touched, moved, or deleted"
+        )

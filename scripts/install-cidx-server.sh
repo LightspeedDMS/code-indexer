@@ -679,15 +679,19 @@ run_migrations() {
 # ---------------------------------------------------------------------------
 
 _resolve_cow_symlink_target() {
-    # Node-aware target: on the co-located CoW-daemon host (--cow-local-bind
-    # with a resolved COW_DAEMON_STORAGE_PATH), target the daemon-local form
-    # directly; every other (NFS-client) node targets {NFS_MOUNT}/{link_name}.
+    # Bug #1464: always target the NFS mount_point form -- the prior
+    # daemon-host special case (--cow-local-bind with a resolved
+    # COW_DAEMON_STORAGE_PATH targeting the daemon-local form directly)
+    # assumed the code-indexer service account could locally traverse the
+    # daemon operator's storage path. On a real staging cluster node that
+    # path's parent was mode 0700, owned by a different user, so the
+    # resulting symlink was broken from the service account's perspective
+    # even though the target directory itself existed. Matches
+    # deployment_executor.py's _resolve_golden_repos_symlink_target fix
+    # exactly. Applies to both golden-repos and activated-repos, since this
+    # function is shared by both link types.
     local link_name="$1"
-    if [[ "${COW_LOCAL_BIND}" == "true" && -n "${COW_DAEMON_STORAGE_PATH}" ]]; then
-        echo "${COW_DAEMON_STORAGE_PATH}/${link_name}"
-    else
-        echo "${NFS_MOUNT}/${link_name}"
-    fi
+    echo "${NFS_MOUNT}/${link_name}"
 }
 
 _bug_number_for_cow_symlink() {
@@ -771,7 +775,22 @@ _reconcile_existing_cow_symlink_entry() {
         if [[ "${current_target}" == "${target}" ]]; then
             info "${link_name} symlink already correct: ${link_path} -> ${target}"
         else
-            warn "${link_name} symlink points to ${current_target} but expected ${target} (Bug #1337) -- manual review needed"
+            # Bug #1464: self-heal -- atomically re-point the symlink
+            # (temp symlink + `mv -T`, i.e. no-target-directory rename, so
+            # a dst that is itself a symlink-to-directory is replaced
+            # rather than followed) instead of warning forever. This ONLY
+            # ever changes what path the symlink points to -- it never
+            # touches, moves, or deletes real directory data on either
+            # side (mirrors deployment_executor.py's
+            # _reconcile_existing_golden_repos_symlink fix exactly).
+            local tmp_link="${link_path}.tmp-relink.$$"
+            rm -f "${tmp_link}" 2>/dev/null || true
+            if ln -s "${target}" "${tmp_link}" 2>/dev/null && mv -T "${tmp_link}" "${link_path}" 2>/dev/null; then
+                info "repaired ${link_name} symlink: ${link_path} was -> ${current_target}, now -> ${target} (Bug #1464)"
+            else
+                rm -f "${tmp_link}" 2>/dev/null || true
+                warn "${link_name} symlink points to ${current_target} but expected ${target} (Bug #1464) -- automatic repair failed, manual review needed"
+            fi
         fi
         return 0
     fi

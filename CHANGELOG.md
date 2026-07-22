@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.78.0] - 2026-07-22
+
+### Fixed
+
+- **#1464**: Golden-repos CoW symlink self-heal (#1463) pointed at a non-traversable local path on the cluster node co-locating the CoW storage daemon. `_resolve_golden_repos_symlink_target()` special-cased that node to use `cow_daemon.daemon_storage_path` instead of `cow_daemon.mount_point`, assuming no bind-mount indirection was needed there -- but the local path sat under a 0700 home directory the service account could not traverse. Fixed by always resolving to `mount_point`, matching the already-correct `activated-repos` twin. Also made existing-symlink reconciliation for both golden-repos and activated-repos self-heal a mismatched target (atomic re-point, never touching underlying data) instead of only warning forever, in both the Python auto-updater and the shell installer.
+- **#1465**: `CowDaemonBackend._sanitize_identifier()` only replaced `.` with `_`, leaving other CoW-daemon-rejected characters (notably `@`) untouched -- breaking per-user activation fleet-wide on the cluster for essentially all real (email-username) users. Fixed by replacing any character outside `[A-Za-z0-9_-]` with `_`, matching the daemon's actual validation rule.
+
 ## [11.77.0] - 2026-07-22
 
 ### Fixed
