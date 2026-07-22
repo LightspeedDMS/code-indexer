@@ -145,18 +145,26 @@ class TestIdempotentWhenAlreadyCorrectSymlink:
 
 
 # ---------------------------------------------------------------------------
-# AC3: real directory with content -> warning logged, data preserved
+# AC3 (Bug #1463): real directory with content -> safely migrated to a
+# `.legacy.bug1052` backup, then converted to a symlink into the CoW mount.
+#
+# Prior to Bug #1463 this branch only WARNED and left the directory
+# untouched forever -- the same fleet-wide non-convergence gap that Bug
+# #1463 fixes for golden-repos (see test_golden_repos_symlink_setup_bug1337
+# .py's equivalent test/docstring for the full staging-cluster rationale).
 # ---------------------------------------------------------------------------
 
 
-class TestSkipsAndWarnsWhenRealDirectoryWithContent:
-    def test_real_directory_with_content_not_touched(
+class TestMigratesRealDirectoryWithContentToSymlink:
+    def test_real_directory_with_content_is_migrated_to_symlink(
         self,
         executor: DeploymentExecutor,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Pre-existing real directory with a file -> no symlink, data intact, WARNING logged."""
+        """Bug #1463: pre-existing real directory with content -> renamed to
+        a `.legacy.bug1052` backup (data fully preserved) and
+        activated-repos becomes a symlink into the CoW mount."""
         mount_point = tmp_path / "cow-storage"
         data_dir = tmp_path / ".cidx-server"
         data_dir_data = data_dir / "data"
@@ -168,24 +176,124 @@ class TestSkipsAndWarnsWhenRealDirectoryWithContent:
 
         config = _make_cow_config(mount_point=str(mount_point))
 
+        with caplog.at_level(logging.INFO):
+            result = _run_step(executor, data_dir, config)
+
+        assert result is True, "step must return True (migration succeeded)"
+        assert activated_dir.is_symlink(), (
+            "activated-repos must now be a symlink into the CoW mount"
+        )
+        assert os.readlink(str(activated_dir)) == str(mount_point / "activated-repos")
+
+        legacy_path = data_dir_data / "activated-repos.legacy.bug1052"
+        legacy_sentinel = legacy_path / "important-user-data.json"
+        assert legacy_path.exists() and legacy_path.is_dir(), (
+            "the real directory's content must be preserved at a "
+            ".legacy.bug1052 backup path, never deleted"
+        )
+        assert legacy_sentinel.exists(), "user data file must survive the migration"
+        assert legacy_sentinel.read_text() == '{"workspace": "prod"}', (
+            "user data must not be modified by the migration"
+        )
+        assert "Bug #1052" in caplog.text or "activated-repos" in caplog.text, (
+            "the migration must be logged, mentioning Bug #1052 or activated-repos"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1463: a pre-existing `.legacy.bug1052` backup must never be silently
+# overwritten -- refuse LOUDLY (ERROR) and leave every path untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestRefusesWhenLegacyBackupAlreadyExists:
+    def test_preexisting_legacy_backup_blocks_migration_and_is_not_overwritten(
+        self,
+        executor: DeploymentExecutor,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mount_point = tmp_path / "cow-storage"
+        data_dir = tmp_path / ".cidx-server"
+        data_dir_data = data_dir / "data"
+
+        activated_dir = data_dir_data / "activated-repos"
+        activated_dir.mkdir(parents=True)
+        current_sentinel = activated_dir / "important-user-data.json"
+        current_sentinel.write_text('{"workspace": "current"}')
+
+        legacy_path = data_dir_data / "activated-repos.legacy.bug1052"
+        legacy_path.mkdir(parents=True)
+        legacy_sentinel = legacy_path / "old-user-data.json"
+        legacy_sentinel.write_text('{"workspace": "stale-from-prior-run"}')
+
+        config = _make_cow_config(mount_point=str(mount_point))
+
         with caplog.at_level(logging.WARNING):
             result = _run_step(executor, data_dir, config)
 
-        assert result is True, "step must return True (non-fatal)"
+        assert result is True, "step must return True (non-fatal, handled)"
         assert activated_dir.exists() and not activated_dir.is_symlink(), (
-            "real directory must NOT be converted to symlink"
+            "current directory must NOT be touched when a backup collision is detected"
         )
-        assert sentinel_file.exists(), "user data must not be deleted"
-        assert sentinel_file.read_text() == '{"workspace": "prod"}', (
-            "user data must not be modified"
+        assert current_sentinel.read_text() == '{"workspace": "current"}'
+        assert not (mount_point / "activated-repos").exists(), (
+            "the CoW-mount target must NEVER be created when the migration "
+            "is refused -- no partial state left behind"
         )
-        assert any(r.levelno >= logging.WARNING for r in caplog.records), (
-            "at least one WARNING must be logged"
+        assert legacy_sentinel.read_text() == '{"workspace": "stale-from-prior-run"}', (
+            "pre-existing backup must NOT be overwritten or merged"
         )
-        # Warning should mention manual migration
-        assert "Bug #1052" in caplog.text or "activated-repos" in caplog.text, (
-            "WARNING must mention Bug #1052 or activated-repos for operator guidance"
+        assert any(r.levelno == logging.ERROR for r in caplog.records), (
+            "a backup collision must be refused with an ERROR-level log "
+            "(Anti-Fallback: fail loudly, never silently), not merely a WARNING"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1463: migration must be collision-safe when the CoW-mount target
+# already has content (e.g. another cluster node already migrated).
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationIsSafeWhenTargetAlreadyHasContent:
+    def test_target_preexisting_content_is_never_touched(
+        self, executor: DeploymentExecutor, tmp_path: Path
+    ) -> None:
+        mount_point = tmp_path / "cow-storage"
+        target = mount_point / "activated-repos"
+        target.mkdir(parents=True)
+        target_sentinel = target / "shared-user-data.json"
+        target_sentinel.write_text('{"workspace": "from-another-node"}')
+
+        data_dir = tmp_path / ".cidx-server"
+        data_dir_data = data_dir / "data"
+
+        activated_dir = data_dir_data / "activated-repos"
+        activated_dir.mkdir(parents=True)
+        local_sentinel = activated_dir / "important-user-data.json"
+        local_sentinel.write_text('{"workspace": "local-stale-copy"}')
+
+        config = _make_cow_config(mount_point=str(mount_point))
+
+        result = _run_step(executor, data_dir, config)
+
+        assert result is True
+        assert activated_dir.is_symlink()
+        assert os.readlink(str(activated_dir)) == str(target)
+        assert target_sentinel.read_text() == '{"workspace": "from-another-node"}', (
+            "pre-existing shared target content must be completely untouched"
+        )
+        assert not (target / "important-user-data.json").exists(), (
+            "local content must NOT have been merged/copied into target"
+        )
+
+        legacy_path = data_dir_data / "activated-repos.legacy.bug1052"
+        legacy_local_sentinel = legacy_path / "important-user-data.json"
+        assert legacy_local_sentinel.exists(), (
+            "the local node's own data must still be preserved as a backup"
+        )
+        assert legacy_local_sentinel.read_text() == '{"workspace": "local-stale-copy"}'
 
 
 # ---------------------------------------------------------------------------
