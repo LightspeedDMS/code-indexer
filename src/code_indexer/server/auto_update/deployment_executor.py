@@ -5407,21 +5407,10 @@ class DeploymentExecutor:
                 return True
 
             if link_path.exists():
-                # Real directory — do NOT move user data from the auto-updater.
-                logger.warning(
-                    "Bug #1052: activated-repos exists as real directory with content; "
-                    "manual migration required to enable CoW activation. "
-                    "Run: sudo systemctl stop cidx-server && "
-                    "mv %s %s.legacy.bug1052 && "
-                    "mkdir -p %s && "
-                    "ln -s %s %s && "
-                    "sudo systemctl start cidx-server",
-                    link_path,
-                    link_path,
-                    target,
-                    target,
-                    link_path,
-                    extra={"correlation_id": get_correlation_id()},
+                # Bug #1463: real directory with content -- safe, idempotent
+                # migration (never a silent-forever WARNING loop).
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1052"
                 )
                 return True
 
@@ -5666,22 +5655,92 @@ class DeploymentExecutor:
         return True
 
     @staticmethod
-    def _warn_golden_repos_real_dir_with_content(link_path: Path, target: Path) -> None:
-        """Bug #1337: golden-repos is a real directory WITH content — never
-        move production data unattended; log the manual migration steps."""
-        logger.warning(
-            "Bug #1337: golden-repos exists as real directory with content; "
-            "manual migration required to enable per-user CoW activation. "
-            "Run: sudo systemctl stop cidx-server && "
-            "mv %s %s.legacy.bug1337 && mkdir -p %s && ln -s %s %s && "
-            "sudo systemctl start cidx-server",
+    def _migrate_real_dir_to_cow_symlink(
+        link_path: Path, target: Path, bug_number: str
+    ) -> bool:
+        """Bug #1463: idempotently and safely migrate a REAL (non-empty)
+        local directory into a CoW-mount-backed symlink, performing exactly
+        the manual remediation the Bug #1337/#1052 startup WARNING already
+        instructs operators to run by hand: ``mv link_path
+        link_path.legacy.bug<N> && mkdir -p target && ln -s target
+        link_path``.
+
+        This is the fix for the exact staging-cluster regression (Bug
+        #1463): the earlier self-heal only WARNED on a real non-empty
+        directory and never migrated it, so already-deployed hosts holding
+        real golden-repo/activated-repo data re-detected the same gap on
+        every single auto-update cycle forever, with zero forward progress.
+
+        Never writes INTO *target* -- ``target.mkdir(parents=True,
+        exist_ok=True)`` is a no-op when target already has content (e.g.
+        another cluster node already migrated its own copy into the SAME
+        shared NFS/CoW-mount target), so pre-existing target content is
+        never at risk of being overwritten or merged (mirrors this
+        codebase's established collision convention in
+        ``_ensure_single_nfs_symlink``: pre-existing destination content
+        always wins, never overwritten). The local directory's real data is
+        preserved intact at the backup path -- no data loss, ever.
+
+        Fails LOUDLY (ERROR, zero mutation) rather than silently clobbering
+        when a ``.legacy.bug<N>`` backup already exists at the destination
+        (e.g. a prior partial/interrupted run) -- per this project's
+        Anti-Fallback principle, this must never produce a silent
+        half-migrated/ambiguous state. If the rename succeeds but the
+        subsequent symlink creation fails for any reason, the rename is
+        rolled back (legacy_path renamed back to link_path) before
+        returning, so a crash mid-migration never leaves link_path
+        missing/half-migrated -- either both steps land, or neither does.
+
+        Returns True once the local directory is safely relocated and the
+        symlink is created; False if the migration could not proceed
+        safely (backup collision, or a failed migration that was rolled
+        back) -- non-fatal to the caller, but a real problem that was
+        already logged loudly here.
+        """
+        legacy_path = link_path.parent / f"{link_path.name}.legacy.bug{bug_number}"
+        if legacy_path.exists():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-212",
+                    f"Bug #{bug_number}: cannot migrate {link_path} -- backup "
+                    f"path {legacy_path} already exists (prior partial run?); "
+                    f"refusing to overwrite. Resolve manually: inspect "
+                    f"{legacy_path}, then either remove it (if it is a stale "
+                    f"empty backup) or reconcile its contents with "
+                    f"{link_path} before retrying.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        target.mkdir(parents=True, exist_ok=True)
+        link_path.rename(legacy_path)
+        try:
+            link_path.symlink_to(target)
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-213",
+                    f"Bug #{bug_number}: symlink creation failed after "
+                    f"backing up {link_path} to {legacy_path}: {e}. Rolling "
+                    f"back the rename so no partial state is left behind.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            legacy_path.rename(link_path)
+            return False
+
+        logger.info(
+            "Bug #%s: migrated real directory %s to backup %s and created "
+            "symlink %s -> %s",
+            bug_number,
             link_path,
+            legacy_path,
             link_path,
             target,
-            target,
-            link_path,
             extra={"correlation_id": get_correlation_id()},
         )
+        return True
 
     @staticmethod
     def _create_golden_repos_symlink(link_path: Path, target: Path) -> None:
@@ -5740,7 +5799,9 @@ class DeploymentExecutor:
                 return self._reconcile_existing_golden_repos_symlink(link_path, target)
 
             if link_path.exists() and not self._remove_if_empty_dir(link_path):
-                self._warn_golden_repos_real_dir_with_content(link_path, target)
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1337"
+                )
                 return True
 
             self._create_golden_repos_symlink(link_path, target)

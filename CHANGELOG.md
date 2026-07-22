@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.77.0] - 2026-07-22
+
+### Fixed
+
+- **#1462**: A fleet-wide NFS write-permission denial on the storage host silently disabled `clone_backend` wiring on every cluster node restart. `VersionedSnapshotManager` construction failed at startup, was caught non-fatally, and `app.state.snapshot_manager` was set to `None` -- causing `lifespan.py`'s three-guard wiring block (`snapshot_manager`/`golden_repo_manager`/`arm` `is not None` checks) to silently skip `clone_backend` injection with zero logging at any of the three guard points, even though the upstream root-cause exception was logged separately with no correlation. Operators saw only a confusing downstream "invoked without clone_backend" error during activation. Fixed by logging an ERROR at each guard point (`APP-GENERAL-1462`/`-B`/`-C`) so future occurrences are immediately diagnosable. Root cause was also fixed at the infrastructure level (NFS ACL grant on the storage host).
+- **#1463**: Golden-repos/activated-repos self-heal into a CoW-mount symlink (originally shipped for Bug #1337/#1052) regressed on the staging cluster: the self-heal deliberately refused to convert a real (non-symlink) directory into a symlink whenever it already contained data, which meant it could never actually self-heal on an already-deployed host, since every already-deployed host has real data by definition. Fixed both `deployment_executor.py` (Python) and `install-cidx-server.sh` (shell) to run a data-safety-first migration: create the CoW target first, rename the existing real directory to a `.legacy.bugNNNN` backup, then symlink into the target, rolling back on symlink failure. Never writes into the shared target directly, so it is safe under concurrent migration from multiple cluster nodes on the same NFS mount.
+
 ## [11.76.0] - 2026-07-21
 
 ### Fixed

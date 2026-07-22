@@ -208,18 +208,31 @@ class TestAutoConvertsEmptyRealDirectory:
 
 
 # ---------------------------------------------------------------------------
-# AC4: real NON-EMPTY directory -> WARNING logged, untouched
+# AC4 (Bug #1463): real NON-EMPTY directory -> safely migrated to a
+# `.legacy.bug1337` backup, then converted to a symlink into the CoW mount.
+#
+# Prior to Bug #1463, this branch only logged a WARNING and left the
+# directory untouched forever -- which is exactly why the staging cluster's
+# already-deployed nodes (each holding real golden-repo clone data) never
+# self-healed across any number of auto-update/deploy cycles: every single
+# run re-detected the same non-empty directory and re-emitted the same
+# WARNING, with no forward progress. Bug #1463 requires the self-heal to
+# actually perform the SAME safe migration the WARNING's own manual
+# remediation text describes (mv to a `.legacy.bug1337` backup, never
+# deleting data, then symlink into the CoW mount) so the fleet converges.
 # ---------------------------------------------------------------------------
 
 
-class TestSkipsAndWarnsWhenRealDirectoryWithContent:
-    def test_real_directory_with_content_not_touched(
+class TestMigratesRealDirectoryWithContentToSymlink:
+    def test_real_directory_with_content_is_migrated_to_symlink(
         self,
         executor: DeploymentExecutor,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Pre-existing real directory with a file -> no symlink, data intact, WARNING logged."""
+        """Bug #1463: pre-existing real directory with content -> renamed to
+        a `.legacy.bug1337` backup (data fully preserved, never deleted or
+        modified) and golden-repos becomes a symlink into the CoW mount."""
         mount_point = tmp_path / "cow-storage"
         data_dir = tmp_path / ".cidx-server"
         data_dir_data = data_dir / "data"
@@ -232,6 +245,71 @@ class TestSkipsAndWarnsWhenRealDirectoryWithContent:
         config = _make_cow_config(mount_point=str(mount_point))
         nonexistent_daemon_cfg = tmp_path / "does-not-exist" / "config.json"
 
+        with caplog.at_level(logging.INFO):
+            result = _run_step(
+                executor,
+                data_dir,
+                config,
+                daemon_host_config_path=nonexistent_daemon_cfg,
+            )
+
+        assert result is True, "step must return True (migration succeeded)"
+        assert golden_repos_dir.is_symlink(), (
+            "golden-repos must now be a symlink into the CoW mount"
+        )
+        assert os.readlink(str(golden_repos_dir)) == str(
+            mount_point / "golden-repos"
+        ), "symlink must point at {mount_point}/golden-repos"
+
+        legacy_path = data_dir_data / "golden-repos.legacy.bug1337"
+        legacy_sentinel = legacy_path / "metadata.json"
+        assert legacy_path.exists() and legacy_path.is_dir(), (
+            "the real directory's content must be preserved at a "
+            ".legacy.bug1337 backup path, never deleted"
+        )
+        assert legacy_sentinel.exists(), "user data file must survive the migration"
+        assert legacy_sentinel.read_text() == '{"repos": []}', (
+            "user data must not be modified by the migration"
+        )
+        assert "Bug #1337" in caplog.text or "golden-repos" in caplog.text, (
+            "the migration must be logged, mentioning Bug #1337 or golden-repos"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1463: a pre-existing `.legacy.bug1337` backup (e.g. from a prior
+# partial/interrupted run) must NEVER be silently overwritten -- refuse
+# LOUDLY (ERROR-level, per this project's Anti-Fallback principle: succeed
+# cleanly or fail loudly, never a silent half-migrated/ambiguous state) and
+# leave every path involved completely untouched, including never creating
+# the target directory or any symlink.
+# ---------------------------------------------------------------------------
+
+
+class TestRefusesWhenLegacyBackupAlreadyExists:
+    def test_preexisting_legacy_backup_blocks_migration_and_is_not_overwritten(
+        self,
+        executor: DeploymentExecutor,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mount_point = tmp_path / "cow-storage"
+        data_dir = tmp_path / ".cidx-server"
+        data_dir_data = data_dir / "data"
+
+        golden_repos_dir = data_dir_data / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+        current_sentinel = golden_repos_dir / "metadata.json"
+        current_sentinel.write_text('{"repos": ["current"]}')
+
+        legacy_path = data_dir_data / "golden-repos.legacy.bug1337"
+        legacy_path.mkdir(parents=True)
+        legacy_sentinel = legacy_path / "old-metadata.json"
+        legacy_sentinel.write_text('{"repos": ["stale-from-prior-run"]}')
+
+        config = _make_cow_config(mount_point=str(mount_point))
+        nonexistent_daemon_cfg = tmp_path / "does-not-exist" / "config.json"
+
         with caplog.at_level(logging.WARNING):
             result = _run_step(
                 executor,
@@ -240,20 +318,93 @@ class TestSkipsAndWarnsWhenRealDirectoryWithContent:
                 daemon_host_config_path=nonexistent_daemon_cfg,
             )
 
-        assert result is True, "step must return True (non-fatal)"
+        assert result is True, "step must return True (non-fatal, handled)"
+
+        # Nothing touched: the current directory is exactly as it was.
         assert golden_repos_dir.exists() and not golden_repos_dir.is_symlink(), (
-            "real directory with content must NOT be converted to symlink"
+            "current directory must NOT be touched when a backup collision is detected"
         )
-        assert sentinel_file.exists(), "user data must not be deleted"
-        assert sentinel_file.read_text() == '{"repos": []}', (
-            "user data must not be modified"
+        assert current_sentinel.read_text() == '{"repos": ["current"]}', (
+            "current data must be untouched"
         )
-        assert any(r.levelno >= logging.WARNING for r in caplog.records), (
-            "at least one WARNING must be logged"
+        # No partial state: no symlink anywhere, no target created.
+        assert not (data_dir_data / "golden-repos").is_symlink()
+        assert not (mount_point / "golden-repos").exists(), (
+            "the CoW-mount target must NEVER be created when the migration "
+            "is refused -- no partial state left behind"
         )
-        assert "Bug #1337" in caplog.text or "golden-repos" in caplog.text, (
-            "WARNING must mention Bug #1337 or golden-repos for operator guidance"
+        # The pre-existing backup is untouched (not overwritten/merged).
+        assert legacy_sentinel.read_text() == '{"repos": ["stale-from-prior-run"]}', (
+            "pre-existing backup must NOT be overwritten or merged"
         )
+        assert not (legacy_path / "metadata.json").exists(), (
+            "current directory's content must NOT have been merged into "
+            "the pre-existing backup"
+        )
+        # Fails LOUDLY: an ERROR-level record, not just a WARNING.
+        assert any(r.levelno == logging.ERROR for r in caplog.records), (
+            "a backup collision must be refused with an ERROR-level log "
+            "(Anti-Fallback: fail loudly, never silently), not merely a WARNING"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1463: the CoW-mount target may already hold content (e.g. another
+# cluster node already migrated its own local copy into the SAME shared
+# NFS/CoW-mount target). Migration must never write into / overwrite target
+# content -- it only backs up the LOCAL directory and symlinks to whatever
+# is already at target. This mirrors this codebase's established
+# collision-handling convention (_ensure_single_nfs_symlink: `if not
+# dest.exists(): shutil.move(...)` -- pre-existing target content always
+# wins, never overwritten).
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationIsSafeWhenTargetAlreadyHasContent:
+    def test_target_preexisting_content_is_never_touched(
+        self,
+        executor: DeploymentExecutor,
+        tmp_path: Path,
+    ) -> None:
+        mount_point = tmp_path / "cow-storage"
+        target = mount_point / "golden-repos"
+        target.mkdir(parents=True)
+        target_sentinel = target / "shared-metadata.json"
+        target_sentinel.write_text('{"repos": ["from-another-node"]}')
+
+        data_dir = tmp_path / ".cidx-server"
+        data_dir_data = data_dir / "data"
+
+        golden_repos_dir = data_dir_data / "golden-repos"
+        golden_repos_dir.mkdir(parents=True)
+        local_sentinel = golden_repos_dir / "metadata.json"
+        local_sentinel.write_text('{"repos": ["local-stale-copy"]}')
+
+        config = _make_cow_config(mount_point=str(mount_point))
+        nonexistent_daemon_cfg = tmp_path / "does-not-exist" / "config.json"
+
+        result = _run_step(
+            executor, data_dir, config, daemon_host_config_path=nonexistent_daemon_cfg
+        )
+
+        assert result is True
+        assert golden_repos_dir.is_symlink(), (
+            "golden-repos must become a symlink pointing at the shared target"
+        )
+        assert os.readlink(str(golden_repos_dir)) == str(target)
+        assert target_sentinel.read_text() == '{"repos": ["from-another-node"]}', (
+            "pre-existing shared target content must be completely untouched"
+        )
+        assert not (target / "metadata.json").exists(), (
+            "local content must NOT have been merged/copied into target"
+        )
+
+        legacy_path = data_dir_data / "golden-repos.legacy.bug1337"
+        legacy_local_sentinel = legacy_path / "metadata.json"
+        assert legacy_local_sentinel.exists(), (
+            "the local node's own data must still be preserved as a backup"
+        )
+        assert legacy_local_sentinel.read_text() == '{"repos": ["local-stale-copy"]}'
 
 
 # ---------------------------------------------------------------------------
