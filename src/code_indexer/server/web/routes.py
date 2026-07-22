@@ -4611,7 +4611,7 @@ def deactivate_repo(
             user_alias=user_alias,
             actor_username=session.username,  # AC12: attribute to admin who clicked
         )
-        job_link = f'<a href="/admin/jobs?search_text={job_id}">{job_id}</a>'
+        job_link = f'<a href="/admin/jobs?search={job_id}">{job_id}</a>'
         return _create_repos_page_response(
             request,
             session,
@@ -4731,11 +4731,13 @@ def _apply_job_filters(
             user = (job.get("username") or "").lower()
             op = (job.get("operation_type") or "").lower()
             err = (job.get("error") or "").lower()
+            job_id = (job.get("job_id") or "").lower()
             if not (
                 search_lower in repo
                 or search_lower in user
                 or search_lower in op
                 or search_lower in err
+                or search_lower in job_id
             ):
                 continue
         result.append(job)

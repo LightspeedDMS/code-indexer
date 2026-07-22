@@ -15,12 +15,13 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
-from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
-    iter_index_files_for_repo,
+from code_indexer.server.services.repository_health_aggregator import (
+    compute_repository_health,
+    get_shared_health_service,
 )
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
-from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -30,7 +31,6 @@ from ._utils import (
     _mcp_response,
     _get_golden_repos_dir,
     _list_global_repos,
-    _get_hnsw_health_service,
     _get_access_filtering_service,
     _get_app_refresh_scheduler,
     _get_available_repos,
@@ -383,7 +383,22 @@ def _load_category_map() -> dict:
 
 
 def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Check HNSW index health and integrity for a repository."""
+    """Check HNSW index health and integrity for a repository (Bug #1453).
+
+    Submits a background job rather than running the health check inline --
+    a synchronous check on a repo with many HNSW collections (e.g. dozens of
+    temporal quarterly shards) can exceed the generic MCP sync-dispatch
+    handler timeout. Poll the result via get_job_details/get_job_statistics.
+
+    Reuses operation_type="repository_health_check" -- the SAME job type
+    the golden-repo REST endpoint POST /{repo_alias}/health/check already
+    uses (Bug #1394) -- so a concurrent MCP + golden-repo REST health check
+    on the same repo correctly collides via the existing DuplicateJobError
+    dedup. This handler only resolves golden repos, and the activated-repos
+    async endpoint (POST /api/activated-repos/{alias}/health/check) uses a
+    different job type (operation_type="activated_repo_health_check"), so
+    there is no cross-surface dedup with that endpoint.
+    """
     try:
         repository_alias = params.get("repository_alias", "")
         if not repository_alias:
@@ -402,70 +417,49 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         clone_path = Path(repo.clone_path)
-        health_service = _get_hnsw_health_service()
+        index_base_path = clone_path / ".code-indexer" / "index"
 
-        # Discover the REAL on-disk HNSW collection(s) for this repo (Bug
-        # #1387) -- reuses the same structural discovery primitive the HNSW
-        # fleet orphan sweep uses (Story #1360), rather than hardcoding a
-        # collection directory name (real names are provider/model-derived,
-        # e.g. "voyage-code-3", never "default") or filename (real filename
-        # is HNSWIndexManager.INDEX_FILENAME == "hnsw_index.bin", not
-        # "index.bin").
-        relative_index_paths = list(iter_index_files_for_repo(clone_path))
-
-        if not relative_index_paths:
-            # No real collection found -- preserve today's not-found
-            # behavior/response shape. HNSWHealthService itself detects the
-            # missing file and reports valid=False/file_exists=False with a
-            # "not found" error; the exact fallback path we hand it only
-            # affects the informational index_path field.
-            fallback_index_path = (
-                clone_path
-                / ".code-indexer"
-                / "index"
-                / "default"
-                / HNSWIndexManager.INDEX_FILENAME
-            )
-            result = health_service.check_health(
-                index_path=str(fallback_index_path),
-                force_refresh=force_refresh,
-            )
+        if _utils.app_module.background_job_manager is None:
             return _mcp_response(
-                {"success": True, "health": result.model_dump(mode="json")}
+                {"success": False, "error": "Background job manager not initialized"}
             )
 
-        if len(relative_index_paths) == 1:
-            index_path = clone_path / relative_index_paths[0]
-            result = health_service.check_health(
-                index_path=str(index_path),
+        def health_check_job() -> Dict[str, Any]:
+            result = compute_repository_health(
+                repository_alias,
+                index_base_path,
+                get_shared_health_service(),
                 force_refresh=force_refresh,
             )
+            result_dict = result.model_dump(mode="json")
+            collections = result_dict.get("collections", [])
+            # Mirrors the retired inline handler's own backward-compat
+            # convention: top-level "health" mirrors collections[0] so
+            # callers reading only "health" still see a real result.
+            result_dict["health"] = collections[0] if collections else {}
+            return result_dict  # type: ignore[no-any-return]
+
+        try:
+            job_id = _utils.app_module.background_job_manager.submit_job(
+                operation_type="repository_health_check",
+                func=health_check_job,
+                submitter_username=user.username,
+                repo_alias=repository_alias,
+            )
+        except DuplicateJobError as e:
             return _mcp_response(
-                {"success": True, "health": result.model_dump(mode="json")}
-            )
-
-        # Multiple real collections (multi-provider config and/or temporal
-        # quarterly shards) -- report ALL of them additively rather than
-        # silently picking one and hiding the rest.
-        collections = []
-        for relative_index_path in relative_index_paths:
-            index_path = clone_path / relative_index_path
-            result = health_service.check_health(
-                index_path=str(index_path),
-                force_refresh=force_refresh,
-            )
-            collections.append(
                 {
-                    "collection_path": str(relative_index_path),
-                    "health": result.model_dump(mode="json"),
+                    "success": False,
+                    "error": str(e),
+                    "existing_job_id": e.existing_job_id,
                 }
             )
 
         return _mcp_response(
             {
                 "success": True,
-                "health": collections[0]["health"],
-                "collections": collections,
+                "job_id": job_id,
+                "message": "Use get_job_details to poll.",
             }
         )
     except Exception as e:
