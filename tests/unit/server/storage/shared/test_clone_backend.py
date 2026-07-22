@@ -1238,6 +1238,58 @@ class TestCowDaemonBackendSanitizeIdentifier:
         result = CowDaemonBackend._sanitize_identifier("a.b.c")
         assert result == "a_b_c"
 
+    def test_sanitize_replaces_at_symbol_with_underscore(self):
+        """Issue #1465: _sanitize_identifier must strip '@' from email usernames.
+
+        Real cluster usernames are email addresses (e.g.
+        'Seba.Battig@lightspeeddms.com'). The daemon rejects namespace/name
+        values containing '@' with HTTP 400 VALIDATION_ERROR. Prior to the
+        fix, _sanitize_identifier only replaced '.', leaving '@' intact and
+        breaking activation fleet-wide for every email-style username.
+        """
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier("Seba.Battig@lightspeeddms.com")
+        assert "@" not in result
+        assert result == "Seba_Battig_lightspeeddms_com"
+
+    def test_sanitize_replaces_plus_sign(self):
+        """_sanitize_identifier strips '+' (valid in email plus-addressing)."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier("seba+test@example.com")
+        assert result == "seba_test_example_com"
+
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "Seba.Battig@lightspeeddms.com",
+            "seba+test@example.com",
+            "user name@example.com",
+            "user@sub.example.co.uk",
+            "my-repo_name123",
+            "a.b.c",
+        ],
+    )
+    def test_sanitize_result_always_matches_daemon_allowed_charset(self, alias):
+        """_sanitize_identifier output must always satisfy the daemon's own
+        validation rule: alphanumeric, hyphens, and underscores only.
+
+        This is the general contract the daemon enforces server-side; any
+        realistic username/alias (dots, '@', '+', spaces) must sanitize down
+        to a string matching this charset, not just the previously-handled
+        dot case.
+        """
+        import re
+
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier(alias)
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", result), (
+            f"sanitized alias {result!r} (from {alias!r}) contains characters "
+            "outside the daemon's allowed charset"
+        )
+
 
 # ---------------------------------------------------------------------------
 # CowDaemonBackend.create_clone_at_path (Commit 2)
