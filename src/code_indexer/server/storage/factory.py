@@ -119,6 +119,12 @@ class BackendRegistry:
     # search_embed_event table (the phantom-free cache-metrics source of
     # truth).
     search_embed_event: Any = field(default=None)
+    # Story #1418 Phase 3: Embedding & reranker call tracking backend —
+    # SQLite in solo mode, PostgreSQL in cluster mode so all nodes share one
+    # embedding_call_stats table (vendor cost reconciliation). Reuses the
+    # SAME db_path (SQLite) / general connection_pool (PostgreSQL) as the
+    # sibling backends in this registry, never a second isolated connection.
+    embedding_call_stats: Any = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +219,9 @@ class StorageFactory:
         from code_indexer.server.services.search_embed_event_writer import (
             SearchEmbedEventSqliteBackend,
         )
+        from code_indexer.server.services.embedding_call_stats import (
+            EmbeddingCallStatsSqliteBackend,
+        )
 
         # Main database: all backends except groups/audit share the same DB.
         db_path = str(Path(data_dir) / "cidx_server.db")
@@ -262,6 +271,7 @@ class StorageFactory:
             search_event_log=SearchEventLogSqliteBackend(db_path=db_path),
             query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
             search_embed_event=SearchEmbedEventSqliteBackend(db_path=db_path),
+            embedding_call_stats=EmbeddingCallStatsSqliteBackend(db_path=db_path),
         )
 
     # ------------------------------------------------------------------
@@ -378,6 +388,9 @@ class StorageFactory:
         from code_indexer.server.services.search_embed_event_writer import (
             SearchEmbedEventPostgresBackend,
         )
+        from code_indexer.server.services.embedding_call_stats import (
+            EmbeddingCallStatsPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -433,6 +446,7 @@ class StorageFactory:
             search_event_log=SearchEventLogPostgresBackend(pool),
             query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
             search_embed_event=SearchEmbedEventPostgresBackend(pool),
+            embedding_call_stats=EmbeddingCallStatsPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

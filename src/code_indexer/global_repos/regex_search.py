@@ -134,7 +134,15 @@ class RegexSearchService:
         Raises:
             RuntimeError: If neither ripgrep nor grep is available
         """
-        self.repo_path = repo_path
+        # Bug #1401: canonicalize the repo root ONCE, here, rather than at
+        # scattered per-call-site resolutions. self.repo_path is the single
+        # source of truth every relative_to() comparison inside this service
+        # (trigram pre-filter, ripgrep JSON parsing, grep-mode parsing,
+        # Python-multiline fallback parsing) is checked against, via
+        # _to_repo_relative(). Without this, an unresolved symlinked repo
+        # root desyncs against candidate paths that subprocesses report back
+        # resolved, raising an uncaught pathlib ValueError downstream.
+        self.repo_path = Path(repo_path).resolve()
         self._subprocess_max_workers = subprocess_max_workers
         self._search_engine = self._detect_search_engine()
         self._pcre2_supported: Optional[bool] = None  # Lazy-detected, cached
@@ -299,6 +307,41 @@ class RegexSearchService:
             )
         return ""
 
+    def _to_repo_relative(self, raw_path: str) -> Optional[str]:
+        """Convert a subprocess-reported path into a repo-relative string.
+
+        Bug #1401: this is the single shared containment-check policy used
+        by every output-parsing site in this service (ripgrep JSON, grep-mode,
+        Python-multiline fallback), checked against the canonical
+        ``self.repo_path`` set once at construction.
+
+        - Absolute paths are compared directly against the canonical root.
+        - Relative paths are joined onto the canonical root first -- being
+          relative is NOT a free pass; a ``../`` escape or an internal
+          symlink that resolves outside the repo is rejected the same way
+          an absolute-outside-repo path is ("genuinely relative" means
+          "relative AND contained", not "relative, therefore trust it").
+
+        Returns None (and logs a warning) if the path does not resolve to
+        somewhere inside the repository root; callers must drop that match
+        rather than ever storing an absolute/escaping path as ``file_path``.
+        """
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = self.repo_path / candidate
+        try:
+            resolved = candidate.resolve()
+            rel = resolved.relative_to(self.repo_path)
+        except ValueError:
+            logger.warning(
+                "regex search match path %r resolves outside repository root "
+                "%s; dropping match to avoid an incorrect absolute file_path",
+                raw_path,
+                self.repo_path,
+            )
+            return None
+        return str(rel)
+
     def _parse_ripgrep_json_output(
         self,
         output: str,
@@ -323,15 +366,15 @@ class RegexSearchService:
             try:
                 data = json.loads(line)
                 if data.get("type") == "match":
+                    match_data = data["data"]
+                    raw_path = self._extract_line_text(match_data["path"])
+                    rel_path = self._to_repo_relative(raw_path)
+                    if rel_path is None:
+                        # Bug #1401: never silently store an absolute/escaping
+                        # path as file_path -- drop the match (already warned).
+                        continue
                     total += 1
                     if len(matches) < max_results:
-                        match_data = data["data"]
-                        abs_path = self._extract_line_text(match_data["path"])
-                        try:
-                            rel_path = str(Path(abs_path).relative_to(self.repo_path))
-                        except ValueError:
-                            rel_path = abs_path
-
                         submatches = match_data.get("submatches", [])
                         column = submatches[0]["start"] + 1 if submatches else 1
 
@@ -697,14 +740,17 @@ class RegexSearchService:
             # Try matching as match line (colon separator)
             match_line = re.match(r"^(.+?):(\d+):(.*)$", line)
             if match_line:
+                file_path = match_line.group(1)
+                rel_path = self._to_repo_relative(file_path)
+                if rel_path is None:
+                    # Bug #1401: never silently store an absolute/escaping
+                    # path as file_path -- drop the match (already warned).
+                    # Grep-mode legitimately reports relative filenames in
+                    # some cases; those are still accepted here since
+                    # _to_repo_relative only rejects genuine escapes.
+                    continue
                 total += 1
                 if len(matches) < max_results:
-                    file_path = match_line.group(1)
-                    try:
-                        rel_path = str(Path(file_path).relative_to(self.repo_path))
-                    except ValueError:
-                        rel_path = file_path
-
                     # Parse line number with error handling
                     try:
                         line_num = int(match_line.group(2))
@@ -782,10 +828,11 @@ class RegexSearchService:
 
             for fname in files:
                 file_path = os.path.join(root, fname)
-                try:
-                    rel_path = str(Path(file_path).relative_to(self.repo_path))
-                except ValueError:
-                    rel_path = file_path
+                rel_path = self._to_repo_relative(file_path)
+                if rel_path is None:
+                    # Bug #1401: never silently store an absolute/escaping
+                    # path as file_path -- skip the file (already warned).
+                    continue
 
                 if include_patterns and not any(
                     fnmatch(fname, p) for p in include_patterns

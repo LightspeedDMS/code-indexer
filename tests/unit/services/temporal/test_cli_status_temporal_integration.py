@@ -5,14 +5,18 @@ Covers:
 - TemporalProgressiveMetadata.load_progress() returns commit count and state
 - get_temporal_collections() returns empty list when no temporal dirs exist
 - execute_temporal_query_with_fusion importability
-- TEMPORAL_QUERY_TIMEOUT_SECONDS constant value
+
+Issue #1398: TEMPORAL_QUERY_TIMEOUT_SECONDS (confirmed dead code -- Story
+#1291 removed its only consumer) was deleted entirely from
+temporal_fusion_dispatch.py; its "constant value" test was removed here
+accordingly (see test_temporal_query_timeout_seconds_removed_1398.py for
+the proof that it no longer exists in source).
 """
 
 from code_indexer.services.temporal.temporal_collection_naming import (
     get_temporal_collections,
 )
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
-    TEMPORAL_QUERY_TIMEOUT_SECONDS,
     execute_temporal_query_with_fusion,
 )
 from code_indexer.services.temporal.temporal_progressive_metadata import (
@@ -121,13 +125,3 @@ def test_status_temporal_no_collections_message(tmp_path):
 def test_fusion_dispatch_import_available():
     """execute_temporal_query_with_fusion must be importable from temporal_fusion_dispatch."""
     assert callable(execute_temporal_query_with_fusion)
-
-
-# ---------------------------------------------------------------------------
-# test_temporal_query_timeout_constant_defined
-# ---------------------------------------------------------------------------
-
-
-def test_temporal_query_timeout_constant_defined():
-    """TEMPORAL_QUERY_TIMEOUT_SECONDS must equal 15."""
-    assert TEMPORAL_QUERY_TIMEOUT_SECONDS == 15

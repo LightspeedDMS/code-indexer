@@ -785,6 +785,33 @@ class TestListJobsFiltered:
         all_sqls = [c[0][0] for c in cur.execute.call_args_list]
         assert any("LOWER" in sql for sql in all_sqls)
 
+    def test_search_text_filter_includes_job_id_column(self):
+        """
+        Bug #1452 (3rd follow-up): search_text must also match against job_id,
+        so clicking a deactivation job's 'Job ID: <link>' (?search=<job_id>)
+        genuinely finds the job in PostgreSQL cluster mode too -- not just the
+        SQLite solo-mode backend.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, cur = self._make_filtered_pool(count=0, rows=[])
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        target_job_id = "9740fda1-102e-4213-875b-c6124e1b62b2"
+        backend.list_jobs_filtered(search_text=target_job_id)
+
+        count_sql, count_params = cur.execute.call_args_list[0][0]
+        assert "job_id" in count_sql, (
+            "search_text predicate SQL must reference the job_id column"
+        )
+        like_pattern = f"%{target_job_id}%"
+        assert count_params.count(like_pattern) == 5, (
+            "Expected 5 LIKE params (repo_alias, username, operation_type, "
+            f"error, job_id), got params: {count_params}"
+        )
+
     def test_exclude_ids_produces_not_in_clause(self):
         """
         Given a set of exclude_ids

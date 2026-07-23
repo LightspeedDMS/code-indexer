@@ -63,6 +63,16 @@ class CollectionHealthResult(BaseModel):
             "value > 0 is ERROR (reflected in `valid`) -- no WARNING tier."
         ),
     )
+    hnswlib_capability_available: Optional[bool] = Field(
+        None,
+        description=(
+            "Bug #1415: True/False iff the installed hnswlib does/does not "
+            "have the custom LightspeedDMS fork's check_integrity()/"
+            "repair_orphans() methods. None if not evaluated. SEPARATE "
+            "signal from orphan_count/valid -- never folded into that "
+            "zero-tolerance binary."
+        ),
+    )
     file_size_bytes: Optional[int] = None
     errors: List[str] = Field(default_factory=list)
     check_duration_ms: float
@@ -100,6 +110,7 @@ def _to_collection_health_result(
         min_inbound=health_result.min_inbound,
         max_inbound=health_result.max_inbound,
         orphan_count=health_result.orphan_count,
+        hnswlib_capability_available=health_result.hnswlib_capability_available,
         file_size_bytes=health_result.file_size_bytes,
         errors=health_result.errors,
         check_duration_ms=health_result.check_duration_ms,
@@ -250,6 +261,9 @@ def build_incomplete_collection_result(
         # No graph exists, so there is nothing to count orphans in -- None
         # (unknown), not 0 (checked and clean).
         orphan_count=None,
+        # No graph exists, so no capability check was even attempted (Bug
+        # #1415) -- None (not evaluated), distinct from True/False.
+        hnswlib_capability_available=None,
         errors=[
             "Vector shards present but HNSW graph missing (hnsw_index.bin) — "
             "indexing was interrupted before the graph was built. "

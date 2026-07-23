@@ -27,6 +27,7 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -604,6 +605,8 @@ class FilesystemVectorStore:
         progress_callback: Optional[Any] = None,
         skip_hnsw_rebuild: bool = False,
         subdirectory: Optional[str] = None,
+        force_full_rebuild: bool = False,
+        clear_stale: bool = True,
     ) -> Dict[str, Any]:
         """Finalize indexing by rebuilding HNSW and ID indexes.
 
@@ -617,6 +620,26 @@ class FilesystemVectorStore:
             skip_hnsw_rebuild: If True, skip HNSW rebuild and mark index as stale
                              (watch mode optimization - defer rebuild to query time)
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
+            force_full_rebuild: Bug #1407 Amendment 3 -- when True, takes
+                             PRECEDENCE over the _branch_isolation_did_filtered_rebuild
+                             sentinel, skip_hnsw_rebuild, and session-change
+                             detection: discards this collection's tracked
+                             session changes and directly runs a non-filtered
+                             rebuild_from_vectors(). Used by the temporal
+                             per-shard finalize barrier for a was_stale shard
+                             (an incremental append onto a possibly-inconsistent
+                             .bin would be wrong). CRITICAL: bypasses the
+                             sentinel WITHOUT consuming/resetting it -- a set
+                             sentinel may belong to a DIFFERENT collection's
+                             still-pending end_indexing (re-guards Bug #941).
+            clear_stale: Bug #1407 Amendment 1/2 -- when True (default,
+                             today's unchanged fleet-wide behavior), the
+                             underlying HNSW writer marks the index fresh
+                             (is_stale=False). When False, staleness is
+                             PRESERVED through this call -- only the caller's
+                             own explicit HNSWIndexManager.clear_stale() call,
+                             made strictly after end_indexing() returns
+                             successfully, may mark the shard fresh.
 
         Returns:
             Status dictionary with rebuild results and hnsw_skipped flag
@@ -651,9 +674,29 @@ class FilesystemVectorStore:
         # HNSW-002: Auto-detection for incremental vs full rebuild
         incremental_update_result: Optional[Dict[str, Any]] = None
 
+        if force_full_rebuild:
+            # Amendment 3: precedence over the sentinel/skip/session-change
+            # branches below, WITHOUT reading or resetting
+            # _branch_isolation_did_filtered_rebuild (it may belong to a
+            # different collection's still-pending end_indexing).
+            if (
+                hasattr(self, "_indexing_session_changes")
+                and collection_name in self._indexing_session_changes
+            ):
+                del self._indexing_session_changes[collection_name]
+            hnsw_manager.rebuild_from_vectors(
+                collection_path=collection_path,
+                progress_callback=progress_callback,
+                clear_stale=clear_stale,
+            )
+            self.logger.info(
+                f"Full HNSW rebuild forced for '{collection_name}' "
+                f"(temporal was_stale shard repair)"
+            )
+            incremental_update_result = {}  # sentinel: already handled
         # #941: When branch isolation already performed a filtered HNSW rebuild,
         # skip the incremental path entirely so it cannot undo the filtered result.
-        if self._branch_isolation_did_filtered_rebuild:
+        elif self._branch_isolation_did_filtered_rebuild:
             self._branch_isolation_did_filtered_rebuild = False
             self.logger.info(
                 f"Incremental HNSW update skipped for '{collection_name}' "
@@ -685,6 +728,7 @@ class FilesystemVectorStore:
                     collection_name=collection_name,
                     changes=changes,
                     progress_callback=progress_callback,
+                    clear_stale=clear_stale,
                 )
 
                 # Clear session changes after applying
@@ -720,7 +764,9 @@ class FilesystemVectorStore:
             else:
                 # Normal mode: Rebuild HNSW index from ALL vectors on disk (ONCE)
                 hnsw_manager.rebuild_from_vectors(
-                    collection_path=collection_path, progress_callback=progress_callback
+                    collection_path=collection_path,
+                    progress_callback=progress_callback,
+                    clear_stale=clear_stale,
                 )
                 self.logger.info(f"HNSW index rebuilt for '{collection_name}'")
 
@@ -768,8 +814,10 @@ class FilesystemVectorStore:
             "hnsw_skipped": hnsw_skipped,
         }
 
-        # Add HNSW update type if incremental was used
-        if incremental_update_result is not None:
+        # Add HNSW update type if incremental was used. force_full_rebuild
+        # reuses the "already handled" {} sentinel but ran a full rebuild,
+        # not an incremental update -- must not be mislabeled (Bug #1407).
+        if incremental_update_result is not None and not force_full_rebuild:
             result["hnsw_update"] = "incremental"
 
         # Clean up active subdirectory tracking
@@ -1261,7 +1309,18 @@ class FilesystemVectorStore:
             dir_path = collection_path
             for segment in segments[:-1]:
                 dir_path = dir_path / segment
+            _dir_path_is_new = is_temporal and not dir_path.exists()
             dir_path.mkdir(parents=True, exist_ok=True)
+            if _dir_path_is_new:
+                # Bug #1407 Foundation: fsync a vector file's freshly-created
+                # parent directory on create (temporal only -- scoped to
+                # avoid a fleet-wide perf regression on the general indexing
+                # path, which is not the correctness gap this closes).
+                _new_dir_fd = os.open(str(dir_path), os.O_RDONLY)
+                try:
+                    nfs_safe_fsync(_new_dir_fd)
+                finally:
+                    os.close(_new_dir_fd)
 
             # Story #669: Use hash-based filenames for temporal collections (v2 format)
             # This prevents OSError when point_ids exceed 255 characters.
@@ -1290,8 +1349,10 @@ class FilesystemVectorStore:
                 uncommitted_files=uncommitted_files,
             )
 
-            # Atomic write to filesystem
-            self._atomic_write_json(vector_file, vector_data)
+            # Atomic write to filesystem. Bug #1407/#1223: fsync temporal
+            # vector JSON writes for crash-durability; non-temporal writes
+            # stay fsync=False (unchanged, avoids a fleet-wide perf hit).
+            self._atomic_write_json(vector_file, vector_data, fsync=is_temporal)
 
             # Update ID index and file path cache
             with self._id_index_lock:
@@ -4165,6 +4226,7 @@ class FilesystemVectorStore:
         collection_name: str,
         changes: Dict[str, set],
         progress_callback: Optional[Any] = None,
+        clear_stale: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Apply incremental HNSW update for batch of changes.
 
@@ -4172,6 +4234,9 @@ class FilesystemVectorStore:
             collection_name: Name of the collection
             changes: Dictionary with 'added', 'updated', 'deleted' sets
             progress_callback: Optional progress callback
+            clear_stale: Bug #1407 Amendment 1/2 -- forwarded to
+                         save_incremental_update(); True (default) preserves
+                         today's behavior for the whole fleet.
 
         Returns:
             Dictionary with update results, or None if no existing index (fallback to full rebuild)
@@ -4272,7 +4337,12 @@ class FilesystemVectorStore:
         # Save updated index
         total_vectors = len(id_to_label)
         hnsw_manager.save_incremental_update(
-            index, collection_path, id_to_label, label_to_id, total_vectors
+            index,
+            collection_path,
+            id_to_label,
+            label_to_id,
+            total_vectors,
+            clear_stale=clear_stale,
         )
 
         # Final progress report

@@ -240,6 +240,43 @@ class GoldenRepoMetadataPostgresBackend:
             logger.info("Updated enable_temporal=%s for golden repo: %s", enable, alias)
         return updated
 
+    def update_temporal_options(self, alias: str, options: Optional[Dict]) -> bool:
+        """
+        Update the temporal_options JSON for a golden repository.
+
+        Bug #1414: this method did not exist on the PostgreSQL backend at
+        all (only update_enable_temporal and update_repo_url existed), so
+        in cluster/PostgreSQL mode GoldenRepoManager.save_temporal_options()
+        (the Web UI's only write path for temporal_options) called
+        `.update_temporal_options(...)` on this class and raised an
+        unhandled AttributeError -> HTTP 500, persisting nothing anywhere.
+        Mirrors GoldenRepoMetadataSqliteBackend.update_temporal_options
+        exactly (Story #478's contract): options=None clears the column.
+
+        Args:
+            alias: Alias of the repository to update.
+            options: Dict of temporal options (max_commits, diff_context,
+                since_date, all_branches), or None to clear.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+        temporal_json = json.dumps(options) if options is not None else None
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE golden_repos_metadata SET temporal_options = %s::jsonb "
+                    "WHERE alias = %s",
+                    (temporal_json, alias),
+                )
+                updated: bool = cur.rowcount > 0
+            conn.commit()
+
+        if updated:
+            logger.info("Updated temporal_options for golden repo: %s", alias)
+        return updated
+
     def update_repo_url(self, alias: str, repo_url: str) -> bool:
         """
         Update the repo_url for a golden repository.

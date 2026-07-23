@@ -610,12 +610,21 @@ class ActivatedRepoIndexManager:
         wall-clock deadline on the subprocess itself. The only legitimate
         fixed timeout in the system is the per-request outbound embedding-
         provider HTTP call.
+
+        Story #1418: this is the SHARED convergence point for every
+        `cidx index` spawn in this file (semantic, fts, temporal), so
+        CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+        unconditionally (both storage modes), before the existing
+        build_cidx_subprocess_env() PYTHONPATH sanitization.
         """
-        resolved_env = (
-            build_cidx_subprocess_env(env)
-            if env is not None
-            else build_cidx_subprocess_env()
+        from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+            build_embedding_stats_child_env,
         )
+
+        env_with_stats = build_embedding_stats_child_env(
+            get_config_service().get_config(), base_env=env
+        )
+        resolved_env = build_cidx_subprocess_env(env_with_stats)
         self._seed_telemetry(repo_path)
         try:
             return run_cancellable_subprocess(
@@ -627,6 +636,28 @@ class ActivatedRepoIndexManager:
             )
         finally:
             self._drain_telemetry(repo_path)
+
+    @staticmethod
+    def _uninitialized_repo_error(repo_path: str, operation: str) -> Dict[str, Any]:
+        """Bug #1419: fast-fail dict for a repo missing .code-indexer/config.json.
+
+        Returned by both _execute_fts_indexing and _execute_semantic_indexing
+        BEFORE the `cidx` subprocess is ever spawned. Without this guard, the
+        subprocess's own config discovery backtracks up the directory tree
+        (ConfigManager.create_with_backtrack) and can pick up an unrelated
+        ANCESTOR .code-indexer/config.json -- producing a confusing,
+        unrelated failure whose message often lands on stdout (not stderr),
+        so the wrapped `{operation} indexing failed: {result.stderr}` error
+        comes back empty with no actionable guidance for the operator.
+        """
+        return {
+            "success": False,
+            "error": (
+                f"{operation} indexing failed: repo at '{repo_path}' is not "
+                "initialized (missing .code-indexer/config.json). Run "
+                "'cidx init' to configure the repository before indexing."
+            ),
+        }
 
     def _execute_semantic_indexing(
         self,
@@ -640,9 +671,16 @@ class ActivatedRepoIndexManager:
         cancelled activation/switch/sync job can kill the `cidx index`
         child promptly instead of blocking to completion. None (the default,
         used by the unrelated manual-reindex job path) disables cancellation.
+
+        Bug #1419: guards against running on a repo with no
+        .code-indexer/config.json -- see _uninitialized_repo_error.
         """
         try:
             repo_path_obj = Path(repo_path)
+
+            if not (repo_path_obj / ".code-indexer" / "config.json").exists():
+                return self._uninitialized_repo_error(repo_path, "Semantic")
+
             index_dir = repo_path_obj / ".code-indexer" / "index"
 
             # Clear index if requested
@@ -713,8 +751,17 @@ class ActivatedRepoIndexManager:
             )
 
     def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute FTS indexing using TantivyIndexManager."""
+        """Execute FTS indexing using TantivyIndexManager.
+
+        Bug #1419: guards against running on a repo with no
+        .code-indexer/config.json -- see _uninitialized_repo_error.
+        """
         try:
+            repo_path_obj = Path(repo_path)
+
+            if not (repo_path_obj / ".code-indexer" / "config.json").exists():
+                return self._uninitialized_repo_error(repo_path, "FTS")
+
             args = ["cidx", "index", "--fts"]
             if clear:
                 args.append("--clear")
@@ -752,6 +799,18 @@ class ActivatedRepoIndexManager:
             args = ["cidx", "index", "--index-commits"]
             if clear:
                 args.append("--clear")
+
+            # Story #1404: apply the global temporal indexing floor date.
+            # No per-repo since_date concept exists at this layer (activated
+            # repos carry no temporal_options), so the global value applies
+            # directly -- omitted entirely when unset (Scenario 5 no-op).
+            from code_indexer.server.services.temporal_floor_date import (
+                resolve_temporal_floor_date,
+            )
+
+            _floor_date = resolve_temporal_floor_date()
+            if _floor_date:
+                args.extend(["--since-date", _floor_date])
 
             _temporal_env = build_temporal_child_env(get_config_service().get_config())
 

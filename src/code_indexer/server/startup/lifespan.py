@@ -972,9 +972,66 @@ def make_lifespan(
                             activated_repo_manager=arm,
                             background_job_manager=background_job_manager,
                         )
+                    else:
+                        # Bug #1462: silent-skip guard #3 -- golden_repo_manager
+                        # has no activated_repo_manager. Without this log the
+                        # only symptom is a much-later, confusingly-unrelated
+                        # "invoked without clone_backend -- wiring bug" error at
+                        # activation time, with no correlation back here.
+                        logger.error(
+                            format_error_log(
+                                "APP-GENERAL-1462-C",
+                                "Skipping clone_backend wiring into "
+                                "ActivatedRepoManager: "
+                                "golden_repo_manager.activated_repo_manager is "
+                                "None/missing. Repository activation (CoW "
+                                "clone) will fail on this node until the "
+                                "underlying issue is resolved and the server "
+                                "is restarted.",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
+                else:
+                    # Bug #1462: silent-skip guard #2 -- golden_repo_manager is
+                    # None. Without this log the only symptom is a much-later,
+                    # confusingly-unrelated "invoked without clone_backend --
+                    # wiring bug" error at activation time, with no
+                    # correlation back here.
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1462-B",
+                            "Skipping clone_backend wiring into "
+                            "ActivatedRepoManager: golden_repo_manager is "
+                            "None. Repository activation (CoW clone) will "
+                            "fail on this node until the underlying issue is "
+                            "resolved and the server is restarted.",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
                 global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
                     snapshot_manager
+                )
+            else:
+                # Bug #1462: silent-skip guard #1 -- snapshot_manager is None
+                # (VersionedSnapshotManager failed to initialize at startup;
+                # see the earlier APP-GENERAL-510 error for the root cause).
+                # Without this log the only symptom is a much-later,
+                # confusingly-unrelated "invoked without clone_backend --
+                # wiring bug" error at activation time, with no correlation
+                # back to the real cause.
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1462",
+                        "Skipping clone_backend wiring into "
+                        "ActivatedRepoManager: snapshot_manager is None "
+                        "(VersionedSnapshotManager failed to initialize at "
+                        "startup -- see the earlier APP-GENERAL-510 error "
+                        "for the root cause). Repository activation (CoW "
+                        "clone) will fail on this node until the underlying "
+                        "issue is resolved and the server is restarted.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
                 )
 
             logger.info(
@@ -1901,6 +1958,87 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize in-process embedding-stats writer (Story #1418
+        # Phase 3). Without this, the live server process never installs a
+        # real writer -- every server-side instrumented embedding/reranker
+        # call (e.g. query-time embeddings) silently falls through to the
+        # default NoOpWriter. The `cidx index` child-subprocess path
+        # (CrossProcessBootstrapWriter) is unaffected by this block.
+        logger.info(
+            "Server startup: Initializing embedding stats writer",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                start_in_process_embedding_stats_writer,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_writer = start_in_process_embedding_stats_writer(
+                backend_registry.embedding_call_stats, get_config_service()
+            )
+            app.state.embedding_stats_writer = embedding_stats_writer
+            logger.info(
+                "Embedding stats writer started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1418",
+                    f"Failed to initialize embedding stats writer: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize embedding-stats retention sweep scheduler
+        # (Story #1418 Phase 3 Component 9)
+        logger.info(
+            "Server startup: Initializing embedding stats retention scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.embedding_stats_retention_scheduler import (
+                EmbeddingStatsRetentionScheduler as _EmbeddingStatsRetentionScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if backend_registry is None:
+                raise RuntimeError("backend_registry is not available")
+            if getattr(backend_registry, "embedding_call_stats", None) is None:
+                raise RuntimeError(
+                    "backend_registry.embedding_call_stats is not available"
+                )
+
+            embedding_stats_retention_scheduler = _EmbeddingStatsRetentionScheduler(
+                backend=backend_registry.embedding_call_stats,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            embedding_stats_retention_scheduler.start()
+            app.state.embedding_stats_retention_scheduler = (
+                embedding_stats_retention_scheduler
+            )
+            logger.info(
+                "Embedding stats retention scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1420",
+                    f"Failed to initialize embedding stats retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Dependency Map Scheduler (Story #193)
         dependency_map_service = None
         logger.info(
@@ -2422,12 +2560,20 @@ def make_lifespan(
             from code_indexer.server.mcp.session_registry import get_session_registry
 
             session_registry = get_session_registry()
+            # Bug #1399: do NOT pass explicit ttl_seconds/cleanup_interval_seconds
+            # literals here -- start_background_cleanup()'s config-driven
+            # fallback (reads mcp_session_config from ConfigService) only
+            # activates when the argument is None. Passing literals silently
+            # bypassed the Web UI's mcp_session.session_ttl_seconds /
+            # cleanup_interval_seconds settings on every server startup.
             session_registry.start_background_cleanup(
-                ttl_seconds=3600,  # 1 hour
-                cleanup_interval_seconds=900,  # 15 minutes
+                ttl_seconds=None,
+                cleanup_interval_seconds=None,
             )
             logger.info(
-                "MCP Session cleanup task started (TTL=3600s, interval=900s)",
+                "MCP Session cleanup task started (TTL=%ds, interval=%ds)",
+                session_registry._ttl_seconds,
+                session_registry._cleanup_interval_seconds,
                 extra={"correlation_id": get_correlation_id()},
             )
 
@@ -3070,7 +3216,7 @@ def make_lifespan(
                         DistributedJobWorkerService,
                     )
 
-                    # EVO-64538 (C10): give the claimer the same cgroup-aware
+                    # Memory-aware admission: give the claimer the same cgroup-aware
                     # memory watermark the per-pod pool uses, so a pressured pod
                     # declines cross-pod refresh claims and leaves them pending.
                     from code_indexer.server.utils.config_manager import (
@@ -3099,47 +3245,81 @@ def make_lifespan(
                     )
                     _cluster_services.append(("dist_job_worker", _dist_worker))
 
-                    # EVO-64545 (pod-pull work-stealing): an always-on (NOT
+                    # Pod-pull work-stealing: an always-on (NOT
                     # leader-gated) per-pod loop that claims the memory-heavy
                     # index ops left PENDING in the shared queue and runs them by
                     # reconstructing from the row's metadata. The claim is
-                    # C10-memory-gated, so a pressured pod leaves rows for a pod
+                    # memory-gated, so a pressured pod leaves rows for a pod
                     # with headroom. Started immediately on every postgres pod;
                     # stopped by the _cluster_services shutdown loop.
                     from code_indexer.server.services.index_job_claim_loop import (
                         IndexJobClaimLoop,
+                        validate_dispatch_covers,
+                    )
+                    from code_indexer.server.repositories.background_jobs import (
+                        POD_PULL_OPS,
                     )
                     from code_indexer.server.app_helpers import (
                         _execute_repository_sync,
+                        build_sync_progress_webhook_callback,
                     )
                     from code_indexer.server.mcp.handlers.repos import (
                         _provider_index_job,
                         _provider_temporal_index_job,
                     )
 
-                    def _pp_add_golden_repo(md):
-                        return golden_repo_manager.execute_add_golden_repo_work(**md)
-
-                    def _pp_change_branch(md):
-                        return golden_repo_manager.change_branch(
-                            md["alias"], md["target_branch"]
+                    # Pod-pull dispatch executors (PR #1424 H2): each takes the
+                    # row's metadata AND a per-job progress_callback that the
+                    # IndexJobClaimLoop routes to the shared background_jobs row,
+                    # so a work-stolen op reports incremental progress to the
+                    # originating node's dashboard instead of a 0 -> 100 jump.
+                    def _pp_add_golden_repo(md, progress_callback):
+                        return golden_repo_manager.execute_add_golden_repo_work(
+                            **md, progress_callback=progress_callback
                         )
 
-                    def _pp_sync_repository(md):
+                    def _pp_change_branch(md, progress_callback):
+                        return golden_repo_manager.change_branch(
+                            md["alias"],
+                            md["target_branch"],
+                            progress_callback=progress_callback,
+                        )
+
+                    def _pp_sync_repository(md, progress_callback):
+                        # Rebuild the client webhook on THIS (executing) node from
+                        # the metadata options, then fan progress out to BOTH the
+                        # DB-backed dashboard callback and the webhook.
+                        options = md.get("options") or {}
+                        webhook_cb = build_sync_progress_webhook_callback(
+                            options.get("progress_webhook"),
+                            md["repo_id"],
+                            md["username"],
+                        )
+
+                        def _combined(progress: int) -> None:
+                            progress_callback(progress)
+                            if webhook_cb is not None:
+                                webhook_cb(progress)
+
                         return _execute_repository_sync(
                             repo_id=md["repo_id"],
                             username=md["username"],
-                            options=md.get("options") or {},
+                            options=options,
                             activated_repo_manager=getattr(
                                 golden_repo_manager, "activated_repo_manager", None
                             ),
+                            progress_callback=_combined,
                         )
 
-                    def _pp_provider_index(md):
-                        return _provider_index_job(**md)
+                    def _pp_provider_index(md, progress_callback):
+                        return _provider_index_job(
+                            **md, progress_callback=progress_callback
+                        )
 
-                    def _pp_provider_temporal(md):
-                        return _provider_temporal_index_job(**md)
+                    def _pp_provider_temporal(md, progress_callback):
+                        return _provider_temporal_index_job(
+                            **md, progress_callback=progress_callback
+                        )
 
                     _index_dispatch = {
                         "add_golden_repo": _pp_add_golden_repo,
@@ -3148,6 +3328,9 @@ def make_lifespan(
                         "provider_index_add": _pp_provider_index,
                         "provider_temporal_index_rebuild": _pp_provider_temporal,
                     }
+                    # M3: fail loudly if a pod-pull op ever lacks an executor (or
+                    # vice versa) instead of silently claiming an unrunnable row.
+                    validate_dispatch_covers(_index_dispatch, POD_PULL_OPS)
                     _index_claim_loop = IndexJobClaimLoop(
                         claimer=_job_claimer,
                         dispatch=_index_dispatch,
@@ -3456,6 +3639,66 @@ def make_lifespan(
                                 "Bug #943: elevation timeout hot-reload on config change failed",
                                 exc_info=True,
                             )
+
+                        # Bug #1399 item 7: re-apply every live-reloadable cache-family
+                        # field (TTL x2, cleanup interval x2, size cap x2,
+                        # reload_on_access) onto THIS process's HNSW/FTS singletons.
+                        # _hot_reload_cache_size_cap/_hot_reload_cache_ttl_minutes/etc.
+                        # only patch the ONE worker that handled the Web UI POST;
+                        # under uvicorn --workers N or in a cluster, every sibling
+                        # worker/node runs its own PG-poll loop and must re-apply the
+                        # fresh values here on its own next tick (mirrors the Bug #943
+                        # pattern above: local synchronous call on the processing node
+                        # PLUS this PG-poll callback for siblings).
+                        try:
+                            from code_indexer.server.services.config_service import (
+                                get_config_service as _get_cs_cache,
+                            )
+
+                            _get_cs_cache().reapply_live_cache_hot_reload_fields(
+                                new_config
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Bug #1399: cache hot-reload on config change failed",
+                                exc_info=True,
+                            )
+
+                        # Bug #1399 item 8: re-wire nested config sub-objects that
+                        # SessionManager / GoldenRepoManager captured by reference at
+                        # construction time. check_config_update() replaces
+                        # self._config with a brand-new ServerConfig (fresh nested
+                        # sub-objects) on every version-diff PG-poll tick, so on any
+                        # node OTHER than the one that processed the POST, these
+                        # managers' cached references still point at the stale
+                        # pre-change sub-object indefinitely.
+                        try:
+                            from code_indexer.server.web.auth import (
+                                get_session_manager as _get_sm,
+                            )
+
+                            _get_sm()._web_security_config = (
+                                new_config.web_security_config
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Bug #1399: SessionManager web_security_config "
+                                "re-wire on config change skipped (not initialized "
+                                "yet or unavailable)",
+                                exc_info=True,
+                            )
+
+                        if golden_repo_manager is not None:
+                            try:
+                                golden_repo_manager.resource_config = (
+                                    new_config.resource_config
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Bug #1399: GoldenRepoManager resource_config "
+                                    "re-wire on config change failed",
+                                    exc_info=True,
+                                )
 
                     from code_indexer.server.services.config_service import (
                         get_config_service as _get_cs,
@@ -4304,9 +4547,7 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except (
-                Exception
-            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
@@ -4392,6 +4633,53 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-037",
                         f"Error stopping activated reaper scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats writer (Story #1418 Phase 3)
+        embedding_stats_writer_state = getattr(
+            app.state, "embedding_stats_writer", None
+        )
+        if embedding_stats_writer_state is not None:
+            try:
+                from code_indexer.server.services.embedding_stats_lifespan_wiring import (
+                    stop_in_process_embedding_stats_writer,
+                )
+
+                stop_in_process_embedding_stats_writer(embedding_stats_writer_state)
+                logger.info(
+                    "Embedding stats writer stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1419",
+                        f"Error stopping embedding stats writer: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop embedding stats retention scheduler (Story #1418
+        # Phase 3 Component 9)
+        embedding_stats_retention_scheduler_state = getattr(
+            app.state, "embedding_stats_retention_scheduler", None
+        )
+        if embedding_stats_retention_scheduler_state is not None:
+            try:
+                embedding_stats_retention_scheduler_state.stop()
+                logger.info(
+                    "Embedding stats retention scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1421",
+                        f"Error stopping embedding stats retention scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

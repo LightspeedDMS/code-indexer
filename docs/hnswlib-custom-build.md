@@ -124,20 +124,32 @@ Two fixes now catch this automatically:
   shebang, never a hardcoded path) and syncs the fork into it as a new,
   non-fatal deploy step (Step 1.7) alongside the server's own build (Step
   1.6). This should self-heal drift on the next deploy.
-- **Fail-loud runtime capability check**: instead of surfacing as a bare
-  `AttributeError` deep inside `_detect_and_repair_orphans()`, a capability
-  check now runs at the very start of every build/finalize entry point.
+- **Graceful degrade + explicit capability signal (Bug #1415)**: Bug #1392's
+  original fix made every build/finalize entry point raise a dedicated
+  `HNSWCapabilityError` immediately when the fork is missing -- but that
+  still aborted the ENTIRE indexing operation (a fleet-wide outage on
+  2026-07-14 discarded already-computed embedding spend for ~12 golden
+  repos). The design was reversed:
   - CLI side (`storage/hnsw_index_manager.py`): `build_index()`,
-    `rebuild_from_vectors()`, and `save_incremental_update()` each raise a
-    dedicated `HNSWCapabilityError` immediately if `hnswlib.Index` lacks the
-    fork methods -- before any indexing work. Query-only paths
-    (`index_exists()`, `is_stale()`, `query()`, `load_index()`, `__init__`)
-    are deliberately NEVER gated, per the "Query Is Everything" invariant.
-  - Server side (`server/services/hnswlib_capability_check.py`): a startup
-    check logs a loud, actionable ERROR (naming the interpreter, expected
-    commit, and this doc) but NEVER blocks server startup -- hard-failing
-    would take down all query serving over a defect that leaves query
-    serving itself unaffected.
+    `rebuild_from_vectors()`, and `save_incremental_update()` no longer gate
+    on capability at all. `_detect_and_repair_orphans()` -- the single place
+    that actually calls `check_integrity()`/`repair_orphans()` -- checks
+    capability first; if missing, it logs ONE WARNING and skips the orphan
+    hardening pass, and the caller proceeds to persist a valid, correct
+    index (orphan repair is a hardening layer, not correctness of the
+    vectors themselves). Query-only paths (`index_exists()`, `is_stale()`,
+    `query()`, `load_index()`, `__init__`) remain NEVER gated, per the
+    "Query Is Everything" invariant.
+  - Server side (`server/services/hnswlib_capability_check.py`): unchanged
+    from Bug #1392 -- a startup check logs a loud, actionable ERROR (naming
+    the interpreter, expected commit, and this doc) but NEVER blocks server
+    startup.
+  - Health surface (`cidx health` / MCP `check_hnsw_health` / REST / Web):
+    exposes a new, SEPARATE `hnswlib_capability_available` field (True/False/
+    not-evaluated) distinct from the zero-tolerance `orphan_count` signal
+    (which stays exactly 0=OK, >0=ERROR, no WARNING tier) -- so a node
+    running stock hnswlib is visibly flagged as degraded rather than either
+    crashing or silently reporting a false-clean/false-corrupt result.
 
 ### Error: "hnswlib is not installed"
 

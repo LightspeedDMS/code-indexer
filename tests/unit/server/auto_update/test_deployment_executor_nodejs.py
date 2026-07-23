@@ -642,6 +642,9 @@ class TestExecuteWiresEnsureNodejsBeforeNpmConsumers:
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(
+                executor, "_ensure_git_safe_directory_wildcard", return_value=True
+            ),
+            patch.object(
                 executor, "ensure_nodejs", side_effect=record("ensure_nodejs")
             ),
             patch.object(

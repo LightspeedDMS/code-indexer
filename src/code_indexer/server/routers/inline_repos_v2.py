@@ -687,7 +687,7 @@ def register_repos_v2_routes(
                 sync_job_wrapper,
                 submitter_username=current_user.username,
                 repo_alias=cleaned_repo_id,  # AC5: Fix unknown repo bug
-                # EVO-64545 (pod-pull): reconstruction params for
+                # Pod-pull: reconstruction params for
                 # _execute_repository_sync (see inline_repos.py for the webhook note).
                 metadata={
                     "repo_id": cleaned_repo_id,

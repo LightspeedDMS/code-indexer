@@ -269,6 +269,43 @@ class TestListJobsFilteredByTextSearch:
         assert jobs == []
         assert total_count == 0
 
+    def test_search_by_exact_job_id_returns_matching_job(self, backend) -> None:
+        """Bug #1452 (3rd follow-up): searching by the exact job_id (as produced
+        by the deactivation success-message 'Job ID: <link>', which links to
+        '/admin/jobs?search=<job_id>') must return that job. Previously the
+        search predicate only matched repo_alias/username/operation_type/error,
+        so a job_id search always returned zero results even though the job
+        genuinely exists.
+        """
+        target_job_id = "9740fda1-102e-4213-875b-c6124e1b62b2"
+        _save_job(backend, target_job_id, "completed", repo_alias="my-repo")
+        _save_job(backend, "some-other-job-id", "completed", repo_alias="my-repo")
+
+        jobs, total_count = backend.list_jobs_filtered(search_text=target_job_id)
+
+        assert total_count == 1, (
+            f"Expected exactly 1 job matching job_id search, got {total_count}"
+        )
+        assert jobs[0]["job_id"] == target_job_id
+
+    def test_search_by_partial_job_id_substring_returns_matching_job(
+        self, backend
+    ) -> None:
+        """A partial/substring job_id search must also surface the matching job,
+        consistent with the existing substring LIKE behavior on repo_alias/
+        username/operation_type/error.
+        """
+        target_job_id = "9740fda1-102e-4213-875b-c6124e1b62b2"
+        _save_job(backend, target_job_id, "completed", repo_alias="my-repo")
+        _save_job(backend, "unrelated-job-id", "completed", repo_alias="my-repo")
+
+        jobs, total_count = backend.list_jobs_filtered(search_text="102e-4213")
+
+        assert total_count == 1, (
+            f"Expected exactly 1 job matching partial job_id search, got {total_count}"
+        )
+        assert jobs[0]["job_id"] == target_job_id
+
 
 class TestListJobsFilteredExcludeIds:
     """Tests for exclude_ids parameter (active jobs dedup)."""

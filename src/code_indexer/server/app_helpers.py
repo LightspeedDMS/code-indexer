@@ -15,6 +15,7 @@ app.py sets it via set_server_start_time() during create_app().
 import json
 import logging
 import psutil
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, cast
@@ -349,6 +350,55 @@ def _find_activated_repository(
             return cast(Optional[str], repo["user_alias"])
 
     return None
+
+
+# Sync progress webhook POST timeout (seconds). Kept short so a slow/unreachable
+# client webhook never stalls the sync; preserves the original inline value.
+WEBHOOK_POST_TIMEOUT_SECONDS = 5
+
+
+def build_sync_progress_webhook_callback(
+    webhook_url: Optional[str],
+    repo_id: str,
+    username: str,
+) -> Optional[Callable[[int], None]]:
+    """Build a best-effort sync-progress webhook callback, or None.
+
+    Single source of the sync webhook-POST logic (PR #1424 H2). Used by BOTH the
+    local sync path (inline_repos) and the executing node's pod-pull dispatch
+    (lifespan), so a work-stolen sync -- which runs on the CLAIMING node, not the
+    submitting one -- can rebuild and push the client-supplied webhook (carried
+    in job metadata ``options.progress_webhook``) from that node.
+
+    Returns None when no URL is provided. Otherwise returns
+    ``callback(progress: int)`` that POSTs a small JSON payload and NEVER raises
+    (a webhook failure must not interrupt the sync).
+    """
+    if not webhook_url:
+        return None
+
+    def webhook_callback(progress: int) -> None:
+        try:
+            payload = {
+                "repository_id": repo_id,
+                "progress": progress,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "username": username,
+            }
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                timeout=WEBHOOK_POST_TIMEOUT_SECONDS,
+                headers={"Content-Type": "application/json"},
+            )
+            if not response.ok:
+                logging.warning(
+                    f"Webhook {webhook_url} returned {response.status_code}"
+                )
+        except Exception as e:  # noqa: BLE001 — webhook is best-effort
+            logging.warning(f"Failed to send webhook to {webhook_url}: {str(e)}")
+
+    return webhook_callback
 
 
 def _execute_repository_sync(

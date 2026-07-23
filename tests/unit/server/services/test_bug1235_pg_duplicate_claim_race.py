@@ -141,6 +141,12 @@ def _make_backend_tracker(backend: _FakeBackend) -> JobTracker:
     active_jobs: Dict[str, TrackedJob] = {}
     tracker._active_jobs = active_jobs
     tracker._lock = threading.Lock()
+    # Story #1400 CRITICAL 3: __new__ bypasses __init__, so the node_id
+    # field it now sets must be stamped manually here too. These bug-1235
+    # tests exercise PG unique-violation translation, not node scoping --
+    # None is the correct default (matches JobTracker(db_path) with no
+    # node_id).
+    tracker._node_id = None
     return tracker
 
 

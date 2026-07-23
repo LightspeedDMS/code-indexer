@@ -455,6 +455,12 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def update_enable_temporal(self, alias: str, enable: bool) -> bool: ...
 
+    # Bug #1414: temporal_options is the Web UI's sole write target
+    # (GoldenRepoManager.save_temporal_options); every concrete backend
+    # MUST implement this or the Web UI save silently AttributeErrors in
+    # cluster mode (Any-typed injection site defeats mypy).
+    def update_temporal_options(self, alias: str, options: Optional[Dict]) -> bool: ...
+
     def update_repo_url(self, alias: str, repo_url: str) -> bool: ...
 
     def update_category(

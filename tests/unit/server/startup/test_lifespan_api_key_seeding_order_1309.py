@@ -73,15 +73,6 @@ def _source() -> str:
     return _LIFESPAN_PATH.read_text()
 
 
-def _line_indent(source: str, marker: str) -> int:
-    """Return the leading-whitespace width of the line containing `marker`."""
-    pos = source.find(marker)
-    assert pos != -1, f"Marker not found in source: {marker!r}"
-    line_start = source.rfind("\n", 0, pos) + 1
-    line = source[line_start:pos]
-    return len(line) - len(line.lstrip(" "))
-
-
 def _nearest_preceding_try_indent(source: str, marker_pos: int) -> int:
     """Find the indentation of the nearest `try:` statement enclosing `marker_pos`.
 
@@ -149,16 +140,29 @@ class TestApiKeySeedingSourceOrderBug1309:
         level as the guard's `if` line itself (both top-level statements in the
         lifespan function body), not deeper (which would mean the seeding try-block
         is nested inside the guard).
+
+        Note: `_POSTGRES_GUARD_LINE` is NOT unique in lifespan.py -- other,
+        unrelated postgres-mode wiring blocks use the byte-identical guard text
+        (e.g. an earlier, differently-nested "ConfigService PG pool set early for
+        global-repos lifecycle" block). We therefore locate the occurrence
+        nearest-preceding the seeding call (via `rfind` bounded to
+        `[0, seeding_pos)`) rather than the first occurrence in the whole file --
+        that is the guard structurally relevant to the seeding call's placement.
         """
         source = _source()
-
-        guard_pos = source.find(_POSTGRES_GUARD_LINE)
-        assert guard_pos != -1, f"Marker not found: {_POSTGRES_GUARD_LINE!r}"
 
         seeding_pos = source.find(_SEEDING_CALL_MARKER)
         assert seeding_pos != -1, f"Marker not found: {_SEEDING_CALL_MARKER!r}"
 
-        guard_indent = _line_indent(source, _POSTGRES_GUARD_LINE)
+        guard_pos = source.rfind(_POSTGRES_GUARD_LINE, 0, seeding_pos)
+        assert guard_pos != -1, (
+            f"Marker not found before seeding call (pos {seeding_pos}): "
+            f"{_POSTGRES_GUARD_LINE!r}"
+        )
+
+        guard_line_start = source.rfind("\n", 0, guard_pos) + 1
+        guard_line_prefix = source[guard_line_start:guard_pos]
+        guard_indent = len(guard_line_prefix) - len(guard_line_prefix.lstrip(" "))
         seeding_try_indent = _nearest_preceding_try_indent(source, seeding_pos)
 
         assert seeding_try_indent == guard_indent, (

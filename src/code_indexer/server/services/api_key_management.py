@@ -437,11 +437,16 @@ class ApiKeyConnectivityTester:
         """
         start_time = time.time()
 
-        try:
+        async def _do_post_and_validate() -> httpx.Response:
+            """The smallest unit including BOTH the network call and its
+            status validation -- returns the response ONLY on a genuine
+            HTTP 200 (this endpoint's definition of success), otherwise
+            raises so a vendor 4xx/5xx (or any other non-200 status) is
+            never recorded as success=True (Story #1418)."""
             async with self._get_http_client_factory().create_client(
                 timeout=self._timeout_seconds
             ) as client:
-                response = await client.post(
+                _response = await client.post(
                     self.VOYAGEAI_API_ENDPOINT,
                     headers={
                         "Authorization": f"Bearer {api_key}",
@@ -452,23 +457,38 @@ class ApiKeyConnectivityTester:
                         "model": self.VOYAGEAI_TEST_MODEL,
                     },
                 )
+            if _response.status_code != 200:
+                _response.raise_for_status()
+                # raise_for_status() is a no-op for a non-error, non-200
+                # status (e.g. an unfollowed redirect) -- still not this
+                # endpoint's definition of success, so raise explicitly.
+                raise RuntimeError(
+                    f"Unexpected non-200 status without HTTP error: "
+                    f"{_response.status_code}"
+                )
+            return cast(httpx.Response, _response)
 
-                elapsed_ms = int((time.time() - start_time) * 1000)
+        try:
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call_async,
+            )
 
-                if response.status_code == 200:
-                    return ConnectivityTestResult(
-                        success=True,
-                        provider="voyageai",
-                        response_time_ms=elapsed_ms,
-                    )
-                else:
-                    response.raise_for_status()
-                    # raise_for_status will throw, this is for type checker
-                    return ConnectivityTestResult(
-                        success=False,
-                        provider="voyageai",
-                        error=f"HTTP {response.status_code}",
-                    )
+            await instrument_call_async(
+                provider="voyageai",
+                call_type="embed",
+                model=self.VOYAGEAI_TEST_MODEL,
+                item_count=1,
+                token_count=0,
+                batch_size=1,
+                purpose="key_test",
+                fn=_do_post_and_validate,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ConnectivityTestResult(
+                success=True,
+                provider="voyageai",
+                response_time_ms=elapsed_ms,
+            )
 
         except asyncio.TimeoutError:
             return ConnectivityTestResult(
@@ -503,11 +523,16 @@ class ApiKeyConnectivityTester:
         """
         start_time = time.time()
 
-        try:
+        async def _do_post_and_validate() -> httpx.Response:
+            """The smallest unit including BOTH the network call and its
+            status validation -- returns the response ONLY on a genuine
+            HTTP 200 (this endpoint's definition of success), otherwise
+            raises so a vendor 4xx/5xx (or any other non-200 status) is
+            never recorded as success=True (Story #1418)."""
             async with self._get_http_client_factory().create_client(
                 timeout=self._timeout_seconds
             ) as client:
-                response = await client.post(
+                _response = await client.post(
                     "https://api.cohere.com/v2/embed",
                     headers={
                         "Authorization": f"Bearer {api_key}",
@@ -520,23 +545,38 @@ class ApiKeyConnectivityTester:
                         "embedding_types": ["float"],
                     },
                 )
+            if _response.status_code != 200:
+                _response.raise_for_status()
+                # raise_for_status() is a no-op for a non-error, non-200
+                # status (e.g. an unfollowed redirect) -- still not this
+                # endpoint's definition of success, so raise explicitly.
+                raise RuntimeError(
+                    f"Unexpected non-200 status without HTTP error: "
+                    f"{_response.status_code}"
+                )
+            return cast(httpx.Response, _response)
 
-                elapsed_ms = int((time.time() - start_time) * 1000)
+        try:
+            from code_indexer.server.services.embedding_call_instrumentation import (
+                instrument_call_async,
+            )
 
-                if response.status_code == 200:
-                    return ConnectivityTestResult(
-                        success=True,
-                        provider="cohere",
-                        response_time_ms=elapsed_ms,
-                    )
-                else:
-                    response.raise_for_status()
-                    # raise_for_status will throw, this is for type checker
-                    return ConnectivityTestResult(
-                        success=False,
-                        provider="cohere",
-                        error=f"HTTP {response.status_code}",
-                    )
+            await instrument_call_async(
+                provider="cohere",
+                call_type="embed",
+                model="embed-v4.0",
+                item_count=1,
+                token_count=0,
+                batch_size=1,
+                purpose="key_test",
+                fn=_do_post_and_validate,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return ConnectivityTestResult(
+                success=True,
+                provider="cohere",
+                response_time_ms=elapsed_ms,
+            )
 
         except asyncio.TimeoutError:
             return ConnectivityTestResult(

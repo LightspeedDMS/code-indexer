@@ -8,6 +8,7 @@ All operations use real system checks, database connections, and service monitor
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
+import subprocess
 
 import psutil
 import time
@@ -61,6 +62,14 @@ MAX_CPU_HISTORY_SIZE = 120  # Safety limit to prevent unbounded growth
 
 # Bytes-to-megabytes conversion constant (Story #358)
 BYTES_PER_MB = 1024 * 1024
+
+# Bug #1433: bounded-timeout golden-repos-directory readability probe.
+# A hard-hung NFS mount's stat()/readdir() can block indefinitely in
+# uninterruptible D-state; running the probe as a killable subprocess (not
+# a same-process thread) is what makes the bound genuine.
+GOLDEN_REPOS_HEALTH_TIMEOUT_SECONDS = 3
+GOLDEN_REPOS_HEALTH_SUBPROCESS_GRACE_SECONDS = 2
+GOLDEN_REPOS_TIMEOUT_EXIT_CODE = 124  # GNU coreutils `timeout` exit convention
 
 
 def _load_thresholds_from_config() -> None:
@@ -571,6 +580,123 @@ class HealthCheckService:
                 error_message=str(e),
             )
 
+    def _resolve_golden_repos_dir(self) -> Optional[str]:
+        """
+        Resolve the golden-repos directory path (Bug #1433), reusing the
+        SAME app.state.golden_repos_dir resolution already established by
+        stats_service._get_golden_repos_dir() / mcp/handlers/_utils.py --
+        never a third path-resolution variant.
+
+        Returns None when not yet configured (fresh install, or a unit/CLI
+        test context where the server never went through startup). This is
+        explicitly NOT a failure -- callers must skip the probe entirely,
+        mirroring the RuntimeError-fallback pattern _check_storage_health()
+        already uses for its own config-service lookup.
+        """
+        try:
+            from ..app import app as app_module
+
+            golden_repos_dir = getattr(app_module.state, "golden_repos_dir", None)
+        except Exception as exc:
+            logger.debug(
+                "Golden-repos storage health check skipped: could not "
+                "resolve golden_repos_dir: %s",
+                exc,
+            )
+            return None
+
+        if not golden_repos_dir:
+            logger.debug(
+                "Golden-repos storage health check skipped: "
+                "golden_repos_dir not yet configured in app.state."
+            )
+            return None
+
+        return str(golden_repos_dir)
+
+    def _probe_golden_repos_dir_readable(
+        self, golden_repos_dir: str
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Bounded-timeout readability probe for the golden-repos directory
+        (Bug #1433).
+
+        A hard-hung NFS mount's stat()/readdir() syscall can block
+        indefinitely in uninterruptible D-state -- a same-process thread
+        stuck there cannot be interrupted or killed and would leak forever.
+        Running the probe as a subprocess (killable) genuinely bounds it, so
+        /health can never hang past a fixed budget regardless of the
+        underlying mount's state.
+
+        Returns (is_readable, error_message). Never raises.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "timeout",
+                    f"{GOLDEN_REPOS_HEALTH_TIMEOUT_SECONDS}s",
+                    "ls",
+                    golden_repos_dir,
+                ],
+                capture_output=True,
+                timeout=GOLDEN_REPOS_HEALTH_TIMEOUT_SECONDS
+                + GOLDEN_REPOS_HEALTH_SUBPROCESS_GRACE_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"golden-repos directory '{golden_repos_dir}' did not "
+                f"respond within {GOLDEN_REPOS_HEALTH_TIMEOUT_SECONDS}s "
+                "(possible hung mount)"
+            )
+        except OSError as exc:
+            return False, f"golden-repos directory probe failed: {exc}"
+
+        if result.returncode == GOLDEN_REPOS_TIMEOUT_EXIT_CODE:
+            return False, (
+                f"golden-repos directory '{golden_repos_dir}' timed out "
+                f"after {GOLDEN_REPOS_HEALTH_TIMEOUT_SECONDS}s (possible "
+                "hung mount)"
+            )
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            return False, (
+                f"golden-repos directory '{golden_repos_dir}' not "
+                f"readable: {stderr or f'exit code {result.returncode}'}"
+            )
+
+        return True, None
+
+    def _collect_golden_repos_storage_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Bug #1433: fold a bounded-timeout golden-repos-directory readability
+        probe into /health's DEGRADED/UNHEALTHY signal.
+
+        During a real staging incident, a node whose CoW/NFS storage host
+        was down kept reporting /health -> healthy (DB connectivity was
+        fine; the generic storage check only looks at root-volume disk
+        space %) while every real query failed with
+        "[Errno 5] Input/output error" reading golden-repos. This check
+        closes that gap.
+
+        Skips (returns no failure) when golden_repos_dir is not yet
+        configured -- fresh install / test context -- never a false
+        UNHEALTHY signal.
+        """
+        golden_repos_dir = self._resolve_golden_repos_dir()
+        if golden_repos_dir is None:
+            return False, False, []
+
+        is_readable, error_message = self._probe_golden_repos_dir_readable(
+            golden_repos_dir
+        )
+        if is_readable:
+            return False, False, []
+
+        return False, True, [f"Golden repos storage: {error_message}"]
+
     def _get_system_info(self) -> SystemHealthInfo:
         """
         Get current system resource information with interval-averaged metrics.
@@ -896,6 +1022,13 @@ class HealthCheckService:
         has_warning = has_warning or grb_warn
         has_error = has_error or grb_err
         failure_reasons.extend(grb_reasons)
+
+        # Bug #1433: golden-repos storage readability (bounded-timeout
+        # probe) -- see _collect_golden_repos_storage_failures() docstring.
+        grs_warn, grs_err, grs_reasons = self._collect_golden_repos_storage_failures()
+        has_warning = has_warning or grs_warn
+        has_error = has_error or grs_err
+        failure_reasons.extend(grs_reasons)
 
         # Check individual service statuses (database, storage services)
         # Issue #3: Add error messages to failure_reasons when services fail

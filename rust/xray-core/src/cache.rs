@@ -39,17 +39,29 @@ pub fn read_metadata(meta_path: &Path) -> Option<CacheMetadata> {
 
 /// Serialises CacheMetadata and writes it to `meta_path` atomically.
 ///
-/// Writes to `{meta_path}.tmp` first, then renames to the final path so that
-/// concurrent readers never observe a partial write.
-/// Creates parent directories if needed.
+/// Writes to a per-call-unique temp file in the same directory first, then
+/// atomically persists (renames) it to the final path so that concurrent
+/// readers never observe a partial write. Creates parent directories if
+/// needed.
+///
+/// The temp file MUST be per-call-unique (not a deterministic name derived
+/// from `meta_path`) — Bug #1425 exposed a race where concurrent callers
+/// writing the SAME `meta_path` (e.g. two threads finishing a concurrent
+/// compile of the identical evaluator hash) all computed the identical
+/// `{meta_path}.meta.tmp` scratch path; whichever caller's rename() ran
+/// second failed with "No such file or directory" because the first caller
+/// had already renamed that shared scratch file away.
 pub fn write_metadata(meta_path: &Path, meta: &CacheMetadata) -> Result<(), std::io::Error> {
-    if let Some(parent) = meta_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp_path = meta_path.with_extension("meta.tmp");
+    use std::io::Write as _;
+
+    let parent = meta_path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let content = format_metadata(meta);
-    std::fs::write(&tmp_path, content)?;
-    std::fs::rename(&tmp_path, meta_path)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".meta-tmp-")
+        .tempfile_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.persist(meta_path).map_err(|persist_err| persist_err.error)?;
     Ok(())
 }
 
@@ -303,6 +315,65 @@ mod tests {
         write_metadata(&meta_path, &meta).expect("write_metadata must succeed");
         let read_back = read_metadata(&meta_path);
         assert_eq!(read_back, Some(meta));
+    }
+
+    #[test]
+    fn test_concurrent_write_metadata_same_path_all_succeed() {
+        // Secondary race exposed by Bug #1425's compiler build-isolation fix:
+        // once concurrent compiles of the SAME evaluator hash all succeed at
+        // the rustc step, they all reach write_metadata() for the SAME
+        // meta_path concurrently. The pre-fix implementation computes a
+        // deterministic tmp path via meta_path.with_extension("meta.tmp") —
+        // identical for every caller — so when thread A renames its tmp file
+        // away first, thread B's later rename() fails with "No such file or
+        // directory" because the tmp file it wrote to no longer exists under
+        // that shared name.
+        let dir = TempDir::new().unwrap();
+        let meta_path = dir.path().join("concurrent1425.meta");
+
+        const THREAD_COUNT: usize = 8;
+        let written_metas: Vec<CacheMetadata> = (0..THREAD_COUNT)
+            .map(|i| CacheMetadata {
+                source_hash: "concurrent1425".to_string(),
+                rustc_version: "rustc 1.91.0".to_string(),
+                compiled_at: format!("{}s-since-epoch", 1_700_000_000 + i),
+                compile_ms: 100 + i as u128,
+            })
+            .collect();
+
+        let handles: Vec<_> = written_metas
+            .iter()
+            .cloned()
+            .map(|meta| {
+                let meta_path = meta_path.clone();
+                std::thread::spawn(move || write_metadata(&meta_path, &meta))
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("write_metadata thread must not panic"))
+            .collect();
+
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                result.is_ok(),
+                "concurrent write_metadata #{} must succeed, got: {:?}",
+                i,
+                result.as_ref().err()
+            );
+        }
+
+        // The file must end up holding EXACTLY one of the per-thread payloads
+        // written above (never a torn/partial/foreign write).
+        let final_meta = read_metadata(&meta_path)
+            .expect("meta file must be readable and well-formed after concurrent writes");
+        assert!(
+            written_metas.contains(&final_meta),
+            "final metadata {:?} must be one of the exact values written by a thread: {:?}",
+            final_meta,
+            written_metas
+        );
     }
 
     #[test]

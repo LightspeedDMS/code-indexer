@@ -50,7 +50,7 @@
                     hx-include="#filter-form"
                 >
                     <option value="">All Status</option>
-                    <option value="queued" {% if status_filter == 'queued' %}selected{% endif %}>Queued</option>
+                    <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Pending</option>
                     <option value="running" {% if status_filter == 'running' %}selected{% endif %}>Running</option>
                     <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>Completed</option>
                     <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>Failed</option>

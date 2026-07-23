@@ -504,3 +504,71 @@ class TestQueryEmbeddingCacheDb:
             f"_resolve_db_path('query_embedding_cache.db') returned {resolved!r}; "
             f"expected {expected!r} (must be in the data/ subdir, not server root)"
         )
+
+
+class TestPayloadCacheDb:
+    """
+    Regression tests for Bug #1444: _resolve_db_path('payload_cache.db')
+    pointed at a directory (<server_dir>/data/golden-repos/.cache/) that
+    nothing ever writes to, so the health check always reported the file
+    as missing, flipping aggregate health to unhealthy (HTTP 503) even
+    though payload_cache.db was genuinely healthy at its real location.
+    """
+
+    def test_payload_cache_db_resolves_under_data_dir(self, tmp_path: Path) -> None:
+        """
+        _resolve_db_path('payload_cache.db') must resolve to
+        <server_dir>/data/payload_cache.db -- the SAME data_dir used for
+        cidx_server.db and api_metrics.db (see factory.py's
+        _create_sqlite_backends(), which writes payload_cache.db directly
+        under data_dir) -- NOT to
+        <server_dir>/data/golden-repos/.cache/payload_cache.db.
+        """
+        service = DatabaseHealthService(server_dir=str(tmp_path))
+        resolved = service._resolve_db_path("payload_cache.db")
+        expected = tmp_path / "data" / "payload_cache.db"
+        assert resolved == expected, (
+            f"_resolve_db_path('payload_cache.db') returned {resolved!r}; "
+            f"expected {expected!r} (must be in the data/ subdir alongside "
+            f"cidx_server.db and api_metrics.db, not golden-repos/.cache/)"
+        )
+
+    def test_payload_cache_db_health_check_passes_with_real_file_at_correct_location(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        End-to-end regression test for Bug #1444: with a real payload_cache.db
+        SQLite file at its actual, correct location (<server_dir>/data/), the
+        full 5-point health check performed by get_all_database_health() must
+        report the payload_cache.db entry as HEALTHY -- not just verify the
+        resolved path string in isolation.
+        """
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
+        db_path = data_dir / "payload_cache.db"
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "CREATE TABLE payload_cache (key TEXT PRIMARY KEY, content TEXT)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        service = DatabaseHealthService(server_dir=str(tmp_path))
+        results = service.get_all_database_health()
+
+        payload_cache_results = [
+            r for r in results if r.file_name == "payload_cache.db"
+        ]
+        assert len(payload_cache_results) == 1, (
+            "Expected exactly one payload_cache.db entry in get_all_database_health() "
+            f"results, got {len(payload_cache_results)}"
+        )
+        result = payload_cache_results[0]
+        assert result.status == DatabaseHealthStatus.HEALTHY, (
+            f"payload_cache.db health check should be HEALTHY when the real file "
+            f"exists at the correct location, got {result.status!r} with "
+            f"checks={result.checks!r}"
+        )

@@ -172,6 +172,21 @@ class TemporalSearchResults:
     performance: Optional[Dict[str, float]] = None
     warning: Optional[str] = None
 
+    # Story #1400 Phase 4: distinct shard-progress counters, populated by
+    # execute_temporal_query_with_fusion (temporal_fusion_dispatch.py).
+    # shards_total: post-health-filter scheduled work (None when not
+    # computed, e.g. the zero-provider early-return path).
+    # shards_attempted: loop iterations completed (success OR swallowed
+    # exception), one-based running count.
+    # shards_succeeded: shards whose query call returned normally
+    # (including a normal empty result) -- excludes exceptions.
+    # A completed query with shards_succeeded < shards_attempted is still
+    # "completed" -- these counters make partial coverage visible without a
+    # new status.
+    shards_total: Optional[int] = None
+    shards_attempted: int = 0
+    shards_succeeded: int = 0
+
 
 class TemporalSearchService:
     """Service for temporal semantic search with date filtering."""

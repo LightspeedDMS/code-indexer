@@ -106,8 +106,13 @@ def execute_remote_query(
             raise ValueError("path filter cannot be empty")
 
     try:
-        # Load remote configuration to validate we're in remote mode
-        _load_remote_configuration(project_root)
+        # Load remote configuration to validate we're in remote mode.
+        # Issue #1398: also extract the optional api_read_timeout_seconds
+        # override (a .code-indexer/.remote-config field -- this is
+        # CLI-side code that cannot read the server's Web-UI-configurable
+        # SearchTimeoutsConfig, so it needs its own persisted config surface).
+        _remote_config_dict = _load_remote_configuration(project_root)
+        read_timeout_seconds = _remote_config_dict.get("api_read_timeout_seconds")
 
         # Check if repository is already linked
         repository_link = load_repository_link(project_root)
@@ -140,6 +145,7 @@ def execute_remote_query(
             path_filter=path,
             min_score=min_score,
             include_source=include_source,
+            read_timeout_seconds=read_timeout_seconds,
         )
 
         # Apply staleness detection to enhance results with local file timestamp comparison
@@ -268,6 +274,7 @@ def _execute_authenticated_query(
     path_filter: Optional[str] = None,
     min_score: Optional[float] = None,
     include_source: bool = True,
+    read_timeout_seconds: Optional[float] = None,
 ) -> List[QueryResultItem]:
     """Execute authenticated query against remote repository.
 
@@ -281,6 +288,10 @@ def _execute_authenticated_query(
         path_filter: Optional path pattern filter
         min_score: Optional minimum score threshold
         include_source: Whether to include source code in results
+        read_timeout_seconds: Issue #1398 -- optional override for the
+            client's httpx read timeout, sourced from the project's
+            .code-indexer/.remote-config "api_read_timeout_seconds" field.
+            None preserves the pre-#1398 hardcoded 30.0s default.
 
     Returns:
         List of query result items
@@ -296,7 +307,9 @@ def _execute_authenticated_query(
 
         # Execute query using remote query client
         with RemoteQueryClient(
-            server_url=server_url, credentials=credentials
+            server_url=server_url,
+            credentials=credentials,
+            read_timeout_seconds=read_timeout_seconds,
         ) as query_client:
             results = query_client.execute_query(
                 repository_alias=repository_alias,

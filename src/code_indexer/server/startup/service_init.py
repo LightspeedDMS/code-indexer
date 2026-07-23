@@ -482,6 +482,10 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=(
             _backend_registry.background_jobs if _backend_registry else None
         ),
+        # Story #1400 CRITICAL 3: thread the real cluster node_id through so
+        # cleanup_orphaned_jobs_on_startup() scopes to THIS node's own
+        # orphaned jobs, never another node's legitimately-running work.
+        node_id=_node_id,
     )
     job_tracker.cleanup_orphaned_jobs_on_startup()
 
@@ -508,7 +512,11 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=(
             _backend_registry.background_jobs if _backend_registry else None
         ),
-        # EVO-64545: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
+        # Story #1400 CRITICAL 3: thread the real cluster node_id through so
+        # fail_orphaned_jobs() can detect a PostgreSQL backend and skip its
+        # unscoped sweep, avoiding cross-node false failures.
+        node_id=_node_id,
+        # Pod-pull: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
         # shared queue for cross-pod work-stealing instead of the local pool.
         cluster_mode=(_storage_mode == "postgres"),
     )

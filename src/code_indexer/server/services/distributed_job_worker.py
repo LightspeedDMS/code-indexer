@@ -68,7 +68,7 @@ class DistributedJobWorkerService:
 
     def _process_one_job(self) -> None:
         """Attempt to claim and execute one pending job."""
-        # EVO-64545: never claim pod-pull index ops — those are owned by the
+        # Pod-pull: never claim pod-pull index ops — those are owned by the
         # per-pod IndexJobClaimLoop. Without this exclusion the leader worker
         # (which fails any non-retryable type it claims) would fail the PENDING
         # add_golden_repo/sync/etc. rows before a pod could work-steal them.

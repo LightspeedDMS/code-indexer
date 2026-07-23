@@ -213,19 +213,19 @@
     <ul>
         {% if page > 1 %}
         <li>
-            <a href="/admin/jobs?page={{ page - 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">&laquo; Previous</a>
+            <a href="/admin/jobs?page={{ page - 1 }}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">&laquo; Previous</a>
         </li>
         {% endif %}
 
         {% for p in range(1, total_pages + 1) %}
         <li>
-            <a href="/admin/jobs?page={{ p }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}" {% if p == page %}aria-current="page"{% endif %}>{{ p }}</a>
+            <a href="/admin/jobs?page={{ p }}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}" {% if p == page %}aria-current="page"{% endif %}>{{ p }}</a>
         </li>
         {% endfor %}
 
         {% if page < total_pages %}
         <li>
-            <a href="/admin/jobs?page={{ page + 1 }}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">Next &raquo;</a>
+            <a href="/admin/jobs?page={{ page + 1 }}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if type_filter %}&job_type={{ type_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">Next &raquo;</a>
         </li>
         {% endif %}
     </ul>

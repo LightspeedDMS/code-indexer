@@ -582,6 +582,17 @@ class GoldenRepoManager:
             # retries with "destination path already exists".
             _clone_path_for_cleanup: Optional[str] = None
             try:
+                # Pod-pull retry safety (PR #1424 H1): a dead-node reclaim can
+                # re-execute this body after a hard crash (SIGKILL) that left a
+                # PARTIAL clone dir at golden_repos_dir/{alias} with no committed
+                # golden_repos row (the except-path cleanup below never ran). If
+                # we cloned now, _clone_repository would raise "destination path
+                # already exists" BEFORE _clone_path_for_cleanup is assigned, so
+                # nothing would ever be cleaned and every retry -- and every
+                # future manual re-add of this alias -- would fail forever.
+                # Remove such an orphan up front (guards inside the helper never
+                # touch in-place content or a committed registration).
+                self._remove_orphan_clone_for_retry(repo_url, alias)
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
                 # EVO-64228 (review MAJOR): in index-in-place mode clone_path IS
@@ -805,6 +816,43 @@ class GoldenRepoManager:
                 raise
 
         return _run()
+
+    def _remove_orphan_clone_for_retry(self, repo_url: str, alias: str) -> bool:
+        """Remove an ORPHAN partial-clone dir so an add_golden_repo retry can
+        proceed (PR #1424 H1).
+
+        Pod-pull work-stealing made add_golden_repo cross-node reclaim-eligible.
+        A hard crash (SIGKILL) mid-clone leaves a partial clone at
+        golden_repos_dir/{alias} with NO committed golden_repos row (the
+        except-path _cleanup_failed_clone never ran). Without removing it, the
+        next clone raises "destination path already exists" and every retry --
+        plus every future manual re-add of this alias -- fails forever.
+
+        Removes the directory ONLY when ALL hold, so it can never destroy live
+        or caller-owned content:
+          - the clone dir actually exists, AND
+          - it is NOT an in-place registration (EVO-64228: the content is the
+            caller's, not cidx's, to delete), AND
+          - there is NO committed golden_repos row for the alias (a row means a
+            near-complete registration, not an orphan).
+
+        Returns True iff an orphan clone was removed.
+        """
+        clone_path = os.path.join(self.golden_repos_dir, alias)
+        if not os.path.exists(clone_path):
+            return False
+        if self._is_in_place_registration(repo_url, clone_path):
+            return False
+        if self.get_golden_repo(alias) is not None:
+            return False
+        logging.warning(
+            "add_golden_repo retry: removing orphan clone for '%s' at %s "
+            "(no committed registry row) so the clone can proceed",
+            alias,
+            clone_path,
+        )
+        shutil.rmtree(clone_path, ignore_errors=True)
+        return True
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
@@ -1863,15 +1911,30 @@ class GoldenRepoManager:
         if enable_temporal:
             temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
 
+            # Story #1404: global temporal indexing floor date, composed
+            # with the per-repo temporal_options["since_date"] override as
+            # "more restrictive wins" -- computed unconditionally (even when
+            # temporal_options is None) so the global floor still applies
+            # with no per-repo override set. Exactly one --since-date flag
+            # is ever emitted; omitted entirely when both are unset.
+            from ..services.temporal_floor_date import (
+                resolve_effective_floor_date,
+                resolve_temporal_floor_date,
+            )
+
+            _per_repo_since_date = (
+                temporal_options.get("since_date") if temporal_options else None
+            )
+            _effective_since_date = resolve_effective_floor_date(
+                resolve_temporal_floor_date(), _per_repo_since_date
+            )
+            if _effective_since_date:
+                temporal_command.extend(["--since-date", _effective_since_date])
+
             if temporal_options:
                 if temporal_options.get("max_commits"):
                     temporal_command.extend(
                         ["--max-commits", str(temporal_options["max_commits"])]
-                    )
-
-                if temporal_options.get("since_date"):
-                    temporal_command.extend(
-                        ["--since-date", temporal_options["since_date"]]
                     )
 
                 # Add diff-context parameter (default: 5 from model)
@@ -1933,15 +1996,22 @@ class GoldenRepoManager:
             CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode -- see the
             temporal call site below. Defaults to None (inherit current
             process env, unchanged for the semantic/FTS call).
+
+            Story #1418: this is the SHARED convergence point for both the
+            semantic+FTS call and the temporal call in this workflow, so
+            CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
+            unconditionally (both storage modes -- unlike the temporal var,
+            this is a pure discovery problem, not gated on postgres mode).
             """
             _popen_stdout.clear()
             _popen_stderr.clear()
-            # Bug #1313 round-3 regression guard: only pass the env= kwarg
-            # when it is not None, so the semantic/FTS call (and sqlite
-            # mode) keep the EXACT pre-existing call shape -- several
-            # pre-existing tests mock run_with_popen_progress with a strict
-            # (non-**kwargs) signature that does not accept an env kwarg at
-            # all.
+            from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                build_embedding_stats_child_env,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_config_service_for_stats,
+            )
+
             _popen_kwargs: dict = dict(
                 command=command,
                 phase_name=phase_name,
@@ -1952,8 +2022,9 @@ class GoldenRepoManager:
                 cwd=clone_path,
                 error_label=error_label,
             )
-            if env is not None:
-                _popen_kwargs["env"] = env
+            _popen_kwargs["env"] = build_embedding_stats_child_env(
+                _get_config_service_for_stats().get_config(), base_env=env
+            )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- defensive compatibility with
             # any strict-signature mock of run_with_popen_progress.
@@ -3505,11 +3576,22 @@ class GoldenRepoManager:
                     Bug #1313 round-4 (Codex Finding 1): env is forwarded so the
                     temporal (--index-commits) child subprocess can be handed
                     CIDX_TEMPORAL_PG_BOOTSTRAP_DIR in cluster/postgres mode --
-                    see the temporal branch below. Only passed to the shared
-                    utility when not None, so the semantic/fts call keeps the
-                    EXACT pre-existing call shape (no env kwarg at all).
+                    see the temporal branch below.
+
+                    Story #1418: this is the SHARED convergence point for
+                    every index_type spawn in this workflow (semantic,
+                    fts-rebuild, temporal), so
+                    CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here
+                    ONCE, unconditionally (both storage modes).
                     """
                     nonlocal all_stdout, all_stderr
+                    from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
+                        build_embedding_stats_child_env,
+                    )
+                    from code_indexer.server.services.config_service import (
+                        get_config_service as _get_config_service_for_stats,
+                    )
+
                     _shared_kwargs: dict = dict(
                         command=command,
                         phase_name=phase_name,
@@ -3520,8 +3602,9 @@ class GoldenRepoManager:
                         cwd=str(repo_path),
                         error_label=error_label,
                     )
-                    if env is not None:
-                        _shared_kwargs["env"] = env
+                    _shared_kwargs["env"] = build_embedding_stats_child_env(
+                        _get_config_service_for_stats().get_config(), base_env=env
+                    )
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
@@ -3630,16 +3713,56 @@ class GoldenRepoManager:
                         if max_commits is not None:
                             command.extend(["--max-commits", str(max_commits)])
 
-                        since_date = temporal_options.get("since_date")
-                        if since_date:
-                            command.extend(["--since-date", since_date])
+                        # Story #1404: global temporal indexing floor date,
+                        # composed with the per-repo since_date override as
+                        # "more restrictive wins". Exactly one --since-date
+                        # flag is ever emitted; omitted entirely when both
+                        # are unset.
+                        from ..services.temporal_floor_date import (
+                            resolve_effective_floor_date,
+                            resolve_temporal_floor_date,
+                        )
+
+                        _effective_since_date = resolve_effective_floor_date(
+                            resolve_temporal_floor_date(),
+                            temporal_options.get("since_date"),
+                        )
+                        if _effective_since_date:
+                            command.extend(["--since-date", _effective_since_date])
 
                         diff_context = temporal_options.get("diff_context")
                         if diff_context is not None:
                             command.extend(["--diff-context", str(diff_context)])
 
                         if temporal_options.get("all_branches"):
-                            command.append("--all-branches")
+                            # Story #1412: golden/server temporal all-branches
+                            # indexing is gated behind a server-wide runtime
+                            # flag, shipped OFF by default. Defense-in-depth:
+                            # skip the flag (never trust a stored legacy
+                            # value or a gate flipped off after the option
+                            # was set) and log loudly so the downgrade to
+                            # single-branch is observable.
+                            from code_indexer.server.services.config_service import (
+                                get_config_service as _get_config_service_gate,
+                            )
+
+                            _gate_config = _get_config_service_gate().get_config()
+                            _gate_enabled = bool(
+                                getattr(
+                                    _gate_config.indexing_config,
+                                    "temporal_all_branches_enabled",
+                                    False,
+                                )
+                            )
+                            if _gate_enabled:
+                                command.append("--all-branches")
+                            else:
+                                logger.warning(
+                                    "all_branches requested for golden '%s' "
+                                    "but temporal_all_branches_enabled=false; "
+                                    "indexing single-branch",
+                                    alias,
+                                )
 
                         # Bug #1313 round-4 (Codex Finding 1): in postgres/cluster
                         # mode, hand the child subprocess CIDX_TEMPORAL_PG_BOOTSTRAP_DIR

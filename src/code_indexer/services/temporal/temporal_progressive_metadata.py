@@ -221,10 +221,19 @@ class TemporalProgressiveMetadata:
             lock_file.close()
 
     def _write_atomic(self, data: dict) -> None:
-        """Write data atomically via tmp file + os.replace."""
+        """Write data atomically via tmp file + os.replace, then fsync the
+        directory (Bug #1407 Foundation) so the rename itself survives a
+        crash/power-loss (precedent: id_index_manager.py's save_index()).
+        """
         self.temporal_dir.mkdir(parents=True, exist_ok=True)
         with open(self._tmp_path, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
             nfs_safe_fsync(f.fileno())
         os.replace(str(self._tmp_path), str(self.progress_path))
+
+        dir_fd = os.open(str(self.temporal_dir), os.O_RDONLY)
+        try:
+            nfs_safe_fsync(dir_fd)
+        finally:
+            os.close(dir_fd)

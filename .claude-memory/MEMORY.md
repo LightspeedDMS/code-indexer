@@ -13,9 +13,12 @@
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - When N agents edit the same uncommitted tree in parallel, each prompt must explicitly forbid git checkout/restore/reset/clean/stash outside its own file list
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
+- [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
+- [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - When install-footprint purity conflicts with reliability (e.g. an "unneeded" extra dependency), default to installing it — recurrence-of-bug-class elimination beats minimal footprint
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
+- [feedback_fix_every_issue_found_no_deferral.md](feedback_fix_every_issue_found_no_deferral.md) - During active implementation work, fix every issue found (even out-of-scope pre-existing ones) in the same session — filing a bug is for ordering work, never for deferring the fix; parallelize independent fixes
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
@@ -34,6 +37,7 @@
 
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously (no triage questions); every defect found = file + fix + iterate until staging logs are clean; clean logs is the bar
+- [feedback_bug_report_means_report_not_fix.md](feedback_bug_report_means_report_not_fix.md) - "Root cause + bug report" request = investigate, file issue, STOP — never start fixing without explicit fix instruction (file+fix mandate is overnight-mission-only)
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
@@ -55,8 +59,10 @@
 - [feedback_active_monitoring_check_back.md](feedback_active_monitoring_check_back.md) - Never stay idle while background agents/jobs run — set a check-back timer and verify progress often; detect stalls early instead of waiting on a completion ping that never comes if it hangs
 - [feedback_study_anomalies_deeply.md](feedback_study_anomalies_deeply.md) - When you see odd/anomalous behavior, study it in depth to root cause and prove the classification with FACTS — never dismiss as "artifact/benign/cosmetic" without evidence; "odd" itself is a claim needing facts
 - [feedback_never_stop_never_blame_env.md](feedback_never_stop_never_blame_env.md) - NEVER self-abort a mission or blame the environment for slow tests; a stalled subagent is a RETRY not a blocker; do NOT kill a working subagent on a frozen output-file or "no git changes yet" — those are not stall signals
+- [feedback_agent_stall_detection_needs_reply_not_just_mtime.md](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - Output-file mtime staleness triggers a PING, not a kill; wait for an actual reply (not just "queued for delivery") before concluding a real stall
 
 ## Architectural Invariants
+- [project_verify_both_staging_environments.md](project_verify_both_staging_environments.md) - Standing rule: every release verification must check BOTH the clustered (postgres/HAProxy) AND solo (SQLite) staging environments, always — production is solo, so solo-only bugs (e.g. #1444) are invisible on the cluster
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER RRF coalescing, BEFORE truncation — mandatory pipeline order
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - FIXED v10.125.0 (#1100): scheduler now uses registry tracking backend (PG in cluster mode); validate against PG, not SQLite

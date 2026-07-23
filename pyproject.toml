@@ -50,9 +50,11 @@ dependencies = [
     "zstandard>=0.25.0",
     # Custom hnswlib fork (Story #54) — PyPI version lacks check_integrity().
     # Also carries repair_orphans() (Story #1358 / Epic #1333) — deterministic
-    # HNSW orphan repair. Pinned to same commit as third_party/hnswlib
-    # submodule. Requires gcc/g++ at install time.
-    "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@878cfbe585395a8bdd95f593d071f778d2fac457",
+    # HNSW orphan repair, and GIL-released save_index()/load_index()
+    # (Bug #1437) — native HNSW shard load/save no longer blocks all Python
+    # threads for the call's duration. Pinned to same commit as
+    # third_party/hnswlib submodule. Requires gcc/g++ at install time.
+    "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@e03aa2364732e47cf58909133f5d85b8fae31e70",
     "regex>=2023.0.0",
     "rpyc>=6.0.0",
     "authlib>=1.6.5",
@@ -82,7 +84,14 @@ dependencies = [
     "markdown>=3.4.0",
     "bleach>=6.0.0",
     # Wiki front matter parsing
-    "python-frontmatter>=1.0.0",
+    # Bug #1443: python-frontmatter==1.2.0's util.py imports typing.TypeGuard,
+    # which does not exist in the Python 3.9 stdlib (this project's requires-python
+    # floor). The wheel declares no Requires-Python guard, so pip happily resolves
+    # the unbounded pin to 1.2.0 on 3.9 and `import frontmatter` raises ImportError.
+    # Verified: 1.1.0 is the last pre-1.2.0 release, is available on PyPI, and
+    # imports + parses correctly on Python 3.9.25 in an isolated venv.
+    "python-frontmatter>=1.0.0,<1.2.0 ; python_version < '3.10'",
+    "python-frontmatter>=1.0.0 ; python_version >= '3.10'",
     # Excel export for query analytics (Story #1160)
     "openpyxl>=3.1.0",
     # MFA/TOTP dependencies (Epic #556)

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, asdict, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
@@ -116,8 +117,12 @@ class CacheConfig:
     # memory_governor_swap_forces_red:
     #   True => positive pswpin delta forces RED regardless of used_pct.
     # memory_governor_rss_inflation_factor:
-    #   Multiplier applied to on-disk shard sizes when computing LRU-cap
-    #   eviction budgets (corrects file-size undercount vs. real RSS).
+    #   Bug #1399: NO behavioral consumer exists anywhere in src/ for this
+    #   field. It is settable/validated via the Web UI and echoed live in
+    #   the memory-governor stats endpoint (MemoryGovernor.get_snapshot()),
+    #   but nothing reads it to influence any runtime decision -- this
+    #   comment previously (inaccurately) claimed it corrected a file-size
+    #   undercount when sizing LRU eviction targets.
     memory_governor_enabled: bool = True
     memory_governor_yellow_pct: float = 70.0
     memory_governor_red_pct: float = 85.0
@@ -260,6 +265,155 @@ class SearchLimitsConfig:
     def max_size_bytes(self) -> int:
         """Return max result size in bytes."""
         return self.max_result_size_mb * 1024 * 1024
+
+
+# Story #1400 CRITICAL 5 (FINAL LOCKED DESIGN): reserved grace budget, in
+# seconds, that temporal_inline_wait_seconds must leave below
+# search_code_handler_timeout_seconds so the foreground handler's post-wait
+# work (snapshot read, access-filter, terminal rerank, serialization) has
+# room to finish before the outer asyncio.wait_for cap fires. Consumed by
+# both the static validate_config defense-in-depth check below and (at
+# request time) the runtime deadline-propagation mechanism.
+TEMPORAL_RESPONSE_RESERVE_SECONDS = 1.0
+
+
+@dataclass
+class SearchTimeoutsConfig:
+    """
+    Query & search timeouts configuration (Issue #1398).
+
+    Consolidates 5 previously hardcoded, non-configurable timeout constants
+    from the MCP tool-call layer and the embedding/reranking pipeline into a
+    single Web-UI-editable config section, following the exact
+    SearchLimitsConfig pattern. Each field replaces one specific hardcoded
+    constant -- see docs/architecture-invariants.md for the full mapping.
+    """
+
+    # Replaces protocol.py's SEARCH_HANDLER_TIMEOUT_SECONDS (Bug #1319):
+    # per-tool override for the search_code MCP tool (sync-dispatched,
+    # covers both semantic and temporal queries). Range 30-600s.
+    search_code_handler_timeout_seconds: int = 180
+
+    # Replaces protocol.py's HANDLER_TIMEOUT_SECONDS (Bug #1008): the
+    # default asyncio.wait_for cap for every SYNCHRONOUSLY-dispatched MCP
+    # tool handler with no explicit override. Does NOT apply to
+    # async-dispatched tools (e.g. regex_search) -- those are never wrapped
+    # by this timeout at all. Range 10-300s.
+    default_handler_timeout_seconds: int = 60
+
+    # Replaces protocol.py's WRITE_MODE_HANDLER_TIMEOUT_SECONDS
+    # (Issue #1190): override for exit_write_mode's Claude-CLI conflict
+    # resolution (600s inner budget + headroom). Range 600-3600s.
+    write_mode_handler_timeout_seconds: int = 720
+
+    # Replaces VoyageAIConfig.timeout / CohereConfig.timeout hardcoded
+    # defaults at the server-side query-embedding construction sites.
+    # Range 5-120s.
+    embedding_provider_timeout_seconds: int = 30
+
+    # Replaces both hardcoded `timeout: float = 15.0` defaults in
+    # reranker_clients.py (Voyage and Cohere reranker HTTP clients).
+    # Range 5-120s.
+    reranker_timeout_seconds: int = 15
+
+    # Issue #1435: outer handler-deadline cap for POST /api/query's
+    # temporal branch, threaded through to execute_live_temporal_search as
+    # handler_deadline_monotonic -- gives REST the same belt-and-suspenders
+    # bound on the async-hybrid inline wait that MCP's search_code tool
+    # already gets via search_code_handler_timeout_seconds (mirrors that
+    # field's default and range exactly, since REST and MCP serve the same
+    # underlying query). Range 30-600s.
+    rest_query_handler_timeout_seconds: int = 180
+
+    # Story #1400 (CRITICAL 5, FINAL LOCKED DESIGN): async-hybrid temporal
+    # query foreground sync-wait window, in seconds. FLOAT (unlike the five
+    # integer fields above) because sub-second values (e.g. 0.001) are the
+    # documented E2E lever for deterministically forcing the async handoff
+    # path (Scenario 11). Live-consumed per-request (mirrors the
+    # _resolve_handler_timeout pattern), no #1399 machinery required.
+    # Validated: 0.0 <= value <= search_code_handler_timeout_seconds - 1.0
+    # (TEMPORAL_RESPONSE_RESERVE_SECONDS grace budget, static
+    # defense-in-depth -- the runtime deadline-propagation mechanism is the
+    # primary guard).
+    temporal_inline_wait_seconds: float = 60.0
+
+
+@dataclass
+class EmbeddingStatsConfig:
+    """
+    Embedding & reranker call tracking configuration (Story #1418 Phase 3).
+
+    Controls the InProcessAsyncWriter / CrossProcessBootstrapWriter periodic
+    flush cadence, the global on/off kill-switch, and the retention sweep's
+    cutoff window for the embedding_call_stats table (vendor cost
+    reconciliation). Follows the exact SearchTimeoutsConfig pattern.
+    """
+
+    # Global kill-switch. When False, EmbeddingStatsWriter.get_active()
+    # resolves to NoOpWriter regardless of what writer was previously
+    # installed (mirrors the memory_retrieval_enabled kill-switch pattern).
+    enabled: bool = True
+
+    # Periodic background-flush cadence, in seconds. Default MUST match
+    # embedding_stats_writer.py's pre-Phase-3 hardcoded
+    # _DEFAULT_FLUSH_INTERVAL_SECONDS so turning on config-driven tuning
+    # does not silently change existing behavior.
+    flush_interval_seconds: float = 30.0
+
+    # Retention sweep cutoff window, in days. Rows with occurred_at older
+    # than (now - retention_days) are deleted by the retention scheduler.
+    retention_days: int = 90
+
+
+@dataclass
+class TemporalIndexingConfig:
+    """
+    Global temporal indexing floor date configuration (Story #1404).
+
+    A single global, DB-backed "floor date" bounding ALL FUTURE
+    `cidx index --index-commits` runs across the fleet -- eliminates the
+    unbounded-history problem (multi-hour index runs, storage bloat from
+    very old commits with near-zero search value) without per-repo CLI
+    flags. Direction is "since"/newer-commits: commits dated on/after the
+    floor are indexed, older commits are skipped (maps to `git log
+    --since`). Forward-only: bounds FUTURE runs only -- never retroactively
+    prunes already-indexed old commits from existing temporal shards
+    (explicitly out of scope). None/empty = unbounded = byte-identical to
+    pre-feature full-history behavior (safety no-op).
+
+    Composes with the pre-existing per-repo `temporal_options.since_date`
+    override as "more restrictive wins" (see
+    server.services.temporal_floor_date.resolve_effective_floor_date) --
+    exactly one --since-date/since_date value is ever emitted per launch,
+    never two.
+    """
+
+    # "YYYY-MM-DD" or None/"" (unbounded -- default, full history exactly
+    # like pre-feature behavior).
+    index_floor_date: Optional[str] = None
+
+    def validate(self) -> None:
+        """Validate index_floor_date. Raises ValueError if malformed.
+
+        Mirrors temporal_search_service.parse_date_range's validation
+        shape: strptime for real-calendar-date rejection (e.g. the
+        non-existent 2026-02-30) plus a strftime round-trip for
+        zero-padding rejection (e.g. 2026-1-1).
+        """
+        value = self.index_floor_date
+        if value is None or value == "":
+            return  # unbounded -- always valid
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(
+                f"index_floor_date must be in YYYY-MM-DD format, got {value!r}"
+            )
+        if parsed.strftime("%Y-%m-%d") != value:
+            raise ValueError(
+                "index_floor_date must be zero-padded YYYY-MM-DD "
+                f"(e.g. 2025-01-01), got {value!r}"
+            )
 
 
 @dataclass
@@ -477,6 +631,12 @@ class IndexingConfig:
     temporal_embedders: List[str] = field(default_factory=lambda: ["voyage-context-4"])
     temporal_active_embedder: str = "voyage-context-4"
     temporal_aggregation_chunk_chars: int = 4096
+
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind this server-wide runtime flag, shipped OFF by default. When
+    # False, all-branches requests must be rejected loudly at REST/Web/MCP
+    # boundaries and skipped (with a WARNING) at command-build sites.
+    temporal_all_branches_enabled: bool = False
 
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
@@ -773,15 +933,24 @@ class BackgroundJobsConfig:
     # compute and allows up to 20 concurrent xray jobs without starvation.
     xray_max_concurrent_jobs: int = 20
 
-    # EVO-64538 (C10): memory-aware admission for heavy index jobs.
+    # Story #1400 (CRITICAL 1, FINAL LOCKED DESIGN): dedicated temporal-lane
+    # worker-pool size. Temporal query jobs read from a SEPARATE queue
+    # (_temporal_pending_job_queue) served by their own fixed pool of this
+    # many worker threads -- real isolation, not a shared-queue "lane" that
+    # ordinary jobs could still consume from. RESTART-required: the lane
+    # pool is built once at BackgroundJobManager.__init__ (see
+    # RESTART_REQUIRED_FIELDS in web/routes.py), not live-reloaded.
+    temporal_lane_concurrency: int = 2
+
+    # Memory-aware admission for heavy index jobs (EVO-64538 / C10).
     # A fixed pool size (above) is memory-blind: under bulk golden-repo indexing
     # the combined HNSW + FTS + embedding footprint of pool_size concurrent jobs
-    # can exceed the pod's cgroup limit and OOMKill it. When the gate is enabled,
-    # a worker consults the cgroup-aware MemoryGovernor before starting a
-    # memory-heavy op and, if the pod is under pressure, re-queues the job
-    # (it stays PENDING) and backs off — jobs wait instead of OOMing. The
-    # watermark is a percentage of the pod's OWN cgroup limit, so it self-tunes
-    # to any memory.max without per-deployment tuning.
+    # can exceed the process/cgroup memory limit and OOM the server. When the
+    # gate is enabled, a worker consults the cgroup-aware MemoryGovernor before
+    # starting a memory-heavy op and, if under pressure, re-queues the job (it
+    # stays PENDING) and backs off — jobs wait instead of OOMing. The watermark
+    # is a percentage of the process's OWN cgroup limit, so it self-tunes to any
+    # memory.max without per-deployment tuning.
     job_admission_memory_gate_enabled: bool = True
     # Admit a heavy job only while cgroup used% is below this (below the
     # governor's 85% RED/eviction line, leaving headroom for the job's growth).
@@ -1383,6 +1552,15 @@ class ServerConfig:
     codex_integration_config: Optional[CodexIntegrationConfig] = None
     cidx_meta_backup_config: Optional[CidxMetaBackupConfig] = None
 
+    # Issue #1398 - Query & search timeouts configuration
+    search_timeouts_config: Optional[SearchTimeoutsConfig] = None
+
+    # Story #1418 Phase 3 - Embedding & reranker call tracking configuration
+    embedding_stats_config: Optional[EmbeddingStatsConfig] = None
+
+    # Story #1404 - Global temporal indexing floor date configuration
+    temporal_indexing_config: Optional[TemporalIndexingConfig] = None
+
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
     cohere_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1659,6 +1837,15 @@ class ServerConfig:
             self.codex_integration_config = CodexIntegrationConfig()
         if self.cidx_meta_backup_config is None:
             self.cidx_meta_backup_config = CidxMetaBackupConfig()
+        # Issue #1398 - Initialize search timeouts config
+        if self.search_timeouts_config is None:
+            self.search_timeouts_config = SearchTimeoutsConfig()
+        # Story #1418 Phase 3 - Initialize embedding stats config
+        if self.embedding_stats_config is None:
+            self.embedding_stats_config = EmbeddingStatsConfig()
+        # Story #1404 - Initialize temporal indexing floor date config
+        if self.temporal_indexing_config is None:
+            self.temporal_indexing_config = TemporalIndexingConfig()
         # Story #997 - Backward-compat migration: convert old bool field to three-way string.
         # If old stored data has enforce_pace_maker_pacing_only, migrate and remove it.
         old_enforce = self.__dict__.pop("enforce_pace_maker_pacing_only", None)
@@ -2358,6 +2545,50 @@ class ServerConfigManager:
         ):
             config_dict["xray_config"] = XRayConfig(**config_dict["xray_config"])
 
+        # Issue #1398: Convert search_timeouts_config dict to SearchTimeoutsConfig.
+        # Same rationale as hnsw_orphan_repair_sweep_config above -- without this
+        # block, the raw dict round-tripped through the runtime DB's JSON column
+        # survives unconverted and attribute access on the resulting "dict"
+        # raises AttributeError. Unknown keys filtered for rolling-upgrade safety.
+        if "search_timeouts_config" in config_dict and isinstance(
+            config_dict["search_timeouts_config"], dict
+        ):
+            _st_dict = config_dict["search_timeouts_config"]
+            _st_allowed = {f.name for f in fields(SearchTimeoutsConfig)}
+            config_dict["search_timeouts_config"] = SearchTimeoutsConfig(
+                **{k: v for k, v in _st_dict.items() if k in _st_allowed}
+            )
+
+        # Story #1418 Phase 3: Convert embedding_stats_config dict to
+        # EmbeddingStatsConfig. Same rationale as search_timeouts_config
+        # above -- without this block, the raw dict round-tripped through
+        # the runtime DB's JSON column survives unconverted and attribute
+        # access on the resulting "dict" raises AttributeError. Unknown
+        # keys filtered for rolling-upgrade safety.
+        if "embedding_stats_config" in config_dict and isinstance(
+            config_dict["embedding_stats_config"], dict
+        ):
+            _es_dict = config_dict["embedding_stats_config"]
+            _es_allowed = {f.name for f in fields(EmbeddingStatsConfig)}
+            config_dict["embedding_stats_config"] = EmbeddingStatsConfig(
+                **{k: v for k, v in _es_dict.items() if k in _es_allowed}
+            )
+
+        # Story #1404: Convert temporal_indexing_config dict to
+        # TemporalIndexingConfig. Same rationale as embedding_stats_config
+        # above -- without this block, the raw dict round-tripped through
+        # the runtime DB's JSON column survives unconverted and attribute
+        # access on the resulting "dict" raises AttributeError. Unknown
+        # keys filtered for rolling-upgrade safety.
+        if "temporal_indexing_config" in config_dict and isinstance(
+            config_dict["temporal_indexing_config"], dict
+        ):
+            _ti_dict = config_dict["temporal_indexing_config"]
+            _ti_allowed = {f.name for f in fields(TemporalIndexingConfig)}
+            config_dict["temporal_indexing_config"] = TemporalIndexingConfig(
+                **{k: v for k, v in _ti_dict.items() if k in _ti_allowed}
+            )
+
         # Epic #408: Convert ontap dict to OntapConfig
         if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
             config_dict["ontap"] = OntapConfig(**config_dict["ontap"])
@@ -2625,6 +2856,74 @@ class ServerConfigManager:
                     f"timeout_seconds must be between 5 and 300, got {config.search_limits_config.timeout_seconds}"
                 )
 
+        # Validate search_timeouts_config (Issue #1398)
+        if config.search_timeouts_config:
+            st = config.search_timeouts_config
+            if not (30 <= st.search_code_handler_timeout_seconds <= 600):
+                raise ValueError(
+                    "search_code_handler_timeout_seconds must be between 30 and 600, "
+                    f"got {st.search_code_handler_timeout_seconds}"
+                )
+            if not (10 <= st.default_handler_timeout_seconds <= 300):
+                raise ValueError(
+                    "default_handler_timeout_seconds must be between 10 and 300, "
+                    f"got {st.default_handler_timeout_seconds}"
+                )
+            if not (600 <= st.write_mode_handler_timeout_seconds <= 3600):
+                raise ValueError(
+                    "write_mode_handler_timeout_seconds must be between 600 and 3600, "
+                    f"got {st.write_mode_handler_timeout_seconds}"
+                )
+            if not (5 <= st.embedding_provider_timeout_seconds <= 120):
+                raise ValueError(
+                    "embedding_provider_timeout_seconds must be between 5 and 120, "
+                    f"got {st.embedding_provider_timeout_seconds}"
+                )
+            if not (5 <= st.reranker_timeout_seconds <= 120):
+                raise ValueError(
+                    "reranker_timeout_seconds must be between 5 and 120, "
+                    f"got {st.reranker_timeout_seconds}"
+                )
+            if not (30 <= st.rest_query_handler_timeout_seconds <= 600):
+                raise ValueError(
+                    "rest_query_handler_timeout_seconds must be between 30 and 600, "
+                    f"got {st.rest_query_handler_timeout_seconds}"
+                )
+            # Story #1400 CRITICAL 5: grace-budget cross-field check.
+            if st.temporal_inline_wait_seconds < 0.0:
+                raise ValueError(
+                    "temporal_inline_wait_seconds must be >= 0.0, "
+                    f"got {st.temporal_inline_wait_seconds}"
+                )
+            _temporal_grace_ceiling = (
+                st.search_code_handler_timeout_seconds
+                - TEMPORAL_RESPONSE_RESERVE_SECONDS
+            )
+            if st.temporal_inline_wait_seconds > _temporal_grace_ceiling:
+                raise ValueError(
+                    "temporal_inline_wait_seconds must be <= "
+                    "search_code_handler_timeout_seconds - "
+                    f"{TEMPORAL_RESPONSE_RESERVE_SECONDS} (grace budget), "
+                    f"got {st.temporal_inline_wait_seconds} with "
+                    "search_code_handler_timeout_seconds="
+                    f"{st.search_code_handler_timeout_seconds}"
+                )
+
+        # Validate embedding_stats_config (Story #1418 Phase 3)
+        if config.embedding_stats_config:
+            es = config.embedding_stats_config
+            if es.flush_interval_seconds <= 0:
+                raise ValueError(
+                    "flush_interval_seconds must be > 0, "
+                    f"got {es.flush_interval_seconds}"
+                )
+            if es.retention_days <= 0:
+                raise ValueError(f"retention_days must be > 0, got {es.retention_days}")
+
+        # Validate temporal_indexing_config (Story #1404)
+        if config.temporal_indexing_config:
+            config.temporal_indexing_config.validate()
+
         # Validate golden_repos_config (Story #3 - Phase 1, AC-M5)
         if config.golden_repos_config:
             # Validate refresh_interval_seconds (minimum 60 seconds)
@@ -2863,6 +3162,12 @@ class ServerConfigManager:
             if not (1 <= config.background_jobs_config.subprocess_max_workers <= 50):
                 raise ValueError(
                     f"subprocess_max_workers must be between 1 and 50, got {config.background_jobs_config.subprocess_max_workers}"
+                )
+            # Story #1400 CRITICAL 1: temporal_lane_concurrency range 1-32
+            if not (1 <= config.background_jobs_config.temporal_lane_concurrency <= 32):
+                raise ValueError(
+                    "temporal_lane_concurrency must be between 1 and 32, got "
+                    f"{config.background_jobs_config.temporal_lane_concurrency}"
                 )
 
         # Validate data_retention_config (Story #400)

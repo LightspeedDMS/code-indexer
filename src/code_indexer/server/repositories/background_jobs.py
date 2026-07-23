@@ -111,6 +111,15 @@ class BackgroundJob:
     # When None, actor is the same as username (legacy / self-service).
     actor_username: Optional[str] = None
 
+    # Story #1400 CRITICAL 1: which dedicated worker pool this job was
+    # routed to ("ordinary" or "temporal"). Drives per-lane queue metrics.
+    lane: str = "ordinary"
+    # Story #1400: opaque snapshot context handed to the worker's caller
+    # (the temporal foreground/handoff layer) at registration time -- NEVER
+    # forwarded to the worker function itself (submit_job pops it before
+    # enqueueing the (func, args, kwargs) tuple).
+    snapshot_ctx: Optional[Dict[str, Any]] = None
+
 
 _BG_JOB_FIELDS = {f.name for f in fields(BackgroundJob)}
 
@@ -133,7 +142,7 @@ PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 # The dashboard and API consumers use at most 50 rows per page in practice.
 MAX_PAGE_SIZE: int = 50
 
-# EVO-64538 (C10): operation types whose execution loads large structures into
+# Memory-aware admission: operation types whose execution loads large structures into
 # RAM (HNSW graph build + FTS index + Voyage embedding batches). These are the
 # ops the memory-aware admission gate throttles under pod memory pressure.
 # Cheap/quick ops (status, cancel, xray reads, dependency-map queries) are never
@@ -148,10 +157,10 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
     }
 )
 
-# EVO-64545 (pod-pull work-stealing): operation types that, in cluster mode,
+# Pod-pull work-stealing: operation types that, in cluster mode,
 # are left PENDING in the shared Postgres queue for any pod with memory headroom
 # to claim and execute — instead of being pinned to the submitting pod's local
-# worker pool. Same set as the C10 memory-heavy ops: these are exactly the
+# worker pool. Same set as the memory-heavy ops: these are exactly the
 # expensive index builds worth distributing. Each must (a) have its submit call
 # pass reconstruction params via `metadata=` and (b) be dispatchable by the
 # IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
@@ -159,7 +168,7 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # so the ops set has a single source of truth across the cluster job plumbing.
 POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
 
-# EVO-64538 (C10): min seconds between "deferring under memory pressure" INFO
+# Memory-aware admission: min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every
 # backoff interval by every worker) can't storm the log while still leaving a
 # clear, periodic breadcrumb that the gate is actively throttling.
@@ -184,6 +193,7 @@ class BackgroundJobManager:
         job_tracker: Optional["JobTracker"] = None,
         data_retention_config: Optional["DataRetentionConfig"] = None,
         storage_backend: Optional[Any] = None,
+        node_id: Optional[str] = None,
         cluster_mode: bool = False,
     ):
         """Initialize enhanced background job manager.
@@ -199,9 +209,16 @@ class BackgroundJobManager:
                 cross-service visibility. When None, behavior is unchanged.
             data_retention_config: Data retention configuration (Story #400).
                 Controls how long completed/failed/cancelled jobs are kept.
+            node_id: Story #1400 CRITICAL 3 -- this node's cluster identity.
+                Used by fail_orphaned_jobs() to decide whether the unscoped
+                sweep is safe to run against the injected storage_backend
+                (only ever safe for solo/SQLite; a PostgreSQL-backed
+                cluster deployment relies on JobTracker's node-scoped
+                cleanup_orphaned_jobs_on_startup(node_id) instead).
         """
         self.jobs: Dict[str, BackgroundJob] = {}
         self._lock = threading.Lock()
+        self._node_id = node_id
         # Story #311: Optional JobTracker for unified tracking (Epic #261 Story 1B)
         self._job_tracker: Optional["JobTracker"] = job_tracker
         self._executor = None
@@ -209,6 +226,12 @@ class BackgroundJobManager:
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
         # Story #26: Queue for pending jobs waiting for a slot
         self._pending_job_queue: queue.Queue = queue.Queue()
+        # Story #1400 CRITICAL 1: a REAL, separate queue for the temporal
+        # lane. Ordinary-pool workers read ONLY _pending_job_queue;
+        # temporal-pool workers read ONLY this queue -- a shared queue with
+        # a "lane" label read by every worker would provide no isolation at
+        # all (any worker could still consume any job).
+        self._temporal_pending_job_queue: queue.Queue = queue.Queue()
         # Story #996: Child process tracking for xray_search/xray_explore termination
         self._child_processes: Dict[str, List] = {}
         self._child_processes_lock = threading.Lock()
@@ -256,11 +279,11 @@ class BackgroundJobManager:
         # Bug #1063 Part 3: Bounded worker pool shutdown signal.
         self._pool_shutdown = threading.Event()
 
-        # EVO-64538 (C10): last time a memory-pressure deferral was logged
+        # Memory-aware admission: last time a memory-pressure deferral was logged
         # (monotonic seconds); rate-limits the deferral breadcrumb.
         self._last_admission_defer_log: float = 0.0
 
-        # EVO-64545 (pod-pull): when True (cluster/postgres mode), _POD_PULL_OPS
+        # Pod-pull: when True (cluster/postgres mode), _POD_PULL_OPS
         # are left PENDING in PG for cross-pod claiming instead of dispatched to
         # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
         self._cluster_mode: bool = cluster_mode
@@ -282,6 +305,7 @@ class BackgroundJobManager:
         for _ in range(pool_size):
             t = threading.Thread(
                 target=self._pool_worker,
+                args=(self._pending_job_queue, "ordinary"),
                 daemon=True,
                 name=f"bgm-worker-{id(self)}",
             )
@@ -289,32 +313,53 @@ class BackgroundJobManager:
             with self._lock:
                 self._running_jobs[f"_pool_{t.ident}"] = t
 
+        # Story #1400 CRITICAL 1: second, entirely separate fixed pool
+        # reading ONLY _temporal_pending_job_queue -- real isolation, so a
+        # saturated ordinary lane can never starve a temporal job and vice
+        # versa. Sized by temporal_lane_concurrency (restart-required).
+        self._temporal_pool_size = (
+            self._background_jobs_config.temporal_lane_concurrency
+        )
+        for _ in range(self._temporal_pool_size):
+            t = threading.Thread(
+                target=self._pool_worker,
+                args=(self._temporal_pending_job_queue, "temporal"),
+                daemon=True,
+                name=f"bgm-temporal-worker-{id(self)}",
+            )
+            t.start()
+            with self._lock:
+                self._running_jobs[f"_pool_{t.ident}"] = t
+
         # Background job manager initialized silently
 
-    def _pool_worker(self) -> None:
-        """Bug #1063 Part 3: Persistent worker thread that processes queued jobs.
+    def _pool_worker(self, queue_ref: "queue.Queue", lane_name: str) -> None:
+        """Bug #1063 Part 3 / Story #1400 CRITICAL 1: Persistent worker
+        thread that processes queued jobs from ONE dedicated queue.
 
-        Pulls (job_id, func, args, kwargs) tuples from _pending_job_queue and
-        calls _execute_job().  Exits when _pool_shutdown is set AND the queue
-        is drained (sentinel None item put by shutdown()).
+        Pulls (job_id, func, args, kwargs) tuples from `queue_ref` and calls
+        _execute_job(). Exits when _pool_shutdown is set AND the queue is
+        drained (sentinel None item put by shutdown()). `lane_name` is
+        informational only (logging) -- isolation comes from `queue_ref`
+        being a queue this worker's sibling pool never reads from.
         """
         while not self._pool_shutdown.is_set():
             try:
-                item = self._pending_job_queue.get(timeout=1.0)
+                item = queue_ref.get(timeout=1.0)
             except queue.Empty:
                 continue
             if item is None:
                 # Sentinel: signal from shutdown() to stop this worker.
-                self._pending_job_queue.task_done()
+                queue_ref.task_done()
                 break
             job_id, func, args, kwargs = item
-            # EVO-64538 (C10): memory-aware admission. Under pod memory pressure,
-            # re-queue a heavy index job (it stays PENDING) and back off rather
-            # than running it and risking an OOMKill. Jobs wait, never OOM.
+            # Memory-aware admission: under memory pressure, re-queue a heavy
+            # index job onto THIS lane's queue (it stays PENDING) and back off
+            # rather than running it and risking an OOM. Jobs wait, never OOM.
             if self._admission_blocked(job_id):
                 self._log_admission_deferred(job_id)
-                self._pending_job_queue.put(item)
-                self._pending_job_queue.task_done()
+                queue_ref.put(item)
+                queue_ref.task_done()
                 self._pool_shutdown.wait(
                     self._background_jobs_config.job_admission_backoff_seconds
                 )
@@ -323,13 +368,15 @@ class BackgroundJobManager:
                 self._execute_job(job_id, func, args, kwargs)
             except Exception:
                 logging.exception(
-                    "Unhandled exception in pool worker for job %s", job_id
+                    "Unhandled exception in %s pool worker for job %s",
+                    lane_name,
+                    job_id,
                 )
             finally:
-                self._pending_job_queue.task_done()
+                queue_ref.task_done()
 
     def _admission_blocked(self, job_id: str) -> bool:
-        """EVO-64538 (C10): should this heavy job be deferred under memory pressure?
+        """should this heavy job be deferred under memory pressure?
 
         Returns True only when ALL of: the gate is enabled, the job's op type is
         memory-heavy, a MemoryGovernor singleton exists, and the governor denies
@@ -349,10 +396,20 @@ class BackgroundJobManager:
         governor = get_memory_governor()
         if governor is None:
             return False
-        return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+        try:
+            return not governor.admission_allowed(cfg.job_admission_memory_max_used_pct)
+        except Exception:  # noqa: BLE001 — L1: a governor error must never kill
+            # the pool-worker thread. Fail-open (do not block) so the only effect
+            # of a broken governor is that admission throttling is skipped, never
+            # a stalled lane.
+            logging.debug(
+                "memory-pressure: admission check raised; failing open (ignored)",
+                exc_info=True,
+            )
+            return False
 
     def _log_admission_deferred(self, job_id: str) -> None:
-        """EVO-64538 (C10): rate-limited breadcrumb when a heavy job is deferred.
+        """rate-limited breadcrumb when a heavy job is deferred.
 
         Makes the throttle observable (throttled vs. stuck) without storming the
         log: at most one line per _ADMISSION_DEFER_LOG_INTERVAL_SECONDS per
@@ -375,7 +432,7 @@ class BackgroundJobManager:
             band = getattr(band_obj, "value", "no-governor")
             used_pct = getattr(governor, "last_used_pct", -1.0)
             logging.info(
-                "C10: deferring memory-heavy job %s (op=%s) under memory pressure "
+                "memory-pressure: deferring memory-heavy job %s (op=%s) under memory pressure "
                 "(band=%s used_pct=%.1f); re-queued PENDING, backing off %.1fs",
                 job_id,
                 op_type,
@@ -384,7 +441,9 @@ class BackgroundJobManager:
                 self._background_jobs_config.job_admission_backoff_seconds,
             )
         except Exception:  # noqa: BLE001 — logging must never break admission
-            logging.debug("C10: deferral-log failed (ignored)", exc_info=True)
+            logging.debug(
+                "memory-pressure: deferral-log failed (ignored)", exc_info=True
+            )
 
     @property
     def max_concurrent_jobs(self) -> int:
@@ -505,6 +564,8 @@ class BackgroundJobManager:
                 return job.job_id
         return None
 
+    _VALID_LANES = ("ordinary", "temporal")
+
     def submit_job(
         self,
         operation_type: str,
@@ -514,7 +575,9 @@ class BackgroundJobManager:
         is_admin: bool = False,
         repo_alias: Optional[str] = None,  # AC5: Fix unknown repo bug
         actor_username: Optional[str] = None,  # AC12: who triggered the job
-        metadata: Optional[Dict[str, Any]] = None,  # EVO-64545: pod-pull params
+        lane: str = "ordinary",  # Story #1400 CRITICAL 1: dedicated worker pool
+        snapshot_ctx: Optional[Dict[str, Any]] = None,  # Story #1400: job metadata only
+        metadata: Optional[Dict[str, Any]] = None,  # pod-pull reconstruction params
         **kwargs,
     ) -> str:
         """
@@ -529,7 +592,14 @@ class BackgroundJobManager:
             repo_alias: Repository alias being processed (AC5: Fix unknown repo bug)
             actor_username: Who actually triggered the job (AC12). When None,
                 defaults to submitter_username for backward compatibility.
-            metadata: EVO-64545. Reconstruction params persisted to the
+            lane: "ordinary" (default) or "temporal" -- routes the job to a
+                dedicated worker pool (Story #1400 CRITICAL 1). NEVER
+                forwarded to `func` -- it is a named parameter here, so
+                Python's argument binding keeps it out of **kwargs entirely.
+            snapshot_ctx: Opaque job-registration metadata for the temporal
+                foreground/handoff layer. Stored on the job, NEVER passed to
+                `func`.
+            metadata: Reconstruction params persisted to the
                 background_jobs row (JSONB) so a pod-pull index op can be
                 executed on any pod that claims it. Required for a
                 ``_POD_PULL_OPS`` op to be work-stolen in cluster mode; without
@@ -540,8 +610,14 @@ class BackgroundJobManager:
             Job ID for tracking
 
         Raises:
+            ValueError: If `lane` is not one of "ordinary"/"temporal".
             Exception: If user has exceeded max jobs limit (if configured)
         """
+        if lane not in self._VALID_LANES:
+            raise ValueError(
+                f"Invalid lane '{lane}': must be one of {self._VALID_LANES}"
+            )
+
         # Check maintenance mode first (Story #734)
         from code_indexer.server.services.maintenance_service import (
             get_maintenance_state,
@@ -588,6 +664,25 @@ class BackgroundJobManager:
             is_admin=is_admin,
             repo_alias=repo_alias,  # AC5: Store repo_alias
             actor_username=resolved_actor,  # AC12: audit trail
+            lane=lane,  # Story #1400 CRITICAL 1
+            snapshot_ctx=snapshot_ctx,  # Story #1400
+        )
+
+        # Pod-pull: in cluster mode a memory-heavy POD_PULL_OPS operation
+        # with reconstruction metadata is left PENDING for cross-node
+        # work-stealing instead of dispatched to this node's local pool
+        # (see the early-return branch below). Bug #1430: such a row MUST be
+        # inserted with executing_node NULL -- DistributedJobClaimer.
+        # claim_next_job's `executing_node IS NULL` predicate can otherwise
+        # never match it, since the submitting node deliberately never runs
+        # it locally. Computed once, before the atomic insert, so both the
+        # insert call and the post-insert routing decision below agree.
+        is_pod_pull_eligible = (
+            self._cluster_mode
+            and operation_type in POD_PULL_OPS
+            and bool(repo_alias)
+            and metadata is not None
+            and self._job_tracker is not None
         )
 
         # Bug #1065: For repo-scoped operations, use the cluster-atomic
@@ -618,6 +713,8 @@ class BackgroundJobManager:
                     metadata=metadata,
                     is_admin=is_admin,
                     actor_username=resolved_actor,
+                    # Bug #1430: leave executing_node NULL for pod-pull rows.
+                    stamp_executing_node=not is_pod_pull_eligible,
                 )
             except _TrackerDuplicateJobError as exc:
                 # Translate into the canonical DuplicateJobError that all
@@ -669,34 +766,49 @@ class BackgroundJobManager:
                         exc_info=True,
                     )
 
-        # EVO-64545 (pod-pull work-stealing): in cluster mode a memory-heavy
-        # index op has already been registered PENDING / executing_node NULL in
-        # the shared PG queue above, so it is immediately claimable by ANY pod
-        # with memory headroom. Do NOT dispatch it to THIS pod's in-memory pool
-        # (which would pin it here) — leave it for the memory-gated
-        # IndexJobClaimLoop running on every pod. Guarded on metadata being
-        # present so a not-yet-migrated caller (no reconstruction params) safely
-        # falls back to the local pool instead of stranding an unexecutable row.
-        if (
-            self._cluster_mode
-            and operation_type in POD_PULL_OPS
-            and repo_alias
-            and metadata is not None
-            and self._job_tracker is not None
-        ):
+        # Pod-pull work-stealing: in cluster mode a memory-heavy index op has
+        # already been registered PENDING / executing_node NULL (Bug #1430
+        # fix: stamp_executing_node=False above) in the shared queue, so it
+        # is immediately claimable by ANY node with memory headroom. Do NOT
+        # dispatch it to THIS node's in-memory pool (which would pin it
+        # here) -- leave it for the memory-gated IndexJobClaimLoop running
+        # on every node. Guarded on metadata being present so a not-yet-migrated
+        # caller (no reconstruction params) safely falls back to the local pool
+        # instead of stranding an unexecutable row.
+        if is_pod_pull_eligible:
+            # Cluster-Aware State (ABSOLUTE RULE): this job executes on WHICHEVER
+            # node claims it, and its real progress/status live in the shared
+            # background_jobs row (written cross-node by the claimer's
+            # update_progress/complete_job/fail_job). Do NOT retain a node-local
+            # in-memory PENDING entry -- get_job_status and get_jobs_for_display
+            # both PREFER self.jobs over the DB row, so keeping it would make a
+            # poll that lands on THIS (submitting) node report stale PENDING
+            # forever while another node runs the job. Dropping it makes both
+            # read paths fall through to the authoritative shared DB row
+            # regardless of which node the poll hits. (Cancellation stays
+            # correct: cancel_job's no-in-memory branch already routes to the
+            # cross-node DB-cancellation path.)
+            with self._lock:
+                self.jobs.pop(job_id, None)
             logging.info(
                 "Background job %s (%s) left PENDING for pod-pull work-stealing "
-                "(not dispatched to local pool)",
+                "(not dispatched to local pool; in-memory entry dropped so "
+                "status reads defer to the shared DB row)",
                 job_id,
                 operation_type,
             )
             return job_id
 
-        # Bug #1063 Part 3: Enqueue the job for the bounded worker pool.
-        # Workers pull from _pending_job_queue and call _execute_job().
-        # This avoids spawning one thread per submit (N submits = N blocking
-        # threads under the old semaphore model).
-        self._pending_job_queue.put((job_id, func, args, kwargs))
+        # Story #1400 CRITICAL 1: Enqueue the job for its dedicated bounded
+        # worker pool. Workers pull from the LANE-SPECIFIC queue and call
+        # _execute_job() -- ordinary and temporal jobs are routed to entirely
+        # separate queues, never a shared one.
+        target_queue = (
+            self._temporal_pending_job_queue
+            if lane == "temporal"
+            else self._pending_job_queue
+        )
+        target_queue.put((job_id, func, args, kwargs))
 
         logging.info(
             f"Background job {job_id} submitted by {submitter_username}: {operation_type}"
@@ -1151,12 +1263,38 @@ class BackgroundJobManager:
                     job.error = error
                     count += 1
 
-        if self._sqlite_backend is not None:
+        # Story #1400 CRITICAL 3: the unscoped sweep below (no node filter)
+        # is only safe for solo/SQLite (single process -- every
+        # running/pending row genuinely belongs to THIS restart). Against a
+        # cluster-shared PostgreSQL backend it would fail every OTHER
+        # node's legitimately-running jobs too. Detected by class name
+        # (not node_id presence, since node_id may be set in some
+        # single-node deployments too) -- cluster cleanup instead flows
+        # through JobTracker.cleanup_orphaned_jobs_on_startup(node_id),
+        # which is already node-scoped at the backend layer.
+        _backend_type_name = (
+            type(self._sqlite_backend).__name__
+            if self._sqlite_backend is not None
+            else ""
+        )
+        if _backend_type_name == "BackgroundJobsPostgresBackend":
+            logging.info(
+                "fail_orphaned_jobs: skipping unscoped PostgreSQL sweep "
+                "(Story #1400 CRITICAL 3) -- node-scoped cleanup runs via "
+                "JobTracker.cleanup_orphaned_jobs_on_startup(node_id) instead"
+            )
+        elif self._sqlite_backend is not None:
             try:
                 db_count = self._sqlite_backend.fail_orphaned_jobs(error)
                 count += db_count
-            except AttributeError:
-                pass
+            except AttributeError as attr_exc:
+                logging.debug(
+                    "fail_orphaned_jobs: backend %s has no fail_orphaned_jobs "
+                    "method (%s) -- skipping DB-level cleanup, in-memory "
+                    "cleanup above still applies",
+                    _backend_type_name,
+                    attr_exc,
+                )
             except Exception as e:
                 logging.warning("fail_orphaned_jobs DB cleanup failed: %s", e)
 
@@ -1389,20 +1527,30 @@ class BackgroundJobManager:
                             )
                     return
 
+                # Story #1400 CRITICAL 2: build enhanced_kwargs ONCE, injecting
+                # job_id/progress_callback/cancel_check whenever those names
+                # appear in the target function's signature -- regardless of
+                # which branch below executes it. This is genuinely NEW
+                # capability (no job_id injection existed anywhere in BGM
+                # before #1400); previously cancel_check/progress_callback
+                # injection was gated entirely on the progress_callback
+                # branch, so a worker declaring job_id or cancel_check WITHOUT
+                # progress_callback (the non-progress_callback/nested-thread
+                # path below) never received them.
+                enhanced_kwargs = kwargs.copy()
+                if "job_id" in func_signature.parameters:
+                    enhanced_kwargs["job_id"] = job_id
+                if "progress_callback" in func_signature.parameters:
+                    enhanced_kwargs["progress_callback"] = progress_callback
+                if "cancel_check" in func_signature.parameters:
+                    enhanced_kwargs["cancel_check"] = cancel_check
+
                 # Execute the actual operation with frequent cancellation checks
                 if "progress_callback" in func_signature.parameters:
                     # Function manages its own progress via ProgressPhaseAllocator.
                     # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
                     # a visible 25->0 regression when the function's first phase
                     # starts at 0 (e.g., phase_start("semantic") == 0).
-                    enhanced_kwargs = kwargs.copy()
-                    enhanced_kwargs["progress_callback"] = progress_callback
-                    # Bug #1342: also inject cancel_check when the worker
-                    # function's signature accepts it (e.g.
-                    # _do_activate_repository), so it can kill its long-running
-                    # subprocess promptly on cancellation.
-                    if "cancel_check" in func_signature.parameters:
-                        enhanced_kwargs["cancel_check"] = cancel_check
                     result = func(*args, **enhanced_kwargs)
                 else:
                     # For functions without progress callback, emit a coarse 25%
@@ -1410,7 +1558,7 @@ class BackgroundJobManager:
                     # to check for cancellation periodically.
                     progress_callback(25)
                     result = self._execute_with_cancellation_check(
-                        job_id, func, args, kwargs
+                        job_id, func, args, enhanced_kwargs
                     )
 
                 # Job completed — determine final status from result
@@ -1808,21 +1956,60 @@ class BackgroundJobManager:
         """
         return self.get_pending_job_count()
 
+    def _temporal_lane_metrics(self) -> Dict[str, int]:
+        """
+        Story #1400 CRITICAL 1: temporal-lane queue metrics.
+
+        Computed from in-memory `self.jobs` (per-node, like the pool
+        concurrency it describes -- the temporal worker pool itself is a
+        per-node construct) rather than the SQLite/PG backend, since the
+        job-status DB schema has no per-lane column. Documented scope: these
+        counts reflect THIS node's temporal lane only.
+        """
+        with self._lock:
+            temporal_running = sum(
+                1
+                for job in self.jobs.values()
+                if job.status == JobStatus.RUNNING and job.lane == "temporal"
+            )
+        return {
+            "temporal_running_count": temporal_running,
+            "temporal_queue_depth": self._temporal_pending_job_queue.qsize(),
+            "temporal_max_concurrent": self._background_jobs_config.temporal_lane_concurrency,
+        }
+
     def get_job_queue_metrics(self) -> Dict[str, int]:
         """
         Get combined job queue metrics (Story #26, DB-first for cluster correctness).
 
+        Story #1400 CRITICAL 1: also surfaces ordinary_*/temporal_* split
+        fields. The legacy unprefixed fields (running_count/queued_count/
+        max_concurrent) are preserved unchanged for backward compatibility
+        and now alias the ORDINARY lane specifically (harmless: before #1400
+        no job ever used lane="temporal", so these numbers are unchanged for
+        every existing caller).
+
         Returns:
-            Dictionary with running_count, queued_count, and max_concurrent
+            Dictionary with running_count, queued_count, max_concurrent,
+            ordinary_running_count, ordinary_queue_depth,
+            ordinary_max_concurrent, temporal_running_count,
+            temporal_queue_depth, temporal_max_concurrent.
         """
         if self._sqlite_backend is not None:
             try:
                 counts = self._sqlite_backend.count_jobs_by_status()
-                return {
-                    "running_count": counts.get("running", 0),
-                    "queued_count": counts.get("pending", 0),
+                running_count = counts.get("running", 0)
+                queued_count = counts.get("pending", 0)
+                metrics = {
+                    "running_count": running_count,
+                    "queued_count": queued_count,
                     "max_concurrent": self.max_concurrent_jobs,
+                    "ordinary_running_count": running_count,
+                    "ordinary_queue_depth": queued_count,
+                    "ordinary_max_concurrent": self.max_concurrent_jobs,
                 }
+                metrics.update(self._temporal_lane_metrics())
+                return metrics
             except Exception as e:
                 logging.warning(
                     "Failed to get job queue metrics from SQLite, falling back to in-memory: %s",
@@ -1837,11 +2024,16 @@ class BackgroundJobManager:
                 1 for job in self.jobs.values() if job.status == JobStatus.PENDING
             )
 
-        return {
+        metrics = {
             "running_count": running_count,
             "queued_count": queued_count,
             "max_concurrent": self.max_concurrent_jobs,
+            "ordinary_running_count": running_count,
+            "ordinary_queue_depth": queued_count,
+            "ordinary_max_concurrent": self.max_concurrent_jobs,
         }
+        metrics.update(self._temporal_lane_metrics())
+        return metrics
 
     def shutdown(self) -> None:
         """
@@ -1856,6 +2048,13 @@ class BackgroundJobManager:
         # Send one sentinel per worker so each blocked worker.get() wakes up.
         for _ in range(pool_size):
             self._pending_job_queue.put(None)
+        # Story #1400 CRITICAL 1: separate sentinels for the separate
+        # temporal-lane queue/pool (exact per-worker count, mirroring the
+        # ordinary pool above; same config source used to size the pool at
+        # construction).
+        temporal_pool_size = self._background_jobs_config.temporal_lane_concurrency
+        for _ in range(temporal_pool_size):
+            self._temporal_pending_job_queue.put(None)
 
         with self._lock:
             # Cancel all running jobs (only real job entries, not pool-_ keys)
@@ -2374,7 +2573,10 @@ class BackgroundJobManager:
             return {"completed": completed, "failed": failed}
 
     def get_recent_jobs_with_filter(
-        self, time_filter: str = "30d", limit: int = 20
+        self,
+        time_filter: str = "30d",
+        limit: int = 20,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> list[Dict[str, Any]]:
         """
         Get recent jobs filtered by time period.
@@ -2384,20 +2586,32 @@ class BackgroundJobManager:
 
         Story #267 Component 8: Active jobs come from memory, historical from SQLite.
 
+        Story #1400 Phase 9: this is the no-JobTracker DASHBOARD FALLBACK
+        path. Previously it had NO exclusion mechanism at all -- unlike the
+        JobTracker path's get_recent_jobs(exclude_operation_types=), so
+        "mirror xray_search" alone left this path unfixed. `None` (the
+        default) preserves prior behavior exactly for every existing caller.
+
         Args:
             time_filter: Time filter string ("24h", "7d", "30d"), default "30d"
             limit: Maximum number of jobs to return, default 20
+            exclude_operation_types: Operation types to omit from the result
+                (e.g. xray_search/xray_explore/xray_search_batch/
+                temporal_query -- dashboard-hidden job types).
 
         Returns:
             List of job dictionaries with running/pending first, then sorted by time
         """
         cutoff_time = self._calculate_cutoff(time_filter)
+        excluded = set(exclude_operation_types or [])
         recent_jobs = []
         seen_job_ids: set = set()
 
         # Step 1: Get active jobs from memory (running/pending)
         with self._lock:
             for job in self.jobs.values():
+                if job.operation_type in excluded:
+                    continue
                 include_job = False
 
                 if job.status in [JobStatus.RUNNING, JobStatus.PENDING]:
@@ -2433,6 +2647,8 @@ class BackgroundJobManager:
             try:
                 db_jobs = self._sqlite_backend.list_jobs(limit=limit)
                 for db_job in db_jobs:
+                    if db_job.get("operation_type") in excluded:
+                        continue
                     if db_job["job_id"] not in seen_job_ids:
                         # Apply time filter
                         include_db_job = False
@@ -2681,11 +2897,13 @@ class BackgroundJobManager:
                     user = (job.username or "").lower()
                     op = (job.operation_type or "").lower()
                     err = (job.error or "").lower()
+                    job_id_lower = (job.job_id or "").lower()
                     if not (
                         search_lower in repo
                         or search_lower in user
                         or search_lower in op
                         or search_lower in err
+                        or search_lower in job_id_lower
                     ):
                         continue
 

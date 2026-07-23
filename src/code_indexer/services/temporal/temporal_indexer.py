@@ -17,7 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone as _tz
+from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
 from typing import List, Optional, Callable
@@ -392,14 +392,14 @@ class TemporalIndexer:
         # Story #1290 AC19/AC20: blank-out runs BEFORE any read/reconcile/write.
         self._blank_out_legacy_collections()
 
-        # Step 1: Get commit history (full repository history -- blank-out
-        # above unconditionally clears the base bookkeeping directory that
-        # would otherwise hold the last-indexed-commit cursor, so this is
-        # always a full fetch in practice; per-embedder skip logic is
-        # entirely reconcile_temporal_index's job, below).
-        commits_from_git = self._get_commit_history(
-            all_branches, max_commits, since_date
-        )
+        # Step 1: Get commit history -- the FULL reachable universe, no
+        # cursor narrowing, no --since, no -n (Bug #1407 Phase 2, also
+        # resolves #1411's global-cursor multi-embedder blind-spot). This
+        # fetch is cheap (metadata-only git log) and independent of
+        # blank-out. max_commits/since_date are applied per-embedder as
+        # scheduling LIMITS on the set-difference result, AFTER indexed
+        # commits are subtracted -- see temporal_incremental_gate.py.
+        commits_from_git = self._get_commit_history(all_branches, None, None)
 
         # Resolve the active temporal embedder NAME (a plain string, no live
         # client construction) up front -- used for shard placement and the
@@ -464,7 +464,6 @@ class TemporalIndexer:
             vector_thread_count = 4
 
         from ...services.embedding_factory import EmbeddingProviderFactory
-        from .temporal_reconciliation import reconcile_temporal_index
 
         embedding_provider = EmbeddingProviderFactory.create(config=self.config)
 
@@ -513,11 +512,36 @@ class TemporalIndexer:
                 assert embedder_instance is not None
 
                 # --- Missing-commit discovery (shard-aware, AC15/16, AC5) ---
-                embedder_commits = reconcile_temporal_index(
-                    self.vector_store, commits_from_git, embedder_name
-                )
+                # Bug #1407: the automatic (non-reconcile) path uses the
+                # cheap per-embedder gate (set-difference + disk-derived
+                # staleness, ZERO vector-chunk reads on a clean tick)
+                # instead of unconditionally paying the full multi-shard
+                # reconcile_temporal_index() disk-scan on every run. The
+                # explicit operator --reconcile path is unchanged in reach
+                # (full disk scan, catches out-of-band corruption the gate
+                # cannot) but its stray-deletes now run inside the same
+                # durable stale barrier (Amendment 4).
+                if reconcile:
+                    shard_commit_map = self._reconcile_full_scan_with_barrier(
+                        embedder_name, commits_from_git
+                    )
+                    already_reconciled = True
+                else:
+                    from .temporal_incremental_gate import (
+                        compute_embedder_indexing_plan,
+                    )
 
-                if not embedder_commits:
+                    plan = compute_embedder_indexing_plan(
+                        self.vector_store,
+                        commits_from_git,
+                        embedder_name,
+                        max_commits=max_commits,
+                        since_date=since_date,
+                    )
+                    shard_commit_map = plan.shard_commits
+                    already_reconciled = False
+
+                if not shard_commit_map:
                     # AC5: zero work scheduled -- no begin_indexing/
                     # end_indexing call, no on-disk touch whatsoever.
                     continue
@@ -529,9 +553,10 @@ class TemporalIndexer:
                 _c, _b, _v = self._index_one_embedder(
                     embedder_name,
                     embedder_instance,
-                    embedder_commits,
+                    shard_commit_map,
                     vector_manager,
                     progress_callback,
+                    already_reconciled=already_reconciled,
                 )
                 commits_processed += _c
                 total_blobs_processed += _b
@@ -592,57 +617,117 @@ class TemporalIndexer:
             commits_per_branch={},
         )
 
+    def _reconcile_full_scan_with_barrier(
+        self, embedder_name: str, commits_from_git: List[CommitInfo]
+    ) -> dict:
+        """Operator --reconcile: full multi-shard disk-scan reconcile, with
+        its stray-deletes running inside the durable stale barrier
+        (Bug #1407 Amendment 4).
+
+        Marks every shard the embedder's full commit set touches stale
+        BEFORE reconcile_temporal_index's deletes run (so a crash mid-scan
+        leaves the touched shards flagged for repair), then clears any
+        shard reconcile found to need no work (nothing unsafe happened in
+        it -- leaving it stale would mean it's never revisited this run).
+
+        Returns:
+            Dict of shard_name -> missing-or-partial CommitInfo list (only
+            shards with at least one commit needing (re)indexing).
+        Coordinator-confirmed fix (post-review): a shard that was ALREADY
+        is_stale=True BEFORE this function ran (e.g. a real crash after
+        completed_commits was flushed but before the HNSW rebuild
+        finished) has commits that look fully COMPLETE to
+        reconcile_temporal_index (marker present, points present) -- so it
+        is absent from missing_shard_map even though the on-disk HNSW is
+        still genuinely inconsistent. That shard must be force-rebuilt,
+        NEVER silently clear_stale()'d -- doing so would bless a broken
+        index as fresh and permanently destroy its own self-heal signal
+        (the automatic gate would then see is_stale=False and never
+        revisit it). Each shard's incoming staleness is therefore
+        snapshotted BEFORE this function's own pre-scan mark_stale() call;
+        only a shard that was NOT already stale coming in (i.e. one this
+        function's own pre-scan is the sole reason it's now marked) may be
+        cleared when reconcile finds nothing missing for it. An
+        already-stale shard with nothing missing is instead added to the
+        returned map with an EMPTY commit list, mirroring how the
+        automatic gate hands a "physically stale, zero new commits" shard
+        to _index_one_embedder for a forced rebuild.
+        """
+        from .temporal_incremental_gate import bucket_commits_by_shard
+        from .temporal_reconciliation import reconcile_temporal_index
+        from ...storage.hnsw_index_manager import HNSWIndexManager
+
+        all_buckets = bucket_commits_by_shard(commits_from_git, embedder_name)
+        # vector_dim is irrelevant to mark_stale/clear_stale/is_stale (flag
+        # -only reads/writes, no dimension validation).
+        hnsw_manager = HNSWIndexManager(vector_dim=1, space="cosine")
+
+        was_already_stale: dict = {}
+        for shard_name in all_buckets:
+            if self.vector_store.collection_exists(shard_name):
+                shard_path = self.vector_store._get_collection_path(shard_name)
+                # Mirrors _index_one_embedder's isinstance guard: a loosely
+                # -mocked vector_store test double may not return a real Path.
+                if isinstance(shard_path, Path):
+                    was_already_stale[shard_name] = hnsw_manager.is_stale(shard_path)
+                    hnsw_manager.mark_stale(shard_path)
+
+        missing = reconcile_temporal_index(
+            self.vector_store, commits_from_git, embedder_name
+        )
+        missing_shard_map = bucket_commits_by_shard(missing, embedder_name)
+
+        for shard_name in all_buckets:
+            if shard_name in missing_shard_map:
+                continue
+            if was_already_stale.get(shard_name):
+                # Genuinely broken coming in -- force a rebuild rather than
+                # silently blessing it as fresh.
+                missing_shard_map[shard_name] = []
+                continue
+            if self.vector_store.collection_exists(shard_name):
+                shard_path = self.vector_store._get_collection_path(shard_name)
+                if isinstance(shard_path, Path):
+                    hnsw_manager.clear_stale(shard_path)
+
+        return missing_shard_map
+
     def _index_one_embedder(
         self,
         embedder_name: str,
         embedder_instance: TemporalEmbedder,
-        commits: List[CommitInfo],
+        shard_commit_map: dict,
         vector_manager: VectorCalculationManager,
         progress_callback: Optional[Callable],
+        already_reconciled: bool = False,
     ) -> tuple:
-        """Build/extend ONE embedder's quarterly shard set for `commits`.
+        """Build/extend ONE embedder's quarterly shard set.
 
         Story #1291: extracted from the single-embedder Story #1290 sharding
         loop so it can be invoked once per configured embedder. Assumes the
         caller has ALREADY set self._active_embedder / self._active_embedder_name
-        to (embedder_instance, embedder_name) and that `commits` is the
-        FINAL, already-reconciled list of commits this embedder needs (no
-        further filtering happens here).
+        to (embedder_instance, embedder_name) and that `shard_commit_map` is
+        the FINAL, already-computed shard->commits assignment (from either
+        the automatic gate or the operator --reconcile full scan).
+
+        Bug #1407: wraps each shard's processing in the durable
+        mark_stale-before / clear_stale-after barrier. A shard already
+        flagged stale (was_stale) gets its stray points cleaned up first
+        (unless already_reconciled -- the operator reconcile path already
+        did this upstream) and finalizes via a forced full rebuild (not
+        incremental append onto a possibly-inconsistent index).
 
         Returns:
             (commits_processed, blobs_processed, vectors_created) for this
             embedder's run.
         """
-        from collections import defaultdict
-        from .temporal_collection_naming import (
-            get_shard_collection_name,
-            base_collection_name,
-        )
+        from .temporal_collection_naming import base_collection_name
+        from .temporal_reconciliation import reconcile_shard
+        from ...storage.hnsw_index_manager import HNSWIndexManager
 
         model_slug = sanitize_model_name(embedder_name)
         shard_vector_size = embedder_instance.dimensions
-
-        try:
-            shard_commit_map: dict = defaultdict(list)
-            for _commit in commits:
-                _shard = get_shard_collection_name(
-                    embedder_name,
-                    datetime.fromtimestamp(_commit.timestamp, tz=_tz.utc),
-                )
-                shard_commit_map[_shard].append(_commit)
-        except Exception as e:
-            # Unknown/unconfigured temporal embedder (e.g. a Mock in tests).
-            # Fall back to treating all commits as a single group under the
-            # current collection.
-            logger.warning(
-                "Could not determine shard collection name for temporal embedder "
-                "'%s' (%s); falling back to base collection '%s'.",
-                embedder_name,
-                e,
-                self.collection_name,
-            )
-            shard_commit_map = defaultdict(list)
-            shard_commit_map[self.collection_name].extend(commits)
+        hnsw_manager = HNSWIndexManager(vector_dim=shard_vector_size, space="cosine")
 
         sorted_shards = sorted(
             shard_commit_map.keys()
@@ -652,13 +737,11 @@ class TemporalIndexer:
         blobs_processed = 0
         vectors_created = 0
         # Bug #1378: whole-run denominator, constant across every quarterly
-        # shard processed below -- `commits` here is the embedder's FULL
-        # reconciled commit list (pre-shard-split), so this is exactly the
-        # "total commits across all shards" the progress display must show.
-        # Passed to _wrap_shard_progress_callback() further below so every
-        # shard's progress_callback invocations report this SAME total
-        # instead of resetting to each shard's own (much smaller) count.
-        grand_total = len(commits)
+        # shard processed below. Passed to _wrap_shard_progress_callback()
+        # further below so every shard's progress_callback invocations
+        # report this SAME total instead of resetting to each shard's own
+        # (much smaller) count.
+        grand_total = sum(len(v) for v in shard_commit_map.values())
 
         _original_collection_name = self.collection_name
         try:
@@ -712,6 +795,37 @@ class TemporalIndexer:
                         if not is_v2_structure(_shard_path):
                             write_structure_marker(_shard_path, model_slug)
 
+                collection_path = self.vector_store._get_collection_path(_shard_name)
+                # Bug #1407: the durable stale-lifecycle barrier requires a
+                # real filesystem Path (mirrors the isinstance(_shard_path,
+                # Path) guard already used above for the self-heal branch --
+                # a loosely-mocked vector_store test double may return a
+                # bare Mock here; production FilesystemVectorStore always
+                # returns a real Path).
+                _use_stale_barrier = isinstance(collection_path, Path)
+
+                # Bug #1407 Foundation: durable stale-lifecycle barrier.
+                # mark_stale() BEFORE any mutation (idempotent, no-op on a
+                # virgin shard -- is_stale() already defaults True there).
+                was_stale = False
+                if _use_stale_barrier:
+                    was_stale = hnsw_manager.is_stale(collection_path)
+                    hnsw_manager.mark_stale(collection_path)
+
+                    if was_stale and not already_reconciled:
+                        # Prior-crash shard -- may contain strays whose
+                        # vector file directory (derived from the quantized
+                        # embedding, not the point id) differs from a
+                        # re-embed's directory. Delete them BEFORE rebuild
+                        # so a blind rebuild_from_vectors() cannot bake in a
+                        # permanent duplicate.
+                        reconcile_shard(
+                            self.vector_store,
+                            _shard_name,
+                            shard_commit_map[_shard_name],
+                            embedder_name,
+                        )
+
                 # Initialize incremental HNSW tracking for this shard
                 self.vector_store.begin_indexing(_shard_name)
 
@@ -726,8 +840,8 @@ class TemporalIndexer:
                     grand_total=grand_total,
                 )
                 # reconcile=True: `commits` was already computed by the
-                # caller via reconcile_temporal_index -- skip the (per-shard
-                # base-tracker) redundant re-filter inside _index_shard_commits.
+                # caller -- skip the (per-shard base-tracker) redundant
+                # re-filter inside _index_shard_commits.
                 _c, _b, _v = self._index_shard_commits(
                     _shard_commits,
                     vector_manager,
@@ -738,40 +852,44 @@ class TemporalIndexer:
                 blobs_processed += _b
                 vectors_created += _v
 
-                # Rebuild HNSW for this shard after processing completes
-                self.vector_store.end_indexing(collection_name=_shard_name)
+                if _use_stale_barrier:
+                    # Finalize: was_stale -> forced full rebuild (never
+                    # append onto a possibly-inconsistent index); else ->
+                    # normal incremental-or-full end_indexing.
+                    # clear_stale=False on BOTH -- staleness is preserved
+                    # until the explicit clear_stale() call below succeeds
+                    # (Amendment 2).
+                    self.vector_store.end_indexing(
+                        collection_name=_shard_name,
+                        force_full_rebuild=was_stale,
+                        clear_stale=False,
+                    )
+                    hnsw_manager.clear_stale(collection_path)
+                else:
+                    # Legacy path (no durable barrier available -- see
+                    # _use_stale_barrier guard above).
+                    self.vector_store.end_indexing(collection_name=_shard_name)
                 self._processed_shards.append(_shard_name)
         finally:
             self.collection_name = _original_collection_name
 
         return commits_processed, blobs_processed, vectors_created
 
-    def _load_last_indexed_commit(self) -> Optional[str]:
-        """Load last indexed commit from temporal_meta.json.
-
-        Returns:
-            Last indexed commit hash if available, None otherwise.
-        """
-        metadata_path = self.temporal_dir / "temporal_meta.json"
-        if not metadata_path.exists():
-            return None
-
-        try:
-            with open(metadata_path) as f:
-                metadata = json.load(f)
-            last_commit = metadata.get("last_commit")
-            return last_commit if isinstance(last_commit, str) else None
-        except (json.JSONDecodeError, IOError):
-            logger.warning(f"Failed to load temporal metadata from {metadata_path}")
-            return None
-
     def _get_commit_history(
         self, all_branches: bool, max_commits: Optional[int], since_date: Optional[str]
     ) -> List[CommitInfo]:
-        """Get commit history from git."""
-        # Load last indexed commit for incremental indexing
-        last_indexed_commit = self._load_last_indexed_commit()
+        """Get commit history from git.
 
+        Bug #1407 Phase 2 (also resolves #1411): enumerates the FULL
+        reachable commit universe -- NO last_commit..HEAD cursor narrowing.
+        The prior cursor (backed by temporal_meta.json's single global
+        last_commit field) was not per-embedder: if one embedder was
+        temporarily unavailable while another completed and advanced the
+        shared cursor, the unavailable embedder could permanently miss the
+        commits indexed in that window. Per-embedder skip logic now lives
+        entirely in temporal_incremental_gate.py's set-difference against
+        each embedder's own completed_commits.
+        """
         # Use null byte delimiters to prevent pipe characters in commit messages from breaking parsing
         # Use %B (full body) instead of %s (subject only) to capture multi-paragraph commit messages
         # Use record separator (%x1e) at end of each record to enable correct parsing with multi-line messages
@@ -781,14 +899,6 @@ class TemporalIndexer:
             "--format=%H%x00%at%x00%an%x00%ae%x00%B%x00%P%x1e",
             "--reverse",
         ]
-
-        # If we have a last indexed commit, only get commits after it
-        if last_indexed_commit:
-            # Use commit range to get only new commits
-            cmd.insert(2, f"{last_indexed_commit}..HEAD")
-            logger.info(
-                f"Incremental indexing: Getting commits after {last_indexed_commit[:8]}"
-            )
 
         if all_branches:
             cmd.append("--all")

@@ -20,7 +20,9 @@ MAX_PAGE_SIZE constant is expected at:
   code_indexer.server.repositories.background_jobs.MAX_PAGE_SIZE == 50
 """
 
+import logging
 import threading
+import time
 from typing import Any, Dict
 from unittest.mock import patch, MagicMock
 import pytest
@@ -39,13 +41,30 @@ from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 MAX_PAGE_SIZE = 50  # matches the expected constant in production code
 
 
-def _make_manager(tmp_path) -> BackgroundJobManager:
+def _make_manager(tmp_path, request) -> BackgroundJobManager:
+    """Create a schema-initialized, auto-shutdown BackgroundJobManager.
+
+    Bug #1447: every manager built here spawns real daemon worker-pool
+    threads at __init__ time (Bug #1063 Part 3) and, since use_sqlite=True,
+    needs its background_jobs table to exist BEFORE any submitted job can
+    terminate -- otherwise the terminal-status persist fails with
+    "no such table: background_jobs" (fail-open logging.error in
+    BackgroundJobManager._persist_job_to_sqlite). Before this fix, neither
+    the schema was initialized nor was the manager ever shut down, leaking
+    live daemon threads and log noise into whatever unrelated test ran next
+    in the same single-process pytest chunk (GitHub issue #1447).
+    """
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+
     db_path = str(tmp_path / "jobs.db")
-    return BackgroundJobManager(
+    DatabaseSchema(db_path).initialize_database()
+    mgr = BackgroundJobManager(
         background_jobs_config=BackgroundJobsConfig(max_concurrent_background_jobs=2),
         db_path=db_path,
         use_sqlite=True,
     )
+    request.addfinalizer(mgr.shutdown)
+    return mgr
 
 
 # ===========================================================================
@@ -77,12 +96,12 @@ class TestMaxPageSizeConstant:
 class TestListJobsPageSizeCap:
     """list_jobs() must silently cap page_size at MAX_PAGE_SIZE."""
 
-    def test_page_size_above_50_is_capped(self, tmp_path):
+    def test_page_size_above_50_is_capped(self, tmp_path, request):
         """
         Requesting page_size=200 must return at most 50 results.
         The DB query must have been issued with LIMIT=50 not LIMIT=200.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
@@ -111,9 +130,9 @@ class TestListJobsPageSizeCap:
             f"DB queries used limits: {captured_limits}"
         )
 
-    def test_page_size_at_50_is_accepted(self, tmp_path):
+    def test_page_size_at_50_is_accepted(self, tmp_path, request):
         """Requesting exactly 50 must be allowed unchanged."""
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         result = mgr.list_jobs(
             username="admin",
@@ -124,9 +143,9 @@ class TestListJobsPageSizeCap:
 
         assert result.get("limit", 0) == 50
 
-    def test_page_size_below_50_is_accepted(self, tmp_path):
+    def test_page_size_below_50_is_accepted(self, tmp_path, request):
         """Requesting fewer than 50 results must be allowed."""
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         result = mgr.list_jobs(
             username="admin",
@@ -146,13 +165,13 @@ class TestListJobsPageSizeCap:
 class TestListJobsNoBulkFetch:
     """list_jobs() must not issue a DB query with limit=10000."""
 
-    def test_db_limit_matches_requested_page_size(self, tmp_path):
+    def test_db_limit_matches_requested_page_size(self, tmp_path, request):
         """
         When page_size=20 is requested, the DB query limit must be close to 20,
         NOT the old 10000 sentinel.  The exact limit may be slightly higher
         (e.g. page_size + len(active_jobs)) but must be < 10000.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
@@ -192,12 +211,12 @@ class TestListJobsNoBulkFetch:
 class TestGetJobsForDisplayBoundedFetch:
     """get_jobs_for_display() must pass limit+offset to the DB, not fetch all rows."""
 
-    def test_list_jobs_filtered_receives_limit(self, tmp_path):
+    def test_list_jobs_filtered_receives_limit(self, tmp_path, request):
         """
         get_jobs_for_display(page=1, page_size=10) must call list_jobs_filtered
         with limit=10 (or close to it), not with limit=None or limit=10000.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
@@ -235,13 +254,13 @@ class TestGetJobsForDisplayBoundedFetch:
                 f"Expected page_size-bounded query."
             )
 
-    def test_total_count_reflects_full_set_not_page(self, tmp_path):
+    def test_total_count_reflects_full_set_not_page(self, tmp_path, request):
         """
         total_count returned by get_jobs_for_display must reflect the full
         matching row count (from COUNT(*)), not just the rows on this page.
         This enables the "N more jobs" footer.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
@@ -295,9 +314,9 @@ class TestGetJobsForDisplayBoundedFetch:
             f"The 'N more jobs' footer needs the full count."
         )
 
-    def test_page_size_capped_at_50_in_display(self, tmp_path):
+    def test_page_size_capped_at_50_in_display(self, tmp_path, request):
         """get_jobs_for_display with page_size > 50 must silently cap at 50."""
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
 
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
@@ -371,7 +390,7 @@ class TestPaginationCorrectness:
             "actor_username": "admin",
         }
 
-    def test_no_active_job_duplication_across_pages(self, tmp_path):
+    def test_no_active_job_duplication_across_pages(self, tmp_path, request):
         """
         With 3 active (RUNNING) jobs + 120 historical jobs and page_size=50:
         - page 1: active-0, active-1, active-2, hist-000..hist-046 (50 total)
@@ -379,14 +398,22 @@ class TestPaginationCorrectness:
         - page 3: hist-097..hist-119 (23 total, NO active jobs)
         Active jobs must appear exactly once across all pages (page 1 only).
         """
+        # Bug #1447: schema must exist before jobs submitted below can
+        # terminate, and the manager must be shut down so its worker
+        # threads don't leak into later tests in this single-process chunk.
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = str(tmp_path / "jobs.db")
+        DatabaseSchema(db_path).initialize_database()
         # Use a small pool (3 workers = 3 concurrent running jobs)
         mgr = BackgroundJobManager(
             background_jobs_config=BackgroundJobsConfig(
                 max_concurrent_background_jobs=3
             ),
-            db_path=str(tmp_path / "jobs.db"),
+            db_path=db_path,
             use_sqlite=True,
         )
+        request.addfinalizer(mgr.shutdown)
 
         # Build 120 historical rows for the mock
         n_historical = 120
@@ -496,18 +523,31 @@ class TestPaginationCorrectness:
             f"Historical jobs appeared on multiple pages: {duplicated_hist}"
         )
 
-    def test_total_count_correct_with_active_and_historical(self, tmp_path):
+    def test_total_count_correct_with_active_and_historical(self, tmp_path, request):
         """
         total_count must equal active_count + db_total (from COUNT(*)),
         not just the rows returned on this page.
         """
+        # Bug #1447: this exact test (schema never initialized + manager
+        # never shut down) was confirmed, via a live reproduction run, to be
+        # the source of the "no such table: background_jobs" log lines and
+        # the leaked bgm-worker-*/bgm-temporal-worker-* daemon threads that
+        # made the unrelated sibling test
+        # test_inline_repos_sync_job_params.py::test_submit_job_without_params_kwarg_succeeds
+        # intermittently observe its own job stuck at "pending" under
+        # full-chunk load (GitHub issue #1447).
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        db_path = str(tmp_path / "jobs.db")
+        DatabaseSchema(db_path).initialize_database()
         mgr = BackgroundJobManager(
             background_jobs_config=BackgroundJobsConfig(
                 max_concurrent_background_jobs=3
             ),
-            db_path=str(tmp_path / "jobs.db"),
+            db_path=db_path,
             use_sqlite=True,
         )
+        request.addfinalizer(mgr.shutdown)
 
         # Submit 3 blocking jobs to have RUNNING active jobs
         barriers = []
@@ -865,11 +905,11 @@ class TestListDisplayJobIds:
     _sqlite_backend.list_job_ids_filtered() with the correct arguments.
     """
 
-    def test_delegates_to_backend(self, tmp_path):
+    def test_delegates_to_backend(self, tmp_path, request):
         """list_display_job_ids must call list_job_ids_filtered on the backend."""
         from unittest.mock import patch
 
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
 
@@ -889,11 +929,11 @@ class TestListDisplayJobIds:
         mock_fn.assert_called_once()
         assert result == expected_ids
 
-    def test_passes_filters_correctly(self, tmp_path):
+    def test_passes_filters_correctly(self, tmp_path, request):
         """Filters must be forwarded verbatim to list_job_ids_filtered."""
         from unittest.mock import patch
 
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, request)
         if mgr._sqlite_backend is None:
             pytest.skip("No SQLite backend available")
 
@@ -921,7 +961,7 @@ class TestListDisplayJobIds:
         assert kw.get("search_text") == "needle"
         assert kw.get("username") == "bob"
 
-    def test_returns_empty_set_when_no_backend(self, tmp_path):
+    def test_returns_empty_set_when_no_backend(self, tmp_path, request):
         """When no backend is present, must return empty set (not raise)."""
         mgr = BackgroundJobManager(
             background_jobs_config=BackgroundJobsConfig(
@@ -930,6 +970,7 @@ class TestListDisplayJobIds:
             db_path=str(tmp_path / "jobs.db"),
             use_sqlite=False,
         )
+        request.addfinalizer(mgr.shutdown)
         result = mgr.list_display_job_ids(
             status_filter=None, type_filter=None, search_text=None, username=None
         )
@@ -1097,4 +1138,152 @@ class TestGetAllJobsSingleQueryPerfGuard:
         assert all_seen.count("dep-map-only") == 1, (
             f"dep-map-only appeared {all_seen.count('dep-map-only')} times; "
             f"must appear exactly once (as tracker extra)."
+        )
+
+
+# ===========================================================================
+# Bug #1447: this file's own BackgroundJobManager instances must not leak
+# live daemon worker threads or produce "no such table: background_jobs"
+# persist errors -- both were confirmed (via a real combined chunk run) to
+# pollute later, unrelated tests in the same single-process pytest chunk
+# (tests/unit/server/web/ + repositories/ + routers/ run together with no
+# xdist isolation in server-fast-automation.sh).
+# ===========================================================================
+
+
+class TestManagerLifecycleAndSchemaHygiene:
+    """Bug #1447 regression: every manager built by _make_manager() must have
+    its SQLite schema initialized before use AND must be shut down via a
+    registered pytest finalizer, so its daemon worker-pool threads never
+    outlive this file's own tests.
+    """
+
+    def test_make_manager_helper_initializes_schema_and_avoids_no_such_table(
+        self, request, tmp_path, caplog
+    ):
+        """Fix verification: _make_manager() initializes the schema before
+        constructing the manager, so a submitted job's terminal persist
+        succeeds -- zero 'no such table' errors logged.
+        """
+        mgr = _make_manager(tmp_path, request)
+
+        with caplog.at_level(logging.ERROR):
+            job_id = mgr.submit_job(
+                operation_type="test_op",
+                func=lambda: {"success": True},
+                submitter_username="admin",
+                is_admin=True,
+            )
+            # Use the public get_job_status() API (not raw mgr.jobs access):
+            # a successful terminal persist evicts the job from in-memory
+            # mgr.jobs, and get_job_status() correctly falls back to reading
+            # the SQLite row in that case.
+            deadline = time.monotonic() + 5.0
+            status: Any = None
+            while time.monotonic() < deadline:
+                status = mgr.get_job_status(job_id, username="admin", is_admin=True)
+                if status is not None and status.get("status") == "completed":
+                    break
+                time.sleep(0.05)
+
+        assert status is not None and status.get("status") == "completed", (
+            f"Job should reach 'completed'; got status={status}"
+        )
+        assert not any("no such table" in r.getMessage() for r in caplog.records), (
+            "Fixed _make_manager() must never log a 'no such table' error"
+        )
+
+    def test_uninitialized_schema_manager_logs_no_such_table_on_terminal_persist(
+        self, tmp_path, caplog
+    ):
+        """Characterization: reproduces the exact log line from GitHub issue
+        #1447 ("Failed to persist job ... to SQLite: no such table:
+        background_jobs").
+
+        A BackgroundJobManager(use_sqlite=True, ...) whose schema was never
+        initialized -- the pattern this file used everywhere before the
+        Bug #1447 fix -- logs exactly that error when a submitted job
+        completes and the pool worker tries to persist its terminal status.
+        This proves the root cause: a missing
+        DatabaseSchema(...).initialize_database() call in THIS test file,
+        not a shared/global persistence path reachable from an unrelated
+        BackgroundJobManager(use_sqlite=False) instance.
+        """
+        mgr = BackgroundJobManager(
+            background_jobs_config=BackgroundJobsConfig(
+                max_concurrent_background_jobs=1
+            ),
+            db_path=str(tmp_path / "uninitialized.db"),
+            use_sqlite=True,
+        )
+        try:
+            with caplog.at_level(logging.ERROR):
+                mgr.submit_job(
+                    operation_type="test_op",
+                    func=lambda: {"success": True},
+                    submitter_username="admin",
+                    is_admin=True,
+                )
+                deadline = time.monotonic() + 5.0
+                found = False
+                while time.monotonic() < deadline:
+                    found = any(
+                        "no such table: background_jobs" in r.getMessage()
+                        for r in caplog.records
+                    )
+                    if found:
+                        break
+                    time.sleep(0.05)
+
+            assert found, (
+                "Expected the uninitialized-schema manager to log "
+                "'no such table: background_jobs' on terminal persist, "
+                "reproducing GitHub issue #1447's exact symptom."
+            )
+        finally:
+            mgr.shutdown()
+
+    def test_make_manager_helper_registers_shutdown_finalizer(self, request, tmp_path):
+        """Fix verification: _make_manager() registers request.addfinalizer
+        (mgr.shutdown), so its bgm-worker-*/bgm-temporal-worker-* daemon
+        threads are guaranteed to stop instead of leaking for the rest of
+        the pytest process (Bug #1447: this exact leak, across many
+        un-shutdown managers in this file, was the mechanism that starved
+        an unrelated sibling test's freshly submitted job of CPU/scheduling
+        time under full-chunk load).
+        """
+        registered_finalizers = []
+        original_addfinalizer = request.addfinalizer
+
+        def capturing_addfinalizer(func):
+            registered_finalizers.append(func)
+            return original_addfinalizer(func)
+
+        request.addfinalizer = capturing_addfinalizer
+        try:
+            mgr = _make_manager(tmp_path, request)
+        finally:
+            request.addfinalizer = original_addfinalizer
+
+        assert registered_finalizers, (
+            "_make_manager() must register a finalizer via request.addfinalizer"
+        )
+
+        marker = str(id(mgr))
+        alive_before = [
+            t for t in threading.enumerate() if marker in t.name and t.is_alive()
+        ]
+        assert alive_before, "Manager should have live worker threads before shutdown"
+
+        # Fire the captured finalizer(s) ourselves, simulating pytest's real
+        # end-of-test teardown running early.
+        for fn in registered_finalizers:
+            fn()
+
+        alive_after = [
+            t for t in threading.enumerate() if marker in t.name and t.is_alive()
+        ]
+        assert alive_after == [], (
+            f"Manager worker threads must all stop once the finalizer runs; "
+            f"still alive: {[t.name for t in alive_after]}"
         )

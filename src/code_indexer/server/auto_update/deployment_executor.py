@@ -1330,7 +1330,9 @@ class DeploymentExecutor:
         hnswlib IS importable (that is exactly the bug), so a plain import
         probe cannot detect drift. This probes for `check_integrity` and
         `repair_orphans` specifically, mirroring
-        `HNSWIndexManager._ensure_hnswlib_capability()`'s own check.
+        `HNSWIndexManager._hnswlib_has_fork_capability()`'s own check (Bug
+        #1415 renamed/repurposed the former raising
+        `_ensure_hnswlib_capability()` into this non-raising predicate).
 
         Args:
             python_path: Path to the Python interpreter to probe.
@@ -2278,6 +2280,145 @@ class DeploymentExecutor:
             return False
 
     # ------------------------------------------------------------------
+    # Issue #1440: self-heal Environment="PATH=..." on already-deployed
+    # cidx-auto-update.service files (predating the systemd unit template
+    # fix, which only benefits fresh installs).
+    # ------------------------------------------------------------------
+
+    def _inject_auto_update_path_env_into_content(
+        self, content: str, expected_line: str
+    ) -> str:
+        """Build new auto-update service file content with PATH env injected.
+
+        Strips any stale Environment="PATH=..." entries -- a marker-specific
+        prefix match, NOT a bare "PATH" substring check, since a line such as
+        Environment="CIDX_SERVER_REPO_PATH=..." also contains the substring
+        "PATH" and must be preserved untouched -- then inserts expected_line
+        immediately after the last existing Environment= line. When no
+        Environment= lines are present, inserts after the [Service] header.
+
+        Args:
+            content: Current service file content.
+            expected_line: The full Environment="PATH=..." line to add.
+
+        Returns:
+            Updated service file content string (newline-terminated).
+        """
+        filtered = [
+            line
+            for line in content.splitlines()
+            if not line.strip().startswith('Environment="PATH=')
+        ]
+
+        last_env_index = -1
+        for i, line in enumerate(filtered):
+            if line.strip().startswith("Environment="):
+                last_env_index = i
+
+        if last_env_index >= 0:
+            insert_after = last_env_index
+        else:
+            # No Environment= lines: insert after [Service] header
+            insert_after = next(
+                (i for i, line in enumerate(filtered) if line.strip() == "[Service]"),
+                len(filtered) - 1,
+            )
+
+        new_lines = []
+        for i, line in enumerate(filtered):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(expected_line)
+
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_auto_update_service_has_cli_path(self) -> bool:
+        """Self-heal cidx-auto-update.service missing Environment="PATH=...".
+
+        Issue #1440: the systemd unit TEMPLATE was fixed to include
+        Environment="PATH={HOME}/.local/bin:..." (needed for npm/node/Codex
+        CLI discovery inside the auto-update subprocess), but that only
+        benefits FRESH installs. Already-deployed hosts (confirmed: staging's
+        3 cluster nodes) predate the fix and have ZERO Environment="PATH="
+        lines at all. This self-heals those hosts on the next auto-update
+        deploy cycle without requiring manual operator intervention.
+
+        Scope decision: only the "PATH line entirely absent" case is
+        actively repaired (the confirmed real-world state). A line that
+        already contains ".local/bin" in some differently-ordered form is
+        treated as already-correct (no-op) purely to avoid duplicating or
+        corrupting an existing PATH line -- a dedicated repair path for a
+        partial/malformed PATH is explicitly out of scope.
+
+        Returns:
+            True if config is correct or was updated, False on error.
+        """
+        try:
+            auto_update_service = (
+                SYSTEMD_UNIT_DIR / f"{AUTO_UPDATE_SERVICE_NAME}.service"
+            )
+            current_content = self._read_service_file(auto_update_service)
+            if current_content is None:
+                return False
+
+            service_user = self._extract_service_user(current_content)
+            if service_user:
+                user_home = Path(pwd.getpwnam(service_user).pw_dir)
+            else:
+                # A oneshot with no explicit User= runs as root under systemd.
+                user_home = Path(pwd.getpwnam("root").pw_dir)
+
+            expected_line = (
+                f'Environment="PATH={user_home}/.local/bin:/usr/local/sbin:'
+                f'/usr/local/bin:/usr/sbin:/usr/bin"'
+            )
+
+            if expected_line in current_content:
+                logger.debug(
+                    "Auto-update service PATH already correctly configured",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Defensive secondary check: a differently-ordered but
+            # functionally-equivalent PATH line (already contains .local/bin)
+            # is treated as already-correct to avoid duplicating/competing
+            # PATH entries.
+            if any(
+                line.strip().startswith('Environment="PATH=') and ".local/bin" in line
+                for line in current_content.splitlines()
+            ):
+                logger.debug(
+                    "Auto-update service PATH already contains .local/bin "
+                    "in a differently-ordered form; leaving as-is",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            logger.info(
+                f"Injecting {expected_line} into auto-update service",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._inject_auto_update_path_env_into_content(
+                current_content, expected_line
+            )
+            if not self._write_service_file_and_reload(
+                auto_update_service, new_content
+            ):
+                return False
+
+            if not self._restart_auto_update_service():
+                return False
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Error ensuring auto-update PATH: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # Bug #897 mitigation 2: MALLOC_ARENA_MAX=2 in the server unit file
     # ------------------------------------------------------------------
 
@@ -2400,6 +2541,111 @@ class DeploymentExecutor:
             )
             return False
 
+    def _build_pip_install_cmd(self, python_path: str, tmpdir: str) -> list:
+        """Build a `pip install -e .[cluster]` command for the given interpreter.
+
+        Bug #1442: factored out of `pip_install()` so `_ensure_cli_dependencies_
+        synced()` can target a wholly different interpreter (the CLI's
+        system-wide Python, resolved via `_get_cli_python_interpreter()`)
+        while reusing the IDENTICAL sudo / --break-system-packages decision
+        logic, instead of duplicating it.
+
+        Bug #1450: requests the `cluster` extras group (`.[cluster]`)
+        instead of a bare `.`. `psycopg[binary]`/`psycopg-pool` are declared
+        under `[project.optional-dependencies] cluster` in pyproject.toml --
+        NOT the base `dependencies` list -- so a plain `-e .` never installs
+        them. `server/storage/postgres/connection_pool.py` does an
+        unconditional module-level `import psycopg` regardless of
+        storage_mode (a deliberate, documented invariant), and it is
+        transitively imported during `cidx index` execution. Since this
+        helper backs BOTH `pip_install()` (server's pipx venv) and
+        `_ensure_cli_dependencies_synced()` (CLI's system-Python
+        interpreter), the CLI interpreter never received psycopg --
+        confirmed live in production (recurring `cidx-meta-global`/
+        `k8s-wildfly-sandboxes-*-global` refresh failures) and reproduced on
+        a solo staging VM via the real automated deploy mechanism:
+        `ModuleNotFoundError: No module named 'psycopg'`. `.[cluster]` is a
+        single argv token (no shell involved -- passed directly to
+        `subprocess.run` as a list), so no quoting/escaping concerns.
+
+        Bug #1245: Use sudo only for system installs. For a user-install
+        layout (code-indexer in ~/.local), sudo would target /root/.local —
+        the wrong site-packages and read-only on immutable hosts.
+        Bug #1234: Probe with use_sudo matching the install so we test the
+        SAME pip binary (system pip for sudo installs, user pip for user
+        installs).
+        Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+        sudo's env_reset. For user installs, the environment is inherited
+        as-is.
+
+        Args:
+            python_path: Interpreter to install into.
+            tmpdir: Writable temp dir to pass through as TMPDIR (sudo path only).
+
+        Returns:
+            The full pip install command as a list of argv tokens.
+        """
+        use_sudo = not self._is_user_install(python_path)
+        pip_cmd = (
+            [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
+            if use_sudo
+            else [python_path, "-m", "pip", "install"]
+        )
+        if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
+            pip_cmd.append("--break-system-packages")
+        pip_cmd.extend(["-e", ".[cluster]"])
+        return pip_cmd
+
+    def _run_pip_install_cmd(self, pip_cmd: list) -> Any:
+        """Run a pip install command built by `_build_pip_install_cmd()`.
+
+        Bug #1442: factored out of `pip_install()` alongside `_build_pip_
+        install_cmd()` so `_ensure_cli_dependencies_synced()` reuses the same
+        belt-and-suspenders retry (if pip rejects --break-system-packages,
+        retry once without it) instead of duplicating it.
+
+        Args:
+            pip_cmd: Command built by `_build_pip_install_cmd()`.
+
+        Returns:
+            The subprocess.CompletedProcess of the final attempt (retried
+            attempt if the initial one was rejected for --break-system-packages).
+        """
+        result = subprocess.run(
+            pip_cmd,
+            cwd=self.repo_path,
+            capture_output=True,
+            text=True,
+        )
+
+        # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+        if (
+            result.returncode != 0
+            and "--break-system-packages" in pip_cmd
+            and "no such option" in result.stderr
+        ):
+            logger.warning(
+                "pip install rejected --break-system-packages; retrying without flag",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+            result = subprocess.run(
+                retry_cmd,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+        return result
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2411,57 +2657,9 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
-            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
-            # a writable temp dir under systemd PrivateTmp=yes.
             tmpdir = self._deploy_tmpdir()
-            # Bug #1245: Use sudo only for system installs. For a user-install layout
-            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
-            # site-packages and read-only on immutable hosts.
-            use_sudo = not self._is_user_install(python_path)
-            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
-            # pip binary (system pip for sudo installs, user pip for user installs).
-            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
-            # sudo's env_reset. For user installs, the environment is inherited as-is.
-            pip_cmd = (
-                [
-                    "sudo",
-                    "env",
-                    f"TMPDIR={tmpdir}",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                ]
-                if use_sudo
-                else [python_path, "-m", "pip", "install"]
-            )
-            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
-                pip_cmd.append("--break-system-packages")
-            pip_cmd.extend(["-e", "."])
-            result = subprocess.run(
-                pip_cmd,
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-            )
-
-            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
-            if (
-                result.returncode != 0
-                and "--break-system-packages" in pip_cmd
-                and "no such option" in result.stderr
-            ):
-                logger.warning(
-                    "pip install rejected --break-system-packages; retrying without flag",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
-                result = subprocess.run(
-                    retry_cmd,
-                    cwd=self.repo_path,
-                    capture_output=True,
-                    text=True,
-                )
+            pip_cmd = self._build_pip_install_cmd(python_path, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
 
             if result.returncode != 0:
                 logger.error(
@@ -2482,6 +2680,74 @@ class DeploymentExecutor:
             logger.exception(
                 f"Pip install exception: {e}",
                 extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _ensure_cli_dependencies_synced(self) -> bool:
+        """Ensure the CLI's system-wide Python env has ALL current dependencies.
+
+        Bug #1442: `pip_install()` runs `pip install -e .` on every deploy
+        cycle, but ONLY against `_get_server_python()` (the server's pipx
+        venv). The CLI's SEPARATE system-wide Python environment (resolved
+        via `_get_cli_python_interpreter()`, Bug #1392) is an editable
+        install against this SAME live repo checkout, but was never re-synced
+        after its one-time `cidx-first-boot.sh` install -- so its package
+        metadata drifts to whatever was installed long ago, missing any
+        dependency added since (confirmed on production via live
+        ModuleNotFoundError reproduction for openpyxl, PIL, pyotp,
+        frontmatter, qrcode, tree_sitter_languages, langfuse).
+
+        Orchestration: resolve CLI interpreter (None -> nothing to sync yet,
+        mirrors `_ensure_cli_hnswlib_capability()`'s early return) -> build
+        and run the SAME `pip install -e .` command shape `pip_install()`
+        uses (via the shared `_build_pip_install_cmd()`/`_run_pip_install_
+        cmd()` helpers) -> loud WARNING on failure.
+
+        Returns:
+            True if synced or nothing to sync yet; False if the pip install
+            genuinely failed or raised (non-fatal to the overall deploy --
+            never raises).
+        """
+        cli_python = self._get_cli_python_interpreter()
+        if cli_python is None:
+            logger.info(
+                "No system-wide 'cidx' CLI entrypoint found on PATH -- "
+                "skipping CLI dependency sync (nothing to sync yet)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        try:
+            tmpdir = self._deploy_tmpdir()
+            pip_cmd = self._build_pip_install_cmd(cli_python, tmpdir)
+            result = self._run_pip_install_cmd(pip_cmd)
+
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-211",
+                        f"Failed to sync CLI Python environment ({cli_python}) "
+                        f"dependencies via pip install -e .: {result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Successfully synced CLI Python environment ({cli_python}) "
+                "dependencies via pip install -e .",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    f"Exception while syncing CLI Python environment "
+                    f"({cli_python}) dependencies: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             )
             return False
 
@@ -3120,6 +3386,121 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-028",
                     f"Error configuring git safe.directory: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _ensure_git_safe_directory_wildcard(self) -> bool:
+        """Ensure a blanket git safe.directory='*' grant is configured for the
+        service user (Bug #1466).
+
+        Unlike _ensure_git_safe_directory() above (which grants ONE specific
+        path -- the cidx-server source checkout itself), this grants a
+        wildcard so EVERY present and future repository the service account's
+        git operations touch is covered, regardless of directory. This closes
+        the gap left by _ensure_git_safe_directory(): CoW-daemon-owned golden
+        repos / activated repos (e.g. on a CoW-mounted storage path) are
+        typically owned by a different OS user than the service account
+        (code-indexer), which trips git's "dubious ownership" check on every
+        git subprocess invocation that touches them -- not just the one repo
+        _ensure_git_safe_directory() already covers.
+
+        Returns:
+            True if config is correct or was updated or not needed, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-215",
+                        f"Service file not found: {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True  # Not a fatal error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Extract User from service file
+            service_user = self._extract_service_user(content)
+
+            # If no User= line, skip (service runs as current user)
+            if not service_user:
+                logger.debug(
+                    "No User= line in service file, skipping wildcard git "
+                    "safe.directory config",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Check if the wildcard is already configured
+            check_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--get-all",
+                    "safe.directory",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if check_result.returncode == 0:
+                configured_paths = check_result.stdout.strip().split("\n")
+                if "*" in configured_paths:
+                    logger.debug(
+                        f"Git safe.directory wildcard already configured for "
+                        f"{service_user}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Add the wildcard safe.directory configuration
+            add_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--add",
+                    "safe.directory",
+                    "*",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if add_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-216",
+                        f"Failed to add git safe.directory wildcard: "
+                        f"{add_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Added git safe.directory wildcard for {service_user}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-217",
+                    f"Error configuring git safe.directory wildcard: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -3849,6 +4230,31 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 1.8 (Bug #1442): Ensure the CLI's SEPARATE system-wide Python
+        # environment has ALL current dependencies, not just hnswlib. Step 2
+        # below (pip_install()) only ever targets _get_server_python() (the
+        # server's own pipx venv) -- the CLI's system-wide interpreter is an
+        # editable install against this SAME live repo checkout, but was
+        # never re-synced after its one-time cidx-first-boot.sh install, so
+        # it drifts to whatever was installed long ago (confirmed on
+        # production via live ModuleNotFoundError reproduction for openpyxl,
+        # PIL, pyotp, frontmatter, qrcode, tree_sitter_languages, langfuse).
+        #
+        # Non-fatal (same rationale as Step 1.7): this targets a wholly
+        # INDEPENDENT Python environment from the one cidx-server itself
+        # runs under, so a failure here must not block the server's own
+        # restart/config steps, which are unaffected by it.
+        if not self._ensure_cli_dependencies_synced():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-211",
+                    "CLI system-wide dependency sync failed -- indexing "
+                    "subprocesses may still fail with ModuleNotFoundError for "
+                    "dependencies added since the CLI's last install.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 2: Pip install
         if not self.pip_install():
             logger.error(
@@ -3875,6 +4281,12 @@ class DeploymentExecutor:
         # Step 5: Ensure git safe.directory configured
         self._ensure_git_safe_directory()
 
+        # Step 5.5: Bug #1466 - Ensure blanket git safe.directory='*' wildcard
+        # configured for the service account, covering CoW-daemon-owned
+        # golden-repos/activated-repos (owned by a different OS user than the
+        # service account) regardless of which directory they live in.
+        self._ensure_git_safe_directory_wildcard()
+
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
 
@@ -3887,6 +4299,20 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-058",
                     "CIDX_DATA_DIR could not be verified/injected — "
                     "restart signal and redeploy marker paths may diverge",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.55: Issue #1440 - Self-heal auto-updater service missing
+        # Environment="PATH=..." (breaks npm/node discovery for already-deployed
+        # hosts predating the #1440 template fix; fresh installs get it from
+        # the template, this heals already-deployed units).
+        if not self._ensure_auto_update_service_has_cli_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-210",
+                    "Auto-updater PATH could not be verified/injected — "
+                    "npm/node discovery may fail in auto-update subprocess",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -5083,40 +5509,15 @@ class DeploymentExecutor:
             link_path = _cidx_data_dir / "data" / "activated-repos"
 
             if link_path.is_symlink():
-                current_target = os.readlink(str(link_path))
-                if current_target == str(target):
-                    logger.debug(
-                        "Bug #1052: activated-repos symlink already correct: %s -> %s",
-                        link_path,
-                        target,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return True
-                logger.warning(
-                    "Bug #1052: activated-repos symlink points to %s but expected %s "
-                    "— manual review needed",
-                    current_target,
-                    target,
-                    extra={"correlation_id": get_correlation_id()},
+                return self._reconcile_existing_activated_repos_symlink(
+                    link_path, target
                 )
-                return True
 
             if link_path.exists():
-                # Real directory — do NOT move user data from the auto-updater.
-                logger.warning(
-                    "Bug #1052: activated-repos exists as real directory with content; "
-                    "manual migration required to enable CoW activation. "
-                    "Run: sudo systemctl stop cidx-server && "
-                    "mv %s %s.legacy.bug1052 && "
-                    "mkdir -p %s && "
-                    "ln -s %s %s && "
-                    "sudo systemctl start cidx-server",
-                    link_path,
-                    link_path,
-                    target,
-                    target,
-                    link_path,
-                    extra={"correlation_id": get_correlation_id()},
+                # Bug #1463: real directory with content -- safe, idempotent
+                # migration (never a silent-forever WARNING loop).
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1052"
                 )
                 return True
 
@@ -5296,22 +5697,24 @@ class DeploymentExecutor:
 
     @staticmethod
     def _resolve_golden_repos_symlink_target(cow_cfg: Any) -> Path:
-        """Bug #1337: node-aware golden-repos symlink target.
+        """Bug #1337/#1464: golden-repos symlink target is always the NFS
+        mount_point form, matching the proven-correct activated-repos twin
+        (_ensure_activated_repos_symlink_for_cow_daemon's unconditional
+        ``Path(cow_cfg.mount_point) / "activated-repos"``).
 
-        Mirrors _resolve_daemon_storage_path's own co-located-daemon-host
-        detection (presence of the daemon's own config file at
-        COW_DAEMON_HOST_CONFIG_PATH — only readable on that node): use the
-        daemon-local form there (no bind-mount indirection needed); use the
-        mount_point form on every other (NFS-client) node. Uses safe
-        attribute access throughout — never raises on a malformed cow_cfg.
+        Bug #1464: this function used to special-case the co-located
+        CoW-daemon host (detected via COW_DAEMON_HOST_CONFIG_PATH) to use
+        cow_daemon.daemon_storage_path instead, on the theory that no
+        bind-mount indirection was needed there. That assumed the
+        code-indexer service account could locally traverse the daemon
+        operator's storage path — false on a real staging cluster node
+        (daemon_storage_path's parent was mode 0700, owned by a different
+        user), which broke golden-repo query serving and several startup
+        subsystems on that node. The special case is removed entirely; use
+        safe attribute access throughout — never raises on a malformed
+        cow_cfg.
         """
-        daemon_storage_path = (
-            getattr(cow_cfg, "daemon_storage_path", None) or ""
-        ).strip()
         mount_point = getattr(cow_cfg, "mount_point", None) or ""
-        is_daemon_host = COW_DAEMON_HOST_CONFIG_PATH.is_file()
-        if is_daemon_host and daemon_storage_path:
-            return Path(daemon_storage_path) / "golden-repos"
         return Path(mount_point) / "golden-repos"
 
     @staticmethod
@@ -5329,15 +5732,41 @@ class DeploymentExecutor:
             return False
 
     @staticmethod
-    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
-        """Bug #1337: an existing golden-repos symlink is already correct
-        (no-op) or points elsewhere (WARNING, never silently rewritten).
-        Returns False (non-fatal, logged) if the symlink cannot be read."""
+    def _reconcile_existing_cow_symlink(
+        link_path: Path, target: Path, *, bug_number: str, resource_name: str
+    ) -> bool:
+        """Shared self-heal core for both the golden-repos
+        (Bug #1337/#1464, ``resource_name="golden-repos"``) and
+        activated-repos (Bug #1052/#1464, ``resource_name="activated-repos"``)
+        CoW-daemon symlink reconcile paths: an existing symlink is already
+        correct (no-op) or is atomically SELF-HEALED to point at the
+        freshly-resolved target.
+
+        Bug #1464: golden-repos used to only WARN forever on a mismatch,
+        never repairing it; the activated-repos twin had the same gap. Since
+        target resolution is deterministic for both resources, any remaining
+        mismatch has no legitimate reason to persist and must self-heal on
+        the next deploy cycle instead of requiring manual intervention.
+
+        The repair ONLY ever re-points the symlink itself -- it never
+        touches, moves, or deletes the real directory data at either the
+        old or new target (on a real deployment both resolve to the exact
+        same underlying CoW storage, just via a different path form).
+        Re-pointing is atomic: a new symlink is created at a temp path in
+        the same parent directory, then rename()'d over link_path via
+        os.replace -- never delete-then-recreate, so there is no window
+        where link_path is missing.
+
+        Returns False (non-fatal, logged) if the symlink cannot be read or
+        the atomic repair itself fails.
+        """
         try:
             current_target = os.readlink(str(link_path))
         except OSError as e:
             logger.warning(
-                "Bug #1337: failed to read golden-repos symlink %s: %s",
+                "Bug #%s: failed to read %s symlink %s: %s",
+                bug_number,
+                resource_name,
                 link_path,
                 e,
                 extra={"correlation_id": get_correlation_id()},
@@ -5345,15 +5774,51 @@ class DeploymentExecutor:
             return False
         if current_target == str(target):
             logger.debug(
-                "Bug #1337: golden-repos symlink already correct: %s -> %s",
+                "Bug #%s: %s symlink already correct: %s -> %s",
+                bug_number,
+                resource_name,
                 link_path,
                 target,
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
-        logger.warning(
-            "Bug #1337: golden-repos symlink points to %s but expected %s "
-            "— manual review needed",
+
+        tmp_link = link_path.parent / f".{link_path.name}.tmp-relink-{os.getpid()}"
+        try:
+            if tmp_link.is_symlink() or tmp_link.exists():
+                tmp_link.unlink()
+            os.symlink(str(target), str(tmp_link))
+            os.replace(str(tmp_link), str(link_path))
+        except OSError as e:
+            try:
+                if tmp_link.is_symlink() or tmp_link.exists():
+                    tmp_link.unlink()
+            except OSError as cleanup_error:
+                # Best-effort cleanup of the temp symlink; link_path itself
+                # was never touched by a failed os.symlink/os.replace above,
+                # so this cleanup failure does not affect correctness --
+                # logged at debug so a stray tmp-relink file is still
+                # discoverable rather than silently discarded.
+                logger.debug(
+                    "Bug #1464: failed to clean up temp relink file %s: %s",
+                    tmp_link,
+                    cleanup_error,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-214",
+                    f"Bug #1464: failed to repair {resource_name} symlink "
+                    f"{link_path} from {current_target} to {target}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        logger.info(
+            "Bug #1464: repaired %s symlink %s: %s -> %s",
+            resource_name,
+            link_path,
             current_target,
             target,
             extra={"correlation_id": get_correlation_id()},
@@ -5361,22 +5826,117 @@ class DeploymentExecutor:
         return True
 
     @staticmethod
-    def _warn_golden_repos_real_dir_with_content(link_path: Path, target: Path) -> None:
-        """Bug #1337: golden-repos is a real directory WITH content — never
-        move production data unattended; log the manual migration steps."""
-        logger.warning(
-            "Bug #1337: golden-repos exists as real directory with content; "
-            "manual migration required to enable per-user CoW activation. "
-            "Run: sudo systemctl stop cidx-server && "
-            "mv %s %s.legacy.bug1337 && mkdir -p %s && ln -s %s %s && "
-            "sudo systemctl start cidx-server",
+    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
+        """Bug #1337/#1464: golden-repos self-heal. Thin wrapper over the
+        shared ``_reconcile_existing_cow_symlink`` core -- see that method's
+        docstring for the full self-heal rationale and atomicity guarantees.
+        """
+        return DeploymentExecutor._reconcile_existing_cow_symlink(
+            link_path, target, bug_number="1337", resource_name="golden-repos"
+        )
+
+    @staticmethod
+    def _reconcile_existing_activated_repos_symlink(
+        link_path: Path, target: Path
+    ) -> bool:
+        """Bug #1052/#1464: activated-repos self-heal -- the twin of
+        ``_reconcile_existing_golden_repos_symlink``, closing the parity gap
+        where this resource used to only WARN forever on a mismatch instead
+        of self-healing. Thin wrapper over the shared
+        ``_reconcile_existing_cow_symlink`` core -- see that method's
+        docstring for the full self-heal rationale and atomicity guarantees.
+        """
+        return DeploymentExecutor._reconcile_existing_cow_symlink(
+            link_path, target, bug_number="1052", resource_name="activated-repos"
+        )
+
+    @staticmethod
+    def _migrate_real_dir_to_cow_symlink(
+        link_path: Path, target: Path, bug_number: str
+    ) -> bool:
+        """Bug #1463: idempotently and safely migrate a REAL (non-empty)
+        local directory into a CoW-mount-backed symlink, performing exactly
+        the manual remediation the Bug #1337/#1052 startup WARNING already
+        instructs operators to run by hand: ``mv link_path
+        link_path.legacy.bug<N> && mkdir -p target && ln -s target
+        link_path``.
+
+        This is the fix for the exact staging-cluster regression (Bug
+        #1463): the earlier self-heal only WARNED on a real non-empty
+        directory and never migrated it, so already-deployed hosts holding
+        real golden-repo/activated-repo data re-detected the same gap on
+        every single auto-update cycle forever, with zero forward progress.
+
+        Never writes INTO *target* -- ``target.mkdir(parents=True,
+        exist_ok=True)`` is a no-op when target already has content (e.g.
+        another cluster node already migrated its own copy into the SAME
+        shared NFS/CoW-mount target), so pre-existing target content is
+        never at risk of being overwritten or merged (mirrors this
+        codebase's established collision convention in
+        ``_ensure_single_nfs_symlink``: pre-existing destination content
+        always wins, never overwritten). The local directory's real data is
+        preserved intact at the backup path -- no data loss, ever.
+
+        Fails LOUDLY (ERROR, zero mutation) rather than silently clobbering
+        when a ``.legacy.bug<N>`` backup already exists at the destination
+        (e.g. a prior partial/interrupted run) -- per this project's
+        Anti-Fallback principle, this must never produce a silent
+        half-migrated/ambiguous state. If the rename succeeds but the
+        subsequent symlink creation fails for any reason, the rename is
+        rolled back (legacy_path renamed back to link_path) before
+        returning, so a crash mid-migration never leaves link_path
+        missing/half-migrated -- either both steps land, or neither does.
+
+        Returns True once the local directory is safely relocated and the
+        symlink is created; False if the migration could not proceed
+        safely (backup collision, or a failed migration that was rolled
+        back) -- non-fatal to the caller, but a real problem that was
+        already logged loudly here.
+        """
+        legacy_path = link_path.parent / f"{link_path.name}.legacy.bug{bug_number}"
+        if legacy_path.exists():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-212",
+                    f"Bug #{bug_number}: cannot migrate {link_path} -- backup "
+                    f"path {legacy_path} already exists (prior partial run?); "
+                    f"refusing to overwrite. Resolve manually: inspect "
+                    f"{legacy_path}, then either remove it (if it is a stale "
+                    f"empty backup) or reconcile its contents with "
+                    f"{link_path} before retrying.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        target.mkdir(parents=True, exist_ok=True)
+        link_path.rename(legacy_path)
+        try:
+            link_path.symlink_to(target)
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-213",
+                    f"Bug #{bug_number}: symlink creation failed after "
+                    f"backing up {link_path} to {legacy_path}: {e}. Rolling "
+                    f"back the rename so no partial state is left behind.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            legacy_path.rename(link_path)
+            return False
+
+        logger.info(
+            "Bug #%s: migrated real directory %s to backup %s and created "
+            "symlink %s -> %s",
+            bug_number,
             link_path,
+            legacy_path,
             link_path,
             target,
-            target,
-            link_path,
             extra={"correlation_id": get_correlation_id()},
         )
+        return True
 
     @staticmethod
     def _create_golden_repos_symlink(link_path: Path, target: Path) -> None:
@@ -5435,7 +5995,9 @@ class DeploymentExecutor:
                 return self._reconcile_existing_golden_repos_symlink(link_path, target)
 
             if link_path.exists() and not self._remove_if_empty_dir(link_path):
-                self._warn_golden_repos_real_dir_with_content(link_path, target)
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1337"
+                )
                 return True
 
             self._create_golden_repos_symlink(link_path, target)

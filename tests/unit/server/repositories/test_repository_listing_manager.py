@@ -76,7 +76,21 @@ class TestRepositoryListingManager:
         ]
 
         for repo_data in test_repos:
+            # Dual-write to match production `add_golden_repo` convention:
+            # `list_golden_repos()` reads exclusively from `_sqlite_backend`
+            # (single source of truth since Bug #176), so populating only
+            # the in-memory `golden_repos` cache leaves the backend empty
+            # and `list_golden_repos()` returns nothing.
             manager.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)  # type: ignore[arg-type]
+            manager._sqlite_backend.add_repo(
+                alias=repo_data["alias"],
+                repo_url=repo_data["repo_url"],
+                default_branch=repo_data["default_branch"],
+                clone_path=repo_data["clone_path"],
+                created_at=repo_data["created_at"],
+                enable_temporal=False,
+                temporal_options=None,
+            )
 
         return manager
 

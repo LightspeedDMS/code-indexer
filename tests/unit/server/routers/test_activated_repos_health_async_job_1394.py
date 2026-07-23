@@ -37,7 +37,7 @@ from unittest.mock import MagicMock, patch
 import hnswlib
 import numpy as np
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
@@ -154,13 +154,14 @@ def _poll_job_status(client: TestClient, job_id: str) -> dict:
     raise AssertionError(f"Job {job_id} did not reach terminal state: {last_body}")
 
 
-class TestGetHealthEndpointRewireSmoke:
-    """Bug #1394 section 3: GET endpoint must preserve external behavior
-    and existing HealthCheckResponse wire shape exactly."""
+class TestGetHealthEndpointRemoved:
+    """Bug #1453: the synchronous GET /{user_alias}/health endpoint is
+    REMOVED entirely (it could block a request thread past the reverse-proxy
+    timeout on repositories with many temporal shards -- the same hazard
+    #1394 fixed for the async POST sibling, which stays live). No route
+    should match this path/method combination anymore."""
 
-    def test_get_health_returns_legacy_shape_for_real_indexes(
-        self, tmp_path: Path, real_job_manager
-    ):
+    def test_get_health_route_no_longer_exists(self, tmp_path: Path, real_job_manager):
         index_dir = tmp_path / ".code-indexer" / "index"
         coll = index_dir / "voyage-code-3"
         coll.mkdir(parents=True)
@@ -169,55 +170,8 @@ class TestGetHealthEndpointRewireSmoke:
         with _AppUnderTest(tmp_path, real_job_manager) as client:
             response = client.get("/api/activated-repos/myrepo/health")
 
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["user_alias"] == "myrepo"
-        assert body["overall_healthy"] is True
-        assert body["status"] == "healthy"
-        assert body["total_collections"] == 1
-        assert body["healthy_count"] == 1
-        assert body["unhealthy_count"] == 0
-        assert body["collections"][0]["collection_name"] == "voyage-code-3"
-        # Additive orphan_count field is tolerated (not asserted absent).
-        assert "orphan_count" in body["collections"][0]
-
-    def test_get_health_empty_index_dir_returns_empty_healthy_result(
-        self, tmp_path: Path, real_job_manager
-    ):
-        with _AppUnderTest(tmp_path, real_job_manager) as client:
-            response = client.get("/api/activated-repos/myrepo/health")
-
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["overall_healthy"] is True
-        assert body["status"] == "healthy"
-        assert body["total_collections"] == 0
-
-    def test_get_health_repo_not_found_returns_404(
-        self, tmp_path: Path, real_job_manager
-    ):
-        missing_path = tmp_path / "does-not-exist"
-        with _AppUnderTest(missing_path, real_job_manager) as client:
-            response = client.get("/api/activated-repos/myrepo/health")
-
-        assert response.status_code == 404
-
-    def test_get_health_unhealthy_collection_flips_status(
-        self, tmp_path: Path, real_job_manager
-    ):
-        index_dir = tmp_path / ".code-indexer" / "index"
-        corrupt_coll = index_dir / "voyage-code-3"
-        corrupt_coll.mkdir(parents=True)
-        (corrupt_coll / "hnsw_index.bin").write_bytes(b"not a real index")
-
-        with _AppUnderTest(tmp_path, real_job_manager) as client:
-            response = client.get("/api/activated-repos/myrepo/health")
-
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["overall_healthy"] is False
-        assert body["status"] == "unhealthy"
-        assert body["unhealthy_count"] == 1
+        assert response.status_code != status.HTTP_200_OK, response.text
+        assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
 
 
 class TestPostHealthCheckSubmitsJob:

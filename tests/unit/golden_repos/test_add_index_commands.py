@@ -17,6 +17,7 @@ Acceptance criteria:
 - RefreshScheduler temporal command applies all_branches option (AC5)
 """
 
+from contextlib import ExitStack
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -313,11 +314,16 @@ class TestAddIndexTemporalCommand:
     """
 
     def _capture_temporal_commands(
-        self, registered_manager, repo_path, temporal_options=None
+        self, registered_manager, repo_path, temporal_options=None, gate_enabled=None
     ):
         """
         Call add_index_to_golden_repo with index_type='temporal' and capture
         the cidx index commands that are issued.
+
+        Story #1412: when gate_enabled is not None, patches get_config_service
+        so temporal_all_branches_enabled resolves to that value for the
+        duration of the call (the command builder now consults this gate
+        before appending --all-branches).
         """
         # Bug #1316: add_indexes_to_golden_repo's background_worker now reads
         # temporal_options authoritatively from the SQLite backend, not the
@@ -340,15 +346,33 @@ class TestAddIndexTemporalCommand:
 
             # Story #480: temporal now uses subprocess.Popen with --progress-json.
             # Patch both run and Popen so all commands are captured for verification.
-            with (
-                patch("subprocess.run", side_effect=recording_run),
-                patch("subprocess.Popen", side_effect=_make_success_popen(collected)),
-                patch.object(
-                    registered_manager,
-                    "get_actual_repo_path",
-                    return_value=str(repo_path),
-                ),
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(patch("subprocess.run", side_effect=recording_run))
+                stack.enter_context(
+                    patch(
+                        "subprocess.Popen", side_effect=_make_success_popen(collected)
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        registered_manager,
+                        "get_actual_repo_path",
+                        return_value=str(repo_path),
+                    )
+                )
+                if gate_enabled is not None:
+                    mock_indexing = MagicMock()
+                    mock_indexing.temporal_all_branches_enabled = gate_enabled
+                    mock_server_cfg = MagicMock()
+                    mock_server_cfg.indexing_config = mock_indexing
+                    mock_cfg_svc = MagicMock()
+                    mock_cfg_svc.get_config.return_value = mock_server_cfg
+                    stack.enter_context(
+                        patch(
+                            "code_indexer.server.services.config_service.get_config_service",
+                            return_value=mock_cfg_svc,
+                        )
+                    )
                 func()
             captured_cmds.extend(collected)
             return "fake-job-id"
@@ -472,11 +496,15 @@ class TestAddIndexTemporalCommand:
         assert temporal_cmd[idx + 1] == "2024-01-01"
 
     def test_temporal_with_all_branches_option(self, registered_manager, repo_path):
-        """AC4: when temporal_options has all_branches=True, command includes --all-branches."""
+        """
+        AC4/Story #1412 Scenario 6: when temporal_options has all_branches=True
+        AND the server-wide gate is enabled, command includes --all-branches.
+        """
         cmds = self._capture_temporal_commands(
             registered_manager,
             repo_path,
             temporal_options={"all_branches": True},
+            gate_enabled=True,
         )
 
         assert cmds, "No 'cidx index' command issued."
@@ -516,6 +544,7 @@ class TestAddIndexTemporalCommand:
                 "diff_context": 10,
                 "all_branches": True,
             },
+            gate_enabled=True,
         )
 
         assert cmds, "No 'cidx index' command issued."

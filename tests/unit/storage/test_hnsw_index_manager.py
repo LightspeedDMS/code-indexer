@@ -1,6 +1,9 @@
 """Unit tests for HNSWIndexManager."""
 
 import json
+import shutil
+import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -698,3 +701,331 @@ class TestHNSWQuerySoftDeletesRobustness:
         # Must return up to 3 results without error
         assert len(result_ids) == num_vectors
         assert len(distances) == num_vectors
+
+
+class TestHNSWIndexManagerDurableStaleLifecycle:
+    """Bug #1407 Foundation: durable stale-lifecycle primitive.
+
+    mark_stale() must flush+fsync the metadata write and fsync the
+    collection directory so the flag survives a crash/power-loss
+    immediately after os.replace() returns (Amendment/Foundation:
+    "mark_stale(shard) made DURABLE").
+    """
+
+    def test_mark_stale_fsyncs_metadata_file_and_directory(self, tmp_path: Path):
+        """mark_stale must call nfs_safe_fsync on both the tmp metadata file
+        descriptor (before replace) and the collection directory descriptor
+        (after replace) so the flag write is crash-durable."""
+        manager = HNSWIndexManager(vector_dim=32)
+        vectors = np.random.randn(10, 32).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(tmp_path, vectors, ids)
+
+        with patch(
+            "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
+        ) as mock_fsync:
+            manager.mark_stale(tmp_path)
+
+        # At least two fsync calls: metadata content + directory.
+        assert mock_fsync.call_count >= 2
+
+    def test_mark_stale_is_still_correct_after_durability_change(self, tmp_path: Path):
+        """The durability change must not alter mark_stale's observable
+        result: is_stale flag still flips to True."""
+        manager = HNSWIndexManager(vector_dim=32)
+        vectors = np.random.randn(10, 32).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(tmp_path, vectors, ids)
+
+        manager.mark_stale(tmp_path)
+
+        assert manager.is_stale(tmp_path) is True
+
+
+class TestHNSWIndexManagerClearStale:
+    """Bug #1407 Foundation: new durable clear_stale() primitive.
+
+    clear_stale() is the ONLY writer permitted to flip is_stale False->True
+    for the temporal finalize path (Amendment 2): the temporal caller
+    invokes it explicitly, strictly after end_indexing() returns
+    successfully -- never inline inside a rebuild/incremental-update call.
+    """
+
+    def test_clear_stale_flips_flag_to_false(self, tmp_path: Path):
+        manager = HNSWIndexManager(vector_dim=32)
+        vectors = np.random.randn(10, 32).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(tmp_path, vectors, ids)
+        manager.mark_stale(tmp_path)
+        assert manager.is_stale(tmp_path) is True
+
+        manager.clear_stale(tmp_path)
+
+        assert manager.is_stale(tmp_path) is False
+
+    def test_clear_stale_fsyncs_metadata_file_and_directory(self, tmp_path: Path):
+        manager = HNSWIndexManager(vector_dim=32)
+        vectors = np.random.randn(10, 32).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(tmp_path, vectors, ids)
+        manager.mark_stale(tmp_path)
+
+        with patch(
+            "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
+        ) as mock_fsync:
+            manager.clear_stale(tmp_path)
+
+        assert mock_fsync.call_count >= 2
+
+    def test_clear_stale_noop_when_metadata_missing(self, tmp_path: Path):
+        """Mirrors mark_stale's guard: never fabricate {"is_stale": False}
+        on a meta-less shard (non-blocking precision item)."""
+        manager = HNSWIndexManager(vector_dim=32)
+
+        manager.clear_stale(tmp_path)  # must not raise
+
+        meta_file = tmp_path / "collection_meta.json"
+        assert not meta_file.exists()
+
+    def test_clear_stale_noop_when_hnsw_index_key_missing(self, tmp_path: Path):
+        manager = HNSWIndexManager(vector_dim=32)
+        meta_file = tmp_path / "collection_meta.json"
+        meta_file.write_text(json.dumps({"name": "virgin"}))
+
+        manager.clear_stale(tmp_path)  # must not raise / must not fabricate
+
+        metadata = json.loads(meta_file.read_text())
+        assert "hnsw_index" not in metadata
+
+    def test_clear_stale_preserves_last_marked_stale_audit_trail(self, tmp_path: Path):
+        """Non-blocking precision item: clear_stale must not null the
+        staleness audit trail -- only save_incremental_update/_update_metadata
+        with clear_stale=True do that (today's unchanged default behavior)."""
+        manager = HNSWIndexManager(vector_dim=32)
+        vectors = np.random.randn(10, 32).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(tmp_path, vectors, ids)
+        manager.mark_stale(tmp_path)
+
+        meta_file = tmp_path / "collection_meta.json"
+        before = json.loads(meta_file.read_text())
+        assert before["hnsw_index"]["last_marked_stale"] is not None
+
+        manager.clear_stale(tmp_path)
+
+        after = json.loads(meta_file.read_text())
+        assert (
+            after["hnsw_index"]["last_marked_stale"]
+            == (before["hnsw_index"]["last_marked_stale"])
+        )
+
+
+class TestHNSWIndexManagerClearStaleParamOnWriters(unittest.TestCase):
+    """Bug #1407 Amendment 1: save_incremental_update / rebuild_from_vectors
+    / _update_metadata get a clear_stale param defaulting to True (today's
+    unchanged fleet-wide behavior); only the temporal finalize path opts out.
+    """
+
+    def setUp(self):
+        self.tmp_path = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+    def test_default_clear_stale_true_matches_today_behavior(self):
+        """No caller passes clear_stale -- rebuild_from_vectors must
+        continue to publish is_stale=False exactly as before (regression
+        guard for the whole non-temporal fleet)."""
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors_dir = self.tmp_path / "vectors"
+        vectors_dir.mkdir()
+        for i in range(5):
+            (vectors_dir / f"vector_{i}.json").write_text(
+                json.dumps({"id": f"vec_{i}", "vector": [0.1] * 16})
+            )
+        (self.tmp_path / "collection_meta.json").write_text(
+            json.dumps({"vector_dim": 16})
+        )
+
+        manager.rebuild_from_vectors(self.tmp_path)
+
+        assert manager.is_stale(self.tmp_path) is False
+
+    def test_clear_stale_false_preserves_prior_stale_flag_after_rebuild(self):
+        """force_full_rebuild path: rebuild_from_vectors(clear_stale=False)
+        must NOT clear is_stale -- the temporal caller's explicit
+        clear_stale() call is the only thing allowed to do that."""
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors_dir = self.tmp_path / "vectors"
+        vectors_dir.mkdir()
+        for i in range(5):
+            (vectors_dir / f"vector_{i}.json").write_text(
+                json.dumps({"id": f"vec_{i}", "vector": [0.1] * 16})
+            )
+        (self.tmp_path / "collection_meta.json").write_text(
+            json.dumps({"vector_dim": 16})
+        )
+        manager.mark_stale(self.tmp_path)  # no-op (no hnsw_index yet) -- fine
+
+        manager.rebuild_from_vectors(self.tmp_path, clear_stale=False)
+
+        # Amendment 1 + virgin-shard opt-out default: no PRIOR hnsw_index
+        # existed, so is_stale must default True, never fabricated False.
+        assert manager.is_stale(self.tmp_path) is True
+
+    def test_clear_stale_false_preserves_existing_stale_true_across_rebuild(
+        self,
+    ):
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors = np.random.randn(10, 16).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(10)]
+        manager.build_index(self.tmp_path, vectors, ids)
+        manager.mark_stale(self.tmp_path)
+        assert manager.is_stale(self.tmp_path) is True
+
+        vectors_dir = self.tmp_path / "vectors"
+        vectors_dir.mkdir()
+        for i in range(10):
+            (vectors_dir / f"vector_{i}.json").write_text(
+                json.dumps({"id": f"vec_{i}", "vector": [0.1] * 16})
+            )
+
+        manager.rebuild_from_vectors(self.tmp_path, clear_stale=False)
+
+        assert manager.is_stale(self.tmp_path) is True
+
+    def test_save_incremental_update_clear_stale_false_preserves_stale(self):
+        manager = HNSWIndexManager(vector_dim=8)
+        vectors = np.random.randn(5, 8).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(5)]
+        manager.build_index(self.tmp_path, vectors, ids)
+        manager.mark_stale(self.tmp_path)
+        assert manager.is_stale(self.tmp_path) is True
+
+        index, id_to_label, label_to_id, next_label = (
+            manager.load_for_incremental_update(self.tmp_path)
+        )
+        new_vec = np.random.randn(8).astype(np.float32)
+        label, id_to_label, label_to_id, next_label = manager.add_or_update_vector(
+            index, "vec_new", new_vec, id_to_label, label_to_id, next_label
+        )
+
+        manager.save_incremental_update(
+            index,
+            self.tmp_path,
+            id_to_label,
+            label_to_id,
+            len(id_to_label),
+            clear_stale=False,
+        )
+
+        assert manager.is_stale(self.tmp_path) is True
+
+    def test_save_incremental_update_default_clears_stale(self):
+        """Regression guard: watch-mode / normal incremental callers never
+        pass clear_stale -- must keep clearing is_stale exactly as today."""
+        manager = HNSWIndexManager(vector_dim=8)
+        vectors = np.random.randn(5, 8).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(5)]
+        manager.build_index(self.tmp_path, vectors, ids)
+        manager.mark_stale(self.tmp_path)
+
+        index, id_to_label, label_to_id, next_label = (
+            manager.load_for_incremental_update(self.tmp_path)
+        )
+        new_vec = np.random.randn(8).astype(np.float32)
+        label, id_to_label, label_to_id, next_label = manager.add_or_update_vector(
+            index, "vec_new", new_vec, id_to_label, label_to_id, next_label
+        )
+        manager.save_incremental_update(
+            index, self.tmp_path, id_to_label, label_to_id, len(id_to_label)
+        )
+
+        assert manager.is_stale(self.tmp_path) is False
+
+
+class TestHNSWIndexManagerEmptyShardContract(unittest.TestCase):
+    """Bug #1407 Amendment 5: empty/all-invalid shard must not bless a
+    stale index. Only exercised when clear_stale=False (force_full_rebuild);
+    default (clear_stale=True) callers keep today's bare-return-0 behavior
+    unchanged (regression guard for the whole fleet)."""
+
+    def setUp(self):
+        self.tmp_path = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+    def test_default_zero_files_returns_zero_without_touching_disk(self):
+        """Regression guard: today's exact behavior for the whole
+        non-temporal fleet -- zero files, clear_stale=True (default) ->
+        bare return 0, no metadata write."""
+        manager = HNSWIndexManager(vector_dim=16)
+        (self.tmp_path / "collection_meta.json").write_text(
+            json.dumps({"vector_dim": 16})
+        )
+
+        count = manager.rebuild_from_vectors(self.tmp_path)
+
+        assert count == 0
+        meta = json.loads((self.tmp_path / "collection_meta.json").read_text())
+        assert "hnsw_index" not in meta
+
+    def test_force_rebuild_zero_files_publishes_durable_empty_state(self):
+        """A legitimate empty shard (zero vector files) under
+        force_full_rebuild must durably publish vector_count=0 / empty
+        id_mapping, preserving (not clearing) staleness."""
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors = np.random.randn(3, 16).astype(np.float32)
+        ids = ["a", "b", "c"]
+        manager.build_index(self.tmp_path, vectors, ids)
+        manager.mark_stale(self.tmp_path)
+        # Simulate stray-delete having emptied the shard: remove all vector files.
+        for f in self.tmp_path.rglob("vector_*.json"):
+            f.unlink()
+
+        count = manager.rebuild_from_vectors(self.tmp_path, clear_stale=False)
+
+        assert count == 0
+        meta = json.loads((self.tmp_path / "collection_meta.json").read_text())
+        assert meta["hnsw_index"]["vector_count"] == 0
+        assert meta["hnsw_index"]["id_mapping"] == {}
+        assert meta["hnsw_index"]["is_stale"] is True  # preserved, not cleared
+        # Prior .bin must no longer be queryable.
+        assert not manager.index_exists(self.tmp_path)
+
+    def test_force_rebuild_all_malformed_files_raises_and_retains_staleness(
+        self,
+    ):
+        """Files exist but ALL fail to parse/validate: NOT a legitimate
+        empty shard -- must raise, never silently publish/bless."""
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors = np.random.randn(3, 16).astype(np.float32)
+        ids = ["a", "b", "c"]
+        manager.build_index(self.tmp_path, vectors, ids)
+        manager.mark_stale(self.tmp_path)
+        for f in self.tmp_path.rglob("vector_*.json"):
+            f.unlink()
+        (self.tmp_path / "vector_bad.json").write_text("{ not valid json")
+
+        with pytest.raises(Exception):
+            manager.rebuild_from_vectors(self.tmp_path, clear_stale=False)
+
+        # Staleness must be retained -- is_stale still True.
+        assert manager.is_stale(self.tmp_path) is True
+
+    def test_default_all_malformed_files_returns_zero_unchanged(self):
+        """Regression guard: default clear_stale=True keeps today's lenient
+        bare-return-0 behavior for all-malformed files (fleet-wide, no
+        change for non-temporal callers)."""
+        manager = HNSWIndexManager(vector_dim=16)
+        vectors_dir = self.tmp_path / "vectors"
+        vectors_dir.mkdir()
+        (vectors_dir / "vector_bad.json").write_text("{ not valid json")
+        (self.tmp_path / "collection_meta.json").write_text(
+            json.dumps({"vector_dim": 16})
+        )
+
+        count = manager.rebuild_from_vectors(self.tmp_path)
+
+        assert count == 0

@@ -716,7 +716,11 @@ class FileListingService:
             raise FileNotFoundError(f"Not a file: {file_path}")
 
         # Read all lines for pagination
-        with open(full_file_path, "r", encoding="utf-8") as f:
+        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
+        # punctuation) is substituted with U+FFFD instead of raising
+        # UnicodeDecodeError -- a legitimately-existing file must still be
+        # readable, and byte-stable line/offset pagination is preserved.
+        with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
 
         total_lines = len(all_lines)
@@ -894,7 +898,11 @@ class FileListingService:
             raise FileNotFoundError(f"Not a file: {file_path}")
 
         # Read all lines for pagination
-        with open(full_file_path, "r", encoding="utf-8") as f:
+        # Bug #1449: errors="replace" so a non-UTF-8 byte (e.g. Windows-1252
+        # punctuation) is substituted with U+FFFD instead of raising
+        # UnicodeDecodeError -- a legitimately-existing file must still be
+        # readable, and byte-stable line/offset pagination is preserved.
+        with open(full_file_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
 
         total_lines = len(all_lines)

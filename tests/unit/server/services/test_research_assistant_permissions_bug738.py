@@ -224,10 +224,13 @@ class TestToolLevelDenyRules:
 class TestExistingAllowRulesPreserved:
     """Existing allow rules from Story #554 must remain unchanged."""
 
-    def test_cidx_meta_write_in_allow(self, allow_list):
-        write_rules = [r for r in allow_list if "Write(" in r and "cidx-meta" in r]
-        assert len(write_rules) >= 1, (
-            f"Write scoped to cidx-meta must be in allow. Got: {allow_list}"
+    def test_cidx_meta_write_not_in_allow(self, allow_list):
+        """Bug #1451: Claude CLI >= 2.1.215 hard-rejects bare Write(path) allow
+        rules for file-permission checks (only Edit(path) rules are honored).
+        The now-fatal, redundant Write(...) rule must never be emitted."""
+        write_rules = [r for r in allow_list if "Write(" in r]
+        assert write_rules == [], (
+            f"Write(...) allow rule must not be present (Bug #1451). Got: {allow_list}"
         )
 
     def test_cidx_meta_edit_in_allow(self, allow_list):
