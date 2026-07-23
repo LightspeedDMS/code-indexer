@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cidx-git-backend"
+version = "0.1.0"
+description = "Delegate cidx's internal git operations to the git-mcp spoke (EVO-64616 Phase 3)"
+requires-python = ">=3.9"
+dependencies = []
+
+# Registers on cidx's code_indexer.git_backend seam, so the plugin is active as
+# soon as it is installed. CIDX_GIT_BACKEND=cidx_git_backend:make_git_backend is
+# an equivalent override and takes precedence. Only USED when the server's
+# git_backend config is 'delegated'.
+[project.entry-points."code_indexer.git_backend"]
+gitmcp = "cidx_git_backend:make_git_backend"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cidx_git_backend"]

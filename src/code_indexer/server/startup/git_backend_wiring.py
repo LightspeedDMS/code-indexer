@@ -86,3 +86,30 @@ def build_git_backend(
     backend = GitBackendFactory.create("local")
     logger.info("GitBackend: using LocalGitBackend (in-process git)")
     return backend
+
+
+def build_configured_git_backend(config: Any) -> GitBackend:
+    """Resolve the delegated plugin (if any) and build the configured backend.
+
+    The Phase-3 completion of ``build_git_backend``: it fills the
+    ``delegated_backend`` slot from the ``code_indexer.git_backend`` entry-point
+    seam (the ``cidx_git_backend`` plugin / ``CIDX_GIT_BACKEND`` env var) via
+    ``git_backend_plugin.resolve_delegated_git_backend``, then delegates to
+    ``build_git_backend``. This is the single call the startup path uses so
+    every git-executing manager shares one selection.
+
+    With ``git_backend`` unset/``local`` (the default) the plugin is never
+    instantiated and a plain ``LocalGitBackend`` is returned — byte-for-byte the
+    behaviour cidx has today. With ``git_backend='delegated'`` a missing/broken
+    plugin fails LOUD (never a silent local fallback) — see ``build_git_backend``
+    and ``git_backend_plugin``.
+    """
+    # Imported lazily so the local-default path never imports the plugin seam
+    # (and so a plugin import error only surfaces when delegation is requested).
+    from code_indexer.server.services.git_backend_plugin import (
+        resolve_delegated_git_backend,
+    )
+
+    backend_type = getattr(config, "git_backend", "local") or "local"
+    delegated = resolve_delegated_git_backend() if backend_type == "delegated" else None
+    return build_git_backend(config, delegated_backend=delegated)

@@ -464,6 +464,16 @@ def initialize_services() -> Dict[str, Any]:
     # Initialize managers with resource configuration
     # (data_dir and db_path_str already computed above for storage mode detection)
 
+    # EVO-64678 Phase 3: resolve the git backend ONCE and share it across every
+    # git-executing manager built here. `local` (default) yields a plain
+    # LocalGitBackend — identical to prior behaviour; `delegated` yields the
+    # git-mcp-backed backend (fails loud if the plugin is unavailable).
+    from code_indexer.server.startup.git_backend_wiring import (
+        build_configured_git_backend,
+    )
+
+    _git_backend = build_configured_git_backend(server_config)
+
     golden_repo_manager = GoldenRepoManager(
         data_dir=data_dir,
         resource_config=server_config.resource_config,
@@ -471,6 +481,7 @@ def initialize_services() -> Dict[str, Any]:
         storage_backend=(
             _backend_registry.golden_repo_metadata if _backend_registry else None
         ),
+        git_backend=_git_backend,
     )
     if _backend_registry is not None:
         golden_repo_manager._global_repos_backend = _backend_registry.global_repos
@@ -589,6 +600,7 @@ def initialize_services() -> Dict[str, Any]:
         data_dir=data_dir,
         golden_repo_manager=golden_repo_manager,
         background_job_manager=background_job_manager,
+        git_backend=_git_backend,
     )
 
     # Inject ActivatedRepoManager for cascade deletion support

@@ -53,6 +53,7 @@ class GlobalReposLifecycleManager:
         job_tracker=None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+        git_backend: Optional[Any] = None,
     ):
         """
         Initialize the lifecycle manager.
@@ -69,6 +70,11 @@ class GlobalReposLifecycleManager:
                 reconciliation can update golden_repos_metadata (bare-alias-keyed)
                 alongside global_repos. None (default) lets RefreshScheduler
                 resolve its own fallback lazily (solo mode / not yet available).
+            git_backend: EVO-64678 Phase 3 git seam — forwarded to
+                RefreshScheduler so its golden-repo clone/checkout/pull/refresh
+                git runs through the configured backend (LocalGitBackend by
+                default; the git-mcp-backed backend when git_backend='delegated').
+                None lets RefreshScheduler default to LocalGitBackend.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -115,6 +121,7 @@ class GlobalReposLifecycleManager:
             job_tracker=job_tracker,
             snapshot_manager=snapshot_manager,
             golden_repo_metadata_backend=golden_repo_metadata_backend,
+            git_backend=git_backend,
         )
 
         # Track running state

@@ -912,12 +912,20 @@ def make_lifespan(
                 )
                 app.state.snapshot_manager = None
 
+            # EVO-64678 Phase 3: same git backend selection the repo managers use
+            # (local by default; git-mcp-backed when git_backend='delegated'), so
+            # RefreshScheduler's golden-repo git runs through the configured seam.
+            from code_indexer.server.startup.git_backend_wiring import (
+                build_configured_git_backend,
+            )
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
                 resource_config=server_config.resource_config,
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
+                git_backend=build_configured_git_backend(server_config),
                 # Bug #1390: RefreshScheduler's filesystem reconciliation needs
                 # to update golden_repos_metadata (bare-alias-keyed) alongside
                 # global_repos -- without this, cluster mode would silently
