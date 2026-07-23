@@ -46,6 +46,16 @@ RUN pip install ".[cluster,cohere]"
 COPY plugins/cidx_orchestrator_invoker ./plugins/cidx_orchestrator_invoker
 RUN pip install ./plugins/cidx_orchestrator_invoker
 
+# EVO-64616 Phase 3: delegate cidx's internal git to the git-mcp spoke instead of
+# running git in this image. Like the invoker above, the plugin registers itself
+# on an entry point (`code_indexer.git_backend`), so installing it is what makes
+# `git_backend=delegated` resolvable — without it the delegated wiring fails loud
+# (by design) and the server can only run in-process `local` git. Default config
+# is still `local`, so this install is inert until the config flips (see
+# plugins/cidx_git_backend). stdlib-only, no extra deps.
+COPY plugins/cidx_git_backend ./plugins/cidx_git_backend
+RUN pip install ./plugins/cidx_git_backend
+
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm
 
