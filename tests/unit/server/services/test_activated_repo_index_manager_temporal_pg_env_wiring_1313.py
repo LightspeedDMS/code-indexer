@@ -123,6 +123,13 @@ class TestExecuteTemporalIndexingGetsPostgresEnvInClusterMode:
     def test_fts_command_receives_sanitized_env_without_pg_bootstrap_var(
         self, index_manager, tmp_path, capturing_subprocess_run
     ):
+        """Bug #1419 follow-up: _execute_fts_indexing now fast-fails when
+        tmp_path has no .code-indexer/config.json (uninitialized-repo
+        guard). Create one here so the mocked run_cancellable_subprocess is
+        actually reached, matching what an initialized repo looks like."""
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         from code_indexer.storage.temporal_metadata_backend_registry import (
             TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
         )

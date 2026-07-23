@@ -7,12 +7,23 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import copy
 import json
 import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+    runtime_checkable,
+)
 
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
@@ -74,6 +85,61 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return search_timeouts settings dict from ServerConfig (Issue #1398).
+
+    Surfaces all 5 fields of SearchTimeoutsConfig for the Web UI Config
+    screen -- consolidates the previously hardcoded MCP handler timeouts
+    (search_code / default / write_mode) and the embedding-provider /
+    reranker HTTP timeouts into one validated, editable section.
+    """
+    st = config.search_timeouts_config
+    assert st is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "search_code_handler_timeout_seconds": st.search_code_handler_timeout_seconds,
+        "default_handler_timeout_seconds": st.default_handler_timeout_seconds,
+        "write_mode_handler_timeout_seconds": st.write_mode_handler_timeout_seconds,
+        "embedding_provider_timeout_seconds": st.embedding_provider_timeout_seconds,
+        "reranker_timeout_seconds": st.reranker_timeout_seconds,
+        # Issue #1435: outer handler-deadline cap for POST /api/query's
+        # temporal branch.
+        "rest_query_handler_timeout_seconds": st.rest_query_handler_timeout_seconds,
+        # Story #1400 CRITICAL 5: async-hybrid temporal query inline
+        # sync-wait window (float seconds).
+        "temporal_inline_wait_seconds": st.temporal_inline_wait_seconds,
+    }
+
+
+def _embedding_stats_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return embedding_stats settings dict from ServerConfig (Story #1418
+    Phase 3).
+
+    Surfaces EmbeddingStatsConfig's 3 fields (enabled kill-switch, writer
+    flush cadence, retention window) for the Web UI Config screen.
+    """
+    es = config.embedding_stats_config
+    assert es is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": es.enabled,
+        "flush_interval_seconds": es.flush_interval_seconds,
+        "retention_days": es.retention_days,
+    }
+
+
+def _temporal_indexing_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_indexing settings dict from ServerConfig (Story #1404).
+
+    Surfaces TemporalIndexingConfig's single field (the global temporal
+    indexing floor date) for the Web UI Config screen. None/empty means
+    unbounded (full history, pre-feature behavior).
+    """
+    ti = config.temporal_indexing_config
+    assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "index_floor_date": ti.index_floor_date,
+    }
+
+
 @runtime_checkable
 class ElevationManagerProtocol(Protocol):
     """Structural protocol for the ElevatedSessionManager hot-reload interface.
@@ -125,6 +191,7 @@ BOOTSTRAP_KEYS = frozenset(
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
         "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
+        "workspace_mcp",  # EVO-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
@@ -204,6 +271,12 @@ class ConfigService:
         # host/port/workers off disk within this process. None means "not
         # captured yet"; a captured value is a dict (possibly empty).
         self._bootstrap_launch_keys_snapshot: Optional[Dict[str, Any]] = None
+        # Story #1400 CRITICAL 6: guards update_settings_atomic's
+        # validate-copy-then-publish sequence (deep-copy live config ->
+        # apply updates to the copy -> validate the copy -> publish only on
+        # success). Never held during I/O beyond the deep-copy/apply/
+        # validate/save sequence itself.
+        self._config_update_lock: threading.RLock = threading.RLock()
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -702,6 +775,12 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            # Issue #1398 - Query & search timeouts Web UI configuration
+            "search_timeouts": _search_timeouts_settings(config),
+            # Story #1418 Phase 3 - Embedding & reranker call tracking config
+            "embedding_stats": _embedding_stats_settings(config),
+            # Story #1404 - Global temporal indexing floor date configuration
+            "temporal_indexing": _temporal_indexing_settings(config),
             # Story #977 - X-Ray precision AST-aware code search configuration
             "xray": {
                 "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
@@ -745,6 +824,12 @@ class ConfigService:
                     config.indexing_config.temporal_aggregation_chunk_chars
                     if config.indexing_config is not None
                     else 4096
+                ),
+                # Story #1412: golden/server temporal all-branches gate display wiring
+                "temporal_all_branches_enabled": (
+                    config.indexing_config.temporal_all_branches_enabled
+                    if config.indexing_config is not None
+                    else False
                 ),
             },
             # Story #323 - Wiki metadata fields configuration
@@ -868,23 +953,31 @@ class ConfigService:
             "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
         }
 
-    def update_setting(
-        self, category: str, key: str, value: Any, skip_validation: bool = False
-    ) -> None:
+    def _apply_setting(
+        self, config: ServerConfig, category: str, key: str, value: Any
+    ) -> bool:
         """
-        Update a single setting.
+        Apply one (category, key, value) update to `config` in place.
 
-        Args:
-            category: Setting category (server, cache, reindexing, timeouts, password_security)
-            key: Setting key within the category
-            value: New value for the setting
-            skip_validation: If True, skip validation and save (for batch updates)
+        Story #1400 CRITICAL 6: extracted from the former update_setting
+        dispatch body so callers (update_settings_atomic) can apply updates
+        to a CANDIDATE copy of the config, never the live object directly.
+        Every branch below is unchanged from the pre-#1400 dispatch.
+
+        Returns:
+            True if `config` was mutated and should participate in the
+            standard validate-then-publish flow. False for the "indexing"
+            category, a pre-existing special case that persists itself
+            internally (_update_indexing_setting) against the live config
+            and must not be re-validated/re-published by the generic
+            atomic flow.
 
         Raises:
-            ValueError: If category or key is invalid, or value fails validation
+            ValueError: If category or key is invalid, or value fails
+                per-field validation performed inline by the per-category
+                helper (full cross-field validation happens later, in
+                config_manager.validate_config, against the CANDIDATE).
         """
-        config = self.get_config()
-
         if category == "server":
             self._update_server_setting(config, key, value)
         elif category == "cache":
@@ -942,14 +1035,18 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Issue #1398 - Query & search timeouts Web UI configuration
+        elif category == "search_timeouts":
+            self._update_search_timeouts_setting(config, key, value)
         # Story #977 - X-Ray precision AST-aware code search configuration
         elif category == "xray":
             self._update_xray_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(key, value)
-            # _update_indexing_setting saves config internally, so skip normal save below
-            return
+            # _update_indexing_setting saves config internally, so the
+            # caller must skip the normal validate-then-publish flow.
+            return False
         # Story #323 - Wiki metadata fields configuration
         elif category == "wiki":
             self._update_wiki_setting(config, key, value)
@@ -978,13 +1075,21 @@ class ConfigService:
         # Issue #1160 - Export retention
         elif category == "export":
             self._update_export_setting(config, key, value)
+        # Story #1418 Phase 3 - Embedding & reranker call tracking config
+        elif category == "embedding_stats":
+            self._update_embedding_stats_setting(config, key, value)
+        # Story #1404 - Global temporal indexing floor date configuration
+        elif category == "temporal_indexing":
+            self._update_temporal_indexing_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
+        return True
 
-        # Validate and save (unless skipping for batch updates)
-        if not skip_validation:
-            self.config_manager.validate_config(config)
-            self.save_config(config)
+    def _log_applied_updates(self, updates: Sequence[Tuple[str, str, Any]]) -> None:
+        """Log every non-"indexing" update after a successful atomic publish."""
+        for category, key, value in updates:
+            if category == "indexing":
+                continue
             logger.info(
                 "Updated setting %s.%s to %s",
                 category,
@@ -992,15 +1097,57 @@ class ConfigService:
                 value,
                 extra={"correlation_id": get_correlation_id()},
             )
-        else:
-            # Just update in memory, don't validate or save yet
-            logger.debug(
-                "Updated setting %s.%s to %s (validation deferred)",
-                category,
-                key,
-                value,
-                extra={"correlation_id": get_correlation_id()},
-            )
+
+    def update_settings_atomic(
+        self, updates: Sequence[Tuple[str, str, Any]]
+    ) -> ServerConfig:
+        """
+        Apply a batch of (category, key, value) updates as ONE atomic unit.
+
+        Story #1400 CRITICAL 6: validate a deep-copied CANDIDATE and publish
+        atomically only on full success, so a rejected update can never
+        leave the shared live config mutated in place. The "indexing"
+        category is a pre-existing special case that self-persists against
+        the live config, independent of this batch's atomicity.
+
+        Raises:
+            ValueError: invalid category/key, or the candidate fails
+                config_manager.validate_config.
+        """
+        with self._config_update_lock:
+            live = self.get_config()
+            candidate = copy.deepcopy(live)
+            has_candidate_updates = False
+            for category, key, value in updates:
+                if category == "indexing":
+                    self._apply_setting(live, category, key, value)
+                    continue
+                if self._apply_setting(candidate, category, key, value):
+                    has_candidate_updates = True
+
+            if has_candidate_updates:
+                self.config_manager.validate_config(candidate)
+                self.save_config(candidate)
+                self._log_applied_updates(updates)
+
+            return self.get_config()
+
+    def update_setting(
+        self, category: str, key: str, value: Any, skip_validation: bool = False
+    ) -> None:
+        """
+        Update a single setting.
+
+        Story #1400 CRITICAL 6: delegates to update_settings_atomic, which
+        validates against a COPY and publishes atomically only on success.
+        `skip_validation` is now a no-op kept only for call-site signature
+        compatibility -- the old "mutate first, validate later" deferred
+        path (which could leave a rejected value live) has been retired.
+
+        Raises:
+            ValueError: If category or key is invalid, or value fails validation
+        """
+        self.update_settings_atomic([(category, key, value)])
 
     def _update_server_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -1071,7 +1218,7 @@ class ConfigService:
         elif key == "fts_cache_max_size_mb":
             cache.fts_cache_max_size_mb = int(value) if value else None
         elif key == "fts_cache_reload_on_access":
-            cache.fts_cache_reload_on_access = bool(value)
+            cache.fts_cache_reload_on_access = _parse_bool(value)
         # Payload cache settings (Story #679).
         # Bug #1396: blank means "no override, use default" for all four.
         elif key == "payload_preview_size_chars":
@@ -1160,9 +1307,12 @@ class ConfigService:
         # runtime without a server restart. Fix B.1 seats a default cap at
         # init time; Fix B.2 lets that cap change dynamically.
         #
-        # Only the two size-cap keys trigger hot-reload. All other cache
-        # settings write through to config only (by design -- see test
-        # TestHotReloadScopeIsolation).
+        # Bug #1399: extends the same hot-reload pattern to the 4 other
+        # CRITICAL cache-family keys (TTL x2, cleanup interval x2) plus
+        # fts_cache_reload_on_access. All other cache settings (payload
+        # cache, memory-governor watermarks handled by their own live-read
+        # path) write through to config only (by design -- see test
+        # TestHotReloadScopeIsolation / TestNewHotReloadScopeIsolation).
         if key == "index_cache_max_size_mb":
             self._hot_reload_cache_size_cap(
                 cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
@@ -1171,6 +1321,45 @@ class ConfigService:
             self._hot_reload_cache_size_cap(
                 cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
             )
+        elif key == "index_cache_ttl_minutes":
+            self._hot_reload_cache_ttl_minutes(
+                cache_kind="HNSW", new_ttl_minutes=cache.index_cache_ttl_minutes
+            )
+        elif key == "fts_cache_ttl_minutes":
+            self._hot_reload_cache_ttl_minutes(
+                cache_kind="FTS", new_ttl_minutes=cache.fts_cache_ttl_minutes
+            )
+        elif key == "index_cache_cleanup_interval":
+            self._hot_reload_cache_cleanup_interval(
+                cache_kind="HNSW",
+                new_interval_seconds=cache.index_cache_cleanup_interval,
+            )
+        elif key == "fts_cache_cleanup_interval":
+            self._hot_reload_cache_cleanup_interval(
+                cache_kind="FTS",
+                new_interval_seconds=cache.fts_cache_cleanup_interval,
+            )
+        elif key == "fts_cache_reload_on_access":
+            self._hot_reload_fts_reload_on_access(cache.fts_cache_reload_on_access)
+
+    @staticmethod
+    def _resolve_live_cache(cache_kind: str) -> Any:
+        """Return the live HNSW or FTS cache singleton for *cache_kind*.
+
+        Shared by all cache-family hot-reload helpers (Bug #1399 anti-
+        duplication: 5 call sites now need this same singleton lookup that
+        previously existed only once, inline, in _hot_reload_cache_size_cap).
+
+        Raises:
+            ValueError: cache_kind is neither "HNSW" nor "FTS".
+        """
+        from code_indexer.server.cache import get_global_cache, get_global_fts_cache
+
+        if cache_kind == "HNSW":
+            return get_global_cache()
+        elif cache_kind == "FTS":
+            return get_global_fts_cache()
+        raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
 
     def _hot_reload_cache_size_cap(
         self, cache_kind: str, new_size_mb: Optional[int]
@@ -1193,18 +1382,9 @@ class ConfigService:
             new_size_mb: New cap in MB, or ``None`` to disable the cap.
         """
         try:
-            from code_indexer.server.cache import (
-                DEFAULT_MAX_CACHE_SIZE_MB,
-                get_global_cache,
-                get_global_fts_cache,
-            )
+            from code_indexer.server.cache import DEFAULT_MAX_CACHE_SIZE_MB
 
-            if cache_kind == "HNSW":
-                cache = get_global_cache()
-            elif cache_kind == "FTS":
-                cache = get_global_fts_cache()
-            else:
-                raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
+            cache = self._resolve_live_cache(cache_kind)
 
             # Bug #880: when DB value is None (operator cleared the field to
             # "use default"), re-apply the 4096 MiB safety floor to the live
@@ -1234,6 +1414,159 @@ class ConfigService:
                 exc,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _hot_reload_cache_ttl_minutes(
+        self, cache_kind: str, new_ttl_minutes: float
+    ) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate an ``index_cache_ttl_minutes`` /
+        ``fts_cache_ttl_minutes`` change to the live HNSW or FTS cache
+        singleton.
+
+        Design decision (documented per the issue): already-cached entries'
+        ``ttl_minutes`` is rewritten EAGERLY under the cache lock, mirroring
+        the size-cap fix's eager ``_enforce_size_limit()`` call -- not left
+        to apply only to entries loaded after the change. This directly
+        addresses the original production incident: an operator lowering
+        the TTL to stop repeated cold-reload storms needs already-hot
+        repositories to start respecting the new, shorter TTL immediately.
+
+        Swallows and logs (WARNING) any failure, matching the established
+        fail-soft contract of _hot_reload_cache_size_cap -- config
+        persistence has already happened by the time this runs.
+        """
+        try:
+            cache = self._resolve_live_cache(cache_kind)
+            with cache._cache_lock:
+                cache.config.ttl_minutes = new_ttl_minutes
+                for entry in cache._cache.values():
+                    entry.ttl_minutes = new_ttl_minutes
+
+            logger.info(
+                "Hot-reloaded %s cache ttl_minutes=%s (%d cached entries rewritten)",
+                cache_kind,
+                new_ttl_minutes,
+                len(cache._cache),
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache ttl_minutes=%s: %s",
+                cache_kind,
+                new_ttl_minutes,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _hot_reload_cache_cleanup_interval(
+        self, cache_kind: str, new_interval_seconds: int
+    ) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate an ``index_cache_cleanup_interval``
+        / ``fts_cache_cleanup_interval`` change to the live HNSW or FTS cache
+        singleton.
+
+        Design decision: unlike TTL, there is no per-entry state to rewrite
+        here -- the background cleanup thread reads
+        ``self.config.cleanup_interval_seconds`` fresh on every loop
+        iteration (see ``start_background_cleanup``'s ``cleanup_loop()`` in
+        hnsw_index_cache.py / fts_index_cache.py). Writing the new value
+        onto ``cache.config`` is therefore sufficient: the CURRENT sleep
+        (already in progress under the old interval) finishes on schedule,
+        and every SUBSEQUENT cycle uses the new interval -- no restart
+        required, effective within at most one old-interval-length window.
+        """
+        try:
+            cache = self._resolve_live_cache(cache_kind)
+            with cache._cache_lock:
+                cache.config.cleanup_interval_seconds = new_interval_seconds
+
+            logger.info(
+                "Hot-reloaded %s cache cleanup_interval_seconds=%s",
+                cache_kind,
+                new_interval_seconds,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache cleanup_interval_seconds=%s: %s",
+                cache_kind,
+                new_interval_seconds,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _hot_reload_fts_reload_on_access(self, new_value: bool) -> None:
+        """
+        Bug #1399 CRITICAL fix: propagate ``fts_cache_reload_on_access`` to
+        the live FTS cache singleton.
+
+        The FTS cache HIT path reads ``self.config.reload_on_access`` fresh
+        on every access (see ``FTSIndexCache.get_or_load``), so mutating
+        ``cache.config`` under the cache lock is sufficient -- the change
+        takes effect on the very next FTS cache access.
+        """
+        try:
+            cache = self._resolve_live_cache("FTS")
+            with cache._cache_lock:
+                cache.config.reload_on_access = new_value
+
+            logger.info(
+                "Hot-reloaded FTS cache reload_on_access=%s",
+                new_value,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload FTS cache reload_on_access=%s: %s",
+                new_value,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def reapply_live_cache_hot_reload_fields(self, config: "ServerConfig") -> None:
+        """
+        Bug #1399 item 7 (multi-worker/cluster gap): re-apply every
+        live-reloadable cache-family field from *config* onto the live
+        HNSW/FTS singletons in THIS process.
+
+        ``_hot_reload_cache_size_cap`` (and the new TTL/cleanup/reload
+        helpers above) only patch the singleton in the ONE worker process
+        that handled the Web UI POST. Under ``uvicorn --workers N`` or in a
+        cluster, sibling workers/nodes each run their own
+        ``ConfigService.start_config_reload`` PG-poll loop and their own
+        cache singletons -- without this method they keep the stale value
+        indefinitely (even across a restart, since cache keys never reach
+        config.json -- see BOOTSTRAP_KEYS).
+
+        This method is registered as a PG config-change callback (mirrors
+        Bug #943's ``update_totp_elevation_atomic`` pattern: a local
+        synchronous hot-reload call on the processing node, PLUS this
+        PG-poll callback so every sibling worker/node re-applies the same
+        fresh values on its own next poll tick). Never raises -- each
+        per-field helper already swallows its own failures.
+        """
+        cache = config.cache_config
+        assert cache is not None  # Guaranteed by ServerConfig.__post_init__
+        self._hot_reload_cache_size_cap(
+            cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
+        )
+        self._hot_reload_cache_size_cap(
+            cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
+        )
+        self._hot_reload_cache_ttl_minutes(
+            cache_kind="HNSW", new_ttl_minutes=cache.index_cache_ttl_minutes
+        )
+        self._hot_reload_cache_ttl_minutes(
+            cache_kind="FTS", new_ttl_minutes=cache.fts_cache_ttl_minutes
+        )
+        self._hot_reload_cache_cleanup_interval(
+            cache_kind="HNSW", new_interval_seconds=cache.index_cache_cleanup_interval
+        )
+        self._hot_reload_cache_cleanup_interval(
+            cache_kind="FTS", new_interval_seconds=cache.fts_cache_cleanup_interval
+        )
+        self._hot_reload_fts_reload_on_access(cache.fts_cache_reload_on_access)
 
     def _update_timeout_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2105,6 +2438,10 @@ class ConfigService:
         elif key == "subprocess_max_workers":
             # Story #27: SubprocessExecutor max_workers configuration
             background_jobs.subprocess_max_workers = int(value)
+        elif key == "temporal_lane_concurrency":
+            # Story #1400 CRITICAL 1: temporal-lane worker pool size
+            # (restart-required -- see RESTART_REQUIRED_FIELDS).
+            background_jobs.temporal_lane_concurrency = int(value)
         else:
             raise ValueError(f"Unknown background jobs setting: {key}")
 
@@ -2167,6 +2504,77 @@ class ConfigService:
             sweep.operating_hours_end_utc = int(value)
         else:
             raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
+    def _update_search_timeouts_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a search_timeouts setting (Issue #1398).
+
+        All 5 fields are plain integers (seconds). Range validation happens
+        later in config_manager.validate_config(), called by update_setting()
+        after this method returns (unless skip_validation=True for batch
+        updates).
+        """
+        st = config.search_timeouts_config
+        assert st is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "search_code_handler_timeout_seconds":
+            st.search_code_handler_timeout_seconds = int(value)
+        elif key == "default_handler_timeout_seconds":
+            st.default_handler_timeout_seconds = int(value)
+        elif key == "write_mode_handler_timeout_seconds":
+            st.write_mode_handler_timeout_seconds = int(value)
+        elif key == "embedding_provider_timeout_seconds":
+            st.embedding_provider_timeout_seconds = int(value)
+        elif key == "reranker_timeout_seconds":
+            st.reranker_timeout_seconds = int(value)
+        elif key == "rest_query_handler_timeout_seconds":
+            st.rest_query_handler_timeout_seconds = int(value)
+        elif key == "temporal_inline_wait_seconds":
+            # Story #1400 CRITICAL 5/6: the ONE float field among six --
+            # sub-second precision (e.g. 0.001) is the documented E2E lever
+            # for deterministically forcing the async-hybrid handoff path.
+            st.temporal_inline_wait_seconds = float(value)
+        else:
+            raise ValueError(f"Unknown search_timeouts setting: {key}")
+
+    def _update_embedding_stats_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an embedding_stats setting (Story #1418 Phase 3).
+
+        Range validation (flush_interval_seconds > 0, retention_days > 0)
+        happens later in config_manager.validate_config(), called by
+        update_setting() after this method returns (unless
+        skip_validation=True for batch updates).
+        """
+        es = config.embedding_stats_config
+        assert es is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            es.enabled = _parse_bool(value)
+        elif key == "flush_interval_seconds":
+            es.flush_interval_seconds = float(value)
+        elif key == "retention_days":
+            es.retention_days = int(value)
+        else:
+            raise ValueError(f"Unknown embedding_stats setting: {key}")
+
+    def _update_temporal_indexing_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_indexing setting (Story #1404).
+
+        Format validation (YYYY-MM-DD, real calendar date, zero-padded)
+        happens later in config_manager.validate_config() via
+        TemporalIndexingConfig.validate(), called by update_setting() after
+        this method returns (unless skip_validation=True for batch
+        updates).
+        """
+        ti = config.temporal_indexing_config
+        assert ti is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "index_floor_date":
+            ti.index_floor_date = None if value is None else str(value)
+        else:
+            raise ValueError(f"Unknown temporal_indexing setting: {key}")
 
     def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
         """Update an X-Ray setting (Story #977)."""
@@ -2348,6 +2756,17 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_aggregation_chunk_chars to %d",
                 indexing.temporal_aggregation_chunk_chars,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1412: golden/server temporal all-branches gate (default OFF).
+        if key == "temporal_all_branches_enabled":
+            indexing.temporal_all_branches_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_all_branches_enabled to %s",
+                indexing.temporal_all_branches_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return
@@ -2998,9 +3417,9 @@ class ConfigService:
                     "SELECT version FROM server_config WHERE config_key = %s",
                     (CONFIG_KEY_RUNTIME,),
                 ).fetchone()
-            assert (
-                row is not None
-            ), "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
+            assert row is not None, (
+                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
+            )
             self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",

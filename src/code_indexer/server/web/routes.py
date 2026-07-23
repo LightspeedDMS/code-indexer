@@ -85,9 +85,89 @@ RESTART_REQUIRED_FIELDS = [
     "scip_multi_max_workers",  # SCIP multi-repo thread pool size (singleton init)
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
+    "temporal_lane_concurrency",  # Story #1400: temporal-lane worker pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
     "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
     "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
+    # Bug #1399 item 6: MODERATE-classified fields captured once at server
+    # startup (singleton/manager construction, module globals, or
+    # middleware wiring) and never re-consulted afterward. A Web UI change
+    # has no effect until the server is restarted; these entries only add
+    # the operator-visible hint -- they do NOT implement hot-reload.
+    # password_security.* — captured once at UserManager.__init__ /
+    # PasswordStrengthValidator construction.
+    "min_length",
+    "max_length",
+    "required_char_classes",
+    "min_entropy_bits",
+    # server.jwt_expiration_minutes — captured once at service_init.py JWT
+    # manager construction.
+    "jwt_expiration_minutes",
+    # health.* — written once to module globals at health_service.py
+    # construction; never re-invoked.
+    "memory_warning_threshold_percent",
+    "memory_critical_threshold_percent",
+    "disk_warning_threshold_percent",
+    "disk_critical_threshold_percent",
+    "cpu_sustained_threshold_percent",
+    # error_handling.* — baked into middleware at startup (app_wiring.py).
+    "max_retry_attempts",
+    "base_retry_delay_seconds",
+    "max_retry_delay_seconds",
+    # telemetry.* sub-fields — captured once into TracerProvider/
+    # MeterProvider/exporters at startup. telemetry_enabled (the kill
+    # switch) already has its own hint above; these are the sub-fields.
+    "collector_endpoint",
+    "collector_protocol",
+    "service_name",
+    "export_traces",
+    "export_metrics",
+    "machine_metrics_enabled",
+    "machine_metrics_interval_seconds",
+    "deployment_environment",
+    # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
+    # created client at startup). Pull-sync fields (pull_enabled, pull_host,
+    # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
+    # are correctly re-read live every sync cycle and are NOT listed here.
+    "public_key",
+    "secret_key",
+    "auto_trace_enabled",
+    # codex_integration.* PROVISIONING fields only (provisioned once at
+    # boot). `enabled`/`codex_weight` are correctly read live per dispatched
+    # dep-map job and are NOT listed here.
+    "credential_mode",
+    "api_key",
+    "lcp_url",
+    "lcp_vendor",
+    # scip_cleanup.scip_workspace_retention_days — thread pool sized once at
+    # service_init.py / workspace_cleanup_service.py construction.
+    "scip_workspace_retention_days",
+    # server.coalesce_k_min / coalesce_k_max — construction-scoped seed for
+    # the concurrency governor.
+    "coalesce_k_min",
+    "coalesce_k_max",
+    # golden_repos.analysis_model — SCHEDULER path only (captured once at
+    # startup). The interactive Research Assistant path reads it live and
+    # is unaffected; the flat list has no per-consumer split.
+    "analysis_model",
+    # multi_search timeout/limit fields — module singletons built once.
+    # multi_search_max_workers / scip_multi_max_workers already have hints
+    # above; these are the sibling timeout/limit fields that do not.
+    "multi_search_timeout_seconds",
+    "scip_multi_timeout_seconds",
+    "scip_reference_limit",
+    "scip_dependency_depth",
+    "scip_callchain_max_depth",
+    "scip_callchain_limit",
+    # claude_cli.scheduled_catchup_* — captured once in
+    # ScheduledCatchupService.__init__; loop uses the frozen value.
+    "scheduled_catchup_enabled",
+    "scheduled_catchup_interval_minutes",
+    # cache payload_* fields — snapshotted once at lifespan.py startup.
+    "payload_preview_size_chars",
+    "payload_max_fetch_size_chars",
+    "payload_cache_ttl_seconds",
+    "payload_cleanup_interval_seconds",
 ]
 
 
@@ -215,6 +295,8 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # Issue #1398 - Query & search timeouts configuration
+    "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
     "xray",
     # Story #652 - Reranking configuration
@@ -232,6 +314,10 @@ _VALID_CONFIG_SECTIONS = (
     "search_event_log",
     # Issue #1160 - Export retention config
     "export",
+    # Story #1418 Phase 3 - Embedding & reranker call tracking config
+    "embedding_stats",
+    # Story #1404 - Global temporal indexing floor date configuration
+    "temporal_indexing",
 )
 
 
@@ -3594,6 +3680,31 @@ def save_temporal_options(
 
     options["all_branches"] = all_branches == "1"
 
+    # Story #1412: golden/server temporal all-branches indexing is gated
+    # behind a server-wide runtime flag, shipped OFF by default. Reject
+    # loudly here rather than silently downgrading/dropping the request.
+    if options["all_branches"]:
+        _gate_config = get_config_service().get_config()
+        _gate_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
+        if not _gate_enabled:
+            return templates.TemplateResponse(
+                request,
+                "partials/error_message.html",
+                {
+                    "request": request,
+                    "error": (
+                        "All-branches temporal indexing is disabled on this "
+                        "server (temporal_all_branches_enabled=false). "
+                        "Contact your administrator to enable it."
+                    ),
+                },
+                status_code=400,
+            )
+
     manager = _get_golden_repo_manager()
     manager.save_temporal_options(alias, options)
 
@@ -4014,6 +4125,15 @@ def golden_repo_details_partial(request: Request, alias: str):
             )
         csrf_token = get_csrf_token_from_cookie(request)
         categories = _get_repo_category_service().list_categories()
+        # Story #1412: pass the gate value so the all-branches checkbox can
+        # be disabled/hidden with an explanatory note when the server-wide
+        # temporal_all_branches_enabled flag is off.
+        _gate_config = get_config_service().get_config()
+        _temporal_all_branches_enabled = bool(
+            getattr(
+                _gate_config.indexing_config, "temporal_all_branches_enabled", False
+            )
+        )
         return templates.TemplateResponse(
             request,
             "partials/golden_repo_details.html",
@@ -4022,6 +4142,7 @@ def golden_repo_details_partial(request: Request, alias: str):
                 "repo": repo,
                 "csrf_token": csrf_token,
                 "categories": categories,
+                "temporal_all_branches_enabled": _temporal_all_branches_enabled,
             },
         )
     except Exception as e:
@@ -4490,7 +4611,7 @@ def deactivate_repo(
             user_alias=user_alias,
             actor_username=session.username,  # AC12: attribute to admin who clicked
         )
-        job_link = f'<a href="/admin/jobs?search_text={job_id}">{job_id}</a>'
+        job_link = f'<a href="/admin/jobs?search={job_id}">{job_id}</a>'
         return _create_repos_page_response(
             request,
             session,
@@ -4610,11 +4731,13 @@ def _apply_job_filters(
             user = (job.get("username") or "").lower()
             op = (job.get("operation_type") or "").lower()
             err = (job.get("error") or "").lower()
+            job_id = (job.get("job_id") or "").lower()
             if not (
                 search_lower in repo
                 or search_lower in user
                 or search_lower in op
                 or search_lower in err
+                or search_lower in job_id
             ):
                 continue
         result.append(job)
@@ -6230,6 +6353,12 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        # Issue #1398 - Query & search timeouts configuration
+        SearchTimeoutsConfig,
+        # Story #1418 Phase 3 - Embedding & reranker call tracking config
+        EmbeddingStatsConfig,
+        # Story #1404 - Global temporal indexing floor date configuration
+        TemporalIndexingConfig,
         # Story #977 - X-Ray configuration
         XRayConfig,
         # Story #652 - Reranking configuration
@@ -6455,6 +6584,18 @@ def _get_current_config() -> dict:
         # Story #1397: HNSW orphan-repair sweep operating-hours window config
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
+        # Issue #1398: Query & search timeouts configuration
+        "search_timeouts": settings.get(
+            "search_timeouts", asdict(SearchTimeoutsConfig())
+        ),
+        # Story #1418 Phase 3: Embedding & reranker call tracking config
+        "embedding_stats": settings.get(
+            "embedding_stats", asdict(EmbeddingStatsConfig())
+        ),
+        # Story #1404: Global temporal indexing floor date configuration
+        "temporal_indexing": settings.get(
+            "temporal_indexing", asdict(TemporalIndexingConfig())
         ),
         # Story #977: X-Ray precision AST-aware code search configuration
         "xray": settings.get("xray", asdict(XRayConfig())),
@@ -7335,6 +7476,105 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch Size must be at least 1"
             except (ValueError, TypeError):
                 return "Batch Size must be a valid number"
+
+    elif section == "search_timeouts":
+        # Issue #1398: Query & search timeouts configuration validation.
+        # Ranges mirror config_manager.validate_config's SearchTimeoutsConfig checks.
+        for field_name, label, min_val, max_val in (
+            (
+                "search_code_handler_timeout_seconds",
+                "Semantic/Temporal Search Tool Timeout",
+                30,
+                600,
+            ),
+            (
+                "default_handler_timeout_seconds",
+                "Default MCP Tool Timeout",
+                10,
+                300,
+            ),
+            (
+                "write_mode_handler_timeout_seconds",
+                "Write-Mode Refresh Timeout",
+                600,
+                3600,
+            ),
+            (
+                "embedding_provider_timeout_seconds",
+                "Embedding Provider HTTP Timeout",
+                5,
+                120,
+            ),
+            ("reranker_timeout_seconds", "Reranker HTTP Timeout", 5, 120),
+            (
+                "rest_query_handler_timeout_seconds",
+                "REST Query Handler Timeout",
+                30,
+                600,
+            ),
+        ):
+            field_value = data.get(field_name)
+            if field_value is not None:
+                try:
+                    val_int = int(field_value)
+                    if val_int < min_val or val_int > max_val:
+                        return (
+                            f"{label} must be between {min_val} and {max_val} seconds"
+                        )
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
+        # Story #1400 CRITICAL 5/6: the ONE float field. Basic sanity
+        # (non-negative) only -- the cross-field grace-budget relationship
+        # against search_code_handler_timeout_seconds is validated later by
+        # config_manager.validate_config against the whole candidate.
+        temporal_wait = data.get("temporal_inline_wait_seconds")
+        if temporal_wait is not None:
+            try:
+                val_float = float(temporal_wait)
+                if val_float < 0.0:
+                    return "Temporal Query Inline Sync-Wait must be >= 0.0 seconds"
+            except (ValueError, TypeError):
+                return "Temporal Query Inline Sync-Wait must be a valid number"
+
+    elif section == "embedding_stats":
+        # Story #1418 Phase 3: Embedding & reranker call tracking
+        # configuration validation. Ranges mirror
+        # config_manager.validate_config's EmbeddingStatsConfig checks.
+        flush_interval = data.get("flush_interval_seconds")
+        if flush_interval is not None:
+            try:
+                val_float = float(flush_interval)
+                if val_float <= 0:
+                    return "Flush Interval must be greater than 0 seconds"
+            except (ValueError, TypeError):
+                return "Flush Interval must be a valid number"
+
+        retention_days = data.get("retention_days")
+        if retention_days is not None:
+            try:
+                val_int = int(retention_days)
+                if val_int <= 0:
+                    return "Retention Days must be greater than 0"
+            except (ValueError, TypeError):
+                return "Retention Days must be a valid number"
+
+    elif section == "temporal_indexing":
+        # Story #1404: Global temporal indexing floor date validation.
+        # Delegates to TemporalIndexingConfig.validate() (strptime +
+        # strftime round-trip shape, mirrors
+        # temporal_search_service.parse_date_range) rather than
+        # re-implementing date-format checks inline.
+        index_floor_date = data.get("index_floor_date")
+        if index_floor_date is not None:
+            from ..utils.config_manager import TemporalIndexingConfig
+
+            try:
+                TemporalIndexingConfig(
+                    index_floor_date=str(index_floor_date)
+                ).validate()
+            except ValueError as exc:
+                return str(exc)
 
     elif section == "xray":
         # Story #977: X-Ray configuration validation
@@ -9026,7 +9266,6 @@ async def update_config_section(
         # (it is a UI-only field, not a config key).
         data.pop("confirm_host_port_change", None)
 
-        # Update all settings without validating (batch update).
         # Bug #1180: the search_event_log UI section renders two fields that
         # belong to different config categories:
         #   - search_event_log_retention_days -> category "search_event_log"
@@ -9037,16 +9276,26 @@ async def update_config_section(
         _section_key_category_overrides: dict = {}
         if section == "search_event_log":
             _section_key_category_overrides = {"export_retention_days": "export"}
-        for key, value in data.items():
-            category = _section_key_category_overrides.get(key, section)
-            config_service.update_setting(category, key, value, skip_validation=True)
+        _updates = [
+            (_section_key_category_overrides.get(key, section), key, value)
+            for key, value in data.items()
+        ]
 
-        # Validate configuration
-        config = config_service.get_config()
-        config_service.config_manager.validate_config(config)
-
-        # For OIDC: test reload BEFORE saving to file
+        # Story #1400 CRITICAL 6: the whole section is now applied as ONE
+        # atomic unit via update_settings_atomic (validate-copy-then-publish
+        # -- a rejected batch never touches the live config, no per-key
+        # partial application). OIDC is the one exception: it needs a live
+        # test-reload BEFORE anything is durably published, so it cannot use
+        # the copy-then-publish primitive (which always publishes on
+        # validation success). It keeps its pre-#1400 shape -- apply
+        # directly against the LIVE config via _apply_setting, validate,
+        # test-reload, and only THEN persist; reload-from-file on failure
+        # undoes the in-memory mutation exactly as before.
         if section == "oidc":
+            config = config_service.get_config()
+            for category, key, value in _updates:
+                config_service._apply_setting(config, category, key, value)
+            config_service.config_manager.validate_config(config)
             try:
                 # Try to reload with new config (don't save yet)
                 await _reload_oidc_configuration()
@@ -9070,9 +9319,10 @@ async def update_config_section(
                     session,
                     error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
                 )
+            config_service.save_config(config)
+        else:
+            config_service.update_settings_atomic(_updates)
 
-        # Only save to file after validation and OIDC test (if applicable)
-        config_service.save_config(config)
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},
@@ -10903,6 +11153,78 @@ def _add_scan_duration(scans: List[Dict]) -> None:
             scan["duration"] = "In progress"
         else:
             scan["duration"] = "N/A"
+
+
+def _load_embedding_stats_dashboard_data(
+    backend: Optional[Any],
+    provider: Optional[str] = None,
+    purpose: Optional[str] = None,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+    limit: int = 200,
+) -> List[Dict]:
+    """Load embedding_call_stats records for the Web UI dashboard page
+    (Story #1418 Phase 3 Component 8), as plain dicts ready for Jinja
+    rendering. Returns [] when backend is unavailable (fail-soft --
+    consistent with this project's read-only reporting convention rather
+    than raising into the page render)."""
+    from dataclasses import asdict
+
+    if backend is None:
+        return []
+    records = backend.query(
+        provider=provider,
+        purpose=purpose,
+        golden_repo_alias=golden_repo_alias,
+        job_id=job_id,
+        limit=limit,
+    )
+    return [asdict(r) for r in records]
+
+
+@web_router.get("/embedding-stats", response_class=HTMLResponse)
+def embedding_stats_dashboard_page(
+    request: Request,
+    provider: Optional[str] = None,
+    purpose: Optional[str] = None,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+):
+    """Embedding & reranker call tracking dashboard (Story #1418 Phase 3
+    Component 8). Filterable volume-over-time view backed by
+    backend_registry.embedding_call_stats -- requires authenticated admin
+    session."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    backend = (
+        getattr(backend_registry, "embedding_call_stats", None)
+        if backend_registry is not None
+        else None
+    )
+    records = _load_embedding_stats_dashboard_data(
+        backend,
+        provider=provider or None,
+        purpose=purpose or None,
+        golden_repo_alias=golden_repo_alias or None,
+        job_id=job_id or None,
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "embedding_stats_dashboard.html",
+        {
+            "records": records,
+            "filters": {
+                "provider": provider or "",
+                "purpose": purpose or "",
+                "golden_repo_alias": golden_repo_alias or "",
+                "job_id": job_id or "",
+            },
+        },
+    )
 
 
 def _load_self_monitoring_data(

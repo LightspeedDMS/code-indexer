@@ -54,7 +54,10 @@ class TestAC1LogLevelRestartRequired:
         source = _ROUTES_PATH.read_text()
         block_start = source.find("RESTART_REQUIRED_FIELDS")
         assert block_start != -1
-        block = source[block_start : block_start + 1000]
+        # Story #1400: widened from 1000 -> 1500 chars. The new
+        # "temporal_lane_concurrency" entry (added directly above
+        # "log_level") pushed log_level's offset past the old window.
+        block = source[block_start : block_start + 1500]
         has_it = '"log_level"' in block or "'log_level'" in block
         assert has_it, (
             "AC1: 'log_level' must be present inside the RESTART_REQUIRED_FIELDS literal"

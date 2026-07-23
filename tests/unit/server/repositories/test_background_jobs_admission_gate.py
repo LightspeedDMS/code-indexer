@@ -1,4 +1,4 @@
-"""EVO-64538 (C10): memory-aware admission gate in BackgroundJobManager.
+"""memory-aware admission gate in BackgroundJobManager.
 
 Covers the pure decision helper (_admission_blocked) and the pool-worker
 behavior (a blocked heavy job is re-queued and NOT executed until the governor
@@ -12,6 +12,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, List
 
 import pytest
 
@@ -33,7 +34,13 @@ class _StubGovernor:
 
     def __init__(self, allowed: bool):
         self.allowed = allowed
-        self.calls = []
+        self.calls: List[float] = []
+        # Optional governor-reporting attributes, mirroring the real
+        # MemoryGovernor's `band`/`last_used_pct` properties. Left unset
+        # (None / 0.0) by default; some tests assign real values to exercise
+        # _log_admission_deferred's breadcrumb formatting.
+        self.band: Any = None
+        self.last_used_pct: float = 0.0
 
     def admission_allowed(self, max_used_pct: float) -> bool:
         self.calls.append(max_used_pct)
@@ -108,6 +115,20 @@ class TestAdmissionBlockedHelper:
         mg.set_memory_governor(_StubGovernor(allowed=False))
         assert m._admission_blocked("j1") is False
 
+    def test_governor_exception_fails_open(self):
+        # L1: a governor that raises must not propagate out of the admission
+        # check -- otherwise the exception would kill the pool-worker thread and
+        # silently stop the lane. Fail-open (do not block).
+        m = self._manager()
+        m.jobs["j1"] = _job("j1", "add_golden_repo")
+
+        class _BoomGovernor:
+            def admission_allowed(self, max_used_pct):
+                raise RuntimeError("governor boom")
+
+        mg.set_memory_governor(_BoomGovernor())
+        assert m._admission_blocked("j1") is False
+
     def test_uses_configured_watermark(self):
         m = self._manager(job_admission_memory_max_used_pct=73.5)
         m.jobs["j1"] = _job("j1", "add_golden_repo")
@@ -130,10 +151,12 @@ class TestAdmissionBlockedHelper:
             m._log_admission_deferred("j1")  # first: logs
             m._log_admission_deferred("j1")  # immediately after: suppressed
 
-        c10_lines = [r for r in caplog.records if "C10: deferring" in r.getMessage()]
-        assert len(c10_lines) == 1
-        assert "band=RED" in c10_lines[0].getMessage()
-        assert "op=add_golden_repo" in c10_lines[0].getMessage()
+        defer_lines = [
+            r for r in caplog.records if "memory-pressure: deferring" in r.getMessage()
+        ]
+        assert len(defer_lines) == 1
+        assert "band=RED" in defer_lines[0].getMessage()
+        assert "op=add_golden_repo" in defer_lines[0].getMessage()
 
 
 @pytest.mark.slow

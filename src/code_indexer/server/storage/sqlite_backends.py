@@ -3180,9 +3180,12 @@ class BackgroundJobsSqliteBackend:
                 "(LOWER(repo_alias) LIKE LOWER(?)"
                 " OR LOWER(username) LIKE LOWER(?)"
                 " OR LOWER(operation_type) LIKE LOWER(?)"
-                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?)"
+                " OR LOWER(job_id) LIKE LOWER(?))"
             )
-            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+            params.extend(
+                [like_pattern, like_pattern, like_pattern, like_pattern, like_pattern]
+            )
 
         if exclude_ids:
             placeholders = ",".join("?" * len(exclude_ids))
@@ -3213,7 +3216,7 @@ class BackgroundJobsSqliteBackend:
             status: Filter by exact status value (e.g. 'completed', 'failed')
             operation_type: Filter by exact operation_type value
             search_text: Case-insensitive LIKE match against repo_alias, username,
-                         operation_type, and error columns
+                         operation_type, error, and job_id columns
             exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
             limit: Maximum number of rows to return (None = no limit)
             offset: Number of rows to skip for pagination (default 0)
@@ -3377,7 +3380,7 @@ class BackgroundJobsSqliteBackend:
 
         return stats
 
-    def cleanup_orphaned_jobs_on_startup(self) -> int:
+    def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:
         """
         Clean up orphaned jobs on server startup.
 
@@ -3388,6 +3391,14 @@ class BackgroundJobsSqliteBackend:
         and timestamp for audit trail.
 
         Story #723: Clean Up Orphaned Jobs on Server Startup
+
+        Story #1400 CRITICAL 3: node_id is accepted for interface parity with
+        the PostgreSQL backend (which uses it to scope cleanup to THIS node's
+        jobs only in cluster mode) but is intentionally IGNORED here -- solo
+        SQLite mode is always single-process/single-node, so every
+        running/pending row in this database genuinely was orphaned by this
+        same process's restart. Node scoping only matters when a shared
+        cluster backend could see another node's still-running work.
 
         Returns:
             Number of orphaned jobs that were cleaned up.

@@ -515,6 +515,116 @@ class TestErrorCodeMapping:
         assert "name" in response["error"]["message"].lower()
 
 
+class TestInternalErrorLogging:
+    """Bug #1423: unhandled tool-call exceptions must be logged server-side
+    (tool name + offending repository_alias/pattern_name) before being
+    surfaced as a raw JSON-RPC -32603 -- previously a silent failure with
+    zero server-side log trace (confirmed via admin_logs_query on staging).
+
+    Both tests drive REAL dispatch (TOOL_REGISTRY/HANDLER_REGISTRY lookup,
+    real permission check, real handler) -- mirroring the existing
+    test_valid_call_returns_stub_success / test_call_without_arguments
+    pattern in this file -- and mock only genuine external collaborators,
+    never handle_tools_call/handle_tools_list themselves.
+    """
+
+    @pytest.mark.asyncio
+    async def test_internal_error_logs_exception_with_tool_context(self):
+        """Real xray_search dispatch with golden_repo_manager unconfigured
+        naturally raises RuntimeError deep inside the real handler (pattern
+        resolution needs cidx-meta path, which is unavailable). Verify the
+        exception is logged with tool name + repository_alias + pattern_name
+        before -32603 is returned."""
+        from code_indexer.server import app as real_app_module
+
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "xray_search",
+                "arguments": {
+                    "repository_alias": ["click-global", "typer-global"],
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "deep-nesting",
+                },
+            },
+            "id": "test-1",
+        }
+
+        with (
+            patch.object(real_app_module, "golden_repo_manager", None),
+            patch.object(
+                real_app_module.app.state,
+                "access_filtering_service",
+                Mock(is_admin_user=Mock(return_value=True)),
+                create=True,
+            ),
+            patch("code_indexer.server.mcp.protocol.logger") as mock_logger,
+        ):
+            response = await process_jsonrpc_request(request, user)
+
+        assert response["error"]["code"] == -32603
+        assert mock_logger.error.called, (
+            "Bug #1423: unhandled tools/call exceptions must be logged via "
+            "logger.error before surfacing as -32603 (previously silent)."
+        )
+        logged_text = " ".join(str(a) for a in mock_logger.error.call_args.args)
+        assert "xray_search" in logged_text
+        assert "click-global" in logged_text
+        assert "typer-global" in logged_text
+        assert "deep-nesting" in logged_text
+
+    @pytest.mark.asyncio
+    async def test_internal_error_logging_does_not_break_tools_without_repo_params(
+        self,
+    ):
+        """A real handler call whose arguments omit repository_alias
+        entirely must still be logged (and -32603 returned) without a
+        secondary crash on the missing key. Reuses the same real
+        golden_repo_manager=None crash trigger as the sibling test, but
+        with no repository_alias key in arguments at all -- proving
+        arguments.get("repository_alias") in the new logging code
+        tolerates absence rather than raising."""
+        from code_indexer.server import app as real_app_module
+
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "xray_search",
+                "arguments": {
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "deep-nesting",
+                    # deliberately no "repository_alias" key at all
+                },
+            },
+            "id": "test-1",
+        }
+
+        with (
+            patch.object(real_app_module, "golden_repo_manager", None),
+            patch("code_indexer.server.mcp.protocol.logger") as mock_logger,
+        ):
+            response = await process_jsonrpc_request(request, user)
+
+        assert response["error"]["code"] == -32603
+        assert mock_logger.error.called
+
+
 class TestEdgeCases:
     """Test edge cases and error conditions."""
 

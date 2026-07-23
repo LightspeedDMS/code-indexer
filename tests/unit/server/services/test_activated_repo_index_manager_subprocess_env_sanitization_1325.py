@@ -95,6 +95,13 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
     def test_semantic_indexing_receives_absolutized_pythonpath(
         self, monkeypatch, index_manager, tmp_path, capturing_subprocess_run
     ):
+        """Bug #1419 follow-up: _execute_semantic_indexing now fast-fails
+        when tmp_path has no .code-indexer/config.json (uninitialized-repo
+        guard). Create one here so the mocked run_cancellable_subprocess is
+        actually reached, matching what an initialized repo looks like."""
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         monkeypatch.setenv("PYTHONPATH", _RELATIVE_PYTHONPATH)
         expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
         run_fn, captured_calls = capturing_subprocess_run
@@ -112,6 +119,13 @@ class TestActivatedRepoIndexManagerSanitizesPythonPath:
     def test_fts_indexing_receives_absolutized_pythonpath(
         self, monkeypatch, index_manager, tmp_path, capturing_subprocess_run
     ):
+        """Bug #1419 follow-up: _execute_fts_indexing now fast-fails when
+        tmp_path has no .code-indexer/config.json (uninitialized-repo
+        guard). Create one here so the mocked run_cancellable_subprocess is
+        actually reached, matching what an initialized repo looks like."""
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         monkeypatch.setenv("PYTHONPATH", _RELATIVE_PYTHONPATH)
         expected_abs = os.path.abspath(_RELATIVE_PYTHONPATH)
         run_fn, captured_calls = capturing_subprocess_run

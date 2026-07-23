@@ -91,7 +91,17 @@ class TestCancelCheckForwardingWiring:
     """Parameter-plumbing tests: cancel_check must reach the subprocess call
     from the public run_branch_delta_index entrypoint."""
 
-    def test_execute_semantic_indexing_forwards_cancel_check(self, index_manager):
+    def test_execute_semantic_indexing_forwards_cancel_check(
+        self, index_manager, tmp_path
+    ):
+        """Bug #1419 follow-up: the hardcoded "/tmp/repo" string was never a
+        real, initialized repo, so the uninitialized-repo guard added in
+        _execute_semantic_indexing now fires before the mocked
+        _run_subprocess_with_telemetry is reached. Use the real tmp_path
+        fixture with a config.json created inside it instead."""
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         sentinel_cancel_check = Mock(return_value=False)
         with patch.object(
             index_manager,
@@ -99,7 +109,7 @@ class TestCancelCheckForwardingWiring:
             return_value=Mock(returncode=0, stdout="", stderr=""),
         ) as mock_run:
             index_manager._execute_semantic_indexing(
-                "/tmp/repo", False, cancel_check=sentinel_cancel_check
+                str(tmp_path), False, cancel_check=sentinel_cancel_check
             )
         _, kwargs = mock_run.call_args
         assert kwargs.get("cancel_check") is sentinel_cancel_check
@@ -145,8 +155,18 @@ class TestCancellationIdentityPreservedBug1346:
     `run_branch_delta_index`'s re-raise unscathed."""
 
     def test_run_branch_delta_index_cancellation_preserves_subprocess_cancelled_identity(
-        self, index_manager
+        self, index_manager, tmp_path
     ):
+        """Bug #1419 follow-up: the hardcoded "/tmp/repo" string was never a
+        real, initialized repo, so the uninitialized-repo guard added in
+        _execute_semantic_indexing now fires before the mocked
+        _run_subprocess_with_telemetry is reached (returning a plain
+        success=False dict instead of letting SubprocessCancelledError
+        propagate). Use the real tmp_path fixture with a config.json created
+        inside it instead."""
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         with patch.object(
             index_manager,
             "_run_subprocess_with_telemetry",
@@ -154,5 +174,5 @@ class TestCancellationIdentityPreservedBug1346:
         ):
             with pytest.raises(SubprocessCancelledError):
                 index_manager.run_branch_delta_index(
-                    "/tmp/repo", cancel_check=lambda: True
+                    str(tmp_path), cancel_check=lambda: True
                 )

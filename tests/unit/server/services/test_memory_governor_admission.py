@@ -1,4 +1,4 @@
-"""EVO-64538 (C10): MemoryGovernor.admission_allowed() gate tests.
+"""MemoryGovernor.admission_allowed() gate tests.
 
 Drives the governor synchronously via _tick() (start_sampler=False) using the
 injectable FakeMemoryReaders, so cgroup used% and the resulting band are

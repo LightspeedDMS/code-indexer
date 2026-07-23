@@ -87,16 +87,35 @@ class VoyageMultimodalClient:
         if input_type is not None:
             payload["input_type"] = input_type
 
-        # Make API request
-        with httpx.Client(
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=self.config.timeout,
-        ) as client:
-            response = client.post(self.config.api_endpoint, json=payload)
-            response.raise_for_status()
+        def _do_post_and_validate() -> httpx.Response:
+            """The smallest unit including BOTH the network call and its
+            status validation -- a vendor 4xx/5xx here must be recorded as
+            success=False, never success=True (Story #1418)."""
+            with httpx.Client(
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.config.timeout,
+            ) as client:
+                _response = client.post(self.config.api_endpoint, json=payload)
+                _response.raise_for_status()
+            return _response
+
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            instrument_call,
+        )
+
+        response = instrument_call(
+            provider="voyageai",
+            call_type="embed_multimodal",
+            model=self.config.model,
+            item_count=1,
+            token_count=0,
+            batch_size=1,
+            purpose="query" if input_type == "query" else "index",
+            fn=_do_post_and_validate,
+        )
 
         result = response.json()
 
@@ -241,16 +260,35 @@ class VoyageMultimodalClient:
         if input_type is not None:
             payload["input_type"] = input_type
 
-        # Make API request
-        with httpx.Client(
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=self.config.timeout,
-        ) as client:
-            response = client.post(self.config.api_endpoint, json=payload)
-            response.raise_for_status()
+        def _do_post_and_validate() -> httpx.Response:
+            """The smallest unit including BOTH the network call and its
+            status validation -- a vendor 4xx/5xx here must be recorded as
+            success=False, never success=True (Story #1418)."""
+            with httpx.Client(
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.config.timeout,
+            ) as client:
+                _response = client.post(self.config.api_endpoint, json=payload)
+                _response.raise_for_status()
+            return _response
+
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            instrument_call,
+        )
+
+        response = instrument_call(
+            provider="voyageai",
+            call_type="embed_multimodal",
+            model=self.config.model,
+            item_count=len(items),
+            token_count=0,
+            batch_size=len(items),
+            purpose="query" if input_type == "query" else "index",
+            fn=_do_post_and_validate,
+        )
 
         result = response.json()
 

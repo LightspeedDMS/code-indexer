@@ -1,4 +1,4 @@
-"""EVO-64538 (C10): memory-aware admission gate in DistributedJobClaimer.
+"""memory-aware admission gate in DistributedJobClaimer.
 
 A pod under memory pressure must decline to claim so the row stays 'pending'
 for a pod with headroom (or for later). Uses a stub governor installed via

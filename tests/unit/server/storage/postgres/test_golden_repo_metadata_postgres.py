@@ -533,6 +533,77 @@ class TestUpdateEnableTemporal:
 
 
 # ---------------------------------------------------------------------------
+# update_temporal_options (Bug #1414)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateTemporalOptions:
+    """
+    Bug #1414: GoldenRepoMetadataPostgresBackend had NO update_temporal_options
+    method at all (only update_enable_temporal and update_repo_url existed),
+    so in cluster/PostgreSQL mode GoldenRepoManager.save_temporal_options()
+    (the Web UI's only write path) raised AttributeError -> unhandled ->
+    HTTP 500, persisting nothing anywhere. Mirrors TestUpdateEnableTemporal /
+    TestUpdateRepoUrl exactly for style and mock-pool driver fidelity
+    (execute() on the cursor via the connection's context-manager, matching
+    real psycopg v3 usage -- not executemany, which lives on the cursor too
+    but is not used by this single-row UPDATE).
+    """
+
+    def test_update_temporal_options_executes_update_sql_with_jsonb_cast(
+        self,
+    ) -> None:
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        mock_pool, mock_conn, mock_cursor = _make_mock_pool(rowcount=1)
+        backend = GoldenRepoMetadataPostgresBackend(mock_pool)
+
+        opts = {"max_commits": 200, "all_branches": True}
+        result = backend.update_temporal_options("my-alias", opts)
+
+        mock_cursor.execute.assert_called_once()
+        sql = mock_cursor.execute.call_args[0][0]
+        params = mock_cursor.execute.call_args[0][1]
+        assert "UPDATE golden_repos_metadata" in sql
+        assert "temporal_options" in sql
+        assert "%s" in sql  # parameterized, never f-string interpolated
+        assert json.loads(params[0]) == opts
+        assert params[1] == "my-alias"
+        mock_conn.commit.assert_called_once()
+        assert result is True
+
+    def test_update_temporal_options_none_clears_column(self) -> None:
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        mock_pool, _, mock_cursor = _make_mock_pool(rowcount=1)
+        backend = GoldenRepoMetadataPostgresBackend(mock_pool)
+
+        backend.update_temporal_options("my-alias", None)
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert params[0] is None
+        assert params[1] == "my-alias"
+
+    def test_update_temporal_options_returns_false_when_alias_not_found(
+        self,
+    ) -> None:
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        mock_pool, _, _ = _make_mock_pool(rowcount=0)
+        backend = GoldenRepoMetadataPostgresBackend(mock_pool)
+
+        assert backend.update_temporal_options("missing-alias", {"max_commits": 5}) is (
+            False
+        )
+
+
+# ---------------------------------------------------------------------------
 # update_repo_url
 # ---------------------------------------------------------------------------
 

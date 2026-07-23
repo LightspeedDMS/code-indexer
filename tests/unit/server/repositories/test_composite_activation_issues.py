@@ -24,8 +24,8 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
-    GoldenRepo,
 )
+from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.fixture
@@ -93,13 +93,18 @@ def golden_repo_manager(temp_data_dir):
         capture_output=True,
     )
 
-    # Add to manager
-    manager.golden_repos["click"] = GoldenRepo(
+    # Add to manager via the real SQLite backend (Bug #176 / commit 6157ba24:
+    # production reads golden repos via get_golden_repo(), which is
+    # SQLite-backed only -- poking .golden_repos[alias] directly is
+    # invisible to it).
+    manager._sqlite_backend.add_repo(
         alias="click",
         repo_url="https://github.com/pallets/click.git",
-        clone_path=click_repo_path,
         default_branch="main",
+        clone_path=click_repo_path,
         created_at="2025-01-01T00:00:00Z",
+        enable_temporal=False,
+        temporal_options=None,
     )
 
     # Create hello-world-test repository
@@ -148,13 +153,15 @@ def golden_repo_manager(temp_data_dir):
         capture_output=True,
     )
 
-    # Add to manager
-    manager.golden_repos["hello-world-test"] = GoldenRepo(
+    # Add to manager via the real SQLite backend (see "click" comment above).
+    manager._sqlite_backend.add_repo(
         alias="hello-world-test",
         repo_url="https://github.com/test/hello-world.git",
-        clone_path=hello_repo_path,
         default_branch="main",
+        clone_path=hello_repo_path,
         created_at="2025-01-01T00:00:00Z",
+        enable_temporal=False,
+        temporal_options=None,
     )
 
     return manager
@@ -164,7 +171,9 @@ def golden_repo_manager(temp_data_dir):
 def activated_repo_manager(temp_data_dir, golden_repo_manager):
     """Create activated repo manager with golden repo manager."""
     return ActivatedRepoManager(
-        data_dir=temp_data_dir, golden_repo_manager=golden_repo_manager
+        data_dir=temp_data_dir,
+        golden_repo_manager=golden_repo_manager,
+        clone_backend=LocalCloneBackend(),
     )
 
 
@@ -422,14 +431,11 @@ class TestIssue3QueryExecutionAnomaly:
             ) as mock_execute:
                 mock_execute.return_value = None  # No output
 
-                # Import asyncio to run async test
-                import asyncio
-
-                # Execute query
-                asyncio.run(
-                    query_manager.search_composite(
-                        repo_path=composite_path, query="authentication", limit=10
-                    )
+                # Execute query. search_composite is a synchronous method
+                # (a thin wrapper over CLI's _execute_cli_query), not a
+                # coroutine -- call it directly.
+                query_manager.search_composite(
+                    repo_path=composite_path, query="authentication", limit=10
                 )
 
                 # Verify _execute_query was called

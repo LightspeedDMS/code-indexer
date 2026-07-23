@@ -38,9 +38,13 @@ from typing import Any, Dict, List, Optional, cast
 
 import numpy as np
 
+from code_indexer.server.services.embedding_call_instrumentation import (
+    stats_purpose_override,
+)
 from code_indexer.server.services.governed_call import (
     governed_query_embedding,
 )
+
 from code_indexer.server.services.search_embed_event_emit import (
     get_search_embed_event_writer,
 )
@@ -80,12 +84,17 @@ def _get_second_search_vector(
     if mode == "shadow":
         return _decode_cached_vector(audit_ctx["cached_blob"])
     elif mode == "on":
-        return cast(
-            Optional[List[float]],
-            governed_query_embedding(
-                embedding_provider, query, embedding_purpose="query"
-            ),
-        )
+        # This is a REAL, billable live vendor call (the primary search
+        # used the CACHED vector) -- tag it distinguishably from an
+        # ordinary user query for vendor-cost reconciliation (Story #1418
+        # LOW-2 review finding).
+        with stats_purpose_override("cache_shadow_audit"):
+            return cast(
+                Optional[List[float]],
+                governed_query_embedding(
+                    embedding_provider, query, embedding_purpose="query"
+                ),
+            )
     else:
         logger.warning(
             "_run_deep_fidelity_audit: unknown mode %r — skipping audit", mode

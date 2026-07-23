@@ -170,6 +170,52 @@ class TestConfigServiceUpdateSetting:
             service.update_setting("server", "invalid_key", "value")
 
 
+class TestFtsCacheReloadOnAccessStringBoolBug1429:
+    """Regression test for GitHub issue #1429.
+
+    ConfigService._update_cache_setting() used `bool(value)` to coerce the
+    `fts_cache_reload_on_access` setting. `bool("false")` evaluates to True
+    in Python (any non-empty string is truthy), so when the Web UI config
+    form posts the string "false" for this toggle, the setting could never
+    actually be turned off via the front door. This is the exact same bug
+    class fixed for Story #1418's embedding_stats kill switch
+    (config_service.py:2527, bool(value) -> _parse_bool(value)). Must use
+    _parse_bool like sibling boolean settings (coalesce_enabled,
+    memory_governor_enabled).
+    """
+
+    def test_update_with_string_false_disables_setting(self, tmp_path):
+        """Posting the string "false" must actually disable the setting."""
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+
+        service.update_setting("cache", "fts_cache_reload_on_access", "false")
+
+        config = service.get_config()
+        assert config.cache_config.fts_cache_reload_on_access is False
+
+    def test_update_with_string_true_enables_setting(self, tmp_path):
+        """Posting the string "true" must keep the setting enabled."""
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+
+        service.update_setting("cache", "fts_cache_reload_on_access", "true")
+
+        config = service.get_config()
+        assert config.cache_config.fts_cache_reload_on_access is True
+
+    def test_update_with_native_bool_false_disables_setting(self, tmp_path):
+        """Posting the native Python bool False must still work (non-Web-UI
+        callers pass native booleans, not strings)."""
+        service = ConfigService(server_dir_path=str(tmp_path))
+        service.load_config()
+
+        service.update_setting("cache", "fts_cache_reload_on_access", False)
+
+        config = service.get_config()
+        assert config.cache_config.fts_cache_reload_on_access is False
+
+
 class TestConfigServiceValidation:
     """Test ConfigService validation."""
 

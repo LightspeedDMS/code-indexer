@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}Embedding & Reranker Call Tracking{% endblock %}
+
+{% block content %}
+<article>
+    <header>
+        <h1>Embedding &amp; Reranker Call Tracking</h1>
+        <p>Vendor cost reconciliation -- volume of real (non-cached) embedding/reranker calls, filterable by provider, purpose, golden repo, and job.</p>
+    </header>
+
+    <form id="embedding-stats-filter-form" method="get" action="/admin/embedding-stats">
+        <div class="form-grid">
+            <label>
+                Provider
+                <select name="provider">
+                    <option value="" {% if not filters.provider %}selected{% endif %}>All</option>
+                    <option value="voyageai" {% if filters.provider == "voyageai" %}selected{% endif %}>voyageai</option>
+                    <option value="cohere" {% if filters.provider == "cohere" %}selected{% endif %}>cohere</option>
+                </select>
+            </label>
+            <label>
+                Purpose
+                <input type="text" name="purpose" value="{{ filters.purpose }}" placeholder="index, query, refresh, ...">
+            </label>
+            <label>
+                Golden Repo Alias
+                <input type="text" name="golden_repo_alias" value="{{ filters.golden_repo_alias }}" placeholder="my-repo-global">
+            </label>
+            <label>
+                Job ID
+                <input type="text" name="job_id" value="{{ filters.job_id }}" placeholder="job-...">
+            </label>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="primary">Filter</button>
+            <a href="/admin/embedding-stats" role="button" class="secondary">Clear</a>
+        </div>
+    </form>
+
+    <table id="embedding-stats-table" class="config-table">
+        <thead>
+            <tr>
+                <th>Occurred At</th>
+                <th>Provider</th>
+                <th>Call Type</th>
+                <th>Model</th>
+                <th>Purpose</th>
+                <th>Items</th>
+                <th>Tokens</th>
+                <th>Batch Size</th>
+                <th>Latency (ms)</th>
+                <th>Success</th>
+                <th>Golden Repo</th>
+                <th>Job ID</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in records %}
+            <tr>
+                <td>{{ record.occurred_at }}</td>
+                <td>{{ record.provider }}</td>
+                <td>{{ record.call_type }}</td>
+                <td>{{ record.model }}</td>
+                <td>{{ record.purpose }}</td>
+                <td>{{ record.item_count }}</td>
+                <td>{{ record.token_count }}</td>
+                <td>{{ record.batch_size }}</td>
+                <td>{{ record.latency_ms }}</td>
+                <td>{{ 'Yes' if record.success else 'No' }}</td>
+                <td>{{ record.golden_repo_alias or '' }}</td>
+                <td>{{ record.job_id or '' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="12">No embedding/reranker calls recorded for the current filters.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</article>
+{% endblock %}

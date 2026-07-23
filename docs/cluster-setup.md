@@ -215,7 +215,7 @@ Add an HAProxy configuration for the CIDX Server backend. Each server line point
 ```
 backend cidx_servers
     balance roundrobin
-    option httpchk GET /docs
+    option httpchk GET /healthz
     cookie SERVERID insert indirect nocache
     server node-1 192.168.1.11:8090 check cookie node1
     server node-2 192.168.1.12:8090 check cookie node2
@@ -226,6 +226,10 @@ frontend cidx_frontend
 ```
 
 The `cookie SERVERID insert indirect nocache` directive enables session affinity. Each node is assigned a cookie value (`node1`, `node2`). Once a client receives the cookie, subsequent requests are routed to the same node. This is required for the Research Assistant feature and recommended for consistent Web UI behavior.
+
+The health check targets `/healthz` -- a dedicated, unauthenticated liveness/readiness endpoint, separate from the detailed `/api/system/health` diagnostics endpoint. `/healthz` maps the computed overall status directly to the HTTP status code: HTTP 200 for `healthy` or `degraded` (degraded is still serviceable and must not be drained), HTTP 503 for `unhealthy` (for example, when the golden-repos storage read-probe added for Bug #1433 detects a broken NFS/CoW mount). Because HAProxy's default `httpchk` behavior already treats any 2xx/3xx as up and everything else as down, a plain `option httpchk GET /healthz` is sufficient -- no `http-check expect` body-parsing directive is needed. `/healthz`'s response body is intentionally minimal (`{"status": "..."}` only, no service/system detail) since it is reachable without authentication.
+
+Note for institutional memory: an earlier version of this doc pointed the check at `option httpchk GET /api/system/health` with `http-check expect ! string "\"status\":\"unhealthy\""`. That combination does not work: `/api/system/health` requires authentication, so an unauthenticated HAProxy probe receives HTTP 401 on every check and never sees the JSON body the `http-check expect` directive was trying to match against -- the storage-failure signal never reached HAProxy's up/down decision. Do not reintroduce a body-matching check against an authenticated endpoint; use the dedicated `/healthz` endpoint instead. A plain `GET /docs` check only proves the FastAPI process is alive, not that the node can actually serve queries -- `/healthz` is required for that signal.
 
 After adding all nodes, reload HAProxy:
 

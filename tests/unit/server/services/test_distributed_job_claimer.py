@@ -87,7 +87,7 @@ def _make_job_row(
         json.dumps(language_resolution_status) if language_resolution_status else None,
         executing_node,
         claimed_at,
-        # EVO-64545: metadata JSONB column (pod-pull reconstruction params).
+        # Pod-pull: metadata JSONB column (pod-pull reconstruction params).
         json.dumps(metadata) if metadata else None,
     )
 

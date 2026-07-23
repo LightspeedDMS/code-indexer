@@ -1,6 +1,7 @@
 """Command line interface for Code Indexer."""
 
 import asyncio
+import atexit
 import getpass
 import json
 import logging
@@ -2846,6 +2847,73 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     return provider_metadata
 
 
+def _install_embedding_stats_writer_for_index() -> None:
+    """CLI child-side embedding-stats bootstrap installer (Story #1418).
+
+    Unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (read ONLY inside the
+    --index-commits standalone branch, since temporal is a conditional
+    feature), CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is a pure DISCOVERY
+    problem: a `cidx index` child subprocess spawned by the server has no
+    other way to locate the server's data directory at all. This helper is
+    therefore called unconditionally at the `index` command entrypoint,
+    BEFORE any --index-commits branching, so plain (non-temporal) indexing
+    is covered too.
+
+    Lazy imports: server/psycopg machinery is only touched when the
+    bootstrap dir env var is actually present (server-orchestrated child),
+    never for standalone/solo CLI usage -- preserves the CLI import budget.
+
+    Bug #1441: the import of install_embedding_stats_writer_from_bootstrap
+    (and the call itself) is wrapped in a broad try/except -- on any
+    interpreter lacking psycopg (confirmed in production, where the
+    `cidx index` child subprocess's interpreter is separate from the
+    postgres-capable server venv), the bare import used to raise
+    ModuleNotFoundError BEFORE install_embedding_stats_writer_from_bootstrap's
+    own internal fail-open try/except ever got a chance to run, crashing
+    the entire `cidx index` invocation. This outer guard restores the
+    documented "FAIL-OPEN, never fail-loud" contract at the one boundary
+    that function's own try/except cannot cover: the act of importing/
+    calling it in the first place.
+    """
+    bootstrap_dir = os.environ.get("CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR")
+    if bootstrap_dir:
+        try:
+            from .server.storage.postgres.embedding_stats_child_wiring import (
+                install_embedding_stats_writer_from_bootstrap,
+            )
+
+            writer = install_embedding_stats_writer_from_bootstrap(bootstrap_dir)
+            # Best-effort final flush on normal process exit (sys.exit(0/1),
+            # uncaught exception) -- atexit does NOT fire on SIGKILL/OOM,
+            # which is the accepted fail-open tradeoff documented on
+            # CrossProcessBootstrapWriter. Only registered when a real
+            # writer was installed (never for the NoOpWriter branch below,
+            # which has nothing to flush).
+            if hasattr(writer, "stop"):
+                atexit.register(writer.stop)
+        except Exception as exc:
+            logger.warning(
+                "_install_embedding_stats_writer_for_index: failed to install "
+                "embedding-stats writer from bootstrap_dir=%s -- falling back "
+                "to NoOpWriter: %s",
+                bootstrap_dir,
+                exc,
+            )
+            from .server.services.embedding_stats_writer import (
+                EmbeddingStatsWriter,
+                NoOpWriter,
+            )
+
+            EmbeddingStatsWriter.set_active(NoOpWriter())
+    else:
+        from .server.services.embedding_stats_writer import (
+            EmbeddingStatsWriter,
+            NoOpWriter,
+        )
+
+        EmbeddingStatsWriter.set_active(NoOpWriter())
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -2914,7 +2982,11 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
 @click.option(
     "--max-commits",
     type=int,
-    help="Maximum number of commits to index per branch (default: all)",
+    help="Maximum number of newly-discovered commits to schedule this run, "
+    "per configured temporal embedder (default: all). Applied AFTER "
+    "incremental-gate discovery as a global (not per-branch) cap: "
+    "selects the newest N chronologically-eligible commits; any "
+    "remainder is picked up on a future unrestricted run.",
 )
 @click.option(
     "--since-date",
@@ -3035,6 +3107,13 @@ def index(
       Filesystem backend stores vectors as optimized JSON files.
     """
     config_manager = ctx.obj["config_manager"]
+
+    # Story #1418: install the embedding-stats writer BEFORE any
+    # embedding-provider client is constructed, and BEFORE any
+    # --index-commits branching (unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR,
+    # this covers plain semantic indexing too -- see the helper's
+    # docstring).
+    _install_embedding_stats_writer_for_index()
 
     # H2: When --progress-json is active, redirect the module-level console to
     # stderr so Rich human-readable output does not corrupt the JSON stream on stdout.
@@ -8516,6 +8595,16 @@ def health(output_json: bool, quiet: bool, index_path: Optional[str]):
         if result.orphan_count is not None:
             console.print(f"  Orphan Count: {result.orphan_count}")
 
+    # Bug #1415: degraded-capability signal, SEPARATE from the zero-tolerance
+    # orphan_count binary above -- only shown when actually evaluated
+    # (Level 4 reached) and found missing.
+    if result.hnswlib_capability_available is False:
+        console.print()
+        console.print(
+            "hnswlib fork capability: unavailable (degraded, orphan repair skipped)",
+            style="bold yellow",
+        )
+
     # Errors (if any)
     if result.errors:
         console.print()
@@ -11157,6 +11246,12 @@ def server_install_auto_update(ctx, branch):
             console.print("❌ Error: Cannot detect current user", style="red")
             sys.exit(1)
 
+        # Bug #1440: resolve current_user's home directory for the unit's
+        # PATH= environment line (must include ~/.local/bin so the systemd
+        # unit's PATH search can find a pip/pipx `cidx` entrypoint there --
+        # systemd's compiled-in default PATH never includes it).
+        home_dir = os.path.expanduser(f"~{current_user}")
+
         # Get absolute path to current git repository
         try:
             repo_path = subprocess.check_output(
@@ -11172,6 +11267,7 @@ def server_install_auto_update(ctx, branch):
         # Read service template and substitute placeholders
         service_content = service_template.read_text()
         service_content = service_content.replace("{USER}", current_user)
+        service_content = service_content.replace("{HOME}", home_dir)
         service_content = service_content.replace("{REPO_PATH}", repo_path)
         service_content = service_content.replace("{BRANCH}", branch)
 

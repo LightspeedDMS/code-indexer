@@ -11,9 +11,12 @@ Performance targets:
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def quick_daemon_check() -> Tuple[bool, Optional[Path]]:
@@ -22,10 +25,21 @@ def quick_daemon_check() -> Tuple[bool, Optional[Path]]:
     Walks up directory tree from current working directory to find
     .code-indexer/config.json and check daemon.enabled flag.
 
+    Bug #1420: the walk STOPS at the FIRST (nearest) config.json found,
+    period -- that config's daemon-mode value (enabled, disabled, absent,
+    or even malformed) is the final answer. A nearer config that is
+    daemon-disabled (or missing the "daemon" section, or malformed) must
+    NEVER be skipped in search of a farther ancestor's daemon-enabled
+    config -- doing so would silently inherit a distant, unrelated
+    project's daemon state.
+
     Returns:
         Tuple of (is_daemon_enabled, config_path)
-        - is_daemon_enabled: True if daemon.enabled: true in config
-        - config_path: Path to config.json if found, None otherwise
+        - is_daemon_enabled: True if daemon.enabled: true in the NEAREST
+          config.json found while walking upward
+        - config_path: Path to that config.json when daemon is enabled,
+          None otherwise (config_path is only consumed by callers when
+          is_daemon_enabled is True)
     """
     current = Path.cwd()
 
@@ -34,16 +48,37 @@ def quick_daemon_check() -> Tuple[bool, Optional[Path]]:
         config_path = current / ".code-indexer" / "config.json"
 
         if config_path.exists():
+            # Nearest config.json found - it is authoritative. Do NOT
+            # continue walking past it regardless of its daemon state.
             try:
                 # Use stdlib json for fast parsing
                 with open(config_path) as f:
                     config = json.load(f)
-                    daemon_config = config.get("daemon") or {}
-                    if daemon_config.get("enabled"):
-                        return True, config_path
-            except (json.JSONDecodeError, IOError, KeyError):
-                # Malformed config - treat as daemon disabled
-                pass
+                daemon_config = (
+                    config.get("daemon") if isinstance(config, dict) else None
+                )
+                if isinstance(daemon_config, dict) and daemon_config.get("enabled"):
+                    return True, config_path
+            except (
+                json.JSONDecodeError,
+                IOError,
+                OSError,
+                AttributeError,
+                TypeError,
+                KeyError,
+            ) as e:
+                # Malformed config (invalid JSON, non-object JSON, or a
+                # "daemon" value that isn't an object). Explicitly
+                # discarded and treated as daemon disabled -- this nearest
+                # config still stops the walk (Bug #1420).
+                logger.debug(
+                    "quick_daemon_check: treating malformed config %s as "
+                    "daemon-disabled: %s",
+                    config_path,
+                    e,
+                )
+
+            return False, None
 
         current = current.parent
 
@@ -55,7 +90,7 @@ def is_delegatable_command(command: str, args: list) -> bool:
 
     Commands that can be delegated:
     - query: Semantic/FTS search (EXCEPT temporal queries with --time-range)
-    - index: Indexing operations
+    - index: Indexing operations (EXCEPT temporal --index-commits)
     - watch: Watch mode
     - clean/clean-data: Cleanup operations
     - start/stop: Daemon lifecycle
@@ -69,6 +104,15 @@ def is_delegatable_command(command: str, args: list) -> bool:
     - sync: Remote operations
     - list-repos: Server operations
     - query --time-range: Temporal queries (daemon doesn't support this yet)
+    - index --index-commits: Temporal git-history indexing (Bug #1417 -- the
+      CIDX_TEMPORAL_PG_BOOTSTRAP_DIR fail-loud wiring for unreachable
+      cluster-mode PostgreSQL, Bug #1313, lives EXCLUSIVELY in cli.py's
+      standalone `index()` branch. cli_daemon_fast.execute_via_daemon has no
+      knowledge of that contract, so daemon-delegating --index-commits would
+      silently skip the fail-loud check -- a silent SQLite fallback that
+      violates Messi Rule #2 (anti-fallback). This mirrors the pre-existing
+      code comment in cli.py's index() command documenting the same
+      invariant.)
 
     Args:
         command: Command name (first argument after 'cidx')
@@ -91,6 +135,10 @@ def is_delegatable_command(command: str, args: list) -> bool:
 
     # Special case: query with --time-range or --time-range-all cannot be delegated (temporal queries)
     if command == "query" and ("--time-range" in args or "--time-range-all" in args):
+        return False
+
+    # Bug #1417: index --index-commits cannot be delegated (see docstring above)
+    if command == "index" and "--index-commits" in args:
         return False
 
     return command in delegatable

@@ -96,9 +96,15 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
         patch.object(executor, "_ensure_git_safe_directory", return_value=True),
         patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
+        patch.object(
             executor, "_ensure_auto_updater_uses_server_python", return_value=True
         ),
         patch.object(executor, "_ensure_data_dir_env_var", return_value=True),
+        patch.object(
+            executor, "_ensure_auto_update_service_has_cli_path", return_value=True
+        ),
         patch.object(executor, "_ensure_malloc_arena_max", return_value=True),
         patch.object(executor, "ensure_ripgrep", return_value=True),
         patch.object(executor, "ensure_nodejs", return_value=True),

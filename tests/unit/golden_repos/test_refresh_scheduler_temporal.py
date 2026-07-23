@@ -25,11 +25,24 @@ def _make_scheduler(registry):
 
     RefreshScheduler.__init__ requires several injected dependencies. We
     supply only what _index_source actually uses: self.registry.
+
+    Bug #1414: _index_source now reads temporal_options from
+    self.golden_repo_metadata (golden_repos_metadata table), not from the
+    registry. These tests model the "at registration both tables agree" /
+    unedited-repo case, so mirror the registry's stored temporal_options
+    into a golden_repo_metadata double here -- this keeps every test's
+    values and assertions unchanged while exercising the new read path.
     """
     from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
     scheduler = object.__new__(RefreshScheduler)
     scheduler.registry = registry
+    repo_info = registry.get_global_repo.return_value
+    golden_meta = MagicMock()
+    golden_meta.get_repo.return_value = {
+        "temporal_options": repo_info.get("temporal_options") if repo_info else None
+    }
+    scheduler.golden_repo_metadata = golden_meta
     return scheduler
 
 
@@ -117,7 +130,8 @@ class TestRefreshSchedulerTemporalAllBranches:
 
     def test_all_branches_true_produces_flag(self, tmp_path):
         """
-        AC5: all_branches=True in temporal_options produces --all-branches.
+        AC5/Story #1412 Scenario 6: all_branches=True in temporal_options
+        AND the server-wide gate enabled produces --all-branches.
 
         This calls the real _index_source method on a real RefreshScheduler
         instance (with mocked registry and subprocess only).
@@ -128,7 +142,18 @@ class TestRefreshSchedulerTemporalAllBranches:
         )
         scheduler = _make_scheduler(registry)
 
-        cmds = _capture_subprocess_cmds(scheduler, alias, tmp_path)
+        mock_indexing = MagicMock()
+        mock_indexing.temporal_all_branches_enabled = True
+        mock_server_cfg = MagicMock()
+        mock_server_cfg.indexing_config = mock_indexing
+        mock_cfg_svc = MagicMock()
+        mock_cfg_svc.get_config.return_value = mock_server_cfg
+
+        with patch(
+            "code_indexer.global_repos.refresh_scheduler.get_config_service",
+            return_value=mock_cfg_svc,
+        ):
+            cmds = _capture_subprocess_cmds(scheduler, alias, tmp_path)
 
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"AC5: No temporal command issued. All commands: {cmds}"

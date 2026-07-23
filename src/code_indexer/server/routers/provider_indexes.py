@@ -225,7 +225,7 @@ async def bulk_add(
             repo_path=repo_path,
             provider_name=body.provider,
             clear=False,
-            # EVO-64545 (pod-pull): reconstruction params for _provider_index_job.
+            # Pod-pull: reconstruction params for _provider_index_job.
             metadata={
                 "repo_path": repo_path,
                 "provider_name": body.provider,

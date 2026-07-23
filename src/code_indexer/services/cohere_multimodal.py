@@ -221,27 +221,64 @@ class CohereMultimodalClient:
         last_error: Optional[Exception] = None
         _start = time.time()
 
+        from code_indexer.server.services.embedding_call_instrumentation import (
+            instrument_call,
+        )
+
+        def _do_post_and_validate() -> httpx.Response:
+            """The smallest unit including BOTH the network call and its
+            status validation -- a vendor 4xx/5xx here must be recorded as
+            success=False, never success=True (Story #1418). Unlike the
+            original pre-raise status branching, this ALWAYS calls
+            raise_for_status() so every non-2xx response (429, 5xx, or any
+            other 4xx) raises uniformly -- the retry-loop branching below
+            recovers the exact same per-status behavior by inspecting the
+            caught exception's status code instead."""
+            with httpx.Client(
+                timeout=httpx.Timeout(
+                    connect=connect_timeout,
+                    read=timeout,
+                    write=timeout,
+                    pool=timeout,
+                )
+            ) as client:
+                _response = client.post(
+                    api_endpoint,
+                    headers=headers,
+                    json=payload,
+                )
+            _response.raise_for_status()
+            return _response
+
         for attempt in range(max_attempts):
             try:
                 _start = time.time()
-                with httpx.Client(
-                    timeout=httpx.Timeout(
-                        connect=connect_timeout,
-                        read=timeout,
-                        write=timeout,
-                        pool=timeout,
-                    )
-                ) as client:
-                    response = client.post(
-                        api_endpoint,
-                        headers=headers,
-                        json=payload,
-                    )
+                response = instrument_call(
+                    provider="cohere",
+                    call_type="embed_multimodal",
+                    model=self.config.model,
+                    item_count=len(inputs),
+                    token_count=0,
+                    batch_size=len(inputs),
+                    purpose="index",
+                    fn=_do_post_and_validate,
+                )
+                return dict(response.json())
 
-                if response.status_code == 429:
-                    retry_after = float(
-                        response.headers.get("retry-after", retry_delay)
-                    )
+            except httpx.HTTPStatusError as http_exc:
+                last_error = http_exc
+                status_code = http_exc.response.status_code
+
+                if status_code == 429:
+                    try:
+                        retry_after = float(
+                            http_exc.response.headers.get("retry-after", retry_delay)
+                        )
+                    except (TypeError, ValueError):
+                        # Malformed Retry-After header -- fall back to the
+                        # configured retry_delay rather than letting the
+                        # parse failure escape the retry loop.
+                        retry_after = retry_delay
                     capped_delay = min(retry_after, _MAX_RETRY_SLEEP_SECONDS)
                     logger.warning(
                         "Cohere multimodal rate limited (attempt %d/%d), retrying after %.1fs",
@@ -252,12 +289,12 @@ class CohereMultimodalClient:
                     time.sleep(capped_delay)
                     continue
 
-                if response.status_code >= 500:
+                if status_code >= 500:
                     delay = retry_delay * (2**attempt if exponential_backoff else 1)
                     capped_delay = min(delay, _MAX_RETRY_SLEEP_SECONDS)
                     logger.warning(
                         "Cohere multimodal server error %d (attempt %d/%d), retrying after %.1fs",
-                        response.status_code,
+                        status_code,
                         attempt + 1,
                         max_attempts,
                         capped_delay,
@@ -265,8 +302,21 @@ class CohereMultimodalClient:
                     time.sleep(capped_delay)
                     continue
 
-                response.raise_for_status()
-                return dict(response.json())
+                # Other 4xx (not 429): same generic retry-with-backoff-then-break
+                # semantics as the original code's `except Exception` branch.
+                if attempt < max_retries:
+                    delay = retry_delay * (2**attempt if exponential_backoff else 1)
+                    capped_delay = min(delay, _MAX_RETRY_SLEEP_SECONDS)
+                    logger.warning(
+                        "Cohere multimodal request failed (attempt %d/%d): %s, retrying after %.1fs",
+                        attempt + 1,
+                        max_attempts,
+                        http_exc,
+                        capped_delay,
+                    )
+                    time.sleep(capped_delay)
+                    continue
+                break
 
             except Exception as exc:
                 last_error = exc

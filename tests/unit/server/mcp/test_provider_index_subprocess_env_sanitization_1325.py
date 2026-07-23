@@ -155,8 +155,14 @@ class TestProviderTemporalIndexJobSanitizesPythonPath:
             mock_ci_config.voyageai_api_key = None
             mock_config = MagicMock()
             mock_config.claude_integration_config = mock_ci_config
+            # Story #1418: _run_provider_subprocess now makes ONE more
+            # get_config_service().get_config() call (for the embedding-
+            # stats bootstrap wiring), after the provider-key-resolution
+            # call and the temporal PG-bootstrap call -- so the side_effect
+            # iterator needs a third entry (same server_config).
             mock_cfg.return_value.get_config.side_effect = [
                 mock_config,
+                server_config,
                 server_config,
             ]
 
@@ -221,8 +227,11 @@ class TestProviderTemporalIndexJobSanitizesPythonPath:
             mock_ci_config.voyageai_api_key = None
             mock_config = MagicMock()
             mock_config.claude_integration_config = mock_ci_config
+            # Story #1418: see the sibling test above for why this needs a
+            # third entry.
             mock_cfg.return_value.get_config.side_effect = [
                 mock_config,
+                server_config,
                 server_config,
             ]
 

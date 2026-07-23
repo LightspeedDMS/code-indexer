@@ -57,9 +57,9 @@ class TestDebugRouterRegistration:
         from code_indexer.server.app import app
 
         app_paths = route_paths(app)
-        assert (
-            "/debug/memory-snapshot" in app_paths
-        ), f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
+        assert "/debug/memory-snapshot" in app_paths, (
+            f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
+        )
 
 
 @pytest.mark.slow

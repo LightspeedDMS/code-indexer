@@ -598,6 +598,84 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     )
 
 
+def handle_admin_embedding_stats_query(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Query embedding/reranker call tracking stats (Story #1418 Phase 3
+    Component 7, vendor cost reconciliation).
+
+    Requires admin role. Read-only reporting tool -- no TOTP step-up
+    elevation required (mirrors get_job_statistics's lighter tier, not
+    admin_logs_query's elevation-gated tier).
+
+    Args:
+        args: Query parameters (provider, purpose, golden_repo_alias,
+            job_id, start_time, end_time, limit, offset).
+        user: Authenticated user (must be admin).
+
+    Returns:
+        MCP-compliant response with records array and count.
+    """
+    if user.role != UserRole.ADMIN:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": "Permission denied. Admin role required to query "
+                "embedding stats.",
+            }
+        )
+
+    backend_registry = getattr(_utils.app_module.app.state, "backend_registry", None)
+    if backend_registry is None:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Backend registry not available"}
+        )
+    backend = getattr(backend_registry, "embedding_call_stats", None)
+    if backend is None:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Embedding call stats backend not available"}
+        )
+
+    _max_query_limit = 1000
+    limit = args.get("limit", 200)
+    offset = args.get("offset", 0)
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not (1 <= limit <= _max_query_limit)
+    ):
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": f"limit must be an integer between 1 and {_max_query_limit}",
+            }
+        )
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "offset must be a non-negative integer"}
+        )
+
+    from dataclasses import asdict
+
+    records = backend.query(
+        provider=args.get("provider"),
+        purpose=args.get("purpose"),
+        golden_repo_alias=args.get("golden_repo_alias"),
+        job_id=args.get("job_id"),
+        start_time=args.get("start_time"),
+        end_time=args.get("end_time"),
+        limit=limit,
+        offset=offset,
+    )
+    return _mcp_response(  # type: ignore[no-any-return]
+        {
+            "success": True,
+            "records": [asdict(r) for r in records],
+            "count": len(records),
+        }
+    )
+
+
 @require_mcp_elevation()
 def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
@@ -1942,6 +2020,7 @@ def _register(registry: dict) -> None:
     registry["get_index_status"] = get_index_status
     registry["admin_logs_query"] = handle_admin_logs_query
     registry["admin_logs_export"] = admin_logs_export
+    registry["admin_embedding_stats_query"] = handle_admin_embedding_stats_query
     registry["set_session_impersonation"] = handle_set_session_impersonation
     registry["list_groups"] = handle_list_groups
     registry["create_group"] = handle_create_group

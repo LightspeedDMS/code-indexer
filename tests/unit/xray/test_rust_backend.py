@@ -894,6 +894,62 @@ def test_error_message_sanitizes_xray_cache_paths():
 
 
 # ---------------------------------------------------------------------------
+# Test 18b: nested build-dir xray-cache paths (Bug #1425) must still redact to
+# 'evaluator.rs', not just the weaker generic '<server-path>' fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_error_message_sanitizes_nested_build_dir_xray_cache_paths():
+    """Bug #1425's per-invocation build-directory isolation fix (Rust side,
+    compiler.rs) moved the compiled .rs source from a flat
+    'xray-cache/<hash>.rs' path into an isolated
+    'xray-cache/build-<hash>-<random>/<hash>.rs' subdirectory, so that
+    concurrent compiles of the SAME evaluator hash never share rustc's -o
+    output directory. rustc error messages now reference this nested path
+    shape — the sanitizer's xray-cache-specific rule must still redact it to
+    'evaluator.rs', not silently fall through to the weaker generic
+    '<server-path>' rule.
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [_spec("src/Foo.java", SIMPLE_JAVA, "java")]
+
+    raw_stderr = (
+        "error[E0425]: cannot find value `x` in this scope\n"
+        " --> /home/jsbattig/.cidx-server/xray-cache/"
+        "build-59d0fc1a2b3c4d-9k2pQz/59d0fc1a2b3c4d.rs:3:5\n"
+        "  |\n"
+        "3 |     x + 1\n"
+        "  |     ^ not found in this scope"
+    )
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = ("", raw_stderr)
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
+        )
+
+    assert len(results) >= 1
+    _matches, errors, _meta = results[0]
+    assert len(errors) == 1
+    msg = errors[0]["error_message"]
+    assert "/home/jsbattig/.cidx-server/xray-cache/" not in msg, (
+        f"xray-cache path must be sanitized from error message. Got: {msg!r}"
+    )
+    assert "evaluator.rs" in msg, (
+        f"Expected 'evaluator.rs' substitution for the nested build-dir "
+        f"path shape. Got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 19: error messages must not leak other absolute server paths (/home, /root, /tmp)
 # ---------------------------------------------------------------------------
 

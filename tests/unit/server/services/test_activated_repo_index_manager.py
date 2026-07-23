@@ -325,18 +325,28 @@ class TestJobExecution:
         "code_indexer.server.services.activated_repo_index_manager"
         ".run_cancellable_subprocess"
     )
-    def test_execute_semantic_indexing(self, mock_subprocess, index_manager):
+    def test_execute_semantic_indexing(self, mock_subprocess, index_manager, tmp_path):
         """Test semantic indexing execution.
 
         Bug #1342: _run_subprocess_with_telemetry now delegates to
         run_cancellable_subprocess (Popen-based, cancel-cooperative) instead
         of a plain subprocess.run, so the mock target moved to the new call
         site.
+
+        Bug #1419 follow-up: _execute_semantic_indexing now fast-fails when
+        repo_path has no .code-indexer/config.json (uninitialized-repo
+        guard). The hardcoded "/tmp/test-repo" string used here previously
+        was never a real, initialized repo -- this test now uses the real
+        tmp_path fixture with a config.json created inside it, matching what
+        an actually-initialized repo looks like.
         """
+        (tmp_path / ".code-indexer").mkdir()
+        (tmp_path / ".code-indexer" / "config.json").write_text("{}")
+
         # Mock successful cidx index execution
         mock_subprocess.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        result = index_manager._execute_semantic_indexing("/tmp/test-repo", False)
+        result = index_manager._execute_semantic_indexing(str(tmp_path), False)
 
         assert result["success"] is True
         assert "Semantic indexing completed" in result["message"]

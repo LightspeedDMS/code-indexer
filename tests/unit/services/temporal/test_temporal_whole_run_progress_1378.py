@@ -200,6 +200,17 @@ class TestIndexOneEmbedderWholeRunProgress:
         # set directly here since this test drives _index_one_embedder().
         indexer._processed_shards = []
 
+        # Bug #1407: _index_one_embedder now takes a pre-computed
+        # shard_commit_map (dict) instead of bucketing a flat commit list
+        # itself -- bucket here exactly as the production callers
+        # (compute_embedder_indexing_plan / _reconcile_full_scan_with_barrier)
+        # do.
+        from code_indexer.services.temporal.temporal_incremental_gate import (
+            bucket_commits_by_shard,
+        )
+
+        shard_commit_map = bucket_commits_by_shard(commits, "voyage-context-4")
+
         with patch.object(
             indexer,
             "_index_shard_commits",
@@ -210,7 +221,7 @@ class TestIndexOneEmbedderWholeRunProgress:
             commits_processed, blobs, vectors = indexer._index_one_embedder(
                 "voyage-context-4",
                 embedder_instance,
-                commits,
+                shard_commit_map,
                 vector_manager=Mock(),
                 progress_callback=progress_callback,
             )

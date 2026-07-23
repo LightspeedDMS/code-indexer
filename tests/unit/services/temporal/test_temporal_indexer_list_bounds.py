@@ -111,10 +111,16 @@ def test_empty_commits_after_filtering_should_return_early(temporal_indexer):
         for i in range(3)
     ]
 
+    from code_indexer.services.temporal.temporal_incremental_gate import (
+        EmbedderIndexingPlan,
+    )
+
     try:
-        # Mock git operations, embedding provider, and reconcile-based
-        # missing-commit discovery (all commits already indexed -> nothing
-        # missing for the fake embedder).
+        # Mock git operations, embedding provider, and the gate's
+        # missing-commit discovery (all commits already indexed -> empty
+        # plan for the fake embedder). Bug #1407: the automatic path now
+        # calls compute_embedder_indexing_plan() instead of the disk-scan
+        # reconcile_temporal_index().
         with patch.object(
             temporal_indexer, "_get_commit_history", return_value=commits
         ):
@@ -125,8 +131,8 @@ def test_empty_commits_after_filtering_should_return_early(temporal_indexer):
                     "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create"
                 ):
                     with patch(
-                        "code_indexer.services.temporal.temporal_reconciliation.reconcile_temporal_index",
-                        return_value=[],
+                        "code_indexer.services.temporal.temporal_incremental_gate.compute_embedder_indexing_plan",
+                        return_value=EmbedderIndexingPlan(shard_commits={}),
                     ):
                         # Expected behavior: Should return early with zero results
                         # Current bug: Crashes with IndexError at line 202

@@ -28,6 +28,7 @@ from tests.e2e.helpers import (
     wait_for_job,
     wait_for_repo_activation,
 )
+from tests.e2e.server.conftest import AdminTokenProvider
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,66 @@ def _init_git_workspace(workspace: Path, remote_url: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Admin token — auto-refreshing on near-expiry (Phase 4 live server)
+#
+# Phase 4 runs against a live uvicorn subprocess whose JWT access tokens expire
+# after ~10 minutes (jwt_manager default TTL).  The phase has grown past that
+# TTL, so a single session-minted token (the root e2e_admin_token) expires
+# before the last tests / the teardown log-audit gate run, yielding HTTP 401
+# ("Token has expired" / "Authentication required").  Mirror the Phase-3 server
+# conftest: a session-scoped provider re-logs-in on near-expiry, and a
+# function-scoped override gives every test a fresh-enough token.  This is
+# test-side token management only — the server's 10-minute auth policy is
+# unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def e2e_admin_token_provider(
+    e2e_config: E2EConfig,
+    e2e_server_url: str,
+) -> AdminTokenProvider:
+    """Session-scoped auto-refreshing admin token for the live Phase-4 server.
+
+    Performs the initial ``/auth/login`` once and caches the result.  All
+    callers below (the function-scoped ``e2e_admin_token`` override and the
+    session-scoped golden-repo / log-audit fixtures) delegate here, so the token
+    is refreshed automatically if the phase runs longer than the JWT TTL.
+    """
+    username = e2e_config.admin_user
+    password = e2e_config.admin_pass
+
+    def _relogin() -> tuple[str, str | None]:
+        resp = httpx.post(
+            f"{e2e_server_url}/auth/login",
+            json={"username": username, "password": password},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return str(body["access_token"]), body.get("refresh_token")
+
+    initial_access, initial_refresh = _relogin()
+    return AdminTokenProvider(
+        login_fn=_relogin,
+        initial_access_token=initial_access,
+        initial_refresh_token=initial_refresh,
+    )
+
+
+@pytest.fixture()
+def e2e_admin_token(e2e_admin_token_provider: AdminTokenProvider) -> str:
+    """Function-scoped override: a fresh-enough admin JWT for the current test.
+
+    Overrides the session-scoped root fixture (tests/e2e/conftest.py) for the
+    whole cli_remote (Phase 4) subtree so no test ever holds a token past its
+    ~10-minute TTL.  Delegates to the session-scoped provider, so no extra login
+    round-trips occur unless the cached token nears expiry.
+    """
+    return e2e_admin_token_provider.get_token()
+
+
+# ---------------------------------------------------------------------------
 # registered_golden_repo
 # ---------------------------------------------------------------------------
 
@@ -139,7 +200,7 @@ def _init_git_workspace(workspace: Path, remote_url: str) -> None:
 @pytest.fixture(scope="session")
 def registered_golden_repo(
     e2e_config: E2EConfig,
-    e2e_admin_token: str,
+    e2e_admin_token_provider: AdminTokenProvider,
     e2e_http_client: httpx.Client,
 ) -> str:
     """Register the markupsafe golden repo on the server and wait for indexing.
@@ -161,7 +222,7 @@ def registered_golden_repo(
         e2e_http_client,
         "POST",
         "/api/admin/golden-repos",
-        token=e2e_admin_token,
+        token=e2e_admin_token_provider.get_token(),
         json={"repo_url": repo_path, "alias": alias},
     )
     response.raise_for_status()
@@ -172,7 +233,7 @@ def registered_golden_repo(
     job_status = wait_for_job(
         e2e_http_client,
         job_id,
-        token=e2e_admin_token,
+        token=e2e_admin_token_provider.get_token(),
         timeout=e2e_config.golden_repo_job_timeout,
         poll_interval=e2e_config.golden_repo_job_poll_interval,
     )
@@ -249,7 +310,7 @@ def activated_golden_repo(
     registered_golden_repo: str,
     e2e_config: E2EConfig,
     e2e_http_client: httpx.Client,
-    e2e_admin_token: str,
+    e2e_admin_token_provider: AdminTokenProvider,
     e2e_cli_env: dict[str, str],
 ) -> str:
     """Activate the markupsafe golden repo in the authenticated workspace.
@@ -279,7 +340,7 @@ def activated_golden_repo(
     wait_for_repo_activation(
         e2e_http_client,
         alias=registered_golden_repo,
-        token=e2e_admin_token,
+        token=e2e_admin_token_provider.get_token(),
         timeout=e2e_config.repo_activation_timeout,
     )
     return registered_golden_repo
@@ -293,7 +354,7 @@ def activated_golden_repo(
 @pytest.fixture(scope="session")
 def log_watermark_phase4(
     e2e_http_client: httpx.Client,
-    e2e_admin_token: str,
+    e2e_admin_token_provider: AdminTokenProvider,
 ) -> int:
     """Record the maximum log id BEFORE Phase 4 tests run (watermark).
 
@@ -312,17 +373,19 @@ def log_watermark_phase4(
 
     # Poll until log count stabilises (async writer drain, Bug #1078 mitigation)
     poll_until_stable_count(
-        count_fn=lambda: len(query_logs_via_mcp(e2e_http_client, e2e_admin_token)),
+        count_fn=lambda: len(
+            query_logs_via_mcp(e2e_http_client, e2e_admin_token_provider.get_token())
+        ),
         max_attempts=10,
         sleep_seconds=0.3,
     )
-    return get_log_watermark(e2e_http_client, e2e_admin_token)
+    return get_log_watermark(e2e_http_client, e2e_admin_token_provider.get_token())
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _phase4_log_audit_gate(
     e2e_http_client: httpx.Client,
-    e2e_admin_token: str,
+    e2e_admin_token_provider: AdminTokenProvider,
     log_watermark_phase4: int,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 4 teardown.
@@ -345,16 +408,20 @@ def _phase4_log_audit_gate(
     yield  # Tests run here
 
     # --- Teardown: audit phase logs ---
-    # Poll until stable to drain buffered entries (Bug #1078)
+    # Poll until stable to drain buffered entries (Bug #1078).  Re-mint the token
+    # here: this teardown runs at the very end of the phase, which can exceed the
+    # server JWT TTL (~10 min); a session-static token would be expired (401).
     poll_until_stable_count(
-        count_fn=lambda: len(query_logs_via_mcp(e2e_http_client, e2e_admin_token)),
+        count_fn=lambda: len(
+            query_logs_via_mcp(e2e_http_client, e2e_admin_token_provider.get_token())
+        ),
         max_attempts=10,
         sleep_seconds=0.3,
     )
 
     result = run_log_audit_gate(
         e2e_http_client,
-        e2e_admin_token,
+        e2e_admin_token_provider.get_token(),
         watermark_id=log_watermark_phase4,
         phase_name="Phase 4 (CLI Remote / Live Server)",
     )
