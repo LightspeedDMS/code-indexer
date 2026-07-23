@@ -330,6 +330,26 @@ class ChunkStore:
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return int(row[0])
 
+    def all_point_ids(self) -> "set[str]":
+        """Return the set of every stored point_id (Story #1456 AC7).
+
+        Lightweight primary-key scan -- no data/vector decode. This is the
+        SQLite-backed replacement for the retired ``id_index.bin`` point-id
+        set for CHUNKS_DB-layout collections.
+        """
+        rows = self._conn.execute("SELECT point_id FROM chunks").fetchall()
+        return {row[0] for row in rows}
+
+    def distinct_paths(self) -> "set[str]":
+        """Return the set of distinct non-null ``path`` values (Story #1456
+        AC7). Uses the indexed ``path`` column -- no data/vector decode.
+        Records with no path (NULL) are excluded.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT path FROM chunks WHERE path IS NOT NULL"
+        ).fetchall()
+        return {row[0] for row in rows}
+
     # ------------------------------------------------------------------
     # Payload-only update (AC4: mirrors
     # FilesystemVectorStore._batch_update_payload_only -- merge only the

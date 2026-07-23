@@ -148,6 +148,25 @@ def _parse_git_timeout() -> int:
 GIT_TIMEOUT_SECONDS = _parse_git_timeout()
 
 
+def _parse_use_chunks_db_for_new_collections_env() -> bool:
+    """Story #1456: opt-in gate for fresh semantic collections to be built
+    using the consolidated chunks.db layout instead of sharded
+    vector_*.json files. Defaults to False (byte-identical existing
+    behavior) everywhere unless CIDX_CHUNKS_DB_NEW_COLLECTIONS is set to a
+    truthy value -- this is the mechanism the ~20 existing
+    FilesystemVectorStore call sites (CLI, daemon, server) automatically
+    inherit WITHOUT any of them being individually modified. Story #1460
+    owns the fleet-wide rollout decision; this is only the switch it will
+    flip. Parsed fresh (not cached) so tests can monkeypatch the env var
+    per-test.
+    """
+    return os.getenv("CIDX_CHUNKS_DB_NEW_COLLECTIONS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 class PathIndex:
     """Reverse index mapping file_path -> Set[point_id].
 
@@ -322,6 +341,7 @@ class FilesystemVectorStore:
         id_index_cache: Optional[Any] = None,
         skip_staleness_check: bool = False,
         memory_governor: Optional[Any] = None,
+        use_chunks_db_for_new_collections: Optional[bool] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -336,6 +356,14 @@ class FilesystemVectorStore:
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3. Server mode
                 passes get_memory_governor(); CLI leaves it None so eviction behavior is
                 byte-identical to Bug #1171.
+            use_chunks_db_for_new_collections: Story #1456 opt-in gate -- when
+                True, create_collection() marks fresh collections to be built
+                using the consolidated chunks.db layout. When explicitly
+                False, always uses the legacy sharded-JSON layout regardless
+                of environment. When None (default), falls back to the
+                CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default False),
+                so all ~20 existing call sites inherit this without any of
+                them needing individual changes.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -425,6 +453,51 @@ class FilesystemVectorStore:
         self._repo_root_cached: bool = False
         self._repo_root_lock: threading.Lock = threading.Lock()
 
+        # Story #1456: production write-path opt-in (see __init__ docstring).
+        if use_chunks_db_for_new_collections is not None:
+            self._use_chunks_db_for_new_collections: bool = (
+                use_chunks_db_for_new_collections
+            )
+        else:
+            self._use_chunks_db_for_new_collections = (
+                _parse_use_chunks_db_for_new_collections_env()
+            )
+        # Per-collection in-memory intent, recorded by create_collection():
+        # True means "this session is actively building this collection as
+        # CHUNKS_DB" -- consulted BEFORE the on-disk discriminator exists
+        # (see _is_chunks_db_collection).
+        self._chunks_db_mode: Dict[str, bool] = {}
+
+    def _is_chunks_db_collection(
+        self, collection_name: str, collection_path: Path
+    ) -> bool:
+        """Story #1456: the single combined authority for "should THIS
+        write/finalize operation treat this collection as CHUNKS_DB".
+
+        Two cases:
+        1. An in-progress FRESH build (THIS session's create_collection
+           recorded intent in ``self._chunks_db_mode`` -- the on-disk
+           discriminator does not exist yet, so ``resolve_chunk_layout()``
+           alone would incorrectly say SHARDED_JSON during that window).
+        2. A collection already consolidated in a PRIOR session (no
+           in-memory intent in THIS fresh instance, but the durable
+           discriminator is already committed -- the resolver correctly
+           detects it).
+
+        Read-only, post-completion consumers (search, get_point, etc.) use
+        ``resolve_chunk_layout()`` directly -- they never have an active
+        "building it right now" intent to consult.
+        """
+        if self._chunks_db_mode.get(collection_name):
+            return True
+
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
+
+        return bool(resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB)
+
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> Path:
@@ -503,6 +576,17 @@ class FilesystemVectorStore:
         # Initialize ID index for this collection
         with self._id_index_lock:
             self._id_index[collection_name] = {}
+
+        # Story #1456: record CHUNKS_DB build intent for THIS session. The
+        # on-disk discriminator is committed later (end_indexing), only
+        # AFTER chunks.db + all its indexes are durable -- see AC1. Temporal
+        # collections are explicitly OUT OF SCOPE for CHUNKS_DB (Epic #1289
+        # is a separate, large dual-embedder sharding subsystem untouched
+        # by this story) and never get this mode regardless of the flag.
+        if self._use_chunks_db_for_new_collections and not (
+            TemporalMetadataStore.is_temporal_collection(collection_name)
+        ):
+            self._chunks_db_mode[collection_name] = True
 
         return True
 
@@ -662,6 +746,19 @@ class FilesystemVectorStore:
 
         self.logger.info(f"Finalizing indexes for collection '{collection_name}'...")
 
+        # Story #1456 AC1: computed ONCE, up front. _is_chunks_db_collection
+        # (not the bare resolver) correctly detects an IN-PROGRESS fresh
+        # build too -- the on-disk discriminator does not exist yet during
+        # the very first end_indexing() call for a new CHUNKS_DB collection.
+        _end_indexing_is_chunks_db = self._is_chunks_db_collection(
+            collection_name, collection_path
+        )
+        from code_indexer.storage.shared.chunk_layout import ChunkLayout
+
+        _end_indexing_layout_override = (
+            ChunkLayout.CHUNKS_DB if _end_indexing_is_chunks_db else None
+        )
+
         # Get vector size from cache (avoids file I/O)
         vector_size = self._get_vector_size(collection_name)
 
@@ -688,6 +785,7 @@ class FilesystemVectorStore:
                 collection_path=collection_path,
                 progress_callback=progress_callback,
                 clear_stale=clear_stale,
+                layout_override=_end_indexing_layout_override,
             )
             self.logger.info(
                 f"Full HNSW rebuild forced for '{collection_name}' "
@@ -767,25 +865,48 @@ class FilesystemVectorStore:
                     collection_path=collection_path,
                     progress_callback=progress_callback,
                     clear_stale=clear_stale,
+                    layout_override=_end_indexing_layout_override,
                 )
                 self.logger.info(f"HNSW index rebuilt for '{collection_name}'")
 
-        # Save ID index to disk (ALWAYS - needed for queries)
-        from .id_index_manager import IDIndexManager
+        # Story #1456 AC7: CHUNKS_DB collections never load or write
+        # id_index.bin here -- point-id resolution is exclusively via the
+        # chunk store, and vector_count is read directly from it.
+        if _end_indexing_is_chunks_db:
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
 
-        id_manager = IDIndexManager()
-        with self._id_index_lock:
-            # BUG FIX: Load ID index from disk if not in memory (reconciliation path)
-            # When reconciliation finds all commits indexed and calls end_indexing(),
-            # _id_index is empty because no new vectors were upserted.
-            if (
-                collection_name not in self._id_index
-                or not self._id_index[collection_name]
-            ):
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                vector_count = chunk_store.count()
+            finally:
+                chunk_store.close()
+        else:
+            # Save ID index to disk (ALWAYS - needed for queries)
+            from .id_index_manager import IDIndexManager
 
-            if collection_name in self._id_index:
-                id_manager.save_index(collection_path, self._id_index[collection_name])
+            id_manager = IDIndexManager()
+            with self._id_index_lock:
+                # BUG FIX: Load ID index from disk if not in memory (reconciliation path)
+                # When reconciliation finds all commits indexed and calls end_indexing(),
+                # _id_index is empty because no new vectors were upserted.
+                if (
+                    collection_name not in self._id_index
+                    or not self._id_index[collection_name]
+                ):
+                    self._id_index[collection_name] = self._load_id_index(
+                        collection_name
+                    )
+
+                if collection_name in self._id_index:
+                    id_manager.save_index(
+                        collection_path, self._id_index[collection_name]
+                    )
+
+            vector_count = len(self._id_index.get(collection_name, {}))
 
         # Story #540: Save path index to disk
         with self._path_index_lock:
@@ -794,7 +915,18 @@ class FilesystemVectorStore:
                     collection_name, self._path_indexes[collection_name]
                 )
 
-        vector_count = len(self._id_index.get(collection_name, {}))
+        # Story #1456 AC1 (mandatory FINAL step): chunks.db + HNSW +
+        # path_index are all durable above -- ONLY NOW is it safe to commit
+        # the discriminator that makes this collection discoverable as
+        # CHUNKS_DB to every other reader. Idempotent: a no-op re-commit on
+        # every subsequent re-index session of an already-consolidated
+        # collection is harmless.
+        if _end_indexing_is_chunks_db:
+            from code_indexer.storage.shared.chunk_layout import (
+                write_chunks_db_discriminator,
+            )
+
+            write_chunks_db_discriminator(collection_path)
 
         # Calculate and update unique file count in metadata
         unique_file_count = self._calculate_and_save_unique_file_count(
@@ -868,12 +1000,27 @@ class FilesystemVectorStore:
         collection_path = self._get_collection_path(collection_name, subdirectory)
         vector_size = self._get_vector_size(collection_name)
 
+        # Story #1456 AC1: this runs BEFORE end_indexing() commits the
+        # discriminator (branch isolation fires ahead of finalization), so
+        # the bare resolver alone would still see SHARDED_JSON during a
+        # fresh CHUNKS_DB build -- must use the combined
+        # _is_chunks_db_collection authority via an explicit override,
+        # exactly like end_indexing()'s own rebuild_from_vectors() calls.
+        from code_indexer.storage.shared.chunk_layout import ChunkLayout
+
+        layout_override = (
+            ChunkLayout.CHUNKS_DB
+            if self._is_chunks_db_collection(collection_name, collection_path)
+            else None
+        )
+
         hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
         count = hnsw_manager.rebuild_from_vectors(
             collection_path=collection_path,
             progress_callback=progress_callback,
             visible_files=visible_files,
             current_branch=current_branch,
+            layout_override=layout_override,
         )
 
         # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
@@ -1012,6 +1159,144 @@ class FilesystemVectorStore:
                 )
             return self._temporal_metadata_store
 
+    def _upsert_points_chunks_db(
+        self,
+        collection_name: str,
+        points: List[Dict[str, Any]],
+        collection_path: Path,
+        progress_callback: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Story #1456: CHUNKS_DB write path.
+
+        Writes go into ``chunks.db`` via ONE ``ChunkStore.write_batch()``
+        call (not per-point files) -- no quantization/hex-path directory
+        sharding is needed since there is only one file per collection.
+        Reuses the SAME record-preparation helpers (blob-hash/git lookups,
+        ``_prepare_vector_data_batch``) as the legacy sharded-JSON path, so
+        the stored record shape is byte-identical field-for-field.
+
+        Orphan cleanup (Story #540 duplicate-prevention semantics) is
+        preserved via the SAME ``PathIndex``, but eviction targets
+        chunk-store rows (``ChunkStore.delete``) instead of unlinking files.
+
+        Temporal collections never reach this method -- create_collection()
+        excludes them from CHUNKS_DB mode entirely (Epic #1289 is a
+        separate, untouched subsystem).
+        """
+        expected_dims = self._get_vector_size(collection_name)
+        repo_root = self._get_repo_root()
+
+        file_paths = [
+            p.get("payload", {}).get("path", "")
+            for p in points
+            if p.get("payload", {}).get("path")
+        ]
+        blob_hashes: Dict[str, str] = {}
+        uncommitted_files: set = set()
+        if repo_root is not None and file_paths:
+            blob_hashes = self._get_blob_hashes_batch(file_paths, repo_root)
+            uncommitted_files = self._check_uncommitted_batch(file_paths, repo_root)
+
+        # Story #540: pre-upsert orphan detection via PathIndex, identical
+        # dedup semantics to the legacy path -- only the eviction mechanism
+        # differs (chunk-store row delete instead of file unlink).
+        from collections import defaultdict
+
+        points_by_file: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for point in points:
+            file_path = point.get("payload", {}).get("path", "")
+            if file_path:
+                points_by_file[file_path].append(point)
+
+        orphan_ids: List[str] = []
+        with self._path_index_lock:
+            if collection_name not in self._path_indexes:
+                self._path_indexes[collection_name] = self._load_path_index(
+                    collection_name
+                )
+            path_index = self._path_indexes[collection_name]
+
+            for file_path, file_points in points_by_file.items():
+                new_point_ids = {p["id"] for p in file_points}
+                old_point_ids = path_index.get_point_ids(file_path)
+                orphan_point_ids = old_point_ids - new_point_ids
+
+                for orphan_id in orphan_point_ids:
+                    path_index.remove_point(file_path, orphan_id)
+                    if not path_index.has_other_owner(orphan_id):
+                        orphan_ids.append(orphan_id)
+
+            for point in points:
+                point_id = point["id"]
+                file_path = point.get("payload", {}).get("path", "")
+                if file_path:
+                    path_index.add_point(file_path, point_id)
+
+        records: List[Dict[str, Any]] = []
+        for idx, point in enumerate(points, 1):
+            point_id = point["id"]
+            vector = np.array(point["vector"])
+            payload = point.get("payload", {})
+            chunk_text = point.get("chunk_text")
+            file_path = payload.get("path", "")
+
+            if vector.dtype == object or vector.dtype == np.dtype("O"):
+                raise ValueError(
+                    f"Point {point_id} has invalid vector with dtype={vector.dtype}. "
+                    f"Vector contains non-numeric values."
+                )
+            if vector.shape[0] != expected_dims:
+                raise ValueError(
+                    f"Point {point_id} has vector dimension {vector.shape[0]}, "
+                    f"expected {expected_dims}"
+                )
+
+            if progress_callback:
+                file_path_for_callback = Path(file_path) if file_path else Path("")
+                progress_callback(
+                    idx, len(points), file_path_for_callback, info=file_path
+                )
+
+            record = self._prepare_vector_data_batch(
+                point_id=point_id,
+                vector=vector,
+                payload=payload,
+                chunk_text=chunk_text,
+                repo_root=repo_root,
+                blob_hashes=blob_hashes,
+                uncommitted_files=uncommitted_files,
+            )
+            records.append(record)
+
+            # HNSW-001 & HNSW-002: track for incremental updates. Unlike the
+            # legacy path, added-vs-updated is not distinguished here (no
+            # cheap "did this point_id already exist" check without a
+            # per-point chunk-store read) -- both buckets feed the SAME
+            # add_or_update_vector() call downstream, so this only affects
+            # cosmetic added/updated counts in logs, never correctness.
+            if collection_name in self._indexing_session_changes:
+                self._indexing_session_changes[collection_name]["added"].add(point_id)
+
+        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+
+        chunk_store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        try:
+            if records:
+                chunk_store.write_batch(records)
+            if orphan_ids:
+                chunk_store.delete(orphan_ids)
+        finally:
+            chunk_store.close()
+
+        if orphan_ids and collection_name in self._indexing_session_changes:
+            self._indexing_session_changes[collection_name]["deleted"].update(
+                orphan_ids
+            )
+
+        return {"status": "ok", "count": len(points)}
+
     def upsert_points(
         self,
         collection_name: Optional[str],
@@ -1063,6 +1348,16 @@ class FilesystemVectorStore:
 
         if not self.collection_exists(collection_name, subdirectory):
             raise ValueError(f"Collection '{collection_name}' does not exist")
+
+        # Story #1456: CHUNKS_DB collections take a completely separate,
+        # simpler write path (no quantization/hex-path directory sharding
+        # needed -- there is only one file per collection). Dispatched here,
+        # before the projection-matrix load the legacy path needs but
+        # CHUNKS_DB does not.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            return self._upsert_points_chunks_db(
+                collection_name, points, collection_path, progress_callback
+            )
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
         try:
@@ -1445,6 +1740,21 @@ class FilesystemVectorStore:
                 # If metadata read fails, fall through to ID index path
                 pass
 
+        # Story #1456 AC3/AC7: CHUNKS_DB fallback -- COUNT(*) on chunks.db,
+        # never the retired id_index.bin.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                return int(chunk_store.count())
+            finally:
+                chunk_store.close()
+
         # Fallback path: Load ID index (original behavior)
         with self._id_index_lock:
             if collection_name not in self._id_index:
@@ -1466,6 +1776,32 @@ class FilesystemVectorStore:
         Note:
             HNSW-001 & HNSW-002: Tracks deletions for incremental HNSW updates.
         """
+        # Story #1456 AC7: CHUNKS_DB collections delete via the chunk store
+        # directly -- id_index.bin is never read or written for this method.
+        # Uses the combined _is_chunks_db_collection authority (not the bare
+        # resolver) so this is correct even mid-build, before end_indexing()
+        # commits the discriminator.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                deleted_count = chunk_store.delete(point_ids)
+            finally:
+                chunk_store.close()
+
+            if deleted_count > 0 and collection_name in self._indexing_session_changes:
+                self._indexing_session_changes[collection_name]["deleted"].update(
+                    point_ids
+                )
+
+            return {"status": "ok", "deleted": deleted_count}
+
         deleted = 0
         # Collect (file_path, point_id) pairs for path-index removal.
         # Applied AFTER releasing _id_index_lock to avoid nesting
@@ -1733,6 +2069,22 @@ class FilesystemVectorStore:
         Returns:
             Set of existing point IDs
         """
+        # Story #1456 AC7: CHUNKS_DB collections source the point-id set
+        # directly from chunks.db -- id_index.bin is never read or written.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                return set(chunk_store.all_point_ids())
+            finally:
+                chunk_store.close()
+
         id_index = self._load_id_index(collection_name)
         return set(id_index.keys())
 
@@ -1855,6 +2207,18 @@ class FilesystemVectorStore:
         path_index_file = collection_path / "path_index.bin"
 
         path_index.save(path_index_file)
+
+        # Story #1456 AC7: CHUNKS_DB collections never write id_index.bin --
+        # path_index.bin above is unaffected/preserved, but the legacy
+        # co-persist write below is skipped entirely for this layout.
+        # MUST use the combined _is_chunks_db_collection authority (not the
+        # bare resolver): this method runs from end_indexing() BEFORE the
+        # discriminator is committed (AC1 ordering), so the bare resolver
+        # alone would still see SHARDED_JSON during a fresh build's very
+        # first call and silently write an empty id_index.bin (a real bug
+        # this exact guard is fixing).
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            return
 
         # Co-persist id_index when it is already in memory so that a cold-start
         # scroll_points fast path does not fall back to rglob in _load_id_index.
@@ -2095,6 +2459,37 @@ class FilesystemVectorStore:
         Returns:
             Point data with id, vector, and payload, or None if not found
         """
+        # Story #1456 AC7: CHUNKS_DB collections resolve via the chunk store
+        # directly -- id_index.bin is never read or written for this method.
+        # Uses the combined _is_chunks_db_collection authority (not the bare
+        # resolver) so this is correct even mid-build, before end_indexing()
+        # commits the discriminator.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                record = chunk_store.read(point_id)
+            finally:
+                chunk_store.close()
+
+            if record is None:
+                return None
+
+            result = {
+                "id": record["id"],
+                "vector": record["vector"],
+                "payload": record.get("payload", {}),
+            }
+            if "chunk_text" in record:
+                result["chunk_text"] = record["chunk_text"]
+            return result
+
         with self._id_index_lock:
             if collection_name not in self._id_index:
                 self._id_index[collection_name] = self._load_id_index(collection_name)
@@ -2445,6 +2840,29 @@ class FilesystemVectorStore:
         subdirectory = self._active_subdirectories.get(collection_name)
         collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index = PathIndex()
+
+        # Story #1456 AC3: CHUNKS_DB collections stream from chunks.db
+        # instead of rglob-scanning vector_*.json files.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                for record in chunk_store.stream_all():
+                    point_id = record.get("id", "")
+                    file_path = record.get("payload", {}).get("path", "")
+                    if point_id and file_path:
+                        path_index.add_point(file_path, point_id)
+            finally:
+                chunk_store.close()
+
+            self._save_path_index(collection_name, path_index)
+            return path_index
+
         for vector_file in collection_path.rglob("*.json"):
             if "collection_meta" in vector_file.name:
                 continue
@@ -2562,6 +2980,59 @@ class FilesystemVectorStore:
 
         # --- Safety valve: fall through to original rglob path ---
         collection_path = self.base_path / collection_name
+
+        # Story #1456 AC3: CHUNKS_DB collections paginate over chunks.db
+        # (sorted point_ids as the opaque offset cursor) instead of
+        # rglob-scanning vector_*.json files.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            filter_func_cdb = None
+            if filter_conditions:
+                filter_func_cdb = self._parse_filter(filter_conditions)
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                all_ids = sorted(chunk_store.all_point_ids())
+
+                start_idx_cdb = 0
+                if offset and offset in all_ids:
+                    start_idx_cdb = all_ids.index(offset) + 1
+
+                page_ids = all_ids[start_idx_cdb : start_idx_cdb + limit]
+
+                cdb_points: List[Dict[str, Any]] = []
+                for point_id in page_ids:
+                    record = chunk_store.read(point_id)
+                    if record is None:
+                        continue
+
+                    point = {"id": record["id"]}
+                    if with_payload:
+                        point["payload"] = record.get("payload", {})
+                    if with_vectors:
+                        point["vector"] = record.get("vector", [])
+                        if hasattr(point["vector"], "tolist"):
+                            point["vector"] = point["vector"].tolist()
+
+                    if filter_func_cdb is not None:
+                        payload = point.get("payload", {})
+                        if not filter_func_cdb(payload):
+                            continue
+
+                    cdb_points.append(point)
+
+                next_offset_cdb = None
+                if len(page_ids) == limit and start_idx_cdb + limit < len(all_ids):
+                    next_offset_cdb = page_ids[-1]
+
+                return cdb_points, next_offset_cdb
+            finally:
+                chunk_store.close()
 
         # Get all vector files sorted by path
         all_files = sorted(
@@ -2738,6 +3209,17 @@ class FilesystemVectorStore:
 
         # === PARALLEL EXECUTION (always) ===
 
+        # Story #1456 AC7 (critical, binding design decision): resolved HERE
+        # on the MAIN/calling thread, BEFORE the worker closure is defined,
+        # so the worker never performs its own layout resolution or any
+        # id-index/chunk-store touching for CHUNKS_DB collections.
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
+
+        _search_chunk_layout = resolve_chunk_layout(collection_path)
+
         def load_index():
             """Load HNSW and ID indexes in parallel thread.
 
@@ -2807,9 +3289,16 @@ class FilesystemVectorStore:
 
             hnsw_load_ms = (time.time() - t_hnsw) * 1000
 
-            # Load ID index in same thread (parallel with embedding generation)
+            # Load ID index in same thread (parallel with embedding generation).
+            # Story #1456 AC7 (critical, binding): CHUNKS_DB collections skip
+            # this ENTIRELY -- no _load_id_index() call, no id-index/chunk-store
+            # path resolution in the worker thread. Point-id resolution for
+            # CHUNKS_DB happens exclusively via the chunk store, opened AFTER
+            # this worker's .result() returns to the main/calling thread.
             t_id = time.time()
-            if self.id_index_cache is not None:
+            if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+                id_index = None
+            elif self.id_index_cache is not None:
                 # Bug #1078: use shared cross-query cache (server mode)
                 id_index = self.id_index_cache.get_or_load(
                     str(collection_path.resolve()),
@@ -2930,6 +3419,20 @@ class FilesystemVectorStore:
                 _embed_meta, embedding_provider.get_provider_name()
             )
 
+        # Story #1456 AC4/AC7: open the chunk store for hydration ONLY here,
+        # on the MAIN thread -- NEVER inside load_index()'s worker closure.
+        # sqlite3 connections are not safely shared across threads, which is
+        # exactly why AC7 mandates this be resolved post-.result().
+        chunk_store_for_hydration: Optional[Any] = None
+        if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store_for_hydration = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000
 
@@ -3013,85 +3516,156 @@ class FilesystemVectorStore:
         t0 = time.time()
         results = []
 
-        if not filter_conditions:
-            # Case A: No filter_conditions - maximum optimization path.
-            # Apply score_threshold on HNSW similarities before any JSON reads,
-            # then read JSON only for the top `limit` results.
+        try:
+            if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+                # Invariant: chunk_store_for_hydration is always opened above
+                # when the layout resolves to CHUNKS_DB. Asserted for mypy's
+                # benefit (Optional[Any] narrowing) -- not a runtime guard.
+                assert chunk_store_for_hydration is not None
+                if not filter_conditions:
+                    # Case A (CHUNKS_DB): Story #1456 AC4 -- apply score_threshold
+                    # on HNSW similarities BEFORE any reads, take the top `limit`
+                    # candidates FIRST (no existence pre-check across the full
+                    # candidate set -- a deliberate perf/correctness tradeoff),
+                    # then hydrate ONLY those: at most `limit` chunk-store reads.
+                    candidates = [
+                        (point_id, float(sim))
+                        for point_id, sim in zip(candidate_ids, candidate_similarities)
+                        if score_threshold is None or sim >= score_threshold
+                    ]
+                    top_candidates = candidates[:limit]
 
-            # Pair candidate IDs with their HNSW-derived similarities
-            candidates = [
-                (point_id, float(sim))
-                for point_id, sim in zip(candidate_ids, candidate_similarities)
-                if point_id in existing_id_index
-                and existing_id_index[point_id].exists()
-                and (score_threshold is None or sim >= score_threshold)
-            ]
+                    for point_id, similarity in top_candidates:
+                        record = chunk_store_for_hydration.read(point_id)
+                        if record is None:
+                            continue
+                        results.append(
+                            {
+                                "id": record["id"],
+                                "score": similarity,
+                                "payload": record.get("payload", {}),
+                                "_vector_data": record,
+                            }
+                        )
+                else:
+                    # Case B (CHUNKS_DB): payload filter evaluated per HNSW
+                    # candidate via a single indexed point_id lookup. Early-exit
+                    # is CONDITIONAL on lazy_load -- identical semantics to the
+                    # legacy sharded-JSON path below.
+                    filter_func = self._parse_filter(filter_conditions)
 
-            # HNSW already returns candidates sorted by distance (closest first),
-            # so candidates are already in descending similarity order.
-            # Take top `limit` candidates before reading any JSON.
-            top_candidates = candidates[:limit]
+                    for point_id, similarity in zip(
+                        candidate_ids, candidate_similarities
+                    ):
+                        if score_threshold is not None and similarity < score_threshold:
+                            continue
 
-            # Read JSON only for the top results to get payload/content
-            for point_id, similarity in top_candidates:
-                vector_file = existing_id_index[point_id]
-                try:
-                    with open(vector_file) as f:
-                        data = json.load(f)
+                        record = chunk_store_for_hydration.read(point_id)
+                        if record is None:
+                            continue
 
-                    results.append(
-                        {
-                            "id": data["id"],
-                            "score": similarity,
-                            "payload": data.get("payload", {}),
-                            "_vector_data": data,
-                        }
-                    )
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    continue
+                        payload = record.get("payload", {})
+                        if not filter_func(payload):
+                            continue
 
-        else:
-            # Case B: filter_conditions present - must read JSON for filter evaluation.
-            # Use HNSW-derived similarities (not recalculated) but read JSON to apply
-            # filter conditions. Stop when we have `limit` results (early exit).
-            filter_func = self._parse_filter(filter_conditions)
+                        results.append(
+                            {
+                                "id": record["id"],
+                                "score": float(similarity),
+                                "payload": payload,
+                                "_vector_data": record,
+                            }
+                        )
 
-            for point_id, similarity in zip(candidate_ids, candidate_similarities):
-                if point_id not in existing_id_index:
-                    continue
+                        # EARLY EXIT: If lazy loading enabled, stop when we have enough results
+                        if lazy_load and len(results) >= limit:
+                            break
 
-                vector_file = existing_id_index[point_id]
-                if not vector_file.exists():
-                    continue
+            elif not filter_conditions:
+                # Case A (legacy sharded-JSON, UNCHANGED): No filter_conditions -
+                # maximum optimization path. Apply score_threshold on HNSW
+                # similarities before any JSON reads, then read JSON only for
+                # the top `limit` results.
 
-                # Apply score threshold before reading JSON when possible
-                if score_threshold is not None and similarity < score_threshold:
-                    continue
+                # Pair candidate IDs with their HNSW-derived similarities
+                candidates = [
+                    (point_id, float(sim))
+                    for point_id, sim in zip(candidate_ids, candidate_similarities)
+                    if point_id in existing_id_index
+                    and existing_id_index[point_id].exists()
+                    and (score_threshold is None or sim >= score_threshold)
+                ]
 
-                try:
-                    with open(vector_file) as f:
-                        data = json.load(f)
+                # HNSW already returns candidates sorted by distance (closest first),
+                # so candidates are already in descending similarity order.
+                # Take top `limit` candidates before reading any JSON.
+                top_candidates = candidates[:limit]
 
-                    # Apply filter conditions on payload
-                    payload = data.get("payload", {})
-                    if not filter_func(payload):
+                # Read JSON only for the top results to get payload/content
+                for point_id, similarity in top_candidates:
+                    vector_file = existing_id_index[point_id]
+                    try:
+                        with open(vector_file) as f:
+                            data = json.load(f)
+
+                        results.append(
+                            {
+                                "id": data["id"],
+                                "score": similarity,
+                                "payload": data.get("payload", {}),
+                                "_vector_data": data,
+                            }
+                        )
+                    except (json.JSONDecodeError, KeyError, ValueError):
                         continue
 
-                    results.append(
-                        {
-                            "id": data["id"],
-                            "score": float(similarity),
-                            "payload": payload,
-                            "_vector_data": data,
-                        }
-                    )
+            else:
+                # Case B (legacy sharded-JSON, UNCHANGED): filter_conditions
+                # present - must read JSON for filter evaluation. Use
+                # HNSW-derived similarities (not recalculated) but read JSON to
+                # apply filter conditions. Stop when we have `limit` results
+                # (early exit).
+                filter_func = self._parse_filter(filter_conditions)
 
-                    # EARLY EXIT: If lazy loading enabled, stop when we have enough results
-                    if lazy_load and len(results) >= limit:
-                        break
+                for point_id, similarity in zip(candidate_ids, candidate_similarities):
+                    if point_id not in existing_id_index:
+                        continue
 
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    continue
+                    vector_file = existing_id_index[point_id]
+                    if not vector_file.exists():
+                        continue
+
+                    # Apply score threshold before reading JSON when possible
+                    if score_threshold is not None and similarity < score_threshold:
+                        continue
+
+                    try:
+                        with open(vector_file) as f:
+                            data = json.load(f)
+
+                        # Apply filter conditions on payload
+                        payload = data.get("payload", {})
+                        if not filter_func(payload):
+                            continue
+
+                        results.append(
+                            {
+                                "id": data["id"],
+                                "score": float(similarity),
+                                "payload": payload,
+                                "_vector_data": data,
+                            }
+                        )
+
+                        # EARLY EXIT: If lazy loading enabled, stop when we have enough results
+                        if lazy_load and len(results) >= limit:
+                            break
+
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        finally:
+            if chunk_store_for_hydration is not None:
+                chunk_store_for_hydration.close()
 
         timing["candidate_load_ms"] = (time.time() - t0) * 1000
 
@@ -3633,6 +4207,36 @@ class FilesystemVectorStore:
         if not points:
             return True
 
+        # Story #1456 AC7: CHUNKS_DB collections update via the chunk store
+        # directly -- id_index.bin is never read or written for this method.
+        # Uses the combined _is_chunks_db_collection authority (not the bare
+        # resolver) so this is correct even mid-build, before end_indexing()
+        # commits the discriminator.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            try:
+                chunk_store = open_chunk_store_for_path(
+                    collection_path / "chunks.db", str(collection_path)
+                )
+                try:
+                    updates = [(point["id"], point["payload"]) for point in points]
+                    chunk_store.update_payload_fields_batch(updates)
+                finally:
+                    chunk_store.close()
+                return True
+            except Exception as e:
+                self.logger.warning(
+                    "Failed to batch update payload (CHUNKS_DB) for collection %s: %s",
+                    collection_name,
+                    e,
+                    exc_info=True,
+                )
+                return False
+
         try:
             # Ensure id_index is loaded for O(1) file resolution
             with self._id_index_lock:
@@ -3708,6 +4312,32 @@ class FilesystemVectorStore:
         Returns:
             List of unique file paths
         """
+        # Story #1456 AC7: CHUNKS_DB collections derive the file-path set
+        # directly from chunks.db -- id_index.bin is never read or written,
+        # and no per-file JSON is opened. self._file_path_cache caching
+        # behavior is preserved; only the data source changes.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            with self._id_index_lock:
+                if collection_name not in self._file_path_cache:
+                    from code_indexer.storage.sqlite_chunk_store import (
+                        open_chunk_store_for_path,
+                    )
+
+                    chunk_store = open_chunk_store_for_path(
+                        collection_path / "chunks.db", str(collection_path)
+                    )
+                    try:
+                        self._file_path_cache[collection_name] = (
+                            chunk_store.distinct_paths()
+                        )
+                    finally:
+                        chunk_store.close()
+
+                file_paths = self._file_path_cache[collection_name]
+
+            return sorted(list(file_paths))
+
         with self._id_index_lock:
             # Ensure ID index is loaded (fast - from filenames only)
             if collection_name not in self._id_index:
@@ -3756,6 +4386,27 @@ class FilesystemVectorStore:
             except (json.JSONDecodeError, OSError) as e:
                 self.logger.warning(f"Failed to read collection metadata: {e}")
 
+        # Story #1456 AC3/AC7: CHUNKS_DB collections never fall through to
+        # the estimate below -- id_index stays empty for this layout (no
+        # id_index.bin), so the estimate would be meaningless. chunks.db's
+        # indexed path column gives an EXACT (not estimated) count cheaply.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            with self._id_index_lock:
+                if collection_name in self._file_path_cache:
+                    return len(self._file_path_cache[collection_name])
+
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                return len(chunk_store.distinct_paths())
+            finally:
+                chunk_store.close()
+
         # Fallback: estimation for old indexes or if metadata read fails
         with self._id_index_lock:
             # If file paths already cached, return count from cache (instant)
@@ -3800,32 +4451,50 @@ class FilesystemVectorStore:
 
         # fcntl imported at module level for lock flag constants
 
-        # Calculate unique file count from vectors
-        unique_files = set()
+        # Story #1456 AC3/AC7: CHUNKS_DB collections derive the unique-path
+        # set directly from chunks.db (indexed column, no data/vector
+        # decode) instead of opening per-point files via id_index.bin.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
 
-        # Use cached id_index for speed (already loaded during indexing)
-        with self._id_index_lock:
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
-
-            id_index = self._id_index[collection_name]
-
-        # Parse each vector to extract source file path
-        for point_id, vector_file in id_index.items():
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
             try:
-                with open(vector_file) as f:
-                    vector_data = json.load(f)
+                unique_files = chunk_store.distinct_paths()
+            finally:
+                chunk_store.close()
+        else:
+            # Calculate unique file count from vectors
+            unique_files = set()
 
-                # Extract source file path from payload
-                file_path = vector_data.get("payload", {}).get("path")
-                if file_path:
-                    unique_files.add(file_path)
+            # Use cached id_index for speed (already loaded during indexing)
+            with self._id_index_lock:
+                if collection_name not in self._id_index:
+                    self._id_index[collection_name] = self._load_id_index(
+                        collection_name
+                    )
 
-            except (json.JSONDecodeError, OSError) as e:
-                self.logger.warning(
-                    f"Failed to read vector file {vector_file} for file count: {e}"
-                )
-                continue
+                id_index = self._id_index[collection_name]
+
+            # Parse each vector to extract source file path
+            for point_id, vector_file in id_index.items():
+                try:
+                    with open(vector_file) as f:
+                        vector_data = json.load(f)
+
+                    # Extract source file path from payload
+                    file_path = vector_data.get("payload", {}).get("path")
+                    if file_path:
+                        unique_files.add(file_path)
+
+                except (json.JSONDecodeError, OSError) as e:
+                    self.logger.warning(
+                        f"Failed to read vector file {vector_file} for file count: {e}"
+                    )
+                    continue
 
         unique_file_count = len(unique_files)
 
@@ -3874,6 +4543,26 @@ class FilesystemVectorStore:
 
         if not self.collection_exists(collection_name):
             return {}
+
+        # Story #1456 AC3: CHUNKS_DB collections derive the file-path set
+        # from chunks.db, mapped to the SINGLE chunks.db file's mtime for
+        # every path (there is no per-record file mtime once records are
+        # consolidated into one file -- a documented, reasonable
+        # approximation for this debug/introspection utility).
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            db_path = collection_path / "chunks.db"
+            chunk_store = open_chunk_store_for_path(db_path, str(collection_path))
+            try:
+                paths = chunk_store.distinct_paths()
+            finally:
+                chunk_store.close()
+
+            shared_timestamp = datetime.fromtimestamp(db_path.stat().st_mtime)
+            return {path: shared_timestamp for path in paths}
 
         file_timestamps: Dict[str, datetime] = {}
 
@@ -3924,6 +4613,42 @@ class FilesystemVectorStore:
 
         if not self.collection_exists(collection_name):
             return []
+
+        # Story #1456 AC3: CHUNKS_DB collections sample random point_ids
+        # from chunks.db instead of rglob-scanning vector_*.json files.
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                point_ids = list(chunk_store.all_point_ids())
+                if not point_ids:
+                    return []
+
+                sample_count = min(sample_size, len(point_ids))
+                sampled_ids = random.sample(point_ids, sample_count)
+
+                sampled: List[Dict] = []
+                for point_id in sampled_ids:
+                    record = chunk_store.read(point_id)
+                    if record is None:
+                        continue
+                    payload = record.get("payload", {})
+                    sampled.append(
+                        {
+                            "id": record["id"],
+                            "vector": record["vector"].tolist(),
+                            "file_path": payload.get("path", ""),
+                            "metadata": record.get("metadata", {}),
+                        }
+                    )
+                return sampled
+            finally:
+                chunk_store.close()
 
         # Collect all vector files
         all_vector_files = [
@@ -3980,6 +4705,37 @@ class FilesystemVectorStore:
         Returns:
             True if all sampled vectors have expected dimensions, False otherwise
         """
+        # Story #1456 AC3: CHUNKS_DB collections sample from chunks.db
+        # instead of the retired id_index.bin/vector_*.json path.
+        collection_path = self._get_collection_path(collection_name)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+            try:
+                point_ids = list(chunk_store.all_point_ids())
+                if not point_ids:
+                    return True  # Empty collection is vacuously valid
+
+                sample_count = min(20, len(point_ids))
+                sampled_ids = random.sample(point_ids, sample_count)
+
+                for point_id in sampled_ids:
+                    record = chunk_store.read(point_id)
+                    if record is None:
+                        continue
+                    vector = record.get("vector", [])
+                    if len(vector) != expected_dims:
+                        return False
+
+                return True
+            finally:
+                chunk_store.close()
+
         with self._id_index_lock:
             # Ensure ID index is loaded (cached after first call)
             if collection_name not in self._id_index:
@@ -4281,44 +5037,77 @@ class FilesystemVectorStore:
         total_changes = len(effective_added) + len(effective_updated) + len(deleted_set)
         processed = 0
 
-        for point_id in effective_added | effective_updated:
-            # Load vector from disk
-            try:
-                vector_file = self._id_index[collection_name].get(point_id)
-                if not vector_file or not Path(vector_file).exists():
+        # Story #1456 AC7: CHUNKS_DB collections resolve each point's vector
+        # via the chunk store (opened ONCE before the loop) instead of the
+        # retired id_index.bin / vector_<id>.json file map.
+        _is_chunks_db = self._is_chunks_db_collection(collection_name, collection_path)
+        _incremental_chunk_store: Optional[Any] = None
+        if _is_chunks_db:
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            _incremental_chunk_store = open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            )
+
+        try:
+            for point_id in effective_added | effective_updated:
+                # Load vector from disk (or chunk store, for CHUNKS_DB)
+                try:
+                    if _is_chunks_db:
+                        assert _incremental_chunk_store is not None
+                        record = _incremental_chunk_store.read(point_id)
+                        if record is None:
+                            self.logger.warning(
+                                f"Chunk-store record not found for point '{point_id}', skipping"
+                            )
+                            continue
+                        vector = np.array(record["vector"], dtype=np.float32)
+                    else:
+                        vector_file = self._id_index[collection_name].get(point_id)
+                        if not vector_file or not Path(vector_file).exists():
+                            self.logger.warning(
+                                f"Vector file not found for point '{point_id}', skipping"
+                            )
+                            continue
+
+                        with open(vector_file) as f:
+                            data = json.load(f)
+
+                        vector = np.array(data["vector"], dtype=np.float32)
+
+                    # Add or update in HNSW
+                    label, id_to_label, label_to_id, next_label = (
+                        hnsw_manager.add_or_update_vector(
+                            index,
+                            point_id,
+                            vector,
+                            id_to_label,
+                            label_to_id,
+                            next_label,
+                        )
+                    )
+
+                    processed += 1
+
+                    # Report progress periodically
+                    if progress_callback and processed % 10 == 0:
+                        progress_callback(
+                            processed,
+                            total_changes,
+                            Path(""),
+                            info=f"🔄 Incremental HNSW update: {processed}/{total_changes} changes",
+                        )
+
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
                     self.logger.warning(
-                        f"Vector file not found for point '{point_id}', skipping"
+                        f"Failed to process point '{point_id}': {e}, skipping"
                     )
                     continue
-
-                with open(vector_file) as f:
-                    data = json.load(f)
-
-                vector = np.array(data["vector"], dtype=np.float32)
-
-                # Add or update in HNSW
-                label, id_to_label, label_to_id, next_label = (
-                    hnsw_manager.add_or_update_vector(
-                        index, point_id, vector, id_to_label, label_to_id, next_label
-                    )
-                )
-
-                processed += 1
-
-                # Report progress periodically
-                if progress_callback and processed % 10 == 0:
-                    progress_callback(
-                        processed,
-                        total_changes,
-                        Path(""),
-                        info=f"🔄 Incremental HNSW update: {processed}/{total_changes} changes",
-                    )
-
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                self.logger.warning(
-                    f"Failed to process point '{point_id}': {e}, skipping"
-                )
-                continue
+        finally:
+            if _incremental_chunk_store is not None:
+                _incremental_chunk_store.close()
 
         # Process deletions
         for point_id in changes["deleted"]:
