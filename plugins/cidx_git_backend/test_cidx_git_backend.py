@@ -16,6 +16,7 @@ happy path; this locks the contract with no cluster needed.
 from __future__ import annotations
 
 import json
+import subprocess
 import urllib.error
 
 import pytest
@@ -47,6 +48,11 @@ def _rpc(result: dict) -> str:
 def _content(payload) -> dict:
     """git-mcp wraps a tool's JSON return as content[0].text."""
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+def _content_raw(text: str) -> dict:
+    """A success result whose content text is NOT valid JSON."""
+    return {"content": [{"type": "text", "text": text}]}
 
 
 @pytest.fixture()
@@ -202,14 +208,16 @@ class TestReconstruction:
             "origin/master",
         ]
 
-    def test_diff_name_only_parses_headers(self, backend, monkeypatch):
-        diff = (
-            "diff --git a/x.py b/x.py\n"
-            "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
-            "diff --git a/dir/y.txt b/dir/y.txt\n"
+    def test_diff_name_only_uses_git_mcp_name_only_files(self, backend, monkeypatch):
+        # Uses git-mcp's own --name-only list (never a lossy unified-diff parse), so
+        # even a quoted / non-ASCII path survives intact.
+        calls = _install(
+            monkeypatch, lambda b: _rpc(_content({"files": ["x.py", "dir/café.py"]}))
         )
-        _install(monkeypatch, lambda b: _rpc(_content({"diff": diff})))
-        assert backend.diff_name_only(REPO, "HEAD~1") == ["x.py", "dir/y.txt"]
+        assert backend.diff_name_only(REPO, "HEAD~1") == ["x.py", "dir/café.py"]
+        args = calls[-1]["body"]["params"]["arguments"]
+        assert args["name_only"] is True
+        assert args["base"] == "HEAD~1"
 
     def test_show_ref_completed_process(self, backend, monkeypatch):
         _install(
@@ -229,19 +237,46 @@ class TestReconstruction:
 
 
 class TestMutationArguments:
-    def test_checkout_create_and_force(self, backend, monkeypatch):
+    def test_checkout_create_only(self, backend, monkeypatch):
         calls = _install(monkeypatch, lambda b: _rpc(_content({})))
-        backend.checkout(REPO, "feature", create=True, force=True)
+        backend.checkout(REPO, "feature", create=True)
         args = calls[-1]["body"]["params"]["arguments"]
         assert args["cow_path"] == REPO
         assert args["target"] == "feature"
         assert args["create"] is True
-        assert args["force"] is True
+        # create (-b) and force_new (-B) must NOT collapse — force_new absent here.
+        assert "force_new" not in args
+
+    def test_checkout_force_new_and_start_point_are_distinct(
+        self, backend, monkeypatch
+    ):
+        calls = _install(monkeypatch, lambda b: _rpc(_content({})))
+        backend.checkout(REPO, "feature", force_new=True, start_point="origin/feature")
+        args = calls[-1]["body"]["params"]["arguments"]
+        assert args["force_new"] is True
+        assert args["start_point"] == "origin/feature"
+        # force_new is a separate signal from create (-B vs -b).
+        assert "create" not in args
+
+    def test_checkout_force(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content({})))
+        backend.checkout(REPO, "HEAD", force=True)
+        assert calls[-1]["body"]["params"]["arguments"]["force"] is True
 
     def test_pull_rebase_mode(self, backend, monkeypatch):
         calls = _install(monkeypatch, lambda b: _rpc(_content({})))
         backend.pull(REPO, mode="rebase")
         assert calls[-1]["body"]["params"]["arguments"]["rebase"] is True
+
+    def test_pull_no_ff_mode(self, backend, monkeypatch):
+        calls = _install(monkeypatch, lambda b: _rpc(_content({})))
+        backend.pull(REPO, mode="no-ff")
+        assert calls[-1]["body"]["params"]["arguments"]["no_ff"] is True
+
+    def test_pull_rejects_unknown_mode(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({})))
+        with pytest.raises(GitMcpBackendError, match="unsupported mode"):
+            backend.pull(REPO, mode="bogus")
 
     def test_reset_hard(self, backend, monkeypatch):
         calls = _install(monkeypatch, lambda b: _rpc(_content({})))
@@ -291,6 +326,82 @@ class TestErrorsFailLoud:
         monkeypatch.setattr(plugin.urllib.request, "urlopen", boom)
         with pytest.raises(GitMcpBackendError, match="request to .* failed"):
             backend.current_branch(REPO)
+
+
+class TestExceptionContract:
+    """The ~30 seam callers do `except subprocess.CalledProcessError` and read
+    `.stderr`; the delegated backend MUST raise that type, with git-mcp's error
+    text in `.stderr`, or every recovery path goes dead (a raw RuntimeError would
+    escape uncaught)."""
+
+    def test_error_is_called_process_error(self):
+        assert issubclass(GitMcpBackendError, subprocess.CalledProcessError)
+
+    def test_tool_error_populates_stderr_for_recovery_matching(
+        self, backend, monkeypatch
+    ):
+        # e.g. remote-already-exists fallback greps e.stderr for "already exists".
+        _install(
+            monkeypatch,
+            lambda b: json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "isError": True,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "fatal: remote origin already exists",
+                            }
+                        ],
+                    },
+                }
+            ),
+        )
+        try:
+            backend.remote_add(REPO, "origin", "http://x/y.git")
+            raise AssertionError("expected raise")
+        except subprocess.CalledProcessError as e:  # caught as the contract type
+            assert "already exists" in (e.stderr or "")
+
+
+class TestWrongShapeBodyFailsLoud:
+    """A valid-transport 200 with an unexpected body must NOT read as clean/empty —
+    that would silently corrupt cidx's git-state view."""
+
+    def test_unparseable_nonempty_body_raises(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content_raw("not json at all")))
+        with pytest.raises(GitMcpBackendError, match="unparseable body"):
+            backend.current_branch(REPO)
+
+    def test_status_missing_buckets_raises_not_clean(self, backend, monkeypatch):
+        # `{}` would previously read as a CLEAN tree; now it fails loud.
+        _install(monkeypatch, lambda b: _rpc(_content({})))
+        with pytest.raises(GitMcpBackendError, match="status buckets"):
+            backend.status_porcelain(REPO)
+
+    def test_ls_files_missing_key_raises_not_empty(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({})))
+        with pytest.raises(GitMcpBackendError, match="missing 'files'"):
+            backend.ls_files(REPO)
+
+    def test_rev_parse_missing_output_raises(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({})))
+        with pytest.raises(GitMcpBackendError, match="missing 'output'"):
+            backend.rev_parse(REPO, "HEAD")
+
+    def test_list_branches_rejects_unsupported_fmt(self, backend, monkeypatch):
+        _install(monkeypatch, lambda b: _rpc(_content({"branches": []})))
+        with pytest.raises(GitMcpBackendError, match="cannot honour fmt"):
+            backend.list_branches(REPO, fmt="%(objectname)")
+
+    def test_list_branches_accepts_refname_short_fmt(self, backend, monkeypatch):
+        _install(
+            monkeypatch,
+            lambda b: _rpc(_content({"branches": [{"name": "main", "type": "local"}]})),
+        )
+        assert backend.list_branches(REPO, fmt="%(refname:short)") == ["main"]
 
 
 class TestFactory:
