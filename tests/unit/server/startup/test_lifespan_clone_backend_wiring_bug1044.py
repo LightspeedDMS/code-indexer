@@ -14,7 +14,9 @@ Both tests MUST fail before the Bug #1044 fix and pass after.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -227,3 +229,189 @@ class TestLifespanCloneBackendSourceOrder:
             f"BEFORE golden_repo_manager._snapshot_manager wiring. "
             f"grm_pos={grm_snapshot_pos}, arm_pos={arm_clone_backend_pos}"
         )
+
+
+class TestLifespanCloneBackendWiringLoggingBug1462:
+    """Bug #1462 regression guard: the three silent-skip guard points in the
+    clone_backend wiring block must each log an ERROR when they evaluate
+    False, instead of silently skipping wiring with zero diagnostics.
+
+    Bug #1462 documented a real production trigger (NFS permission denial
+    causing snapshot_manager to be None), but the logging gap is independent
+    of that specific trigger -- ANY future reason for snapshot_manager,
+    golden_repo_manager, or arm being None reproduces the same
+    silent-then-confusing-downstream-error pattern (a much later, unrelated
+    "invoked without clone_backend -- wiring bug" error at activation time
+    with no log correlation back to the real cause).
+
+    These tests extract the ACTUAL wiring block source from lifespan.py
+    (between the 'if snapshot_manager is not None:' and the following
+    'logger.info(' markers) and exec() it under each of the three failure
+    scenarios, so they exercise real production code -- not a hand-written
+    replica -- and must fail (RED) before the fix and pass (GREEN) after.
+    """
+
+    _SNAPSHOT_MANAGER_ERROR_CODE = "APP-GENERAL-1462"
+    _GOLDEN_REPO_MANAGER_ERROR_CODE = "APP-GENERAL-1462-B"
+    _ARM_ERROR_CODE = "APP-GENERAL-1462-C"
+    _LOGGER_NAME = "code_indexer.server.startup.lifespan"
+
+    def test_all_three_error_codes_present_in_source(self):
+        """Sanity check: lifespan.py must define all three new error codes."""
+        source = _LIFESPAN_PATH.read_text()
+
+        assert f'"{self._SNAPSHOT_MANAGER_ERROR_CODE}"' in source, (
+            "Bug #1462: missing ERROR log for the snapshot_manager-is-None "
+            f"guard (expected error code {self._SNAPSHOT_MANAGER_ERROR_CODE})."
+        )
+        assert f'"{self._GOLDEN_REPO_MANAGER_ERROR_CODE}"' in source, (
+            "Bug #1462: missing ERROR log for the golden_repo_manager-is-None "
+            f"guard (expected error code {self._GOLDEN_REPO_MANAGER_ERROR_CODE})."
+        )
+        assert f'"{self._ARM_ERROR_CODE}"' in source, (
+            "Bug #1462: missing ERROR log for the arm-is-None guard "
+            f"(expected error code {self._ARM_ERROR_CODE})."
+        )
+
+    @staticmethod
+    def _extract_wiring_block_source() -> str:
+        """Slice the real three-guard wiring block out of lifespan.py source
+        and dedent it to column 0 so it can be exec()'d standalone.
+
+        Boundaries: starts at 'if snapshot_manager is not None:' (unique in
+        the file) and ends right before the following 'logger.info(' call
+        (the "Global repos background services started successfully" log,
+        also unique / immediately after the block).
+        """
+        source = _LIFESPAN_PATH.read_text()
+        start = source.index("if snapshot_manager is not None:")
+        end = source.index("logger.info(", start)
+        block = source[start:end]
+
+        base_indent = " " * 12
+        dedented_lines = []
+        for line in block.splitlines():
+            if line.startswith(base_indent):
+                dedented_lines.append(line[len(base_indent) :])
+            elif line.strip() == "":
+                dedented_lines.append("")
+            else:
+                dedented_lines.append(line)
+        return "\n".join(dedented_lines)
+
+    def _run_wiring_block(self, snapshot_manager, golden_repo_manager):
+        """exec() the real, sliced production wiring block under the given
+        snapshot_manager / golden_repo_manager values, using the REAL
+        logger/format_error_log/get_correlation_id objects from the
+        lifespan module so caplog captures genuine production log calls.
+        """
+        from code_indexer.server.startup import lifespan as lifespan_module
+
+        exec_globals = {
+            "snapshot_manager": snapshot_manager,
+            "golden_repo_manager": golden_repo_manager,
+            "global_lifecycle_manager": MagicMock(),
+            "background_job_manager": MagicMock(),
+            "logger": lifespan_module.logger,
+            "format_error_log": lifespan_module.format_error_log,
+            "get_correlation_id": lifespan_module.get_correlation_id,
+        }
+
+        block_source = self._extract_wiring_block_source()
+        exec(  # noqa: S102 - intentional exec of real production source slice
+            compile(block_source, "<lifespan_wiring_block_bug1462>", "exec"),
+            exec_globals,
+        )
+        return exec_globals
+
+    def test_snapshot_manager_none_logs_error(self, caplog):
+        """Case 1: snapshot_manager is None -> ERROR log, no crash."""
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            self._run_wiring_block(
+                snapshot_manager=None,
+                golden_repo_manager=MagicMock(),
+            )
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, (
+            "Bug #1462: no ERROR log emitted when snapshot_manager is None. "
+            "The silent skip must be diagnosable in logs."
+        )
+        combined = " ".join(r.getMessage() for r in error_records)
+        assert self._SNAPSHOT_MANAGER_ERROR_CODE in combined
+        assert "snapshot_manager" in combined
+        assert "clone_backend" in combined
+        assert "wiring" in combined.lower()
+        assert "restart" in combined.lower()
+
+    def test_golden_repo_manager_none_logs_error(self, caplog):
+        """Case 2: snapshot_manager set, golden_repo_manager is None -> ERROR log."""
+        snapshot_manager = MagicMock()
+        snapshot_manager._clone_backend = MagicMock()
+
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            self._run_wiring_block(
+                snapshot_manager=snapshot_manager,
+                golden_repo_manager=None,
+            )
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, (
+            "Bug #1462: no ERROR log emitted when golden_repo_manager is None. "
+            "The silent skip must be diagnosable in logs."
+        )
+        combined = " ".join(r.getMessage() for r in error_records)
+        assert self._GOLDEN_REPO_MANAGER_ERROR_CODE in combined
+        assert "golden_repo_manager" in combined
+        assert "clone_backend" in combined
+        assert "wiring" in combined.lower()
+        assert "restart" in combined.lower()
+
+    def test_arm_none_logs_error(self, caplog):
+        """Case 3: snapshot_manager and golden_repo_manager set, but
+        golden_repo_manager.activated_repo_manager is absent -> ERROR log.
+        """
+        snapshot_manager = MagicMock()
+        snapshot_manager._clone_backend = MagicMock()
+        golden_repo_manager = SimpleNamespace()  # no activated_repo_manager attr
+
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            self._run_wiring_block(
+                snapshot_manager=snapshot_manager,
+                golden_repo_manager=golden_repo_manager,
+            )
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, (
+            "Bug #1462: no ERROR log emitted when "
+            "golden_repo_manager.activated_repo_manager is missing. "
+            "The silent skip must be diagnosable in logs."
+        )
+        combined = " ".join(r.getMessage() for r in error_records)
+        assert self._ARM_ERROR_CODE in combined
+        assert "activated_repo_manager" in combined
+        assert "clone_backend" in combined
+        assert "wiring" in combined.lower()
+        assert "restart" in combined.lower()
+
+    def test_happy_path_no_wiring_error_logged(self, caplog):
+        """Regression guard: when all three prerequisites are present, none
+        of the new Bug #1462 guard-skip ERROR logs must fire.
+        """
+        snapshot_manager = MagicMock()
+        snapshot_manager._clone_backend = MagicMock()
+        arm = MagicMock()
+        golden_repo_manager = SimpleNamespace(activated_repo_manager=arm)
+
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            self._run_wiring_block(
+                snapshot_manager=snapshot_manager,
+                golden_repo_manager=golden_repo_manager,
+            )
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        combined = " ".join(r.getMessage() for r in error_records)
+        assert self._SNAPSHOT_MANAGER_ERROR_CODE not in combined
+        assert self._GOLDEN_REPO_MANAGER_ERROR_CODE not in combined
+        assert self._ARM_ERROR_CODE not in combined
+        assert arm._clone_backend is snapshot_manager._clone_backend

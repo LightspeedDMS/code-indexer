@@ -395,8 +395,17 @@ class CowDaemonBackend:
 
     @staticmethod
     def _sanitize_identifier(alias: str) -> str:
-        """Daemon rejects dots in namespace/name. Replace with underscores."""
-        return alias.replace(".", "_")
+        """Sanitize a namespace/name identifier for the CoW daemon.
+
+        The daemon's own server-side validation requires namespace/name
+        values to contain only alphanumeric characters, hyphens, and
+        underscores. Real cluster usernames are email addresses (e.g.
+        ``Seba.Battig@lightspeeddms.com``), so any character outside that
+        allowed set -- not just dots -- must be replaced, or the daemon
+        rejects the request with HTTP 400 VALIDATION_ERROR (Issue #1465).
+        Every disallowed character maps to a single underscore.
+        """
+        return re.sub(r"[^A-Za-z0-9_-]", "_", alias)
 
     def _translate_to_daemon_path(self, cidx_path: str) -> str:
         """Translate CIDX-view path (under mount_point) to daemon-local path (under daemon_storage_path).

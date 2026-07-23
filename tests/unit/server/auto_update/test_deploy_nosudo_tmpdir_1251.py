@@ -121,6 +121,7 @@ _NOOP_EXECUTE_STEPS: dict = {
     "_ensure_launch_config": None,
     "_ensure_cidx_repo_root": True,
     "_ensure_git_safe_directory": True,
+    "_ensure_git_safe_directory_wildcard": True,
     "_ensure_auto_updater_uses_server_python": True,
     "_ensure_data_dir_env_var": True,
     "_ensure_malloc_arena_max": True,

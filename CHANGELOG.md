@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.79.0] - 2026-07-22
+
+### Fixed
+
+- **#1466**: Golden-repo git operations (refresh, branch listing, change detection, per-user activation) failed with git's "dubious ownership" error whenever a repo's on-disk owner differed from the running service account -- e.g. CoW-mounted golden repos owned by the CoW daemon's own operator account while cidx-server runs as a dedicated service account. Fixed with a global self-heal: `git config --global --add safe.directory '*'` for the service account, mirroring the existing `_ensure_git_safe_directory()` pattern (which covers a different, specific path and is untouched). Wired into both the auto-updater (`DeploymentExecutor`) and the installer (`install-cidx-server.sh`) for parity. Proven harmless in solo mode (this project's actual production deployment shape) via a real-git-binary test asserting `git status` on a same-owner repo is byte-identical before and after the grant.
+
+## [11.78.0] - 2026-07-22
+
+### Fixed
+
+- **#1464**: Golden-repos CoW symlink self-heal (#1463) pointed at a non-traversable local path on the cluster node co-locating the CoW storage daemon. `_resolve_golden_repos_symlink_target()` special-cased that node to use `cow_daemon.daemon_storage_path` instead of `cow_daemon.mount_point`, assuming no bind-mount indirection was needed there -- but the local path sat under a 0700 home directory the service account could not traverse. Fixed by always resolving to `mount_point`, matching the already-correct `activated-repos` twin. Also made existing-symlink reconciliation for both golden-repos and activated-repos self-heal a mismatched target (atomic re-point, never touching underlying data) instead of only warning forever, in both the Python auto-updater and the shell installer.
+- **#1465**: `CowDaemonBackend._sanitize_identifier()` only replaced `.` with `_`, leaving other CoW-daemon-rejected characters (notably `@`) untouched -- breaking per-user activation fleet-wide on the cluster for essentially all real (email-username) users. Fixed by replacing any character outside `[A-Za-z0-9_-]` with `_`, matching the daemon's actual validation rule.
+
+## [11.77.0] - 2026-07-22
+
+### Fixed
+
+- **#1462**: A fleet-wide NFS write-permission denial on the storage host silently disabled `clone_backend` wiring on every cluster node restart. `VersionedSnapshotManager` construction failed at startup, was caught non-fatally, and `app.state.snapshot_manager` was set to `None` -- causing `lifespan.py`'s three-guard wiring block (`snapshot_manager`/`golden_repo_manager`/`arm` `is not None` checks) to silently skip `clone_backend` injection with zero logging at any of the three guard points, even though the upstream root-cause exception was logged separately with no correlation. Operators saw only a confusing downstream "invoked without clone_backend" error during activation. Fixed by logging an ERROR at each guard point (`APP-GENERAL-1462`/`-B`/`-C`) so future occurrences are immediately diagnosable. Root cause was also fixed at the infrastructure level (NFS ACL grant on the storage host).
+- **#1463**: Golden-repos/activated-repos self-heal into a CoW-mount symlink (originally shipped for Bug #1337/#1052) regressed on the staging cluster: the self-heal deliberately refused to convert a real (non-symlink) directory into a symlink whenever it already contained data, which meant it could never actually self-heal on an already-deployed host, since every already-deployed host has real data by definition. Fixed both `deployment_executor.py` (Python) and `install-cidx-server.sh` (shell) to run a data-safety-first migration: create the CoW target first, rename the existing real directory to a `.legacy.bugNNNN` backup, then symlink into the target, rolling back on symlink failure. Never writes into the shared target directly, so it is safe under concurrent migration from multiple cluster nodes on the same NFS mount.
+
+## [11.76.0] - 2026-07-21
+
+### Fixed
+
+- **#1449**: Server crashed reading non-UTF-8 file content (e.g. files containing binary or Latin-1 byte sequences that aren't valid UTF-8). Fixed by passing `errors="replace"` at both file-read sites in `server/services/file_service.py`, so invalid byte sequences are substituted with the Unicode replacement character instead of raising `UnicodeDecodeError`.
+- **#1452**: Jobs panel filter chain was broken across multiple independent surfaces. The status filter dropdown offered a dead `"queued"` option that never matched any stored job status. Dashboard job-count tiles linked to the Jobs panel using a `status` query param while the panel's own filtering logic expected `status_filter`, and similarly linked search using `search` instead of `search_text`, so tile clicks silently failed to pre-filter the list. Separately, the jobs search predicate matched job type/alias/user but never `job_id`, so searching by job id returned no results. Fixed across all four independent backend implementations that maintain their own filtering logic (SQLite backend, PostgreSQL backend, in-memory/repository layer, and the web routes merge layer) plus the affected templates (`jobs.html`, `partials/dashboard_job_counts.html`, `partials/dashboard_stats.html`, `partials/jobs_list.html`, `partials/repos_list.html`).
+- **#1453**: `check_hnsw_health` (MCP) and the legacy synchronous REST health-check endpoints for golden and activated repos could hang or time out the calling connection on large indexes, since HNSW integrity verification is a genuinely long-running operation with no natural time bound. Converted `check_hnsw_health` to the standard async job-submission pattern (submit, then poll for status/result) and removed the legacy synchronous REST `GET .../health` endpoints entirely, since they are fully superseded by the existing async `POST .../health/check` siblings already used elsewhere.
+
 ## [11.75.0] - 2026-07-19
 
 ### Fixed

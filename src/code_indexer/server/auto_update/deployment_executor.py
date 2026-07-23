@@ -3391,6 +3391,121 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_git_safe_directory_wildcard(self) -> bool:
+        """Ensure a blanket git safe.directory='*' grant is configured for the
+        service user (Bug #1466).
+
+        Unlike _ensure_git_safe_directory() above (which grants ONE specific
+        path -- the cidx-server source checkout itself), this grants a
+        wildcard so EVERY present and future repository the service account's
+        git operations touch is covered, regardless of directory. This closes
+        the gap left by _ensure_git_safe_directory(): CoW-daemon-owned golden
+        repos / activated repos (e.g. on a CoW-mounted storage path) are
+        typically owned by a different OS user than the service account
+        (code-indexer), which trips git's "dubious ownership" check on every
+        git subprocess invocation that touches them -- not just the one repo
+        _ensure_git_safe_directory() already covers.
+
+        Returns:
+            True if config is correct or was updated or not needed, False on error
+        """
+        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
+
+        try:
+            if not service_path.exists():
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-215",
+                        f"Service file not found: {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return True  # Not a fatal error if service doesn't exist yet
+
+            content = service_path.read_text()
+
+            # Extract User from service file
+            service_user = self._extract_service_user(content)
+
+            # If no User= line, skip (service runs as current user)
+            if not service_user:
+                logger.debug(
+                    "No User= line in service file, skipping wildcard git "
+                    "safe.directory config",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # Check if the wildcard is already configured
+            check_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--get-all",
+                    "safe.directory",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if check_result.returncode == 0:
+                configured_paths = check_result.stdout.strip().split("\n")
+                if "*" in configured_paths:
+                    logger.debug(
+                        f"Git safe.directory wildcard already configured for "
+                        f"{service_user}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Add the wildcard safe.directory configuration
+            add_result = subprocess.run(
+                [
+                    "sudo",
+                    "-u",
+                    service_user,
+                    "git",
+                    "config",
+                    "--global",
+                    "--add",
+                    "safe.directory",
+                    "*",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if add_result.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-216",
+                        f"Failed to add git safe.directory wildcard: "
+                        f"{add_result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            logger.info(
+                f"Added git safe.directory wildcard for {service_user}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-217",
+                    f"Error configuring git safe.directory wildcard: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def _ensure_sudoers_restart(self) -> bool:
         """Ensure sudoers rule exists for service user to restart systemd service.
 
@@ -4165,6 +4280,12 @@ class DeploymentExecutor:
 
         # Step 5: Ensure git safe.directory configured
         self._ensure_git_safe_directory()
+
+        # Step 5.5: Bug #1466 - Ensure blanket git safe.directory='*' wildcard
+        # configured for the service account, covering CoW-daemon-owned
+        # golden-repos/activated-repos (owned by a different OS user than the
+        # service account) regardless of which directory they live in.
+        self._ensure_git_safe_directory_wildcard()
 
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
@@ -5388,40 +5509,15 @@ class DeploymentExecutor:
             link_path = _cidx_data_dir / "data" / "activated-repos"
 
             if link_path.is_symlink():
-                current_target = os.readlink(str(link_path))
-                if current_target == str(target):
-                    logger.debug(
-                        "Bug #1052: activated-repos symlink already correct: %s -> %s",
-                        link_path,
-                        target,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return True
-                logger.warning(
-                    "Bug #1052: activated-repos symlink points to %s but expected %s "
-                    "— manual review needed",
-                    current_target,
-                    target,
-                    extra={"correlation_id": get_correlation_id()},
+                return self._reconcile_existing_activated_repos_symlink(
+                    link_path, target
                 )
-                return True
 
             if link_path.exists():
-                # Real directory — do NOT move user data from the auto-updater.
-                logger.warning(
-                    "Bug #1052: activated-repos exists as real directory with content; "
-                    "manual migration required to enable CoW activation. "
-                    "Run: sudo systemctl stop cidx-server && "
-                    "mv %s %s.legacy.bug1052 && "
-                    "mkdir -p %s && "
-                    "ln -s %s %s && "
-                    "sudo systemctl start cidx-server",
-                    link_path,
-                    link_path,
-                    target,
-                    target,
-                    link_path,
-                    extra={"correlation_id": get_correlation_id()},
+                # Bug #1463: real directory with content -- safe, idempotent
+                # migration (never a silent-forever WARNING loop).
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1052"
                 )
                 return True
 
@@ -5601,22 +5697,24 @@ class DeploymentExecutor:
 
     @staticmethod
     def _resolve_golden_repos_symlink_target(cow_cfg: Any) -> Path:
-        """Bug #1337: node-aware golden-repos symlink target.
+        """Bug #1337/#1464: golden-repos symlink target is always the NFS
+        mount_point form, matching the proven-correct activated-repos twin
+        (_ensure_activated_repos_symlink_for_cow_daemon's unconditional
+        ``Path(cow_cfg.mount_point) / "activated-repos"``).
 
-        Mirrors _resolve_daemon_storage_path's own co-located-daemon-host
-        detection (presence of the daemon's own config file at
-        COW_DAEMON_HOST_CONFIG_PATH — only readable on that node): use the
-        daemon-local form there (no bind-mount indirection needed); use the
-        mount_point form on every other (NFS-client) node. Uses safe
-        attribute access throughout — never raises on a malformed cow_cfg.
+        Bug #1464: this function used to special-case the co-located
+        CoW-daemon host (detected via COW_DAEMON_HOST_CONFIG_PATH) to use
+        cow_daemon.daemon_storage_path instead, on the theory that no
+        bind-mount indirection was needed there. That assumed the
+        code-indexer service account could locally traverse the daemon
+        operator's storage path — false on a real staging cluster node
+        (daemon_storage_path's parent was mode 0700, owned by a different
+        user), which broke golden-repo query serving and several startup
+        subsystems on that node. The special case is removed entirely; use
+        safe attribute access throughout — never raises on a malformed
+        cow_cfg.
         """
-        daemon_storage_path = (
-            getattr(cow_cfg, "daemon_storage_path", None) or ""
-        ).strip()
         mount_point = getattr(cow_cfg, "mount_point", None) or ""
-        is_daemon_host = COW_DAEMON_HOST_CONFIG_PATH.is_file()
-        if is_daemon_host and daemon_storage_path:
-            return Path(daemon_storage_path) / "golden-repos"
         return Path(mount_point) / "golden-repos"
 
     @staticmethod
@@ -5634,15 +5732,41 @@ class DeploymentExecutor:
             return False
 
     @staticmethod
-    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
-        """Bug #1337: an existing golden-repos symlink is already correct
-        (no-op) or points elsewhere (WARNING, never silently rewritten).
-        Returns False (non-fatal, logged) if the symlink cannot be read."""
+    def _reconcile_existing_cow_symlink(
+        link_path: Path, target: Path, *, bug_number: str, resource_name: str
+    ) -> bool:
+        """Shared self-heal core for both the golden-repos
+        (Bug #1337/#1464, ``resource_name="golden-repos"``) and
+        activated-repos (Bug #1052/#1464, ``resource_name="activated-repos"``)
+        CoW-daemon symlink reconcile paths: an existing symlink is already
+        correct (no-op) or is atomically SELF-HEALED to point at the
+        freshly-resolved target.
+
+        Bug #1464: golden-repos used to only WARN forever on a mismatch,
+        never repairing it; the activated-repos twin had the same gap. Since
+        target resolution is deterministic for both resources, any remaining
+        mismatch has no legitimate reason to persist and must self-heal on
+        the next deploy cycle instead of requiring manual intervention.
+
+        The repair ONLY ever re-points the symlink itself -- it never
+        touches, moves, or deletes the real directory data at either the
+        old or new target (on a real deployment both resolve to the exact
+        same underlying CoW storage, just via a different path form).
+        Re-pointing is atomic: a new symlink is created at a temp path in
+        the same parent directory, then rename()'d over link_path via
+        os.replace -- never delete-then-recreate, so there is no window
+        where link_path is missing.
+
+        Returns False (non-fatal, logged) if the symlink cannot be read or
+        the atomic repair itself fails.
+        """
         try:
             current_target = os.readlink(str(link_path))
         except OSError as e:
             logger.warning(
-                "Bug #1337: failed to read golden-repos symlink %s: %s",
+                "Bug #%s: failed to read %s symlink %s: %s",
+                bug_number,
+                resource_name,
                 link_path,
                 e,
                 extra={"correlation_id": get_correlation_id()},
@@ -5650,15 +5774,51 @@ class DeploymentExecutor:
             return False
         if current_target == str(target):
             logger.debug(
-                "Bug #1337: golden-repos symlink already correct: %s -> %s",
+                "Bug #%s: %s symlink already correct: %s -> %s",
+                bug_number,
+                resource_name,
                 link_path,
                 target,
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
-        logger.warning(
-            "Bug #1337: golden-repos symlink points to %s but expected %s "
-            "— manual review needed",
+
+        tmp_link = link_path.parent / f".{link_path.name}.tmp-relink-{os.getpid()}"
+        try:
+            if tmp_link.is_symlink() or tmp_link.exists():
+                tmp_link.unlink()
+            os.symlink(str(target), str(tmp_link))
+            os.replace(str(tmp_link), str(link_path))
+        except OSError as e:
+            try:
+                if tmp_link.is_symlink() or tmp_link.exists():
+                    tmp_link.unlink()
+            except OSError as cleanup_error:
+                # Best-effort cleanup of the temp symlink; link_path itself
+                # was never touched by a failed os.symlink/os.replace above,
+                # so this cleanup failure does not affect correctness --
+                # logged at debug so a stray tmp-relink file is still
+                # discoverable rather than silently discarded.
+                logger.debug(
+                    "Bug #1464: failed to clean up temp relink file %s: %s",
+                    tmp_link,
+                    cleanup_error,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-214",
+                    f"Bug #1464: failed to repair {resource_name} symlink "
+                    f"{link_path} from {current_target} to {target}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        logger.info(
+            "Bug #1464: repaired %s symlink %s: %s -> %s",
+            resource_name,
+            link_path,
             current_target,
             target,
             extra={"correlation_id": get_correlation_id()},
@@ -5666,22 +5826,117 @@ class DeploymentExecutor:
         return True
 
     @staticmethod
-    def _warn_golden_repos_real_dir_with_content(link_path: Path, target: Path) -> None:
-        """Bug #1337: golden-repos is a real directory WITH content — never
-        move production data unattended; log the manual migration steps."""
-        logger.warning(
-            "Bug #1337: golden-repos exists as real directory with content; "
-            "manual migration required to enable per-user CoW activation. "
-            "Run: sudo systemctl stop cidx-server && "
-            "mv %s %s.legacy.bug1337 && mkdir -p %s && ln -s %s %s && "
-            "sudo systemctl start cidx-server",
+    def _reconcile_existing_golden_repos_symlink(link_path: Path, target: Path) -> bool:
+        """Bug #1337/#1464: golden-repos self-heal. Thin wrapper over the
+        shared ``_reconcile_existing_cow_symlink`` core -- see that method's
+        docstring for the full self-heal rationale and atomicity guarantees.
+        """
+        return DeploymentExecutor._reconcile_existing_cow_symlink(
+            link_path, target, bug_number="1337", resource_name="golden-repos"
+        )
+
+    @staticmethod
+    def _reconcile_existing_activated_repos_symlink(
+        link_path: Path, target: Path
+    ) -> bool:
+        """Bug #1052/#1464: activated-repos self-heal -- the twin of
+        ``_reconcile_existing_golden_repos_symlink``, closing the parity gap
+        where this resource used to only WARN forever on a mismatch instead
+        of self-healing. Thin wrapper over the shared
+        ``_reconcile_existing_cow_symlink`` core -- see that method's
+        docstring for the full self-heal rationale and atomicity guarantees.
+        """
+        return DeploymentExecutor._reconcile_existing_cow_symlink(
+            link_path, target, bug_number="1052", resource_name="activated-repos"
+        )
+
+    @staticmethod
+    def _migrate_real_dir_to_cow_symlink(
+        link_path: Path, target: Path, bug_number: str
+    ) -> bool:
+        """Bug #1463: idempotently and safely migrate a REAL (non-empty)
+        local directory into a CoW-mount-backed symlink, performing exactly
+        the manual remediation the Bug #1337/#1052 startup WARNING already
+        instructs operators to run by hand: ``mv link_path
+        link_path.legacy.bug<N> && mkdir -p target && ln -s target
+        link_path``.
+
+        This is the fix for the exact staging-cluster regression (Bug
+        #1463): the earlier self-heal only WARNED on a real non-empty
+        directory and never migrated it, so already-deployed hosts holding
+        real golden-repo/activated-repo data re-detected the same gap on
+        every single auto-update cycle forever, with zero forward progress.
+
+        Never writes INTO *target* -- ``target.mkdir(parents=True,
+        exist_ok=True)`` is a no-op when target already has content (e.g.
+        another cluster node already migrated its own copy into the SAME
+        shared NFS/CoW-mount target), so pre-existing target content is
+        never at risk of being overwritten or merged (mirrors this
+        codebase's established collision convention in
+        ``_ensure_single_nfs_symlink``: pre-existing destination content
+        always wins, never overwritten). The local directory's real data is
+        preserved intact at the backup path -- no data loss, ever.
+
+        Fails LOUDLY (ERROR, zero mutation) rather than silently clobbering
+        when a ``.legacy.bug<N>`` backup already exists at the destination
+        (e.g. a prior partial/interrupted run) -- per this project's
+        Anti-Fallback principle, this must never produce a silent
+        half-migrated/ambiguous state. If the rename succeeds but the
+        subsequent symlink creation fails for any reason, the rename is
+        rolled back (legacy_path renamed back to link_path) before
+        returning, so a crash mid-migration never leaves link_path
+        missing/half-migrated -- either both steps land, or neither does.
+
+        Returns True once the local directory is safely relocated and the
+        symlink is created; False if the migration could not proceed
+        safely (backup collision, or a failed migration that was rolled
+        back) -- non-fatal to the caller, but a real problem that was
+        already logged loudly here.
+        """
+        legacy_path = link_path.parent / f"{link_path.name}.legacy.bug{bug_number}"
+        if legacy_path.exists():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-212",
+                    f"Bug #{bug_number}: cannot migrate {link_path} -- backup "
+                    f"path {legacy_path} already exists (prior partial run?); "
+                    f"refusing to overwrite. Resolve manually: inspect "
+                    f"{legacy_path}, then either remove it (if it is a stale "
+                    f"empty backup) or reconcile its contents with "
+                    f"{link_path} before retrying.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        target.mkdir(parents=True, exist_ok=True)
+        link_path.rename(legacy_path)
+        try:
+            link_path.symlink_to(target)
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-213",
+                    f"Bug #{bug_number}: symlink creation failed after "
+                    f"backing up {link_path} to {legacy_path}: {e}. Rolling "
+                    f"back the rename so no partial state is left behind.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            legacy_path.rename(link_path)
+            return False
+
+        logger.info(
+            "Bug #%s: migrated real directory %s to backup %s and created "
+            "symlink %s -> %s",
+            bug_number,
             link_path,
+            legacy_path,
             link_path,
             target,
-            target,
-            link_path,
             extra={"correlation_id": get_correlation_id()},
         )
+        return True
 
     @staticmethod
     def _create_golden_repos_symlink(link_path: Path, target: Path) -> None:
@@ -5740,7 +5995,9 @@ class DeploymentExecutor:
                 return self._reconcile_existing_golden_repos_symlink(link_path, target)
 
             if link_path.exists() and not self._remove_if_empty_dir(link_path):
-                self._warn_golden_repos_real_dir_with_content(link_path, target)
+                self._migrate_real_dir_to_cow_symlink(
+                    link_path, target, bug_number="1337"
+                )
                 return True
 
             self._create_golden_repos_symlink(link_path, target)

@@ -51,7 +51,7 @@
             <td class="actions-cell">
                 {% set deact_job_id = deactivating_map.get((repo.username, repo.user_alias)) if deactivating_map is defined else none %}
                 {% if deact_job_id %}
-                <a href="/admin/jobs?search_text={{ deact_job_id }}" class="badge-deactivating" title="Deactivation in progress — click to view job">Deactivating...</a>
+                <a href="/admin/jobs?search={{ deact_job_id }}" class="badge-deactivating" title="Deactivation in progress — click to view job">Deactivating...</a>
                 {% else %}
                 <button class="outline small" onclick="toggleDetails('{{ repo.username }}', '{{ repo.user_alias }}')" title="View details">Details</button>
                 <button class="small" onclick="triggerActivatedRepoReindex('{{ repo.user_alias }}')" title="Re-index repository">Reindex</button>

@@ -323,6 +323,9 @@ class TestExecuteWiring:
     """Tests for execute() calling _ensure_auto_update_service_has_cli_path()."""
 
     @patch.object(
+        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
+    )
+    @patch.object(
         DeploymentExecutor,
         "_ensure_auto_update_service_has_cli_path",
         return_value=True,
@@ -360,6 +363,7 @@ class TestExecuteWiring:
         mock_ensure_data_dir,
         mock_ensure_malloc_arena,
         mock_ensure_auto_update_path,
+        mock_ensure_git_safe_wildcard,
         executor,
     ):
         """Test that execute() calls _ensure_auto_update_service_has_cli_path()."""
@@ -368,6 +372,9 @@ class TestExecuteWiring:
         assert result is True
         mock_ensure_auto_update_path.assert_called_once()
 
+    @patch.object(
+        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
+    )
     @patch.object(
         DeploymentExecutor,
         "_ensure_auto_update_service_has_cli_path",
@@ -406,6 +413,7 @@ class TestExecuteWiring:
         mock_ensure_data_dir,
         mock_ensure_malloc_arena,
         mock_ensure_auto_update_path,
+        mock_ensure_git_safe_wildcard,
         executor,
     ):
         """Test that execute() still returns True overall when

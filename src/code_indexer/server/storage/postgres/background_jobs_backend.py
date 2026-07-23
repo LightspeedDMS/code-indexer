@@ -565,7 +565,7 @@ class BackgroundJobsPostgresBackend:
             status: Filter by exact status value
             operation_type: Filter by exact operation_type value
             search_text: Case-insensitive LIKE match against repo_alias, username,
-                         operation_type, and error columns
+                         operation_type, error, and job_id columns
             username: When set, scope results to this owner's jobs (H2 non-admin)
             exclude_ids: Set of job_ids to exclude
         """
@@ -589,9 +589,10 @@ class BackgroundJobsPostgresBackend:
                 "(LOWER(repo_alias) LIKE LOWER(%s)"
                 " OR LOWER(username) LIKE LOWER(%s)"
                 " OR LOWER(operation_type) LIKE LOWER(%s)"
-                " OR LOWER(COALESCE(error, '')) LIKE LOWER(%s))"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(%s)"
+                " OR LOWER(job_id) LIKE LOWER(%s))"
             )
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like])
         if exclude_ids:
             exclude_list = list(exclude_ids)
             placeholders = ", ".join(["%s"] * len(exclude_list))

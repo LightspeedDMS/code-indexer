@@ -679,24 +679,94 @@ run_migrations() {
 # ---------------------------------------------------------------------------
 
 _resolve_cow_symlink_target() {
-    # Node-aware target: on the co-located CoW-daemon host (--cow-local-bind
-    # with a resolved COW_DAEMON_STORAGE_PATH), target the daemon-local form
-    # directly; every other (NFS-client) node targets {NFS_MOUNT}/{link_name}.
+    # Bug #1464: always target the NFS mount_point form -- the prior
+    # daemon-host special case (--cow-local-bind with a resolved
+    # COW_DAEMON_STORAGE_PATH targeting the daemon-local form directly)
+    # assumed the code-indexer service account could locally traverse the
+    # daemon operator's storage path. On a real staging cluster node that
+    # path's parent was mode 0700, owned by a different user, so the
+    # resulting symlink was broken from the service account's perspective
+    # even though the target directory itself existed. Matches
+    # deployment_executor.py's _resolve_golden_repos_symlink_target fix
+    # exactly. Applies to both golden-repos and activated-repos, since this
+    # function is shared by both link types.
     local link_name="$1"
-    if [[ "${COW_LOCAL_BIND}" == "true" && -n "${COW_DAEMON_STORAGE_PATH}" ]]; then
-        echo "${COW_DAEMON_STORAGE_PATH}/${link_name}"
-    else
-        echo "${NFS_MOUNT}/${link_name}"
+    echo "${NFS_MOUNT}/${link_name}"
+}
+
+_bug_number_for_cow_symlink() {
+    # Bug #1463 follow-up (Finding 2): per-directory-type legacy-backup bug
+    # number, matching deployment_executor.py's Python call sites exactly
+    # (golden-repos -> bug_number="1337"; activated-repos -> bug_number=
+    # "1052" at deployment_executor.py:5413). NEVER hardcode a single
+    # suffix for both directory types.
+    case "$1" in
+        activated-repos) echo "1052" ;;
+        *) echo "1337" ;;
+    esac
+}
+
+_migrate_real_dir_to_cow_symlink() {
+    # Bug #1463 follow-up (Finding 1): mirrors deployment_executor.py's
+    # _migrate_real_dir_to_cow_symlink() EXACTLY -- idempotently and safely
+    # migrate a REAL (non-empty) local directory into a CoW-mount-backed
+    # symlink: (a) mkdir target FIRST, (b) mv link -> legacy, (c) ln -s
+    # target -> link, (d) if (c) fails, roll back by moving legacy back to
+    # link (restoring the original real directory) before returning
+    # failure. This ordering means a transiently unwritable CoW mount (the
+    # exact NFS-permission scenario Bug #1462 fixed) is caught at step (a)
+    # BEFORE the original directory is ever touched; a failure at step (c)
+    # (after (a) and (b) already succeeded) is rolled back so the node is
+    # never left with neither the original directory nor a working
+    # symlink -- self-healing, not a human-intervention-required dead end.
+    #
+    # $1 = link_path, $2 = target, $3 = bug_number ("1337" | "1052")
+    # Returns 0 once the directory is safely relocated and the symlink is
+    # created; 1 if the migration could not proceed safely (backup
+    # collision, mkdir/mv/ln failure -- each already logged loudly here).
+    local link_path="$1" target="$2" bug_number="$3"
+    local legacy_path="${link_path}.legacy.bug${bug_number}"
+
+    if [[ -e "${legacy_path}" || -L "${legacy_path}" ]]; then
+        warn "cannot migrate ${link_path} -- backup path ${legacy_path} already exists (prior partial run?); refusing to overwrite (Bug #${bug_number}). Resolve manually: inspect ${legacy_path}, then either remove it or reconcile it with ${link_path} before retrying."
+        return 1
     fi
+
+    if ! mkdir -p "${target}" 2>/dev/null; then
+        warn "migration of ${link_path} failed: could not create target ${target} (Bug #${bug_number}); leaving ${link_path} untouched"
+        return 1
+    fi
+
+    if ! mv "${link_path}" "${legacy_path}"; then
+        warn "migration of ${link_path} failed: could not move it to ${legacy_path} (Bug #${bug_number}); leaving untouched"
+        return 1
+    fi
+
+    if ! ln -s "${target}" "${link_path}" 2>/dev/null; then
+        warn "symlink creation failed after backing up ${link_path} to ${legacy_path} (Bug #${bug_number}); rolling back the rename so no partial state is left behind"
+        if ! mv "${legacy_path}" "${link_path}"; then
+            warn "CRITICAL: rollback failed -- could not move ${legacy_path} back to ${link_path} (Bug #${bug_number}); manual recovery required"
+        fi
+        return 1
+    fi
+
+    info "migrated ${link_path}: backed up real directory to ${legacy_path} and created symlink ${link_path} -> ${target} (Bug #${bug_number})"
+    return 0
 }
 
 _reconcile_existing_cow_symlink_entry() {
     # Idempotent (check-then-apply): already-correct symlink -> no-op;
     # wrong-target symlink -> WARNING, never rewritten; non-empty real
-    # directory -> WARNING, never touched (no unattended data move); empty
+    # directory -> Bug #1463 safe migration via _migrate_real_dir_to_cow_symlink
+    # (fully handled here, including symlink creation -- see below); empty
     # real directory -> removed (safe, caller creates the symlink).
-    # Returns 0 when fully handled here, 1 when the caller must still
-    # create the symlink (path is absent or was an empty dir just removed).
+    # Returns 0 when fully handled here (no-op/warn symlink case, or a
+    # real directory with content was handed to
+    # _migrate_real_dir_to_cow_symlink -- success, refused backup
+    # collision, and rolled-back failure are ALL "fully handled": the
+    # caller must NOT also try to create the symlink), 1 when the caller
+    # must still create the symlink (path is absent, or was an empty dir
+    # just removed).
     local link_path="$1" target="$2" link_name="$3"
 
     if [[ -L "${link_path}" ]]; then
@@ -705,7 +775,22 @@ _reconcile_existing_cow_symlink_entry() {
         if [[ "${current_target}" == "${target}" ]]; then
             info "${link_name} symlink already correct: ${link_path} -> ${target}"
         else
-            warn "${link_name} symlink points to ${current_target} but expected ${target} (Bug #1337) -- manual review needed"
+            # Bug #1464: self-heal -- atomically re-point the symlink
+            # (temp symlink + `mv -T`, i.e. no-target-directory rename, so
+            # a dst that is itself a symlink-to-directory is replaced
+            # rather than followed) instead of warning forever. This ONLY
+            # ever changes what path the symlink points to -- it never
+            # touches, moves, or deletes real directory data on either
+            # side (mirrors deployment_executor.py's
+            # _reconcile_existing_golden_repos_symlink fix exactly).
+            local tmp_link="${link_path}.tmp-relink.$$"
+            rm -f "${tmp_link}" 2>/dev/null || true
+            if ln -s "${target}" "${tmp_link}" 2>/dev/null && mv -T "${tmp_link}" "${link_path}" 2>/dev/null; then
+                info "repaired ${link_name} symlink: ${link_path} was -> ${current_target}, now -> ${target} (Bug #1464)"
+            else
+                rm -f "${tmp_link}" 2>/dev/null || true
+                warn "${link_name} symlink points to ${current_target} but expected ${target} (Bug #1464) -- automatic repair failed, manual review needed"
+            fi
         fi
         return 0
     fi
@@ -715,7 +800,16 @@ _reconcile_existing_cow_symlink_entry() {
             rmdir "${link_path}" 2>/dev/null || true
         fi
         if [[ -e "${link_path}" ]]; then
-            warn "${link_name} exists as a real directory with content; manual migration required for per-user CoW activation (Bug #1337). Run: sudo systemctl stop cidx-server && mv ${link_path} ${link_path}.legacy.bug1337 && mkdir -p ${target} && ln -s ${target} ${link_path} && sudo systemctl start cidx-server"
+            # Bug #1463: real directory WITH content -- perform the safe,
+            # atomic migration (mkdir target -> mv to legacy -> symlink,
+            # with rollback-on-symlink-failure) via the shared helper,
+            # never writing INTO target (mkdir -p is a no-op if target
+            # already has content, e.g. from another cluster node that
+            # already migrated into the SAME shared CoW mount) -- so
+            # pre-existing target content is never at risk.
+            local bug_number
+            bug_number="$(_bug_number_for_cow_symlink "${link_name}")"
+            _migrate_real_dir_to_cow_symlink "${link_path}" "${target}" "${bug_number}"
             return 0
         fi
     fi
@@ -1006,6 +1100,46 @@ SERVICEEOF
 }
 
 # ---------------------------------------------------------------------------
+# Step: git safe.directory wildcard (Bug #1466)
+#
+# CoW-daemon-owned golden-repos/activated-repos may be owned by a different
+# OS user than the one running cidx-server (e.g. the CoW daemon's own user
+# vs a dedicated code-indexer service account), which trips git's "dubious
+# ownership" check on every git subprocess invocation that touches them. A
+# single blanket `safe.directory=*` grant for the service account is
+# idempotent and covers all present and future golden/activated repos
+# regardless of which directory they live in. Mirrors
+# DeploymentExecutor._ensure_git_safe_directory_wildcard() in
+# deployment_executor.py (the auto-updater's self-heal twin for
+# already-deployed hosts).
+# ---------------------------------------------------------------------------
+
+ensure_git_safe_directory_wildcard() {
+    info "--- Git safe.directory wildcard (Bug #1466) ---"
+    local service_user
+    service_user="$(whoami)"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        echo "  [dry-run] sudo -u ${service_user} git config --global --add safe.directory '*' (idempotent)"
+        return 0
+    fi
+
+    local configured
+    configured="$(sudo -u "${service_user}" git config --global --get-all safe.directory 2>/dev/null || true)"
+
+    if echo "${configured}" | grep -qxF '*'; then
+        info "Git safe.directory wildcard already configured for ${service_user}"
+        return 0
+    fi
+
+    if sudo -u "${service_user}" git config --global --add safe.directory '*'; then
+        info "Added git safe.directory wildcard for ${service_user}"
+    else
+        warn "Failed to add git safe.directory wildcard (non-fatal)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Step: auto-update systemd service + timer
 #
 # Renders cidx-auto-update.service from the SAME template used by
@@ -1219,6 +1353,7 @@ main() {
     write_config
     install_pace_maker
     create_systemd_service
+    ensure_git_safe_directory_wildcard
     install_auto_update_service
 
     if [[ "${CLUSTER_MODE}" == "true" ]]; then

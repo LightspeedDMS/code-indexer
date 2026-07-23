@@ -3180,9 +3180,12 @@ class BackgroundJobsSqliteBackend:
                 "(LOWER(repo_alias) LIKE LOWER(?)"
                 " OR LOWER(username) LIKE LOWER(?)"
                 " OR LOWER(operation_type) LIKE LOWER(?)"
-                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?)"
+                " OR LOWER(job_id) LIKE LOWER(?))"
             )
-            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+            params.extend(
+                [like_pattern, like_pattern, like_pattern, like_pattern, like_pattern]
+            )
 
         if exclude_ids:
             placeholders = ",".join("?" * len(exclude_ids))
@@ -3213,7 +3216,7 @@ class BackgroundJobsSqliteBackend:
             status: Filter by exact status value (e.g. 'completed', 'failed')
             operation_type: Filter by exact operation_type value
             search_text: Case-insensitive LIKE match against repo_alias, username,
-                         operation_type, and error columns
+                         operation_type, error, and job_id columns
             exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
             limit: Maximum number of rows to return (None = no limit)
             offset: Number of rows to skip for pagination (default 0)
