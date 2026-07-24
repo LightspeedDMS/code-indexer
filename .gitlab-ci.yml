@@ -65,17 +65,21 @@ smoke:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "master"
 
-# Advisory only for now: the fork carries pre-existing lint debt, so a red ruff
-# must not block image builds. Tighten to blocking once the tree is clean.
+# Real gate: ruff must be PINNED to the version the repo standardizes on
+# (.pre-commit-config.yaml → v0.14.1). Unpinned `pip install ruff` drifts to
+# whatever is latest, whose much broader default ruleset floods this vendored
+# upstream snapshot with ~18k style/modernization nits (UP/FA/BLE/LOG…) — none of
+# them in the repo's actual lint standard, and hand-fixing them would gratuitously
+# diverge the fork from upstream. Against the pinned ruff the tree is clean, so
+# (per the former TODO) this is now blocking rather than advisory.
 lint:
   stage: test
   tags: [default]
   image: python:3.11-slim-bookworm
-  allow_failure: true
   before_script:
-    - pip install ruff
+    - pip install ruff==0.14.1
   script:
-    - ruff check src
+    - ruff check src tests
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "master"
