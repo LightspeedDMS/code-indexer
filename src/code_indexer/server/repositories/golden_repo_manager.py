@@ -411,6 +411,26 @@ class GoldenRepoManager:
         self.golden_repos[alias] = repo
         return repo
 
+    def _strip_credentials_if_delegated(self, repo_url: str) -> str:
+        """EVO-64616: return *repo_url* with any embedded credential REMOVED when
+        the git backend supplies its own (delegated → git-mcp), so the PAT lives
+        ONLY in git-mcp and never in cidx's stored golden state (metadata row +
+        background-job metadata + ``.git/config``). Local mode returns it unchanged
+        — in-process git needs the token in the URL.
+
+        The scheme match is case-INSENSITIVE (RFC 3986 §3.1: schemes are
+        case-insensitive, and git/libcurl accept ``HTTPS://``) so an odd-cased URL
+        cannot smuggle the credential past the guard. The http/https allow-list is
+        kept: ``ssh://git@host`` must retain its ``git`` user (not a secret).
+        """
+        if self._git_backend.owns_credentials and repo_url.lower().startswith(
+            ("http://", "https://")
+        ):
+            # strip_url_credentials is typed Any->Any (non-str passthrough); a str
+            # in always yields a str out.
+            return cast(str, strip_url_credentials(repo_url))
+        return repo_url
+
     def add_golden_repo(
         self,
         repo_url: str,
@@ -485,18 +505,10 @@ class GoldenRepoManager:
         if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
-        # EVO-64616: when the git backend supplies its own credentials (delegated
-        # → git-mcp), the PAT must live ONLY in git-mcp, never in cidx's stored
-        # golden state. Strip any credential embedded in the URL up front so the
-        # pre-flight probe, the background-job metadata, the clone, and the
-        # persisted record all carry a clean URL; git-mcp injects its own token for
-        # the network ops. In local mode (owns_credentials=False) the URL is left
-        # intact — in-process git needs the embedded token.
-        if (
-            repo_url.startswith(("http://", "https://"))
-            and self._git_backend.owns_credentials
-        ):
-            repo_url = strip_url_credentials(repo_url)
+        # EVO-64616: strip any embedded credential up front (when git-mcp owns
+        # auth) so the pre-flight probe AND the background-job metadata carry a
+        # clean URL; the persistence point strips again as defense-in-depth.
+        repo_url = self._strip_credentials_if_delegated(repo_url)
 
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).
@@ -558,6 +570,11 @@ class GoldenRepoManager:
         job row's metadata. Retry-safe: a partial clone is cleaned up on failure
         and a duplicate alias is rejected up front by the caller.
         """
+        # EVO-64616 defense-in-depth: this is the persistence boundary (clone +
+        # _sqlite_backend.add_repo + GoldenRepo record) and is reachable directly
+        # from a pod-pull job's metadata, so strip here too — a credential must
+        # never reach the stored record even if a caller passed an unstripped URL.
+        repo_url = self._strip_credentials_if_delegated(repo_url)
 
         def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
             """Remove a partially-cloned directory so retries don't fail with
