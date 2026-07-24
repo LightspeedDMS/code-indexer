@@ -89,6 +89,18 @@ class TestMaskUrlCredentials:
         ):
             assert mask_url_credentials(url) == url
 
+    def test_at_after_host_boundary_is_preserved(self):
+        # The `/` in the negated class stops the match at the host, so an `@` in
+        # the path/ref (a pinned @-tag) is NOT mistaken for userinfo. A regex
+        # simplification to `[^@\s]+@` would mangle these — this locks the boundary.
+        from code_indexer.server.logging_utils import mask_url_credentials
+
+        assert (
+            mask_url_credentials("https://gitlab.com/org/repo@v1.git")
+            == "https://gitlab.com/org/repo@v1.git"
+        )
+        assert mask_url_credentials("https://tok@host/a@b") == "https://***@host/a@b"
+
     def test_idempotent_and_non_string_safe(self):
         from code_indexer.server.logging_utils import mask_url_credentials
 
@@ -96,3 +108,58 @@ class TestMaskUrlCredentials:
         assert mask_url_credentials(once) == once  # masking twice is a no-op
         assert mask_url_credentials(None) is None
         assert mask_url_credentials(123) == 123
+
+
+class TestStripUrlCredentials:
+    """strip_url_credentials REMOVES the credential (vs mask's ``***``), yielding a
+    still-valid URL — used before a repo URL is PERSISTED when git-mcp owns auth
+    (EVO-64616), so the PAT lives only in git-mcp."""
+
+    def test_strips_oauth2_token_to_valid_url(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        stripped = strip_url_credentials(
+            "https://oauth2:glpat-SECRET123@gitlab.com/org/repo.git"
+        )
+        # A real, usable URL — not the display-only *** form.
+        assert stripped == "https://gitlab.com/org/repo.git"
+        assert "glpat" not in stripped and "SECRET123" not in stripped
+        assert "***" not in stripped
+
+    def test_strips_user_password(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        assert (
+            strip_url_credentials("https://user:pass@github.com/a/b.git")
+            == "https://github.com/a/b.git"
+        )
+
+    def test_leaves_credential_free_and_scheme_only_unchanged(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        for url in (
+            "https://gitlab.com/org/repo.git",
+            "local://myalias",
+            "git@github.com:org/repo.git",
+        ):
+            assert strip_url_credentials(url) == url
+
+    def test_at_after_host_boundary_is_preserved(self):
+        # Strip userinfo ONLY, never a path `@` (a pinned @-ref/tag). The `/`
+        # boundary in the regex is load-bearing: a simplification to `[^@\s]+@`
+        # would rewrite the first url to a broken `https://v1.git`.
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        assert (
+            strip_url_credentials("https://gitlab.com/org/repo@v1.git")
+            == "https://gitlab.com/org/repo@v1.git"
+        )
+        assert strip_url_credentials("https://tok@host/a@b") == "https://host/a@b"
+
+    def test_idempotent_and_non_string_safe(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        once = strip_url_credentials("https://oauth2:tok@gitlab.com/x.git")
+        assert strip_url_credentials(once) == once
+        assert strip_url_credentials(None) is None
+        assert strip_url_credentials(123) == 123

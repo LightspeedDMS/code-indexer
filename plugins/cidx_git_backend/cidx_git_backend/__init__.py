@@ -103,6 +103,16 @@ class GitMcpBackend:
         self._id = 0
         self._id_lock = threading.Lock()
 
+    # ── capabilities ───────────────────────────────────────────────────────────
+
+    @property
+    def owns_credentials(self) -> bool:
+        """True: git-mcp holds the git credential (``GIT_CLONE_TOKEN`` → its own
+        credential helper) and injects it for every network op, so cidx must NOT
+        embed a token in repo URLs and should strip any credential before storing
+        one. The PAT then lives ONLY in git-mcp (EVO-64616)."""
+        return True
+
     # ── transport ────────────────────────────────────────────────────────────
 
     def _call(
