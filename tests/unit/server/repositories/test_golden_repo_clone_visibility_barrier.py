@@ -4,8 +4,9 @@ visible on THIS node before spawning `cidx init`/`cidx index` children.
 A delegated clone is written by git-mcp on a DIFFERENT NFS client, so this cidx
 process's client can briefly negative-cache the just-created directory even after
 the backend reports success — a child `subprocess(cwd=clone_path)` then dies with
-FileNotFoundError on the cwd. `_await_clone_path_locally_visible` opens the dir
-(forcing lookup + readdir) with a bounded retry to refresh the local caches first.
+FileNotFoundError on the cwd. `_await_clone_path_locally_visible` re-reads the
+PARENT directory (forcing a readdir that revalidates the dcache and busts the
+stale negative entry) then confirms the child is enterable, with a bounded retry.
 """
 
 from __future__ import annotations
@@ -35,6 +36,25 @@ class TestCloneVisibilityBarrier:
 
         # Local clone: visible first try -> never sleeps.
         assert slept == []
+
+    def test_lists_parent_to_force_revalidation(self, tmp_path, monkeypatch):
+        # The load-bearing fix: a direct scandir of the child hits the cached
+        # negative dentry (observed ~28s stale); reading the PARENT forces a
+        # readdir that revalidates it. Assert the parent is what gets listed.
+        m = _mgr(tmp_path)
+        parent = tmp_path / "sub"
+        d = parent / "repo"
+        d.mkdir(parents=True)
+        listed: list = []
+        real_listdir = grm.os.listdir
+        monkeypatch.setattr(
+            grm.os, "listdir", lambda p: (listed.append(str(p)), real_listdir(p))[1]
+        )
+        monkeypatch.setattr(grm.time, "sleep", lambda s: None)
+
+        m._await_clone_path_locally_visible(str(d))
+
+        assert str(parent) in listed
 
     def test_retries_then_succeeds(self, tmp_path, monkeypatch):
         m = _mgr(tmp_path)

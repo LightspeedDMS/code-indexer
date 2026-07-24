@@ -1884,24 +1884,35 @@ class GoldenRepoManager:
             raise GitOperationError(f"Unexpected cleanup failure: {str(error)}")
 
     def _await_clone_path_locally_visible(
-        self, clone_path: str, *, attempts: int = 50, delay_seconds: float = 0.1
+        self, clone_path: str, *, attempts: int = 100, delay_seconds: float = 0.1
     ) -> None:
         """Block until *clone_path* is an enterable directory from THIS node's view.
 
         EVO-64616 cross-client barrier: a delegated clone is written by git-mcp on
-        a different NFS client, so this process's client can briefly negative-cache
-        the freshly-created directory even after the backend reports success — a
-        child ``subprocess`` launched with ``cwd=clone_path`` then fails fast with
-        ``FileNotFoundError`` on the cwd. Opening the directory with ``os.scandir``
-        forces both the path lookup and a ``readdir`` on the local client,
-        refreshing the caches the child's ``chdir`` will consult; retry with a
-        short backoff until it succeeds. Returns on the first try for a local clone
-        (already visible), so it is a no-op there. Bounded — raises rather than
-        hangs if the directory never appears.
+        a different NFS client, so after the backend reports success this process's
+        client can still serve a NEGATIVE dcache entry for the freshly-created
+        directory — the very next ``cidx init``/``cidx index`` child, launched with
+        ``cwd=clone_path``, then dies with ``FileNotFoundError`` on the cwd before
+        it runs.
+
+        The load-bearing detail (measured): a direct ``os.scandir(clone_path)`` hits
+        that cached negative dentry and can keep missing for up to the mount's
+        ``acdirmax`` — ~28s observed on a warm cache. Re-reading the PARENT
+        directory (``os.listdir``) instead forces a fresh ``readdir`` that
+        revalidates the local dcache and picks up the new child immediately (attempt
+        0 even on the warm cache that made the scandir-only wait 28s). So each
+        iteration lists the parent first, then confirms the child is enterable.
+
+        No-op for a local clone (visible on the first pass). Bounded — raises rather
+        than hangs if the directory never appears.
         """
+        parent = os.path.dirname(clone_path.rstrip("/")) or "/"
         last_exc: Optional[OSError] = None
         for _ in range(max(1, attempts)):
             try:
+                # Force parent readdir -> revalidates the dcache (busts the stale
+                # negative entry), THEN confirm the child is a readable directory.
+                os.listdir(parent)
                 with os.scandir(clone_path):
                     pass
                 return
