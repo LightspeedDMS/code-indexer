@@ -1883,6 +1883,37 @@ class GoldenRepoManager:
             )
             raise GitOperationError(f"Unexpected cleanup failure: {str(error)}")
 
+    def _await_clone_path_locally_visible(
+        self, clone_path: str, *, attempts: int = 50, delay_seconds: float = 0.1
+    ) -> None:
+        """Block until *clone_path* is an enterable directory from THIS node's view.
+
+        EVO-64616 cross-client barrier: a delegated clone is written by git-mcp on
+        a different NFS client, so this process's client can briefly negative-cache
+        the freshly-created directory even after the backend reports success — a
+        child ``subprocess`` launched with ``cwd=clone_path`` then fails fast with
+        ``FileNotFoundError`` on the cwd. Opening the directory with ``os.scandir``
+        forces both the path lookup and a ``readdir`` on the local client,
+        refreshing the caches the child's ``chdir`` will consult; retry with a
+        short backoff until it succeeds. Returns on the first try for a local clone
+        (already visible), so it is a no-op there. Bounded — raises rather than
+        hangs if the directory never appears.
+        """
+        last_exc: Optional[OSError] = None
+        for _ in range(max(1, attempts)):
+            try:
+                with os.scandir(clone_path):
+                    pass
+                return
+            except (FileNotFoundError, NotADirectoryError) as exc:
+                last_exc = exc
+                time.sleep(delay_seconds)
+        raise GitOperationError(
+            f"Cloned repository never became visible to this node at "
+            f"{clone_path!r} after {attempts} attempts "
+            f"(~{delay_seconds * attempts:.1f}s): {last_exc}"
+        )
+
     def _execute_post_clone_workflow(
         self,
         clone_path: str,
@@ -1918,6 +1949,16 @@ class GoldenRepoManager:
         logging.info(
             f"Executing post-clone workflow for {clone_path} (force_init={force_init})"
         )
+
+        # EVO-64616: with a DELEGATED clone, git-mcp writes the repo on a different
+        # NFS client than this cidx process. The delegated backend returns as soon
+        # as git-mcp reports success, but this node's NFS client can briefly still
+        # have a negative-cached view of the just-created directory — so the very
+        # next `cidx init`/`cidx index` child, launched with `cwd=clone_path`, dies
+        # with `FileNotFoundError` on the cwd before it can run. Block until this
+        # node can actually enter the directory, refreshing the local NFS caches,
+        # before spawning any child. A no-op for a local clone (visible first try).
+        self._await_clone_path_locally_visible(clone_path)
 
         # Build init command with optional --force flag
         # --no-override-file prevents creating .code-indexer-override.yaml in golden repos
