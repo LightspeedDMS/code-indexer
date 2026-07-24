@@ -41,7 +41,13 @@ class SCIPIndexer(ABC):
 
     @abstractmethod
     def generate(
-        self, project_dir: Path, output_dir: Path, build_system: str
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        build_system: str,
+        *,
+        workspace_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> IndexerResult:
         """
         Generate SCIP index for a project.
@@ -50,6 +56,11 @@ class SCIPIndexer(ABC):
             project_dir: Directory containing the project source code
             output_dir: Directory where the .scip file should be generated
             build_system: Build system used by the project (e.g., "maven", "gradle", "npm")
+            workspace_id: workspace-mcp id of the golden repo (EVO-65021). Only the
+                delegated backend needs it to address the sandbox; local indexers
+                ignore it. Keyword-only so existing 3-arg callers are unaffected.
+            language: Discovered project language (EVO-65021). Used by the delegated
+                backend to select the remote indexer; local indexers ignore it.
 
         Returns:
             IndexerResult with generation status and details

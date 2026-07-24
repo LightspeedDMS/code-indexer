@@ -197,7 +197,10 @@ def scip_generate(ctx, project: Optional[str], skip_verify: bool):
     console.print(f"Discovering projects in {repo_root}", style="cyan")
 
     try:
-        generator = SCIPGenerator(repo_root)
+        # Local CLI path: no workspace_id (local subprocess indexers). The
+        # delegated backend / workspace_id threading is a server concern
+        # (build_scip_generator) — EVO-65021.
+        generator = SCIPGenerator(repo_root, workspace_id=None)
 
         # Progress callback
         def progress_callback(discovered_project, status_msg):
@@ -510,7 +513,8 @@ def scip_rebuild(ctx, projects: tuple, failed: bool, force: bool):
         sys.exit(1)
 
     try:
-        generator = SCIPGenerator(repo_root)
+        # Local CLI path: no workspace_id (local subprocess indexers) — EVO-65021.
+        generator = SCIPGenerator(repo_root, workspace_id=None)
         tracker = StatusTracker(generator.scip_dir)
 
         # Check if status exists

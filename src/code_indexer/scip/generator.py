@@ -55,27 +55,54 @@ class GenerationResult:
 class SCIPGenerator:
     """Orchestrates SCIP index generation for multiple projects."""
 
-    def __init__(self, repo_root: Path, max_workers: int = 4):
+    def __init__(
+        self,
+        repo_root: Path,
+        max_workers: int = 4,
+        *,
+        indexer_map: Optional[Dict[str, SCIPIndexer]] = None,
+        workspace_id: Optional[str] = None,
+    ):
         """
         Initialize SCIP generator.
 
         Args:
             repo_root: Root directory of repository
             max_workers: Maximum number of parallel indexer executions
+            indexer_map: Optional ``language -> SCIPIndexer`` map to inject
+                (EVO-65021 backend seam). Defaults to today's local subprocess
+                indexers (built inline below), so the default path is
+                byte-for-byte the previous behaviour. Prefer
+                ``build_scip_generator`` (startup wiring) to select the backend
+                from config rather than constructing a map here.
+            workspace_id: workspace-mcp id of the golden repo (EVO-65021),
+                threaded into every ``indexer.generate`` call. Only the
+                delegated backend uses it; ``None`` (default) is correct for the
+                local backend.
         """
         self.repo_root = Path(repo_root)
         self.scip_dir = self.repo_root / ".code-indexer" / "scip"
         self.max_workers = max_workers
+        self.workspace_id = workspace_id
 
-        # Initialize indexers
-        self._indexers: Dict[str, SCIPIndexer] = {
-            "java": JavaIndexer(),
-            "kotlin": JavaIndexer(),  # Kotlin uses scip-java
-            "typescript": TypeScriptIndexer(),
-            "python": PythonIndexer(),
-            "csharp": CSharpIndexer(),
-            "go": GoIndexer(),
-        }
+        # Initialize indexers. Default = today's local subprocess map (built
+        # inline so tests that patch these classes at this module keep working);
+        # injectable for the delegated backend via ``indexer_map`` (EVO-65021).
+        # NOTE: keep this default map in sync with
+        # ``ScipBackendFactory.create_local_indexer_map`` — the two cannot share
+        # one builder without a generator<->factory import cycle.
+        self._indexers: Dict[str, SCIPIndexer] = (
+            indexer_map
+            if indexer_map is not None
+            else {
+                "java": JavaIndexer(),
+                "kotlin": JavaIndexer(),  # Kotlin uses scip-java
+                "typescript": TypeScriptIndexer(),
+                "python": PythonIndexer(),
+                "csharp": CSharpIndexer(),
+                "go": GoIndexer(),
+            }
+        )
 
     def _cleanup_orphan_scip_databases(
         self, discovered_projects: List[DiscoveredProject]
@@ -211,7 +238,11 @@ class SCIPGenerator:
             output_dir = self.scip_dir / project.relative_path
 
             indexer_result = indexer.generate(
-                project_dir, output_dir, project.build_system
+                project_dir,
+                output_dir,
+                project.build_system,
+                workspace_id=self.workspace_id,
+                language=project.language,
             )
 
             project_results.append(ProjectGenerationResult(project, indexer_result))
@@ -348,7 +379,11 @@ class SCIPGenerator:
             output_dir = self.scip_dir / project_path
 
             indexer_result = indexer.generate(
-                project_dir, output_dir, project_status.build_system
+                project_dir,
+                output_dir,
+                project_status.build_system,
+                workspace_id=self.workspace_id,
+                language=project_status.language,
             )
 
             # Build database from protobuf if successful - REQUIRED FOR SUCCESS

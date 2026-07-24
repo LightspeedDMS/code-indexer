@@ -56,6 +56,7 @@ class SCIPSelfHealingService:
         job_manager: BackgroundJobManager,
         repo_root: Path,
         resolution_queue: Optional[Any] = None,
+        workspace_id: Optional[str] = None,
     ):
         """
         Initialize SCIP Self-Healing Service.
@@ -64,10 +65,15 @@ class SCIPSelfHealingService:
             job_manager: Background job manager for tracking job state
             repo_root: Repository root path for SCIP operations
             resolution_queue: Optional queue for re-queuing projects (AC4)
+            workspace_id: workspace-mcp id of the golden repo (EVO-65021).
+                Threaded into SCIP retries so the delegated backend can address
+                the sandbox. ``None`` (default) is correct for the local
+                backend; the value comes from stream-02.
         """
         self.job_manager = job_manager
         self.repo_root = repo_root
         self.resolution_queue = resolution_queue
+        self.workspace_id = workspace_id
 
     def handle_scip_failure(
         self,
@@ -616,8 +622,9 @@ Status values:
             # Import here to avoid circular dependencies
             from code_indexer.scip.generator import SCIPGenerator
 
-            # Create SCIP generator instance
-            generator = SCIPGenerator(self.repo_root)
+            # Create SCIP generator instance (workspace_id threaded for the
+            # delegated backend — EVO-65021; None for the local backend).
+            generator = SCIPGenerator(self.repo_root, workspace_id=self.workspace_id)
 
             # Get project directory (remove trailing slash for Path operations)
             project_dir = self.repo_root / project_path.rstrip("/")
@@ -647,8 +654,15 @@ Status values:
                 )
                 return False
 
-            # Generate SCIP index for this specific project
-            indexer_result = indexer.generate(project_dir, output_dir, build_system)
+            # Generate SCIP index for this specific project (workspace_id /
+            # language threaded for the delegated backend — EVO-65021).
+            indexer_result = indexer.generate(
+                project_dir,
+                output_dir,
+                build_system,
+                workspace_id=self.workspace_id,
+                language=language,
+            )
 
             if indexer_result.is_success():
                 logger.info(

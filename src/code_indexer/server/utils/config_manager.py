@@ -1581,6 +1581,11 @@ class ServerConfig:
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings
     )
+    # EVO-65021: SCIP compile-step backend — "local" (in-pod subprocess indexers,
+    # default) or "delegated" (compile via sandbox-mcp). "delegated" reuses the
+    # workspace_mcp block above (endpoint + api_key) pointed at sandbox-mcp; see
+    # server/startup/scip_backend_wiring.py (fail-loud, no local fallback).
+    scip_backend: str = "local"
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
     # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
