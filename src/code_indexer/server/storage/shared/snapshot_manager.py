@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 #: Default timeout in seconds for the filesystem CoW ``cp`` command.
 _DEFAULT_COW_TIMEOUT = 600
+
+#: Story #1457 AC9: bounded retry count for collision-checked version-id
+#: generation. Two version-creations for the same namespace within the same
+#: wall-clock second would otherwise collide on ``v_{timestamp}``; this bound
+#: gives a provable termination guarantee for the collision-retry loop.
+_MAX_VERSION_ID_COLLISION_RETRIES = 100
 
 
 class VersionedSnapshotManager:
@@ -85,6 +92,11 @@ class VersionedSnapshotManager:
         self._versioned_base = versioned_base
         self._cow_timeout = cow_timeout
         self._clone_backend = clone_backend
+        # Story #1457 HIGH #8 (2026-07-23 code review): serializes the
+        # collision-check-then-create sequence within this process --
+        # closes the intra-process TOCTOU window a genuinely concurrent
+        # (not just sequential) same-second creation would otherwise hit.
+        self._snapshot_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Mode helpers
@@ -128,13 +140,81 @@ class VersionedSnapshotManager:
         timestamp = int(time.time())
 
         if self._clone_backend is not None:
-            return self._clone_backend.create_clone(
-                source_path, alias, f"v_{timestamp}"
-            )
+            return self._create_clone_backend_snapshot(alias, source_path, timestamp)
 
         if self._flexclone is not None:
             return self._create_flexclone_snapshot(alias, timestamp)
         return self._create_cow_snapshot(alias, source_path, timestamp)
+
+    def _create_clone_backend_snapshot(
+        self, alias: str, source_path: str, timestamp: int
+    ) -> str:
+        """Dispatch to ``self._clone_backend.create_clone`` -- collision-
+        checked when the backend is path-based (Story #1457 HIGH #8,
+        2026-07-23 code review).
+
+        Prior to this fix, this was the PRODUCTION dispatch path (every
+        real deployment constructs VersionedSnapshotManager WITH a
+        clone_backend) and had ZERO collision protection at all -- the
+        story's own AC9 retry loop only ever protected
+        ``_create_cow_snapshot``, a fallback path production never
+        reaches. For a path-based backend (``LocalCloneBackend``, which
+        uses the SAME ``{versioned_base}/.versioned/{alias}/v_{ts}``
+        convention as the CoW fallback -- detected via the
+        ``_versioned_base`` attribute, mirroring the existing
+        ``_backend_mount_point()`` pattern of reaching into backend
+        internals), pre-check the destination and retry with an
+        incremented timestamp on collision, exactly like
+        ``_create_cow_snapshot`` already does.
+
+        Non-path-based backends (ONTAP, cow-daemon -- remote-resource-
+        named, no local filesystem path to pre-check) are dispatched
+        unchanged; their own collision handling is Epic #1454 scope, not
+        this fix (no live ONTAP/daemon infrastructure available to safely
+        verify a fix against here).
+        """
+        assert self._clone_backend is not None  # caller-guaranteed (create_snapshot)
+        backend_versioned_base = getattr(self._clone_backend, "_versioned_base", None)
+        if backend_versioned_base is None:
+            return self._clone_backend.create_clone(
+                source_path, alias, f"v_{timestamp}"
+            )
+
+        # Story #1457 HIGH #8: the lock closes the intra-process TOCTOU
+        # window between the existence check and the actual create --
+        # a genuinely CONCURRENT (not just sequential) same-second
+        # creation would otherwise still collide even with the retry
+        # loop below (two threads could both observe "not yet taken"
+        # before either finishes creating). A coarse lock serializing
+        # snapshot creation within this process is the accepted
+        # correctness-over-throughput tradeoff this codebase already
+        # uses elsewhere for infrequent, correctness-critical operations.
+        with self._snapshot_lock:
+            namespace_dir = Path(backend_versioned_base) / ".versioned" / alias
+            candidate_timestamp = timestamp
+            candidate_path = namespace_dir / f"v_{candidate_timestamp}"
+            for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+                if not candidate_path.exists():
+                    break
+                logger.warning(
+                    "Clone backend snapshot collision for alias '%s' at "
+                    "'%s'; retrying with incremented version id",
+                    alias,
+                    candidate_path,
+                )
+                candidate_timestamp += 1
+                candidate_path = namespace_dir / f"v_{candidate_timestamp}"
+            else:
+                raise RuntimeError(
+                    f"Failed to generate a collision-free version id for "
+                    f"alias '{alias}' after "
+                    f"{_MAX_VERSION_ID_COLLISION_RETRIES} attempts "
+                    f"starting at v_{timestamp}"
+                )
+
+            return self._clone_backend.create_clone(
+                source_path, alias, f"v_{candidate_timestamp}"
+            )
 
     def delete_snapshot(self, alias: str, version_path: str) -> bool:
         """Delete a versioned snapshot.
@@ -396,11 +476,38 @@ class VersionedSnapshotManager:
     # ------------------------------------------------------------------
 
     def _create_cow_snapshot(self, alias: str, source_path: str, timestamp: int) -> str:
-        """Create a CoW directory snapshot using ``cp --reflink=auto``."""
-        versioned_path = (
-            Path(self._versioned_base) / ".versioned" / alias / f"v_{timestamp}"
-        )
-        versioned_path.parent.mkdir(parents=True, exist_ok=True)
+        """Create a CoW directory snapshot using ``cp --reflink=auto``.
+
+        Story #1457 AC9: version-id generation is collision-checked. Two
+        version-creations for the SAME namespace within the SAME wall-clock
+        second would otherwise collide on the identical ``v_{timestamp}``
+        destination -- and ``cp --reflink=auto -a source <existing-dir>``
+        copies INSIDE the existing directory (nesting) rather than erroring,
+        producing a structurally corrupt snapshot. On collision, retry with
+        an incremented timestamp within a bounded iteration count.
+        """
+        namespace_dir = Path(self._versioned_base) / ".versioned" / alias
+        namespace_dir.mkdir(parents=True, exist_ok=True)
+
+        candidate_timestamp = timestamp
+        versioned_path = namespace_dir / f"v_{candidate_timestamp}"
+        for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+            if not versioned_path.exists():
+                break
+            logger.warning(
+                "CoW snapshot collision for alias '%s' at '%s'; retrying "
+                "with incremented version id",
+                alias,
+                versioned_path,
+            )
+            candidate_timestamp += 1
+            versioned_path = namespace_dir / f"v_{candidate_timestamp}"
+        else:
+            raise RuntimeError(
+                f"Failed to generate a collision-free version id for alias "
+                f"'{alias}' after {_MAX_VERSION_ID_COLLISION_RETRIES} attempts "
+                f"starting at v_{timestamp}"
+            )
 
         logger.info(
             "Creating CoW snapshot for alias '%s' at '%s' from '%s'",

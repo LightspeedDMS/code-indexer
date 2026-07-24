@@ -375,6 +375,51 @@ async def trigger_reindex(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to start reindex job
     """
+    # Story #1457 AC12 remaining gap (2026-07-24 re-review, Codex round 4):
+    # the None-default case already excludes "temporal" (below), but an
+    # EXPLICITLY-provided index_types list must be validated against an
+    # explicit allowlist -- a bare `"temporal" in request.index_types`
+    # case-sensitive membership check was trivially bypassed by a case
+    # variant ("Temporal") and silently accepted any other typo'd/garbage
+    # value. Reject loudly on ANY unsupported entry, BEFORE any manager
+    # call or job submission -- mirrors add_index_type's existing
+    # route-level validation intent, generalized to a full list.
+    #
+    # 2026-07-24 round-5 re-review (Codex): a validate-one/use-another bug
+    # -- entries were previously lowercased ONLY for the allowlist check,
+    # while the raw unnormalized request.index_types was reused below for
+    # the actual job submission and response body. Build ONE normalized
+    # (lowercased) list HERE and use that SAME list everywhere downstream
+    # -- never the raw request value again after this point. An empty
+    # list ([]) is also rejected -- it would otherwise submit a
+    # meaningless job with nothing to index.
+    normalized_index_types: Optional[List[str]] = None
+    if request.index_types is not None:
+        normalized_index_types = [t.lower() for t in request.index_types]
+        _valid_reindex_types = {"semantic", "fts", "scip"}
+        if not normalized_index_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "index_types must not be empty. Must contain one or "
+                    f"more of: {', '.join(sorted(_valid_reindex_types))}."
+                ),
+            )
+        _invalid_types = [
+            t for t in normalized_index_types if t not in _valid_reindex_types
+        ]
+        if _invalid_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid index type(s) {_invalid_types}. Must be one "
+                    f"of: {', '.join(sorted(_valid_reindex_types))}. "
+                    "Temporal indexing is never supported for activated "
+                    "repositories -- temporal data is owned exclusively by "
+                    "the golden repo's shared sister location."
+                ),
+            )
+
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -393,11 +438,19 @@ async def trigger_reindex(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Determine which index types to reindex
-        index_types = request.index_types
+        # Determine which index types to reindex. Story #1457 round-5
+        # re-review (Codex): use the NORMALIZED list built and validated
+        # above -- never the raw request.index_types again.
+        index_types = normalized_index_types
         if index_types is None:
-            # Default to all existing indexes
-            index_types = ["semantic", "fts", "temporal", "scip"]
+            # Default to all existing indexes. Story #1457 AC12
+            # (2026-07-23 code review HIGH #10): "temporal" is EXCLUDED
+            # here -- temporal data is owned exclusively by the golden
+            # repo's shared sister location and is never built locally
+            # for an activated repo (activated_repo_index_manager.py's
+            # trigger_reindex rejects it unconditionally); defaulting to
+            # include it here contradicted that manager-level rejection.
+            index_types = ["semantic", "fts", "scip"]
 
         # Submit reindex job
         def reindex_job():
@@ -468,8 +521,11 @@ async def add_index_type(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to start add index job
     """
-    # Validate index type
-    valid_index_types = ["semantic", "fts", "temporal", "scip"]
+    # Validate index type. Story #1457 AC12 (2026-07-23 code review
+    # HIGH #10): "temporal" is EXCLUDED -- temporal data is owned
+    # exclusively by the golden repo's shared sister location and is
+    # never built locally for an activated repo.
+    valid_index_types = ["semantic", "fts", "scip"]
     if index_type not in valid_index_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

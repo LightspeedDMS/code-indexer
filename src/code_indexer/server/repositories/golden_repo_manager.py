@@ -45,8 +45,51 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 # from the D4 unit tests, matching the D2/D3 pattern in DependencyMapService.
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
 from code_indexer.server.services.job_tracker import DuplicateJobError
+from code_indexer.services.temporal.temporal_row_existence import (
+    temporal_shard_has_committed_rows,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Story #1457 AC9: bounded retry count for the standalone-CLI-fallback
+#: collision-checked version-id generation in _cb_cow_snapshot, mirroring
+#: snapshot_manager.py's VersionedSnapshotManager hardening. Gives a
+#: provable termination guarantee for the collision-retry loop.
+_MAX_VERSION_ID_COLLISION_RETRIES = 100
+
+
+def _temporal_vectors_exist_for_repo(index_dir: Path) -> bool:
+    """Layout-agnostic replacement for the confirmed Bug/AC5 non-recursive
+    glob (Story #1457 AC5).
+
+    The original inline check (`_coll_dir.glob("vector_*.json")`) is a
+    NON-RECURSIVE glob against each `code-indexer-temporal*` collection
+    directory -- but vector_*.json files are actually 4-level hash-sharded,
+    so it can NEVER match, always forcing `--clear` (a full unwanted
+    re-embed) on every explicit add_indexes/reindex admin action.
+
+    Reuses the shared `temporal_shard_has_committed_rows` primitive (the
+    SAME side-effect-free, existence-only, short-circuiting scan AC6/AC8/
+    AC11 use) across every `code-indexer-temporal*` directory found under
+    index_dir, returning True on the FIRST embedder/quarter with any
+    committed row.
+
+    NOTE (honest scope disclosure): this checks the IN-REPO legacy layout
+    only. The story's full AC5 spec additionally wants a pointer-first
+    check against the AC8 resolver's sister-location union
+    (`resolver.catalog(embedder_slug)` per configured embedder) before
+    falling back to this legacy scan -- deferred until AC2's dedicated
+    temporal store is actually wired into production (there is currently
+    no sister-location data for any golden repo to consult).
+    """
+    if not index_dir.is_dir():
+        return False
+    for coll_dir in index_dir.glob("code-indexer-temporal*"):
+        if not coll_dir.is_dir():
+            continue
+        if temporal_shard_has_committed_rows(coll_dir):
+            return True
+    return False
 
 
 def _make_hnsw_orphan_event_logger(alias: str):
@@ -2955,7 +2998,33 @@ class GoldenRepoManager:
             # Standalone CLI fallback: no manager wired (e.g., test contexts or CLI usage)
             versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
             os.makedirs(versioned_base, exist_ok=True)
-            snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
+
+            # Story #1457 AC9: collision-checked version-id generation.
+            # Two snapshot creations for the SAME alias within the SAME
+            # wall-clock second must not collide on v_{timestamp} -- a
+            # naive `cp -a source <existing-dir>` copies INSIDE the
+            # existing directory (nesting) instead of erroring, producing
+            # a structurally corrupt snapshot.
+            candidate_ts = int(time.time())
+            snapshot_path = os.path.join(versioned_base, f"v_{candidate_ts}")
+            for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+                if not os.path.exists(snapshot_path):
+                    break
+                logger.warning(
+                    "CoW snapshot collision for alias '%s' at '%s'; "
+                    "retrying with incremented version id",
+                    alias,
+                    snapshot_path,
+                )
+                candidate_ts += 1
+                snapshot_path = os.path.join(versioned_base, f"v_{candidate_ts}")
+            else:
+                raise RuntimeError(
+                    f"Failed to generate a collision-free version id for "
+                    f"alias '{alias}' after "
+                    f"{_MAX_VERSION_ID_COLLISION_RETRIES} attempts"
+                )
+
             subprocess.run(
                 ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
                 capture_output=True,
@@ -3701,12 +3770,14 @@ class GoldenRepoManager:
                         # Bug #945: Only use --clear when no vector_*.json files exist.
                         # Vectors are expensive (embedding API). HNSW is cheap to rebuild.
                         # If vectors exist, omit --clear so rebuild_from_vectors is used.
+                        # Story #1457 AC5: the original inline check here was a
+                        # NON-RECURSIVE glob against each collection dir, which can
+                        # NEVER match the real 4-level hash-sharded vector_*.json
+                        # layout -- always forcing --clear. Fixed via the shared,
+                        # layout-agnostic row-existence helper.
                         _index_dir = Path(repo_path) / ".code-indexer" / "index"
-                        _temporal_vectors_exist = any(
-                            True
-                            for _coll_dir in _index_dir.glob("code-indexer-temporal*")
-                            if _coll_dir.is_dir()
-                            for _ in _coll_dir.glob("vector_*.json")
+                        _temporal_vectors_exist = _temporal_vectors_exist_for_repo(
+                            _index_dir
                         )
                         _clear_flags = [] if _temporal_vectors_exist else ["--clear"]
                         command = [

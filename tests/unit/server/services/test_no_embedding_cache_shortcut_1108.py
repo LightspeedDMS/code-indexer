@@ -1152,6 +1152,7 @@ class TestValueFlowTemporalDispatch:
 
         class _FakeVectorStore:
             project_root = "/fake/root"
+            base_path = "/fake/root"
 
         dispatch_mod.execute_temporal_query_with_fusion(
             config=object(),

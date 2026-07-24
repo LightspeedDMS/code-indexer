@@ -454,6 +454,45 @@ class ChunkStore:
         self._conn.commit()
         return deleted_total
 
+    def delete_stray_points_fail_closed(self, point_ids: list) -> int:
+        """Delete point_ids inside a SINGLE transaction, fail-closed (Story
+        #1457 AC7).
+
+        Unlike :meth:`delete`, this method:
+          - Sets ``PRAGMA synchronous=FULL`` so the commit is explicitly
+            DURABLE (never a deferred/relaxed commit) -- a committed
+            stray-row deletion must survive a crash.
+          - Explicitly ROLLS BACK the whole transaction on ANY failure
+            (whether raised during a DELETE statement or during the commit
+            itself) -- no partial deletion is ever left committed.
+          - Re-raises the original exception verbatim (never swallows it),
+            so callers (temporal reconciliation's fail-closed contract)
+            translate it into their own error type.
+
+        Returns:
+            Number of points actually deleted.
+        """
+        self._require_mutable()
+        if not point_ids:
+            return 0
+
+        self._conn.execute("PRAGMA synchronous=FULL")
+        try:
+            deleted_total = 0
+            for start in range(0, len(point_ids), self._DELETE_CHUNK_SIZE):
+                chunk = point_ids[start : start + self._DELETE_CHUNK_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = self._conn.execute(
+                    f"DELETE FROM chunks WHERE point_id IN ({placeholders})",
+                    chunk,
+                )
+                deleted_total += cursor.rowcount
+            self._conn.commit()
+            return deleted_total
+        except Exception:
+            self._conn.rollback()
+            raise
+
 
 # ---------------------------------------------------------------------------
 # Immutable-mode gating factory (AC5)

@@ -829,6 +829,13 @@ class ConfigService:
                     if config.indexing_config is not None
                     else False
                 ),
+                # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
+                # sister-location relocation safety gate display wiring.
+                "temporal_sister_relocation_enabled": (
+                    config.indexing_config.temporal_sister_relocation_enabled
+                    if config.indexing_config is not None
+                    else False
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -2711,6 +2718,15 @@ class ConfigService:
                 embedders = [v.strip() for v in str(value).split(",") if v.strip()]
             if not embedders:
                 raise ValueError("temporal_embedders must not be empty")
+            # Story #1457 AC6 (round-13 Codex N13-1) defense-in-depth: reject
+            # a colliding embedder set HERE, at the Web UI Config Screen
+            # submission boundary, rather than silently persisting it and
+            # only failing later inside a background index run.
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                validate_embedder_slug_uniqueness,
+            )
+
+            validate_embedder_slug_uniqueness(embedders)
             indexing.temporal_embedders = embedders
             self.save_config(config)
             logger.info(
@@ -2765,6 +2781,18 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
+        # sister-location relocation safety gate (default OFF).
+        if key == "temporal_sister_relocation_enabled":
+            indexing.temporal_sister_relocation_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_sister_relocation_enabled to %s",
+                indexing.temporal_sister_relocation_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

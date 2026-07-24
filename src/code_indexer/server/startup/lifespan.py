@@ -97,6 +97,28 @@ def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
     wire_fault_injection(app, startup_config)
 
 
+def _wire_query_tracker_into_semantic_query_manager(
+    app: Any, query_tracker: Any
+) -> None:
+    """Inject the server-wide QueryTracker singleton onto SemanticQueryManager
+    (Story #1457 AC1/AC2 live wiring, final piece).
+
+    Mirrors the existing set_shard_ownership POST-HOC wiring pattern
+    elsewhere in this module: app.state.semantic_query_manager is wired by
+    app_wiring.py before this lifespan startup code runs, so it is normally
+    present here; a defensive None-check keeps this a safe no-op if not
+    (e.g. in a degraded/partial startup path), matching the same fail-safe
+    style set_shard_ownership's call site already uses.
+
+    Without this call, SemanticQueryManager.query_tracker stays None and
+    _execute_temporal_query never constructs a TemporalShardResolver,
+    regardless of golden_repo_alias -- byte-identical to pre-#1457 behavior.
+    """
+    semantic_query_manager = getattr(app.state, "semantic_query_manager", None)
+    if semantic_query_manager is not None:
+        semantic_query_manager.set_query_tracker(query_tracker)
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -933,6 +955,12 @@ def make_lifespan(
             # Store lifecycle manager in app state for access by query handlers
             app.state.global_lifecycle_manager = global_lifecycle_manager
             app.state.query_tracker = global_lifecycle_manager.query_tracker
+            # Story #1457 AC1/AC2: inject the SAME QueryTracker singleton
+            # into SemanticQueryManager so temporal queries can construct a
+            # real, pin()-capable TemporalShardResolver.
+            _wire_query_tracker_into_semantic_query_manager(
+                app, global_lifecycle_manager.query_tracker
+            )
             app.state.golden_repos_dir = str(golden_repos_dir)
 
             # Wire refresh_scheduler into golden_repo_manager so that

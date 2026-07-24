@@ -151,6 +151,7 @@ class TestAC1BootstrapKeysRemoved:
                 "coalesce_k_min",
                 "coalesce_k_max",
                 "snapshot_retention_keep_last",
+                "snapshot_min_retention_age_seconds",
                 "nfs_visibility_timeout_seconds",
                 "research_session_retention_days",
                 "query_embedding_cache_config",

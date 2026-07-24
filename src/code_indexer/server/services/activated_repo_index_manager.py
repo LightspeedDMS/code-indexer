@@ -198,6 +198,19 @@ class ActivatedRepoIndexManager:
                 f"Valid types: {', '.join(self.VALID_INDEX_TYPES)}"
             )
 
+        # Story #1457 AC12: temporal data is owned EXCLUSIVELY by the golden
+        # repo's shared sister location (AC1-AC11) -- an activated (non-golden)
+        # repo has no business re-deriving or duplicating it locally.
+        # ActivatedRepoIndexManager is used ONLY for activated repos (golden
+        # repos go through GoldenRepoManager instead), so this rejection is
+        # unconditional here. Reject loudly -- never a silent no-op.
+        if "temporal" in index_types:
+            raise ValueError(
+                "temporal indexing is not supported for activated repositories: "
+                "temporal data is owned exclusively by the golden repo's shared "
+                "sister location and is never built locally for an activated repo"
+            )
+
         # Validate repository exists
         try:
             repo_path = self.activated_repo_manager.get_activated_repo_path(

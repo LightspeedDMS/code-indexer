@@ -37,10 +37,12 @@ from .temporal_blank_out import blank_out_legacy_temporal_collections
 from .temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
     sanitize_model_name,
+    validate_embedder_slug_uniqueness,
 )
 from .temporal_point_builder import build_chunk_payload, build_point_id
 from .temporal_projection_matrix import _ensure_shard_has_projection_matrix
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
+from .temporal_relocation_trigger import maybe_relocate_shard_to_sister_location
 from .temporal_structure_marker import is_v2_structure, write_structure_marker
 
 logger = logging.getLogger(__name__)
@@ -422,6 +424,12 @@ class TemporalIndexer:
             configured_embedders = [active_embedder_name]
         if active_embedder_name not in configured_embedders:
             configured_embedders = [active_embedder_name] + configured_embedders
+
+        # Story #1457 AC6 (round-13 Codex N13-1): fail loud, at the
+        # consumption boundary, if two configured embedders sanitize to the
+        # same collection slug -- they would silently share one on-disk
+        # shard namespace and overwrite each other.
+        validate_embedder_slug_uniqueness(configured_embedders)
 
         # AC10: an explicit embedder_scope only narrows WHICH configured
         # embedders are processed this run when reconcile=True. A normal
@@ -869,6 +877,20 @@ class TemporalIndexer:
                     # Legacy path (no durable barrier available -- see
                     # _use_stale_barrier guard above).
                     self.vector_store.end_indexing(collection_name=_shard_name)
+
+                # Story #1457 AC1: relocation trigger. No-op in standalone
+                # CLI (the function's own CIDX_SERVER_REFRESH_CONTEXT
+                # check) -- in server context, builds+publishes this
+                # shard's data to the sister location via AC6's dispatch.
+                maybe_relocate_shard_to_sister_location(
+                    codebase_dir=self.codebase_dir,
+                    shard_name=_shard_name,
+                    local_shard_dir=collection_path,
+                    new_commit_hashes={c.hash for c in _shard_commits},
+                    vector_dim=shard_vector_size,
+                    force_rebuild=was_stale,
+                )
+
                 self._processed_shards.append(_shard_name)
         finally:
             self.collection_name = _original_collection_name

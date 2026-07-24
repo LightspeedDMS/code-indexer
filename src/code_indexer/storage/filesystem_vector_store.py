@@ -342,6 +342,7 @@ class FilesystemVectorStore:
         skip_staleness_check: bool = False,
         memory_governor: Optional[Any] = None,
         use_chunks_db_for_new_collections: Optional[bool] = None,
+        temporal_shard_resolver: Optional[Any] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -364,6 +365,12 @@ class FilesystemVectorStore:
                 CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default False),
                 so all ~20 existing call sites inherit this without any of
                 them needing individual changes.
+            temporal_shard_resolver: Story #1457 AC8 -- optional
+                TemporalShardResolver instance. When set, _get_collection_path
+                resolves TEMPORAL collection names through it (dual-mode,
+                per-instance-gated); non-temporal names and the None default
+                (CLI/solo, semantic store, build/index store) are UNCHANGED,
+                direct base_path/collection_name construction.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -420,6 +427,13 @@ class FilesystemVectorStore:
         # Server mode injects get_memory_governor() via FilesystemBackend.get_vector_store_client().
         # CLI/solo leaves this None so eviction is byte-identical to Bug #1171.
         self.memory_governor: Optional[Any] = memory_governor
+
+        # Story #1457 AC8: optional TemporalShardResolver, per-instance-gated.
+        # None (default) preserves byte-identical direct construction for
+        # EVERY existing call site; only a store explicitly constructed with
+        # a resolver (the dedicated read-side temporal store, not yet wired
+        # anywhere in production) resolves temporal collection names.
+        self._temporal_shard_resolver: Optional[Any] = temporal_shard_resolver
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -513,9 +527,40 @@ class FilesystemVectorStore:
         Example:
             _get_collection_path("my_coll") -> base_path/my_coll
             _get_collection_path("my_coll", "multimodal_index") -> base_path/multimodal_index/my_coll
+
+        Story #1457 AC8: when this instance was constructed WITH a
+        TemporalShardResolver AND collection_name parses as a temporal
+        collection name AND the resolver finds a match, resolves through it
+        instead of direct construction -- per-instance-gated, dual-mode.
+        Every other case (no resolver, non-temporal name, no subdirectory
+        override, or no resolver match) falls through UNCHANGED to direct
+        construction, so this is byte-identical for every existing
+        production call site (none of which inject a resolver yet).
         """
         if subdirectory:
             return self.base_path / subdirectory / collection_name
+
+        if self._temporal_shard_resolver is not None:
+            from code_indexer.services.temporal.temporal_shard_resolver import (
+                parse_physical_temporal_name,
+            )
+
+            parsed = parse_physical_temporal_name(collection_name)
+            if parsed is not None:
+                embedder_slug, quarter = parsed
+                # Story #1457 AC8 Step 6: a pin() block in effect for this
+                # namespace MUST be consulted FIRST, without calling
+                # resolve() again, so a concurrent alias swap mid-read
+                # cannot change the path this read actually touches.
+                pinned = self._temporal_shard_resolver.get_pinned(
+                    embedder_slug, quarter
+                )
+                if pinned is not None:
+                    return Path(pinned)
+                resolved = self._temporal_shard_resolver.resolve(embedder_slug, quarter)
+                if resolved is not None:
+                    return Path(resolved.path)
+
         return self.base_path / collection_name
 
     def create_collection(

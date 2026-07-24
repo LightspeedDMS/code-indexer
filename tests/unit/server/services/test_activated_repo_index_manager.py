@@ -98,13 +98,19 @@ class TestTriggerReindex:
 
     @patch("os.path.exists")
     def test_trigger_reindex_all_types(self, mock_exists, index_manager):
-        """Test triggering all four index types."""
+        """Test triggering all NON-temporal index types.
+
+        Story #1457 AC12: "temporal" is deliberately excluded here -- an
+        activated repo can never request temporal indexing (rejected with a
+        clear error, see test_activated_repo_index_manager_temporal_rejection_1457.py).
+        "All types" for an activated repo therefore means semantic+fts+scip.
+        """
         # Mock repository directory exists
         mock_exists.return_value = True
 
         job_id = index_manager.trigger_reindex(
             repo_alias="test-repo",
-            index_types=["semantic", "fts", "temporal", "scip"],
+            index_types=["semantic", "fts", "scip"],
             clear=True,
             username="testuser",
         )
