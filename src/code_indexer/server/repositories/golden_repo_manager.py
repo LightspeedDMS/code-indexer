@@ -35,7 +35,11 @@ if TYPE_CHECKING:
     from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 from pydantic import BaseModel
-from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
+from code_indexer.server.logging_utils import (
+    format_error_log,
+    mask_url_credentials,
+    strip_url_credentials,
+)
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
@@ -480,6 +484,19 @@ class GoldenRepoManager:
         # still detected, not just aliases known to this worker's cache)
         if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
+
+        # EVO-64616: when the git backend supplies its own credentials (delegated
+        # → git-mcp), the PAT must live ONLY in git-mcp, never in cidx's stored
+        # golden state. Strip any credential embedded in the URL up front so the
+        # pre-flight probe, the background-job metadata, the clone, and the
+        # persisted record all carry a clean URL; git-mcp injects its own token for
+        # the network ops. In local mode (owns_credentials=False) the URL is left
+        # intact — in-process git needs the embedded token.
+        if (
+            repo_url.startswith(("http://", "https://"))
+            and self._git_backend.owns_credentials
+        ):
+            repo_url = strip_url_credentials(repo_url)
 
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).

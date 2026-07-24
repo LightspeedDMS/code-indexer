@@ -96,3 +96,46 @@ class TestMaskUrlCredentials:
         assert mask_url_credentials(once) == once  # masking twice is a no-op
         assert mask_url_credentials(None) is None
         assert mask_url_credentials(123) == 123
+
+
+class TestStripUrlCredentials:
+    """strip_url_credentials REMOVES the credential (vs mask's ``***``), yielding a
+    still-valid URL — used before a repo URL is PERSISTED when git-mcp owns auth
+    (EVO-64616), so the PAT lives only in git-mcp."""
+
+    def test_strips_oauth2_token_to_valid_url(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        stripped = strip_url_credentials(
+            "https://oauth2:glpat-SECRET123@gitlab.com/org/repo.git"
+        )
+        # A real, usable URL — not the display-only *** form.
+        assert stripped == "https://gitlab.com/org/repo.git"
+        assert "glpat" not in stripped and "SECRET123" not in stripped
+        assert "***" not in stripped
+
+    def test_strips_user_password(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        assert (
+            strip_url_credentials("https://user:pass@github.com/a/b.git")
+            == "https://github.com/a/b.git"
+        )
+
+    def test_leaves_credential_free_and_scheme_only_unchanged(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        for url in (
+            "https://gitlab.com/org/repo.git",
+            "local://myalias",
+            "git@github.com:org/repo.git",
+        ):
+            assert strip_url_credentials(url) == url
+
+    def test_idempotent_and_non_string_safe(self):
+        from code_indexer.server.logging_utils import strip_url_credentials
+
+        once = strip_url_credentials("https://oauth2:tok@gitlab.com/x.git")
+        assert strip_url_credentials(once) == once
+        assert strip_url_credentials(None) is None
+        assert strip_url_credentials(123) == 123

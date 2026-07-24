@@ -295,3 +295,9 @@ def test_factory_delegated_requires_injected_backend():
 def test_factory_unknown_raises():
     with pytest.raises(ValueError, match="Unknown git_backend"):
         GitBackendFactory.create("bogus")
+
+
+def test_local_backend_does_not_own_credentials(backend: LocalGitBackend):
+    # Local git relies on the credential carried in the URL / ambient config, so
+    # callers MUST keep any embedded token — golden-repo URLs are not stripped.
+    assert backend.owns_credentials is False

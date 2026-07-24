@@ -404,6 +404,13 @@ class TestWrongShapeBodyFailsLoud:
         assert backend.list_branches(REPO, fmt="%(refname:short)") == ["main"]
 
 
+class TestCapabilities:
+    def test_owns_credentials_true(self, backend):
+        # git-mcp holds the token and injects it, so cidx must strip any credential
+        # before storing a URL — the PAT lives only in git-mcp.
+        assert backend.owns_credentials is True
+
+
 class TestFactory:
     def test_make_git_backend_reads_env(self, monkeypatch):
         monkeypatch.setenv("CIDX_GIT_MCP_URL", "http://custom:9/")

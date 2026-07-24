@@ -54,6 +54,20 @@ Timeout = Optional[float]
 class GitBackend(Protocol):
     """Structural interface for cidx's internal git operations."""
 
+    # -- capabilities ---------------------------------------------------------
+    @property
+    def owns_credentials(self) -> bool:
+        """True when this backend supplies its OWN git credentials for network
+        operations (so callers must NOT embed a token in the repo URL, and any
+        credential-bearing URL should be stripped before it is persisted).
+
+        ``LocalGitBackend`` returns False — it runs git in-process and relies on
+        the credential carried in the URL / ambient git config. The delegated
+        git-mcp backend returns True — git-mcp holds the token (EVO-64616), so the
+        PAT lives only there and never in cidx's stored golden-repo state.
+        """
+        ...  # pragma: no cover
+
     # -- remote-URL operations ------------------------------------------------
     def ls_remote(self, url: str, timeout: Timeout = None) -> bool:
         """``git ls-remote <url>`` -> True when the remote is reachable."""
@@ -241,6 +255,13 @@ class LocalGitBackend:
     ``run_git_command``; network-touching operations use the retrying variant,
     matching current behavior.
     """
+
+    # -- capabilities ---------------------------------------------------------
+    @property
+    def owns_credentials(self) -> bool:
+        """False: local git relies on the credential in the URL / git config, so
+        callers must keep any embedded token. See ``GitBackend.owns_credentials``."""
+        return False
 
     # -- single funnel: every git invocation goes through here -----------------
     @staticmethod

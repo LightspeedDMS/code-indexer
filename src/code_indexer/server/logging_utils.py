@@ -35,6 +35,24 @@ def mask_url_credentials(url: Any) -> Any:
     return _URL_CREDENTIALS_RE.sub(r"\1***@", url)
 
 
+def strip_url_credentials(url: Any) -> Any:
+    """Return a git/HTTP URL with any embedded credentials REMOVED (not masked).
+
+    ``https://oauth2:glpat-XXXX@gitlab.com/org/repo.git`` ->
+    ``https://gitlab.com/org/repo.git`` — a still-valid, credential-free URL,
+    unlike :func:`mask_url_credentials` which yields a display-only ``***`` form.
+
+    Used when a URL will be PERSISTED (golden-repo metadata / ``.git/config``) in a
+    deployment whose git backend supplies its own credentials (EVO-64616: git-mcp),
+    so the token lives only in git-mcp and never in cidx's stored state. Non-string
+    input, credential-free URLs, and scheme-only forms (``local://alias``) are
+    returned unchanged; idempotent.
+    """
+    if not isinstance(url, str):
+        return url
+    return _URL_CREDENTIALS_RE.sub(r"\1", url)
+
+
 # Sensitive field names that should be redacted in logs
 SENSITIVE_FIELDS = {
     "password",
