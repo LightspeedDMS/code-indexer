@@ -443,6 +443,7 @@ class GoldenRepoMetadataBackend(Protocol):
         created_at: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+        workspace_id: Optional[str] = None,
     ) -> None: ...
 
     def get_repo(self, alias: str) -> Optional[Dict[str, Any]]: ...
@@ -462,6 +463,8 @@ class GoldenRepoMetadataBackend(Protocol):
     def update_temporal_options(self, alias: str, options: Optional[Dict]) -> bool: ...
 
     def update_repo_url(self, alias: str, repo_url: str) -> bool: ...
+
+    def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool: ...
 
     def update_category(
         self, alias: str, category_id: Optional[int], auto_assigned: bool = True

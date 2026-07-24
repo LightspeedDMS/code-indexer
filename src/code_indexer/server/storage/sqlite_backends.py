@@ -1780,7 +1780,8 @@ class GoldenRepoMetadataSqliteBackend:
                     temporal_options TEXT,
                     category_id INTEGER,
                     category_auto_assigned INTEGER DEFAULT 0,
-                    wiki_enabled INTEGER DEFAULT 0
+                    wiki_enabled INTEGER DEFAULT 0,
+                    workspace_id TEXT
                 )
             """
             )
@@ -1791,6 +1792,8 @@ class GoldenRepoMetadataSqliteBackend:
                 ("category_id", "INTEGER"),
                 ("category_auto_assigned", "INTEGER DEFAULT 0"),
                 ("wiki_enabled", "INTEGER DEFAULT 0"),
+                # EVO-65021: workspace-mcp workspace_id retention for golden repos.
+                ("workspace_id", "TEXT"),
             ]
             for col_name, col_def in migrations:
                 if col_name not in existing_cols:
@@ -1842,6 +1845,7 @@ class GoldenRepoMetadataSqliteBackend:
         created_at: str,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
+        workspace_id: Optional[str] = None,
     ) -> None:
         """
         Add a new golden repository.
@@ -1854,6 +1858,9 @@ class GoldenRepoMetadataSqliteBackend:
             created_at: ISO 8601 timestamp when repository was created.
             enable_temporal: Whether temporal indexing is enabled.
             temporal_options: Optional temporal indexing options (stored as JSON).
+            workspace_id: Optional workspace-mcp workspace id (EVO-65021). Persisted
+                so the delegated SCIP indexer can address sandbox-mcp
+                (``sb-{workspace_id}``). ``None`` when not (yet) known.
 
         Raises:
             sqlite3.IntegrityError: When a repo with the same alias already exists.
@@ -1868,8 +1875,8 @@ class GoldenRepoMetadataSqliteBackend:
             conn.execute(
                 """INSERT INTO golden_repos_metadata
                    (alias, repo_url, default_branch, clone_path, created_at,
-                    enable_temporal, temporal_options)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    enable_temporal, temporal_options, workspace_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     alias,
                     repo_url,
@@ -1878,6 +1885,7 @@ class GoldenRepoMetadataSqliteBackend:
                     created_at,
                     1 if enable_temporal else 0,
                     temporal_json,
+                    workspace_id,
                 ),
             )
             return None
@@ -1899,7 +1907,7 @@ class GoldenRepoMetadataSqliteBackend:
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
                       enable_temporal, temporal_options, category_id, category_auto_assigned,
-                      COALESCE(wiki_enabled, 0)
+                      COALESCE(wiki_enabled, 0), workspace_id
                FROM golden_repos_metadata WHERE alias = ?""",
             (alias,),
         )
@@ -1919,6 +1927,7 @@ class GoldenRepoMetadataSqliteBackend:
             "category_id": row[7],
             "category_auto_assigned": bool(row[8]),
             "wiki_enabled": bool(row[9]),
+            "workspace_id": row[10],
         }
 
     def list_repos(self) -> List[Dict[str, Any]]:
@@ -1931,7 +1940,8 @@ class GoldenRepoMetadataSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT alias, repo_url, default_branch, clone_path, created_at,
-                      enable_temporal, temporal_options, COALESCE(wiki_enabled, 0)
+                      enable_temporal, temporal_options, COALESCE(wiki_enabled, 0),
+                      workspace_id
                FROM golden_repos_metadata"""
         )
 
@@ -1947,6 +1957,7 @@ class GoldenRepoMetadataSqliteBackend:
                     "enable_temporal": bool(row[5]),
                     "temporal_options": json.loads(row[6]) if row[6] else None,
                     "wiki_enabled": bool(row[7]),
+                    "workspace_id": row[8],
                 }
             )
 
@@ -2073,6 +2084,34 @@ class GoldenRepoMetadataSqliteBackend:
         updated: bool = self._conn_manager.execute_atomic(operation)
         if updated:
             logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
+        return updated
+
+    def update_workspace_id(
+        self, alias: str, workspace_id: Optional[str]
+    ) -> bool:
+        """Update the workspace-mcp ``workspace_id`` for a golden repository.
+
+        EVO-65021: persists (or clears, when ``workspace_id`` is None) the
+        workspace-mcp handle used by the delegated SCIP indexer to address
+        sandbox-mcp. Used both by the registration capture path and by any
+        backfill of pre-existing repos.
+
+        Returns:
+            True if a record was updated, False if alias not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE golden_repos_metadata SET workspace_id = ? WHERE alias = ?",
+                (workspace_id, alias),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.info(
+                f"Updated workspace_id={workspace_id!r} for golden repo: {alias}"
+            )
         return updated
 
     def update_category(
