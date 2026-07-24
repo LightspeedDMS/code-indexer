@@ -7,7 +7,13 @@ import pytest
 
 from code_indexer.scip.indexers.delegated import DelegatedIndexer
 from code_indexer.scip.indexers.typescript import TypeScriptIndexer
-from code_indexer.server.startup.scip_backend_wiring import build_scip_generator
+from code_indexer.server.repositories.golden_repo_manager import (
+    WorkspaceIdNotRetainedError,
+)
+from code_indexer.server.startup.scip_backend_wiring import (
+    build_scip_generator,
+    build_scip_generator_for_golden_repo,
+)
 
 
 def _local_config():
@@ -63,3 +69,68 @@ class TestDelegated:
         )
         with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
             build_scip_generator(cfg, tmp_path, workspace_id="W")
+
+
+class _FakeManager:
+    """Minimal stand-in exposing only resolve_workspace_id (seam #3)."""
+
+    def __init__(self, *, workspace_id=None, raises=False):
+        self._workspace_id = workspace_id
+        self._raises = raises
+        self.calls = []
+
+    def resolve_workspace_id(self, alias):
+        self.calls.append(alias)
+        if self._raises:
+            raise WorkspaceIdNotRetainedError(f"no workspace_id for '{alias}'")
+        return self._workspace_id
+
+
+class TestGoldenRepoBridge:
+    """EVO-65021 seam #3: resolve_workspace_id -> build_scip_generator."""
+
+    def test_local_backend_ignores_workspace_id_lookup(self, tmp_path):
+        mgr = _FakeManager(raises=True)  # would raise if consulted
+        gen = build_scip_generator_for_golden_repo(
+            _local_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="svc-foo",
+        )
+        assert isinstance(gen._indexers["typescript"], TypeScriptIndexer)
+        assert gen.workspace_id is None
+        # local backend never resolves a workspace_id
+        assert mgr.calls == []
+
+    @patch("requests.get")
+    def test_delegated_resolves_and_names_real_workspace(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        mgr = _FakeManager(workspace_id="ws-real-1234")
+        gen = build_scip_generator_for_golden_repo(
+            _delegated_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="svc-foo",
+        )
+        assert gen is not None
+        assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
+        # the delegated build names the REAL resolved workspace W
+        assert gen.workspace_id == "ws-real-1234"
+        assert mgr.calls == ["svc-foo"]
+
+    @patch("requests.get")
+    def test_delegated_unretained_workspace_id_fail_soft_returns_none(
+        self, mock_get, tmp_path
+    ):
+        mgr = _FakeManager(raises=True)
+        gen = build_scip_generator_for_golden_repo(
+            _delegated_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="legacy-repo",
+        )
+        # Fail-soft: skip SCIP for this repo rather than building against sb-None.
+        assert gen is None
+        assert mgr.calls == ["legacy-repo"]
+        # No build/health check is attempted once the workspace_id is missing.
+        mock_get.assert_not_called()

@@ -38,6 +38,20 @@ class AddGoldenRepoRequest(BaseModel):
     )
     enable_temporal: bool = False
     temporal_options: Optional[TemporalIndexOptions] = None
+    # EVO-65021 (seam #3): the workspace-mcp workspace_id the provisioner used to
+    # materialize this golden repo (in-place/provisioning registration). Captured
+    # at registration and persisted on the golden-repo metadata so the delegated
+    # SCIP indexer can address sandbox-mcp (``sb-{workspace_id}``). None when the
+    # caller does not (yet) know it — legacy repos backfill via the workspace-mcp
+    # registry (documented follow-up).
+    workspace_id: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "workspace-mcp workspace id this repo was provisioned into "
+            "(EVO-65021). Retained for the delegated SCIP backend."
+        ),
+    )
 
     @field_validator("repo_url")
     @classmethod

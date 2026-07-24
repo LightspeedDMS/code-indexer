@@ -55,9 +55,17 @@ _SCIP_TOOL_NAME = "sandbox_scip"
 # server-side ``timeout_s: 1800`` (contract §2a / §5).
 _DEFAULT_TIMEOUT_SECONDS = 1800
 
-# Relative path (under the configured endpoint) probed by ``is_available`` and
-# the startup health check. A dedicated param keeps it tunable without a config
-# schema change if the sandbox health route differs.
+# Path appended to the sandbox-mcp base endpoint for the JSON-RPC front door
+# (reconciled EVO-65021 seam #2 — the authoritative sandbox contract). The
+# ``workspace_mcp.endpoint`` config is the sandbox-mcp *base* URL (e.g.
+# ``http://sandbox-mcp:8200``); ``SandboxMcpController`` mounts the MCP handler
+# at ``POST /v1/sandbox/mcp`` (URI versioning prefix 'v', v1). A dedicated param
+# keeps it tunable without a config-schema change if the route ever moves.
+_DEFAULT_JSONRPC_PATH = "/v1/sandbox/mcp"
+
+# Relative path (under the configured base endpoint) probed by ``is_available``
+# and the startup health check. Health is un-versioned and un-authed
+# (``GET /health``, no ``/v1`` prefix) per the sandbox contract.
 _DEFAULT_HEALTH_PATH = "/health"
 
 
@@ -77,23 +85,26 @@ class DelegatedIndexer(SCIPIndexer):
         *,
         tool_name: str = _SCIP_TOOL_NAME,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
-        jsonrpc_path: str = "",
+        jsonrpc_path: str = _DEFAULT_JSONRPC_PATH,
         health_path: str = _DEFAULT_HEALTH_PATH,
     ) -> None:
         """Initialize the delegated indexer.
 
         Args:
             config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key)
-                pointed at the sandbox-mcp JSON-RPC front door (contract §5).
+                whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
+                ``http://sandbox-mcp:8200``); the JSON-RPC front door and health
+                routes are appended per the sandbox contract (§5, seam #2).
             repo_root: Golden-repo root (== the sandbox ``/workspace`` mount).
                 Used to derive the workspace-relative ``project_path`` /
                 ``output_dir`` the sandbox expects.
             tool_name: MCP tool name to call (default ``sandbox_scip``).
             timeout_seconds: HTTP request timeout (default 1800s).
-            jsonrpc_path: Path appended to ``endpoint`` for the JSON-RPC POST.
-                Empty (default) POSTs to ``endpoint`` as-is (a single MCP
-                front-door URL).
-            health_path: Path appended to ``endpoint`` for the health probe.
+            jsonrpc_path: Path appended to the base ``endpoint`` for the
+                JSON-RPC POST. Default ``/v1/sandbox/mcp`` (the sandbox-mcp MCP
+                front door — reconciled seam #2).
+            health_path: Path appended to the base ``endpoint`` for the health
+                probe. Default ``/health`` (un-versioned, un-authed).
         """
         self._endpoint = (config.endpoint or "").rstrip("/")
         self._api_key = config.api_key or ""

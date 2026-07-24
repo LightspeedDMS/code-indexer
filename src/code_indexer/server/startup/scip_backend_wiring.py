@@ -127,3 +127,88 @@ def build_scip_generator(
         max_workers=max_workers,
         workspace_id=workspace_id,
     )
+
+
+def build_scip_generator_for_golden_repo(
+    config: Any,
+    repo_root: Path,
+    *,
+    golden_repo_manager: Any,
+    alias: str,
+    max_workers: int = 4,
+) -> Optional[Any]:
+    """Build a ``SCIPGenerator`` for a golden repo, resolving its workspace_id.
+
+    This is the reconciled EVO-65021 **seam #3**: it bridges stream-02's
+    ``GoldenRepoManager.resolve_workspace_id`` accessor into stream-01's
+    delegated ``build_scip_generator`` so the delegated build names the *real*
+    workspace ``W`` sandbox-mcp must build in.
+
+    Fail-soft contract (FROZEN §6): under ``scip_backend='delegated'``, if the
+    golden repo has no retained workspace_id
+    (``WorkspaceIdNotRetainedError`` — unknown alias, or a repo that predates
+    workspace_id retention and has not been backfilled), this returns ``None``
+    so the caller leaves the repo at the existing ``"skipped: No SCIP index
+    available"`` state **rather than building** against a bogus ``sb-None``. A
+    SCIP-backend gap must never block the enclosing golden-repo index job.
+
+    For the ``local`` backend workspace_id is irrelevant, so this never returns
+    ``None`` for it — it delegates straight to :func:`build_scip_generator`
+    (``workspace_id=None``), preserving today's behaviour.
+
+    Parameters
+    ----------
+    config:
+        Server config (``ServerConfig``) — read for ``scip_backend`` and, when
+        delegated, the ``workspace_mcp`` block (endpoint + api_key).
+    repo_root:
+        Golden-repo root (== the sandbox ``/workspace`` mount).
+    golden_repo_manager:
+        The ``GoldenRepoManager`` exposing ``resolve_workspace_id(alias)``.
+    alias:
+        Golden-repo alias whose workspace_id to resolve.
+    max_workers:
+        Passed straight through to ``SCIPGenerator``.
+
+    Returns
+    -------
+    Optional[SCIPGenerator]
+        A configured generator, or ``None`` when the delegated backend must
+        fail-soft (skip SCIP for this repo) because no workspace_id is retained.
+
+    Raises
+    ------
+    RuntimeError
+        Propagated from :func:`build_scip_generator` when the delegated backend
+        is selected but ``workspace_mcp.endpoint`` is unset or sandbox-mcp is
+        unreachable (a misconfiguration/outage that fails loud at wiring time).
+    """
+    # Lazy import to avoid a module-load dependency on the (heavy) repositories
+    # package and any import cycle.
+    from code_indexer.server.repositories.golden_repo_manager import (  # noqa: PLC0415
+        WorkspaceIdNotRetainedError,
+    )
+
+    backend_type = getattr(config, "scip_backend", "local") or "local"
+
+    workspace_id: Optional[str] = None
+    if backend_type == "delegated":
+        try:
+            workspace_id = golden_repo_manager.resolve_workspace_id(alias)
+        except WorkspaceIdNotRetainedError as exc:
+            # Fail-soft: no real workspace to name → skip SCIP for this repo.
+            logger.warning(
+                "EVO-65021: skipping delegated SCIP for golden repo '%s' — no "
+                "retained workspace_id (%s). Repo stays at 'skipped: No SCIP "
+                "index available'; the index job is not blocked.",
+                alias,
+                exc,
+            )
+            return None
+
+    return build_scip_generator(
+        config,
+        repo_root,
+        workspace_id=workspace_id,
+        max_workers=max_workers,
+    )

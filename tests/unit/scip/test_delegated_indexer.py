@@ -271,6 +271,44 @@ class TestDelegatedIndexerFailure:
         fake.post.assert_not_called()
 
 
+class TestDelegatedIndexerTransport:
+    """EVO-65021 seam #2: JSON-RPC route + health route match the sandbox contract."""
+
+    def test_post_targets_v1_sandbox_mcp_front_door(self, tmp_path):
+        """endpoint is the sandbox-mcp BASE url; POST appends /v1/sandbox/mcp."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        (output_dir / "index.scip").write_bytes(b"\x00")
+
+        fake = _fake_requests(
+            post_return=_fake_response(
+                payload=_rpc_result(exit_code=0, output="", duration_ms=1)
+            )
+        )
+        indexer = DelegatedIndexer(
+            config=SimpleNamespace(endpoint="http://sandbox-mcp:8200", api_key="tok"),
+            repo_root=tmp_path,
+        )
+        indexer._requests = lambda: fake  # type: ignore[method-assign]
+
+        indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        # Default JSON-RPC front door per the authoritative sandbox contract.
+        assert fake.post.call_args.args[0] == "http://sandbox-mcp:8200/v1/sandbox/mcp"
+
+    def test_health_targets_unversioned_health_route(self, tmp_path):
+        fake = _fake_requests(get_return=_fake_response(status_code=200))
+        indexer = DelegatedIndexer(
+            config=SimpleNamespace(endpoint="http://sandbox-mcp:8200", api_key="tok"),
+            repo_root=tmp_path,
+        )
+        indexer._requests = lambda: fake  # type: ignore[method-assign]
+        assert indexer.is_available() is True
+        # Health is un-versioned (no /v1 prefix) per the sandbox contract.
+        assert fake.get.call_args.args[0] == "http://sandbox-mcp:8200/health"
+
+
 class TestDelegatedIndexerHealth:
     def test_is_available_true_on_2xx(self, tmp_path):
         fake = _fake_requests(get_return=_fake_response(status_code=200))
