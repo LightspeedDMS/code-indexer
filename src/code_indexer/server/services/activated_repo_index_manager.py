@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, cast
 
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
@@ -330,7 +330,7 @@ class ActivatedRepoIndexManager:
         status = {
             "semantic": self._get_semantic_status(repo_path),
             "fts": self._get_fts_status(repo_path),
-            "temporal": self._get_temporal_status(repo_path),
+            "temporal": self._get_temporal_status(repo_path, repo_alias, username),
             "scip": self._get_scip_status(repo_path),
         }
 
@@ -946,7 +946,65 @@ class ActivatedRepoIndexManager:
             )
             return {"status": "not_indexed"}
 
-    def _get_temporal_status(self, repo_path: Path) -> Dict[str, Any]:
+    def _resolve_relocated_temporal_dir(
+        self, legacy_index_path: Path, repo_alias: str, username: str
+    ) -> Optional[Path]:
+        """Resolver-aware fallback (GitHub Issue #1459 AC4): the local
+        clone scan found nothing -- check whether temporal data has
+        relocated to Story #1457's golden-owned sister location before
+        concluding "not_indexed". Routes through the SAME
+        TemporalShardResolver/catalog mechanism the query path uses, never
+        a parallel sister-root scan.
+
+        Returns the resolved shard's physical directory (sister v_*
+        version OR in-repo legacy dir) when queryable data is found, else
+        None.
+        """
+        try:
+            metadata = self.activated_repo_manager.get_repository(
+                username, repo_alias, touch=False
+            )
+        except Exception as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-008",
+                    f"Failed to resolve golden_repo_alias for activated repo "
+                    f"'{repo_alias}' (user '{username}'): {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-008"),
+            )
+            return None
+        if not metadata:
+            return None
+        golden_repo_alias = metadata.get("golden_repo_alias")
+        if not isinstance(golden_repo_alias, str) or not golden_repo_alias:
+            return None
+
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
+        )
+
+        golden_repos_dir = (
+            Path(self.activated_repo_manager.activated_repos_dir).parent
+            / "golden-repos"
+        )
+        temporal_status = get_temporal_repo_status(
+            golden_repos_dir=golden_repos_dir,
+            repo_alias=golden_repo_alias,
+            legacy_index_path=legacy_index_path,
+        )
+        if temporal_status.is_queryable and temporal_status.resolved_path:
+            # mypy workaround: this file resolves under a src.-prefixed
+            # module identity when checked from the repo root, which
+            # otherwise infers this cross-module attribute access as Any
+            # (same pre-existing project quirk collection_migration.py's
+            # bool(...) wrap documents for its own analogous case).
+            return cast(Path, temporal_status.resolved_path)
+        return None
+
+    def _get_temporal_status(
+        self, repo_path: Path, repo_alias: str, username: str
+    ) -> Dict[str, Any]:
         """Get temporal index status."""
         from code_indexer.services.temporal.temporal_collection_naming import (
             is_temporal_collection as _is_temporal,
@@ -962,11 +1020,40 @@ class ActivatedRepoIndexManager:
             None,
         )
 
+        if temporal_dir is not None and not (temporal_dir / "hnsw_index.bin").exists():
+            # Issue #1459 Finding 1b Site B: a name-matched local directory
+            # with a metadata.json completion marker is not sufficient to
+            # report a positive status -- it must also have a working
+            # HNSW. Without this check, a genuine crash-window state (rows
+            # + metadata.json written, hnsw_index.bin not yet built) would
+            # be reported as a false-positive "up_to_date"/"stale" status.
+            # Reset to None so execution falls through into the SAME
+            # resolver-based fallback below that already handles "nothing
+            # found locally" -- never a third code path.
+            temporal_dir = None
+
+        resolved_via_sister = False
         if temporal_dir is None or not temporal_dir.exists():
-            return {"status": "not_indexed"}
+            resolved_temporal_dir = self._resolve_relocated_temporal_dir(
+                index_dir, repo_alias, username
+            )
+            if resolved_temporal_dir is None:
+                return {"status": "not_indexed"}
+            temporal_dir = resolved_temporal_dir
+            resolved_via_sister = True
 
         metadata_file = temporal_dir / "metadata.json"
         if not metadata_file.exists():
+            if resolved_via_sister:
+                # Sister-relocated shards do not (yet) carry the legacy
+                # metadata.json in-repo TemporalIndexer writes (Story #1457
+                # AC6's build machinery writes collection_meta.json +
+                # chunks.db + hnsw_index.bin, not this file) -- report a
+                # queryable-but-no-detail status rather than falsely
+                # claiming "not_indexed".
+                return {"status": "up_to_date"}
+            # Local in-repo shard missing metadata.json -- pre-existing
+            # behavior preserved exactly (regression safety).
             return {"status": "not_indexed"}
 
         try:

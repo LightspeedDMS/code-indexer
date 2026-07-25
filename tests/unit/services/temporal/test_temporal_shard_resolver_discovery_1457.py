@@ -65,6 +65,7 @@ def test_resolve_overlapping_shards_filters_by_date_range_via_sister_pointers(
             / "v_1700000000"
         )
         version_dir.mkdir(parents=True)
+        (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
         resolver._alias_manager.create_alias(
             f"evolution-temporal-voyage_code_3-{suffix}", str(version_dir)
         )

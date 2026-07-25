@@ -68,6 +68,59 @@ def test_resolve_returns_sister_pointer_when_alias_pointer_exists(tmp_path):
     assert result.physical_name == "code-indexer-temporal-voyage_code_3-2024Q1"
 
 
+def test_resolve_sister_pointer_not_queryable_without_hnsw_index(tmp_path):
+    """Issue #1459 Finding 1: a sister pointer whose target directory has
+    committed data (chunks.db, or any file) but NO hnsw_index.bin must
+    resolve is_queryable=False -- NOT the previously hardcoded True. This
+    is a genuine crash-window state: publish-last ordering is aspirational,
+    not enforced, so queryability must be verified per-read (defense in
+    depth), never assumed from publish ordering."""
+    resolver = _make_resolver(tmp_path, repo_alias="evolution")
+    sister_version_dir = (
+        tmp_path
+        / "sister"
+        / ".versioned"
+        / "evolution-temporal-voyage_code_3-2024Q1"
+        / "v_1700000000"
+    )
+    sister_version_dir.mkdir(parents=True)
+    (sister_version_dir / "chunks.db").write_bytes(b"fake-real-data-no-hnsw")
+    resolver._alias_manager.create_alias(
+        "evolution-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
+    )
+
+    result = resolver.resolve("voyage_code_3", "2024Q1")
+
+    assert result is not None
+    assert result.source == TemporalShardSource.SISTER_POINTER
+    assert result.is_queryable is False
+
+
+def test_resolve_sister_pointer_queryable_with_hnsw_index(tmp_path):
+    """Issue #1459 Finding 1 (defense-in-depth positive case): a sister
+    pointer whose target directory has a real hnsw_index.bin resolves
+    is_queryable=True."""
+    resolver = _make_resolver(tmp_path, repo_alias="evolution")
+    sister_version_dir = (
+        tmp_path
+        / "sister"
+        / ".versioned"
+        / "evolution-temporal-voyage_code_3-2024Q1"
+        / "v_1700000000"
+    )
+    sister_version_dir.mkdir(parents=True)
+    (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
+    resolver._alias_manager.create_alias(
+        "evolution-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
+    )
+
+    result = resolver.resolve("voyage_code_3", "2024Q1")
+
+    assert result is not None
+    assert result.source == TemporalShardSource.SISTER_POINTER
+    assert result.is_queryable is True
+
+
 def test_resolve_falls_back_to_in_repo_legacy_when_rows_exist_and_no_pointer(tmp_path):
     """No sister pointer, but the in-repo legacy shard has real committed
     rows (via the row-existence scan) -- resolve to IN_REPO_LEGACY, is_queryable

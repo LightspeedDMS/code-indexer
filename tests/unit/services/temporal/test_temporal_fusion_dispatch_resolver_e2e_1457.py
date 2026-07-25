@@ -82,6 +82,7 @@ def test_resolver_threads_through_discovery_and_pin_end_to_end(tmp_path):
         / "v_1700000000"
     )
     version_dir.mkdir(parents=True)
+    (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
     alias_manager.create_alias(
         "evolution-temporal-voyage_code_3-2024Q1", str(version_dir)
     )
@@ -201,6 +202,7 @@ def test_pin_exhaustion_surfaces_as_explicit_warning(tmp_path):
     for i in range(4):
         v = sister_root / ".versioned" / pointer_namespace / f"v_170000000{i}"
         v.mkdir(parents=True)
+        (v / "hnsw_index.bin").write_bytes(b"fake-hnsw")
         versions.append(v)
     alias_manager.create_alias(pointer_namespace, str(versions[0]))
 

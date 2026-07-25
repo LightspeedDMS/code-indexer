@@ -174,6 +174,39 @@ def _get_background_job_manager():
     return manager
 
 
+def _resolve_golden_repo_alias_for_activated_repo(
+    activated_manager, username: str, user_alias: str
+) -> Optional[str]:
+    """Resolve the underlying golden repo alias for an activated repo.
+
+    GitHub Issue #1459 AC4: the resolver-aware temporal-status helper needs
+    the golden repo's BARE alias (never the activated repo's own
+    user_alias) to build the sister-location pointer namespace. Reuses the
+    `golden_repo_alias` field ActivatedRepoManager.get_repository() already
+    tracks.
+
+    Returns None if the activated repo cannot be found or has no tracked
+    golden_repo_alias (e.g. a composite repo with no single backing golden
+    repo) -- callers must treat None as "cannot resolve sister-location
+    temporal data for this repo", not raise.
+    """
+    try:
+        metadata = activated_manager.get_repository(username, user_alias, touch=False)
+    except Exception as exc:
+        logger.warning(
+            "Failed to resolve golden_repo_alias for activated repo "
+            "'%s' (user '%s'): %s",
+            user_alias,
+            username,
+            exc,
+        )
+        return None
+    if not metadata:
+        return None
+    golden_alias = metadata.get("golden_repo_alias")
+    return golden_alias if isinstance(golden_alias, str) and golden_alias else None
+
+
 def _check_index_status(index_path: Path, index_type: str) -> IndexStatus:
     """
     Check the status of a specific index.
@@ -304,10 +337,19 @@ async def get_indexes_status(
         fts_path = index_dir.parent / "tantivy_index"
         indexes.append(_check_index_status(fts_path, "fts"))
 
-        # Temporal index (any provider-aware or legacy temporal collection)
+        # Temporal index (any provider-aware or legacy temporal collection).
+        # Local-clone scan preserved as the baseline (regression safety);
+        # then resolver-aware detection (GitHub Issue #1459 AC4) overrides
+        # with the resolved sister-location hnsw_index.bin when temporal
+        # data has relocated per Story #1457 -- routes through the SAME
+        # TemporalShardResolver/catalog mechanism the query path uses,
+        # never a parallel sister-root scan.
         from code_indexer.services.temporal.temporal_collection_naming import (
             LEGACY_TEMPORAL_COLLECTION,
             is_temporal_collection as _is_temporal,
+        )
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
         )
 
         temporal_hnsw = next(
@@ -320,6 +362,22 @@ async def get_indexes_status(
             ),
             index_dir / LEGACY_TEMPORAL_COLLECTION / "hnsw_index.bin",
         )
+
+        golden_repo_alias_for_temporal = _resolve_golden_repo_alias_for_activated_repo(
+            activated_manager, target_username, user_alias
+        )
+        if golden_repo_alias_for_temporal:
+            golden_repos_dir = (
+                Path(activated_manager.activated_repos_dir).parent / "golden-repos"
+            )
+            temporal_status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=golden_repo_alias_for_temporal,
+                legacy_index_path=index_dir,
+            )
+            if temporal_status.is_queryable and temporal_status.resolved_path:
+                temporal_hnsw = temporal_status.resolved_path / "hnsw_index.bin"
+
         indexes.append(_check_index_status(temporal_hnsw, "temporal"))
 
         # SCIP index

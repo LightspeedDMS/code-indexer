@@ -82,6 +82,7 @@ def test_resolver_discovers_via_sister_pointer_not_iterdir(tmp_path):
         / "v_1700000000"
     )
     version_dir.mkdir(parents=True)
+    (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
     resolver._alias_manager.create_alias(
         "evolution-temporal-voyage_code_3-2024Q1", str(version_dir)
     )
@@ -136,6 +137,7 @@ def test_resolver_date_range_filtering_still_applies(tmp_path):
             / "v_1700000000"
         )
         version_dir.mkdir(parents=True)
+        (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
         resolver._alias_manager.create_alias(
             f"evolution-temporal-voyage_code_3-{suffix}", str(version_dir)
         )

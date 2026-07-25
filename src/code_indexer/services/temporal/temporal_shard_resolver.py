@@ -214,10 +214,16 @@ class ResolvedTemporalShard:
             resolves to.
         is_queryable: True if this shard is currently searchable (has a
             working HNSW). Distinct from data-existence (the row-existence
-            scan) -- a SISTER_POINTER result is always queryable
-            (publish-last ordering guarantees hnsw_index.bin exists before
-            the pointer is created); an IN_REPO_LEGACY result is queryable
-            iff its hnsw_index.bin exists.
+            scan). Queryability is verified per-read for BOTH sources by
+            checking hnsw_index.bin presence at the resolved path -- it is
+            NEVER assumed from publish ordering. Publish-last ordering
+            (build hnsw_index.bin, THEN create the pointer) is the intended
+            design for SISTER_POINTER, but that ordering is not enforced by
+            this resolver -- a crash between those two steps, or any other
+            unforeseen inconsistency, can still leave a pointer referencing
+            a version without a working HNSW. This field always reflects
+            the real, current on-disk state (Issue #1459 Finding 1:
+            defense-in-depth, not an assumed invariant).
     """
 
     pointer_namespace: str
@@ -301,12 +307,19 @@ class TemporalShardResolver:
 
         target_path = self._alias_manager.read_alias(pointer_namespace)
         if target_path is not None:
+            # Issue #1459 Finding 1: verify queryability per-read (defense
+            # in depth) rather than assuming publish-last ordering always
+            # holds -- a crash between building hnsw_index.bin and creating
+            # the pointer, or any other unforeseen inconsistency, can leave
+            # a pointer referencing a version with committed data but no
+            # working HNSW.
+            is_queryable = (Path(target_path) / "hnsw_index.bin").exists()
             return ResolvedTemporalShard(
                 pointer_namespace=pointer_namespace,
                 physical_name=physical_name,
                 path=Path(target_path),
                 source=TemporalShardSource.SISTER_POINTER,
-                is_queryable=True,
+                is_queryable=is_queryable,
             )
 
         legacy_path = self._legacy_index_path / physical_name

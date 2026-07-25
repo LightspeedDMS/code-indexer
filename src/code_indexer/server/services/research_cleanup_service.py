@@ -113,7 +113,16 @@ def make_db_live_folder_provider(db_path: str) -> Callable[[], Set[str]]:
     """
 
     def _provider() -> Set[str]:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        # Issue #1459 code-review sweep: a naive f"file:{db_path}?mode=ro"
+        # string mis-parses any db_path containing a URI-special character
+        # ('?', '#', '%', spaces) -- SQLite's URI parser reads a literal
+        # '?'/'#' in the path as the start of the query string, truncating
+        # the path before "mode=ro" is even seen. Path.resolve().as_uri()
+        # produces a correctly percent-encoded file:// URI (same fix as
+        # storage/sqlite_chunk_store.py's ChunkStore._open_connection /
+        # chunk_store_has_real_data).
+        uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
         try:
             cursor = conn.execute(
                 "SELECT folder_path FROM research_sessions "

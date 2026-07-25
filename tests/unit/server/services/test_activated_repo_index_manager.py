@@ -311,6 +311,14 @@ class TestGetIndexStatus:
         metadata_file.write_text(
             json.dumps({"last_indexed": old_timestamp, "commit_count": 100})
         )
+        # Issue #1459 Finding 1b Site B: in real production, TemporalIndexer
+        # writes metadata.json as its completion marker only AFTER the HNSW
+        # index is built, so hnsw_index.bin always exists whenever
+        # metadata.json exists for a genuinely-completed legacy in-repo
+        # temporal index. This fixture was missing the file as a testing
+        # shortcut -- adding it makes the fixture represent
+        # genuinely-complete local data.
+        (temporal_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
 
         index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
             repo_path

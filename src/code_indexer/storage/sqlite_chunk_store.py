@@ -51,12 +51,15 @@ Two write/open modes
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Any, Dict, Literal, Optional, Sequence, Union
 
 import numpy as np
 import zstandard
+
+logger = logging.getLogger(__name__)
 
 _VECTOR_DTYPE = "<f4"  # little-endian float32, per AC3
 
@@ -144,7 +147,18 @@ class ChunkStore:
 
     def _open_connection(self) -> sqlite3.Connection:
         if self._immutable:
-            uri = f"file:{self.db_path}?immutable=1"
+            # Issue #1459 remediation (post-review follow-up, same class as
+            # round-2 Finding A): a naive f"file:{path}?immutable=1" string
+            # mis-parses any path containing URI-special characters
+            # ('?', '#', '%', spaces, unicode) -- SQLite's URI parser reads
+            # a literal '?'/'#' in the path as the start of the
+            # query/fragment, truncating the path before "immutable=1" is
+            # even seen. This either fails to find the real file (false
+            # "no data") or opens the truncated path in SQLite's default
+            # read-write-create mode, creating a stray file --
+            # Path.resolve().as_uri() produces a correctly percent-encoded
+            # file:// URI, matching chunk_store_has_real_data's fix.
+            uri = f"{Path(self.db_path).resolve().as_uri()}?immutable=1"
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(str(self.db_path))
@@ -545,3 +559,163 @@ def open_chunk_store_for_path(
     predicate = _resolve_immutable_predicate()
     immutable = predicate(collection_path)
     return ChunkStore(db_path, immutable=immutable)
+
+
+# ---------------------------------------------------------------------------
+# Read-only, side-effect-free row-existence check (Issue #1459 remediation
+# Findings 2/3/4)
+# ---------------------------------------------------------------------------
+
+_VALID_ON_ERROR_VALUES = ("treat_absent", "raise")
+
+# Round 2 remediation, Finding B (refined by round 4): substrings of
+# sqlite3.OperationalError messages, matched via stable,
+# version-independent text -- the stdlib sqlite3 module does not expose a
+# clean structured errno for this distinction.
+#
+# "no such table" is UNAMBIGUOUS: the file positively opened (SQLite
+# reached the point of resolving a table name), so it genuinely has no
+# "chunks" table yet -- always "no data yet", regardless of on_error.
+#
+# "unable to open database file" is AMBIGUOUS by itself -- round 4
+# remediation found SQLite emits this IDENTICAL message for BOTH a
+# genuinely-missing file AND an existing-but-unreadable file (permission
+# denied, chmod 000). Message content alone cannot distinguish them, so
+# this substring is NOT sufficient on its own to conclude "no data yet" --
+# see the explicit Path.exists() check in chunk_store_has_real_data below.
+_MISSING_SCHEMA_SUBSTRING = "no such table"
+_UNABLE_TO_OPEN_SUBSTRING = "unable to open database file"
+
+
+def chunk_store_has_real_data(
+    db_path: Union[str, Path],
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
+) -> bool:
+    """Read-only, side-effect-free row-existence check for a chunks.db file.
+
+    Opens ``db_path`` in SQLite read-only URI mode (``mode=ro``) -- unlike a
+    normal ``sqlite3.connect()``, ``mode=ro`` NEVER creates a missing file,
+    so a status/health probe never has a write side effect (Issue #1459
+    remediation Finding 2). The URI is built via ``Path.resolve().as_uri()``
+    (round 2 remediation Finding A) so that path components containing
+    URI-special characters (``?``, ``#``, ``%``, spaces, unicode) are
+    correctly percent-encoded -- a naive ``f"file:{path}?mode=ro"`` string
+    gets misparsed by SQLite's URI parser (a literal ``?``/``#`` in the path
+    is read as the start of the query/fragment, truncating the path),
+    which both produces a false negative AND, since the truncated "path" is
+    then opened in the DEFAULT read-write-create mode instead of the
+    intended ``mode=ro``, creates stray files at the misparsed sub-paths --
+    a second instance of the exact "must never create files" contract
+    violation this function exists to prevent.
+
+    A GENUINELY MISSING file (``not Path(db_path).exists()``), or an
+    existing-but-incomplete file with no "chunks" table yet, means
+    genuinely no data yet -- returns False silently, always, regardless of
+    ``on_error``. Round 4 remediation: SQLite's "unable to open database
+    file" message is AMBIGUOUS on its own -- it is emitted identically for
+    a genuinely-missing file AND for an existing-but-permission-denied
+    file, so this function performs an explicit filesystem existence check
+    before treating that message as "no data yet"; message content alone
+    is never sufficient (see ``_MISSING_SCHEMA_SUBSTRING`` /
+    ``_UNABLE_TO_OPEN_SUBSTRING``, and the ``Path.exists()`` check in the
+    implementation, for the exact distinction).
+
+    Any OTHER ``sqlite3.OperationalError`` -- an EXISTING file that could
+    not be opened (permission denied, e.g. ``chmod 000``), "database is
+    locked" from a real concurrent exclusive lock, or a disk I/O error --
+    is NOT a "no data yet" state -- it is a genuine operational problem,
+    and is dispatched through the SAME ``on_error`` contract as a
+    genuinely CORRUPT file (``sqlite3.DatabaseError``, e.g. "file is not a
+    database") (Finding 3 / round 2 remediation Finding B, refined by
+    round 4 for the permission-denied case):
+      - "treat_absent" (default): log a WARNING and return False. For
+        read-only reporting surfaces (golden_repo_manager.py,
+        repository_health_aggregator.py) that must degrade gracefully,
+        never crash.
+      - "raise": re-raise the original exception unchanged. For
+        temporal_blank_out.py's destructive path, which must fail loudly
+        on uncertain state (including "we don't know, the database is
+        locked") rather than silently proceeding toward a hard-delete
+        decision (Messi Rule #13).
+
+    Never instantiates a full ``ChunkStore`` (which would trigger
+    schema-creation side effects even hypothetically) -- queries
+    ``SELECT COUNT(*) FROM chunks`` directly via the read-only connection.
+
+    Raises:
+        ValueError: If ``on_error`` is not one of "treat_absent"/"raise" --
+            an unrecognized value must fail loudly, never silently fall
+            back to either behavior.
+    """
+    if on_error not in _VALID_ON_ERROR_VALUES:
+        raise ValueError(
+            f"chunk_store_has_real_data: on_error must be one of "
+            f"{_VALID_ON_ERROR_VALUES!r}, got {on_error!r}"
+        )
+
+    # resolve() never raises for a missing file (strict=False default) --
+    # it is required because Path.as_uri() only accepts absolute paths, and
+    # it produces the correct percent-encoding for URI-special characters
+    # via the stdlib's own file-URI construction (round 2 Finding A).
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        return bool(row is not None and int(row[0]) > 0)
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if _MISSING_SCHEMA_SUBSTRING in message:
+            # Unambiguous: the file positively opened, it just has no
+            # "chunks" table yet -- always "no data yet".
+            return False
+        if _UNABLE_TO_OPEN_SUBSTRING in message:
+            # Round 4 remediation: this message alone is AMBIGUOUS --
+            # SQLite emits it for both a genuinely-missing file AND an
+            # existing-but-unreadable file (permission denied). Only a
+            # genuinely-absent path is unconditional "no data yet"; an
+            # existing-but-unopenable path is a real operational failure
+            # and must be dispatched through on_error like any other
+            # operational problem, never silently swallowed.
+            if not Path(db_path).exists():
+                return False
+            if on_error == "raise":
+                raise
+            logger.warning(
+                "chunk_store_has_real_data: chunks.db at %s exists but "
+                "could not be opened (%s) -- treating as no data present",
+                db_path,
+                exc,
+            )
+            return False
+        # Any other OperationalError (e.g. "database is locked" from a
+        # real concurrent writer) -- NOT "no data yet". Round 2 remediation
+        # Finding B: dispatch through the same on_error contract as
+        # DatabaseError below, never silently swallow.
+        if on_error == "raise":
+            raise
+        logger.warning(
+            "chunk_store_has_real_data: chunks.db at %s raised an "
+            "unexpected OperationalError (%s) -- treating as no data "
+            "present",
+            db_path,
+            exc,
+        )
+        return False
+    except sqlite3.DatabaseError as exc:
+        # A sibling subclass of OperationalError, NOT re-caught by the
+        # branch above -- genuine corruption (e.g. "file is not a
+        # database").
+        if on_error == "raise":
+            raise
+        logger.warning(
+            "chunk_store_has_real_data: chunks.db at %s appears corrupt "
+            "(%s) -- treating as no data present",
+            db_path,
+            exc,
+        )
+        return False
+    finally:
+        if conn is not None:
+            conn.close()

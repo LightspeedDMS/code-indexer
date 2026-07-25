@@ -7624,12 +7624,32 @@ def _status_impl(ctx):
                                     "HNSW Index: ⚠️ Missing (queries will be slow)"
                                 )
 
-                            # ID index check (binary file that persists to disk)
+                            # ID index check (binary file that persists to disk).
+                            # Issue #1459 AC1/AC5: id_index.bin is PERMANENTLY,
+                            # DELIBERATELY never written for a CHUNKS_DB-layout
+                            # collection (Story #1456) -- its absence there is
+                            # the correct, expected state, not a warning
+                            # condition. Layout decision routes through the
+                            # single canonical resolver, never an independent
+                            # flag/file check.
+                            from .storage.shared.chunk_layout import (
+                                ChunkLayout,
+                                resolve_chunk_layout,
+                            )
+
+                            semantic_chunk_layout = resolve_chunk_layout(
+                                collection_path
+                            )
                             id_index_file = collection_path / "id_index.bin"
                             if id_index_file.exists():
                                 size_kb = id_index_file.stat().st_size / 1024
                                 index_files_status.append(
                                     f"ID Index: ✅ {size_kb:.0f} KB"
+                                )
+                            elif semantic_chunk_layout == ChunkLayout.CHUNKS_DB:
+                                index_files_status.append(
+                                    "ID Index: ➖ N/A (retired -- consolidated "
+                                    "chunks.db storage)"
                                 )
                             else:
                                 index_files_status.append(
@@ -7755,7 +7775,14 @@ def _status_impl(ctx):
                                 missing_components.append("projection_matrix")
                             if not has_hnsw_index:
                                 missing_components.append("hnsw")
-                            if not has_id_index:
+                            # Issue #1459 AC1: a CHUNKS_DB-layout collection's
+                            # missing id_index.bin is permanent/expected, not a
+                            # recoverable gap -- never surface the bogus
+                            # "rebuild id_index" recovery instruction for it.
+                            if (
+                                not has_id_index
+                                and semantic_chunk_layout != ChunkLayout.CHUNKS_DB
+                            ):
                                 missing_components.append("id_index")
 
                             # Store for later display
@@ -7843,11 +7870,30 @@ def _status_impl(ctx):
                                 "HNSW Index: ⚠️ Missing"
                             )
 
-                        # ID index
+                        # ID index. Issue #1459 AC1/AC5: same layout-aware
+                        # treatment as the semantic collection above --
+                        # id_index.bin is permanently retired for a
+                        # CHUNKS_DB-layout collection, so its absence there is
+                        # not a warning condition.
+                        from .storage.shared.chunk_layout import (
+                            ChunkLayout as _MultimodalChunkLayout,
+                            resolve_chunk_layout as _resolve_multimodal_chunk_layout,
+                        )
+
+                        multimodal_chunk_layout = _resolve_multimodal_chunk_layout(
+                            multimodal_collection
+                        )
                         if multimodal_id_index.exists():
                             size_kb = multimodal_id_index.stat().st_size / 1024
                             multimodal_index_files_status.append(
                                 f"ID Index: ✅ {size_kb:.0f} KB"
+                            )
+                        elif (
+                            multimodal_chunk_layout == _MultimodalChunkLayout.CHUNKS_DB
+                        ):
+                            multimodal_index_files_status.append(
+                                "ID Index: ➖ N/A (retired -- consolidated "
+                                "chunks.db storage)"
                             )
                         else:
                             multimodal_index_files_status.append("ID Index: ⚠️ Missing")

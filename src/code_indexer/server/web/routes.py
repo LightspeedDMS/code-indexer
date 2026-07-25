@@ -3046,11 +3046,38 @@ def _resolve_alias_metadata(
     return global_alias, globally_queryable, version, last_refresh, index_path
 
 
-def _detect_index_flags(index_path: Optional[str]) -> dict:
+def _golden_repos_dir_from_env() -> Path:
+    """Resolve the golden-repos root from CIDX_SERVER_DATA_DIR.
+
+    Mirrors the SAME `os.environ.get("CIDX_SERVER_DATA_DIR",
+    os.path.expanduser("~/.cidx-server"))` bootstrap-config convention
+    already used at multiple other call sites in this module (e.g.
+    `_get_golden_repos_list`, `_get_single_repo_enriched`) -- extracted
+    here as a single named helper rather than a fourth inline copy, for
+    GitHub Issue #1459 AC4's resolver-aware temporal detection.
+    """
+    server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
+    )
+    return Path(server_data_dir) / "data" / "golden-repos"
+
+
+def _detect_index_flags(
+    index_path: Optional[str], repo_alias: Optional[str] = None
+) -> dict:
     """
     Return has_semantic/has_fts/has_temporal/has_scip flags via filesystem inspection.
 
     All flags default False when index_path is None or the .code-indexer dir is absent.
+
+    Args:
+        index_path: Golden repo clone (or resolved global index) path.
+        repo_alias: The golden repo's BARE alias. When provided AND the
+            local-clone temporal scan finds nothing, temporal detection
+            additionally routes through the shared TemporalShardResolver-
+            based get_temporal_repo_status() helper (GitHub Issue #1459
+            AC4) so temporal data relocated to Story #1457's sister
+            location is still detected, never a false "not indexed".
     """
     flags = {
         "has_semantic": False,
@@ -3086,6 +3113,20 @@ def _detect_index_flags(index_path: Optional[str]) -> dict:
     )
     if temporal_dir is not None:
         flags["has_temporal"] = True
+    elif repo_alias:
+        # Resolver-aware detection (GitHub Issue #1459 AC4): routes through
+        # the SAME TemporalShardResolver/catalog mechanism the query path
+        # uses, never a parallel sister-root scan.
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
+        )
+
+        temporal_status = get_temporal_repo_status(
+            golden_repos_dir=_golden_repos_dir_from_env(),
+            repo_alias=repo_alias,
+            legacy_index_path=index_dir,
+        )
+        flags["has_temporal"] = temporal_status.is_queryable
     scip_dir = (
         index_base / "scip"
     )  # CRITICAL: only .scip.db persists after cidx scip generate
@@ -3188,7 +3229,7 @@ def _get_golden_repos_list(backend_registry=None):
                 index_path = repo.get("clone_path")
             # temporal_status deferred to details partial (_get_single_repo_enriched)
             # to avoid per-alias overhead on initial page load (Finding 3 / AC1).
-            repo.update(_detect_index_flags(index_path))
+            repo.update(_detect_index_flags(index_path, repo_alias=alias))
             cat = category_lookup.get(alias, {})
             repo.update(
                 {
@@ -4079,7 +4120,7 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
     if not g_queryable:
         index_path = repo.get("clone_path")
     repo["temporal_status"] = _load_temporal_status(g_alias, alias)
-    repo.update(_detect_index_flags(index_path))
+    repo.update(_detect_index_flags(index_path, repo_alias=alias))
     cat = _build_category_lookup().get(alias, {})
     repo.update(
         {
