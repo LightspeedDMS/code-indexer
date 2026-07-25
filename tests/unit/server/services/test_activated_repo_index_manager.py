@@ -6,12 +6,17 @@ covering semantic, FTS, temporal, and SCIP index management.
 """
 
 import json
+import logging
+import os
 import pytest
 import tempfile
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any, Dict, List
 from unittest.mock import Mock, patch
+
+import numpy as np
 
 from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
@@ -19,6 +24,59 @@ from code_indexer.server.services.activated_repo_index_manager import (
 from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
 )
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+# Round-7 dual-review Issue 2 (GitHub Issue #1476): permission modes used
+# to simulate/restore a real unreadable .code-indexer/index directory.
+_UNREADABLE_DIR_MODE = 0o000
+_RESTORED_DIR_MODE = 0o755
+
+
+def _build_real_semantic_collection(
+    index_dir: Path,
+    collection_name: str,
+    payload_paths: List[str],
+    vector_size: int = 32,
+) -> Dict[str, Any]:
+    """Build a REAL, loadable semantic collection using the actual
+    production writer (FilesystemVectorStore) -- GitHub Issue #1476 dual
+    review Finding 4: tests that claim to prove real indexed-data
+    detection must exercise a genuinely real hnsw_index.bin +
+    collection_meta.json, not hand-crafted JSON + a fake byte payload.
+
+    Args:
+        index_dir: The ``.code-indexer/index`` directory to build inside.
+        collection_name: Embedder-slug collection directory name (e.g.
+            "voyage-code-3").
+        payload_paths: One entry per vector upserted; duplicates produce
+            the same file (drives unique_file_count deterministically).
+        vector_size: Embedding dimension for the throwaway test vectors.
+
+    Returns:
+        The real collection_meta.json contents the production writer
+        wrote, so callers can assert against actual values rather than
+        guessing field names/shapes.
+    """
+    index_dir.mkdir(parents=True, exist_ok=True)
+    store = FilesystemVectorStore(index_dir, project_root=index_dir)
+    store.create_collection(collection_name, vector_size=vector_size)
+
+    points = [
+        {
+            "id": f"vec_{i}",
+            "vector": np.random.randn(vector_size).tolist(),
+            "payload": {"path": path},
+        }
+        for i, path in enumerate(payload_paths)
+    ]
+    store.begin_indexing(collection_name)
+    store.upsert_points(collection_name, points)
+    store.end_indexing(collection_name)
+
+    meta_file = index_dir / collection_name / "collection_meta.json"
+    with open(meta_file) as f:
+        result: Dict[str, Any] = json.load(f)
+    return result
 
 
 @pytest.fixture
@@ -198,22 +256,18 @@ class TestGetIndexStatus:
     """Tests for get_index_status method."""
 
     def test_get_index_status_all_current(self, index_manager, temp_data_dir):
-        """Test getting status when all indexes are up-to-date."""
-        # Create mock .code-indexer directory with metadata
+        """Test getting status when all indexes are up-to-date.
+
+        Issue #1476 dual-review Finding 4: previously wrote the legacy
+        top-level metadata.json (never produced by the real layout) and
+        only asserted key presence -- it passed regardless of whether
+        semantic status was actually correct. Now builds the REAL
+        per-embedder layout and asserts the explicit status value.
+        """
         repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
         index_dir = repo_path / ".code-indexer" / "index"
-        index_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create semantic index metadata
-        metadata_file = index_dir / "metadata.json"
-        metadata_file.write_text(
-            json.dumps(
-                {
-                    "last_indexed": datetime.now(timezone.utc).isoformat(),
-                    "file_count": 100,
-                    "index_size_mb": 25.5,
-                }
-            )
+        _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py", "b.py", "c.py"]
         )
 
         # Mock repo path
@@ -229,23 +283,34 @@ class TestGetIndexStatus:
         assert "fts" in status
         assert "temporal" in status
         assert "scip" in status
+        assert status["semantic"]["status"] == "up_to_date"
 
     def test_get_index_status_semantic_details(self, index_manager, temp_data_dir):
-        """Test semantic index status details."""
+        """Test semantic index status details.
+
+        Issue #1476: real semantic metadata lives per-embedder at
+        ``<index_dir>/<embedder>/collection_meta.json`` alongside a real
+        ``hnsw_index.bin`` -- the legacy top-level ``metadata.json`` this
+        test previously wrote is never produced by the current layout.
+        """
         repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
-        index_dir = repo_path / ".code-indexer" / "index"
-        index_dir.mkdir(parents=True, exist_ok=True)
+        collection_dir = repo_path / ".code-indexer" / "index" / "voyage-code-3"
+        collection_dir.mkdir(parents=True, exist_ok=True)
 
         last_indexed = datetime.now(timezone.utc).isoformat()
-        metadata_file = index_dir / "metadata.json"
-        metadata_file.write_text(
+        collection_meta_file = collection_dir / "collection_meta.json"
+        collection_meta_file.write_text(
             json.dumps(
                 {
-                    "last_indexed": last_indexed,
-                    "file_count": 150,
+                    "name": "voyage-code-3",
+                    "vector_size": 1024,
+                    "created_at": "2026-01-01T00:00:00",
+                    "hnsw_index": {"last_rebuild": last_indexed, "vector_count": 300},
+                    "unique_file_count": 150,
                 }
             )
         )
+        (collection_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
 
         index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
             repo_path
@@ -330,6 +395,605 @@ class TestGetIndexStatus:
 
         # Should be stale (>7 days old)
         assert status["temporal"]["status"] == "stale"
+
+
+class TestGetSemanticStatusRealLayoutBug1476:
+    """Regression tests for GitHub Issue #1476.
+
+    _get_semantic_status used to check for a legacy top-level
+    ``.code-indexer/index/metadata.json`` file that the current
+    per-embedder collection layout never produces -- real metadata lives
+    at e.g. ``.code-indexer/index/voyage-code-3/collection_meta.json``
+    alongside a real ``hnsw_index.bin``. A genuinely indexed repo was
+    therefore always reported "not_indexed". These tests build the REAL
+    on-disk per-embedder layout (no mocking of the filesystem/metadata
+    reading logic) to prove the bug and then the fix.
+    """
+
+    def test_get_semantic_status_up_to_date_for_real_per_embedder_layout(
+        self, index_manager, temp_data_dir
+    ):
+        """A REAL per-embedder collection (built via the actual production
+        FilesystemVectorStore writer -- a genuinely loadable hnsw_index.bin
+        and real collection_meta.json, not a hand-crafted fixture) must be
+        detected as 'up_to_date', reading file_count/last_indexed from the
+        REAL schema fields (top-level unique_file_count,
+        hnsw_index.last_rebuild) rather than the legacy metadata.json schema.
+
+        Issue #1476 dual-review Finding 4: the previous version of this
+        test wrote fake placeholder HNSW bytes (b"fake-real-hnsw-data")
+        despite its name/docstring claiming "REAL" -- now it genuinely
+        exercises the production write path.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        real_meta = _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py", "b.py", "c.py", "a.py"]
+        )
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "up_to_date", (
+            "Issue #1476: a genuinely indexed repo (real per-embedder "
+            "collection_meta.json + hnsw_index.bin) must not be reported "
+            f"as not_indexed. Got: {status['semantic']}"
+        )
+        assert status["semantic"]["file_count"] == real_meta["unique_file_count"] == 3
+        assert (
+            status["semantic"]["last_indexed"]
+            == real_meta["hnsw_index"]["last_rebuild"]
+        )
+
+    def test_get_semantic_status_error_on_corrupt_metadata_logs_real_exception(
+        self, index_manager, temp_data_dir, caplog
+    ):
+        """Issue #1476 dual-review Finding 1: a corrupt collection_meta.json
+        on a repo with a REAL, present hnsw_index.bin must not be silently
+        collapsed into 'not_indexed' -- that discards the real
+        HNSW-presence signal discover_health_collections already found.
+        The warning log must also contain the ACTUAL exception text, not a
+        literal unformatted '{e}' placeholder.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        _build_real_semantic_collection(index_dir, "voyage-code-3", ["a.py"])
+
+        # Corrupt the metadata AFTER a real HNSW index was genuinely built.
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        meta_file.write_text("{not valid json!!!")
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        with caplog.at_level(logging.WARNING):
+            status = index_manager.get_index_status(
+                repo_alias="test-repo", username="testuser"
+            )
+
+        assert status["semantic"]["status"] != "not_indexed", (
+            "A real HNSW index exists on disk -- a corrupt metadata file "
+            "must not silently report the repo as never indexed. "
+            f"Got: {status['semantic']}"
+        )
+        assert status["semantic"]["status"] == "error"
+
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any(
+            "{e}" not in msg and "expecting" in msg.lower() for msg in warning_messages
+        ), (
+            "Expected the warning log to contain the REAL exception text "
+            "(a JSON decode error), not a literal unformatted '{e}' "
+            f"placeholder. Captured warnings: {warning_messages}"
+        )
+
+    def test_get_semantic_status_missing_fields_reports_error_not_wrong_data(
+        self, index_manager, temp_data_dir
+    ):
+        """Issue #1476 dual-review Finding 2: unique_file_count and
+        hnsw_index.last_rebuild are NOT interchangeable with
+        hnsw_index.vector_count (chunk count, not file count) or
+        created_at (collection-creation time, not last-rebuild time). Per
+        this project's writer/reader contract (CLAUDE.md 'Chunk Storage
+        Layout'), a genuinely completed collection always has these
+        fields -- their absence is an anomaly that must be surfaced as an
+        explicit error, never silently backfilled with a dimensionally
+        wrong value under the right field name.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        real_meta = _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py", "b.py"]
+        )
+
+        # Simulate an anomalous collection: strip the two fields the fix
+        # must never silently substitute, while keeping their
+        # dimensionally-different siblings (vector_count, created_at)
+        # present -- exactly the scenario that used to produce wrong data.
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        broken_meta = dict(real_meta)
+        del broken_meta["unique_file_count"]
+        broken_meta["hnsw_index"] = dict(broken_meta["hnsw_index"])
+        del broken_meta["hnsw_index"]["last_rebuild"]
+        meta_file.write_text(json.dumps(broken_meta))
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "Missing unique_file_count/hnsw_index.last_rebuild is an "
+            f"anomaly that must be surfaced explicitly. Got: {status['semantic']}"
+        )
+        assert status["semantic"].get("file_count") != broken_meta["hnsw_index"].get(
+            "vector_count"
+        ), "file_count must never silently report the chunk/vector count."
+        assert status["semantic"].get("last_indexed") != broken_meta.get(
+            "created_at"
+        ), (
+            "last_indexed must never silently report created_at "
+            "(collection-creation time) in place of hnsw_index.last_rebuild."
+        )
+
+    def test_get_semantic_status_error_on_non_integer_file_count(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-7 dual-review Issue 1 (HIGH): unique_file_count can be
+        present (non-null, passing the existing is-None check) but
+        wrong-typed -- e.g. a list instead of an int. Without a real
+        type check, this value flows through as file_count, past the
+        Pydantic response layer downstream (routers/indexing.py), and
+        crashes with an unhandled ValidationError -> HTTP 500. Must
+        produce the existing graceful status: "error" instead.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        real_meta = _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py"]
+        )
+
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        broken_meta = dict(real_meta)
+        broken_meta["unique_file_count"] = ["not", "an", "integer"]
+        meta_file.write_text(json.dumps(broken_meta))
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "A list value for unique_file_count must be reported as an "
+            f"explicit error, never pass through as file_count. "
+            f"Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_error_on_non_string_last_rebuild(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-7 dual-review Issue 1 (HIGH): hnsw_index.last_rebuild can
+        be present (non-null) but wrong-typed -- e.g. a list instead of a
+        timestamp string. Must produce the existing graceful
+        status: "error", never pass through as last_indexed.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        real_meta = _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py"]
+        )
+
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        broken_meta = dict(real_meta)
+        broken_meta["hnsw_index"] = dict(broken_meta["hnsw_index"])
+        broken_meta["hnsw_index"]["last_rebuild"] = ["not", "a", "timestamp"]
+        meta_file.write_text(json.dumps(broken_meta))
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "A list value for hnsw_index.last_rebuild must be reported as "
+            "an explicit error, never pass through as last_indexed. "
+            f"Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_error_on_list_metadata_not_object(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-5 dual-review Issue 1 (HIGH): collection_meta.json can be
+        syntactically valid JSON that is NOT a JSON object (e.g. a bare
+        list). json.load() succeeds, but the subsequent .get() calls on a
+        list raise AttributeError, which used to propagate uncaught all
+        the way to an unhandled HTTP 500 at the REST layer instead of the
+        intended graceful status: "error".
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        _build_real_semantic_collection(index_dir, "voyage-code-3", ["a.py"])
+
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        meta_file.write_text("[]")
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        # Must not raise -- must return the graceful error status.
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "A JSON list instead of a JSON object must be reported as an "
+            f"explicit error, never crash. Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_error_on_non_dict_hnsw_index_field(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-5 dual-review Issue 1 (HIGH): the top-level
+        collection_meta.json can itself be a valid dict, but its
+        hnsw_index field can be a non-dict (e.g. a list). The subsequent
+        .get() call on hnsw_metadata must not raise AttributeError.
+
+        Uses a non-EMPTY list ([1, 2, 3]) deliberately: an empty list is
+        falsy and would be silently absorbed by the pre-existing
+        `metadata.get("hnsw_index") or {}` fallback, masking the real
+        crash path this test must exercise.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        real_meta = _build_real_semantic_collection(
+            index_dir, "voyage-code-3", ["a.py"]
+        )
+
+        meta_file = index_dir / "voyage-code-3" / "collection_meta.json"
+        broken_meta = dict(real_meta)
+        broken_meta["hnsw_index"] = [1, 2, 3]
+        meta_file.write_text(json.dumps(broken_meta))
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "A non-dict hnsw_index field must be reported as an explicit "
+            f"error, never crash. Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_selects_configured_active_embedder(
+        self, index_manager, temp_data_dir
+    ):
+        """Issue #1476 dual-review Finding 3: when multiple semantic
+        collections coexist (e.g. an embedder-switch migration window),
+        the repo's own .code-indexer/config.json (embedding_provider +
+        matching provider's model field) is the authoritative source of
+        which one is actually active -- never an arbitrary alphabetical
+        pick. Uses two REAL collections so an alphabetically-first pick
+        would report the WRONG (stale, old-embedder) data.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+
+        # Alphabetically first, deliberately stale/smaller.
+        _build_real_semantic_collection(index_dir, "aaa-old-embedder", ["a.py"])
+        # Alphabetically last, the ACTUAL current embedder per config.json.
+        current_meta = _build_real_semantic_collection(
+            index_dir, "zzz-current-embedder", ["a.py", "b.py", "c.py"]
+        )
+
+        config_dir = repo_path / ".code-indexer"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "embedding_provider": "voyage-ai",
+                    "voyage_ai": {"model": "zzz-current-embedder"},
+                }
+            )
+        )
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "up_to_date"
+        assert (
+            status["semantic"]["file_count"] == current_meta["unique_file_count"] == 3
+        ), (
+            "Must select the collection matching the repo's configured "
+            f"active embedder, not an alphabetically-first pick. "
+            f"Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_ambiguous_multiple_collections_fails_explicitly(
+        self, index_manager, temp_data_dir
+    ):
+        """Issue #1476 dual-review Finding 3: with multiple real semantic
+        collections and no config.json to disambiguate which is active,
+        the function must fail explicitly (anti-fallback, Messi Rule #2)
+        rather than silently picking one.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+
+        _build_real_semantic_collection(index_dir, "aaa-old-embedder", ["a.py"])
+        _build_real_semantic_collection(
+            index_dir, "zzz-current-embedder", ["a.py", "b.py", "c.py"]
+        )
+        # Deliberately no .code-indexer/config.json -- genuinely ambiguous.
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "With no way to determine which of 2 real semantic "
+            "collections is active, must fail explicitly, not silently "
+            f"pick one. Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_single_collection_config_mismatch_fails_explicitly(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-5 dual-review Issue 2 (MEDIUM): the single-collection
+        shortcut must consult config.json when it is present, even when
+        there is only one discovered collection. A real config.json
+        naming a NEW active embedder whose collection has not been built
+        yet (e.g. mid-reindex), with the only collection on disk
+        belonging to the OLD, no-longer-active embedder, must report
+        status: "error" -- never a misleading "up_to_date" implying the
+        configured embedder is fully indexed.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+
+        # The ONLY collection on disk -- belongs to the OLD embedder.
+        _build_real_semantic_collection(index_dir, "old-model", ["a.py"])
+
+        config_dir = repo_path / ".code-indexer"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "embedding_provider": "voyage-ai",
+                    "voyage_ai": {"model": "new-active-model"},
+                }
+            )
+        )
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "error", (
+            "config.json names a different, not-yet-built active "
+            "embedder than the sole collection on disk -- must fail "
+            f"explicitly, not silently trust the stale collection. "
+            f"Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_index_size_scoped_to_active_collection(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-3 dual-review Issue 2: index_size_mb must reflect ONLY the
+        active/selected collection's on-disk size, not the entire
+        .code-indexer/index directory -- which can include a large
+        INACTIVE collection left over from an embedder-switch window
+        (correctly excluded from file_count/last_indexed already via
+        _select_active_semantic_collection, but the size computation was
+        still summing the whole index directory).
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+
+        # A large INACTIVE collection that must NOT be counted.
+        _build_real_semantic_collection(
+            index_dir,
+            "aaa-old-embedder",
+            ["a.py"] * 200,
+            vector_size=512,
+        )
+        # The active, configured collection -- deliberately much smaller.
+        _build_real_semantic_collection(
+            index_dir, "zzz-current-embedder", ["a.py"], vector_size=32
+        )
+
+        config_dir = repo_path / ".code-indexer"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "embedding_provider": "voyage-ai",
+                    "voyage_ai": {"model": "zzz-current-embedder"},
+                }
+            )
+        )
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        active_collection_dir = index_dir / "zzz-current-embedder"
+        expected_bytes = sum(
+            f.stat().st_size for f in active_collection_dir.rglob("*") if f.is_file()
+        )
+        expected_mb = round(expected_bytes / index_manager.BYTES_PER_MB, 2)
+        whole_dir_bytes = sum(
+            f.stat().st_size for f in index_dir.rglob("*") if f.is_file()
+        )
+
+        # Sanity check the fixture actually creates a meaningful size gap,
+        # otherwise this test could pass by rounding coincidence.
+        assert whole_dir_bytes - expected_bytes > 1024 * 1024
+
+        assert status["semantic"]["index_size_mb"] == expected_mb, (
+            "index_size_mb must be scoped to the active collection only, "
+            f"not the whole index directory. Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_ambiguous_logs_real_config_parse_exception(
+        self, index_manager, temp_data_dir, caplog
+    ):
+        """Round-3 dual-review Issue 3 (optional/low): a corrupt
+        .code-indexer/config.json during multi-collection resolution must
+        log the REAL parse exception -- distinguishable in logs from
+        genuine embedder ambiguity (config present and valid, but matches
+        neither collection). The returned status remains "error" either
+        way (not a correctness bug); this only strengthens diagnosability.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+
+        _build_real_semantic_collection(index_dir, "aaa-old-embedder", ["a.py"])
+        _build_real_semantic_collection(
+            index_dir, "zzz-current-embedder", ["a.py", "b.py", "c.py"]
+        )
+
+        config_dir = repo_path / ".code-indexer"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text("{not valid json!!!")
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        with caplog.at_level(logging.WARNING):
+            status = index_manager.get_index_status(
+                repo_alias="test-repo", username="testuser"
+            )
+
+        assert status["semantic"]["status"] == "error"
+
+        warning_messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any(
+            "expecting" in msg.lower() or "json" in msg.lower()
+            for msg in warning_messages
+        ), (
+            "Expected a warning log documenting the REAL config.json parse "
+            f"exception, distinguishable from genuine ambiguity. "
+            f"Captured warnings: {warning_messages}"
+        )
+
+    def test_get_semantic_status_error_on_unreadable_index_directory(
+        self, index_manager, temp_data_dir
+    ):
+        """Round-7 dual-review Issue 2 (HIGH): a real, unreadable
+        .code-indexer/index directory must not crash the route with an
+        unhandled PermissionError -> HTTP 500. Both
+        discover_health_collections and the size-scan rglob touch this
+        directory outside any protective try/except before this fix.
+        Permissions are always restored in finally so this test never
+        leaves broken permissions behind, even on assertion failure.
+        """
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        index_dir = repo_path / ".code-indexer" / "index"
+        _build_real_semantic_collection(index_dir, "voyage-code-3", ["a.py"])
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        os.chmod(index_dir, _UNREADABLE_DIR_MODE)
+        try:
+            status = index_manager.get_index_status(
+                repo_alias="test-repo", username="testuser"
+            )
+        finally:
+            os.chmod(index_dir, _RESTORED_DIR_MODE)
+
+        assert status["semantic"]["status"] == "error", (
+            "An unreadable index directory must be reported as an "
+            f"explicit error, never crash. Got: {status['semantic']}"
+        )
+
+    def test_get_semantic_status_not_indexed_when_index_dir_missing(
+        self, index_manager, temp_data_dir
+    ):
+        """Regression: repo with no .code-indexer/index directory at all
+        must still correctly report not_indexed."""
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        repo_path.mkdir(parents=True, exist_ok=True)
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "not_indexed"
+
+    def test_get_semantic_status_not_indexed_when_collection_incomplete(
+        self, index_manager, temp_data_dir
+    ):
+        """Regression: an index directory exists but the collection never
+        finished building (no hnsw_index.bin yet) must still report
+        not_indexed, not crash or false-positive."""
+        repo_path = Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        collection_dir = repo_path / ".code-indexer" / "index" / "voyage-code-3"
+        collection_dir.mkdir(parents=True, exist_ok=True)
+        (collection_dir / "collection_meta.json").write_text(
+            json.dumps({"name": "voyage-code-3", "vector_size": 1024})
+        )
+        # No hnsw_index.bin -- collection is incomplete/never finished.
+
+        index_manager.activated_repo_manager.get_activated_repo_path.return_value = str(
+            repo_path
+        )
+
+        status = index_manager.get_index_status(
+            repo_alias="test-repo", username="testuser"
+        )
+
+        assert status["semantic"]["status"] == "not_indexed"
 
 
 class TestJobExecution:

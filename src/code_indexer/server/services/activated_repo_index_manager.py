@@ -15,11 +15,14 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, cast
+from typing import Dict, List, Optional, Any, Callable, Tuple, cast
+
+from code_indexer.config import Config
 
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
+from .repository_health_aggregator import discover_health_collections
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from ..utils.cancellable_subprocess import (
     SHORT_POLL_SECONDS,
@@ -870,41 +873,292 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"SCIP generation error: {str(e)}"}
 
+    def _select_active_semantic_collection(
+        self,
+        repo_path: Path,
+        semantic_collections: List[Tuple[str, Path]],
+    ) -> Optional[Tuple[str, Path]]:
+        """Resolve which discovered semantic collection is the repo's
+        actual active embedder (Issue #1476 dual-review Finding 3).
+
+        A repo normally has exactly one semantic collection. During an
+        embedder-switch/migration window it can briefly have more than
+        one (old + new embedder collections coexisting) -- picking one
+        arbitrarily (e.g. alphabetically) can silently report stale data
+        under the "current" status. The authoritative source of "which
+        embedder is active" is the repo's own ``.code-indexer/config.json``
+        (``embedding_provider`` + the matching provider's ``model``
+        field) -- the SAME field `cidx health`'s auto-detect path
+        (``cli.py``'s ``collection_name = config.voyage_ai.model``) and
+        the on-disk collection directory naming both already key off of.
+
+        Returns the matching (name, hnsw_path) tuple, or None if
+        genuinely ambiguous (more than one candidate and no config match)
+        -- callers must treat None as an explicit failure to determine
+        the active collection, never silently pick one (Messi Rule #2,
+        anti-fallback).
+        """
+        config_path = repo_path / ".code-indexer" / "config.json"
+        if not config_path.exists():
+            # Round-5 dual-review Issue 2: the "only one exists, must be
+            # it" shortcut is trustworthy ONLY in this genuinely
+            # no-config-at-all case (backward compatible with repos that
+            # predate this resolution mechanism entirely). Once
+            # config.json exists it is always consulted below, even for
+            # a single discovered collection -- that collection could
+            # belong to an OLD embedder while config already names a NEW
+            # one whose collection has not been built yet (e.g.
+            # mid-reindex), and blindly trusting "only one" would report
+            # stale data as if the configured embedder were fully
+            # indexed.
+            if len(semantic_collections) == 1:
+                return semantic_collections[0]
+            return None
+
+        try:
+            with open(config_path) as f:
+                config_data = json.load(f)
+            config = Config(**config_data)
+        except Exception as exc:
+            # Round-3 dual-review Issue 3: log the REAL parse/validation
+            # exception here so a corrupt config.json is distinguishable
+            # in logs from genuine embedder ambiguity (valid config,
+            # matches neither collection) -- the caller's generic "cannot
+            # determine active embedder" warning does not carry this
+            # distinction on its own.
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to read/parse {config_path} while resolving "
+                    f"the active semantic embedder: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return None
+
+        active_model = (
+            config.cohere.model
+            if config.embedding_provider == "cohere"
+            else config.voyage_ai.model
+        )
+
+        for name, hnsw_path in semantic_collections:
+            if name == active_model:
+                return (name, hnsw_path)
+        return None
+
     def _get_semantic_status(self, repo_path: Path) -> Dict[str, Any]:
-        """Get semantic index status."""
+        """Get semantic index status.
+
+        GitHub Issue #1476: the current per-embedder collection layout
+        (e.g. ``.code-indexer/index/voyage-code-3/collection_meta.json``)
+        never produces a legacy top-level ``metadata.json`` -- checking for
+        that file always reported a genuinely indexed repo as
+        "not_indexed". Detection now reuses `discover_health_collections`
+        (the SAME shared, already-tested primitive
+        `/api/activated-repos/{alias}/health` and `repository_health.py`
+        route through), which scans the index directory for real
+        per-embedder collections keyed on the presence of `hnsw_index.bin`
+        -- never a bare `*.json` glob (a `collection_meta.json` always
+        exists once a collection directory is created, empty or not).
+
+        Dual-review remediation (Issue #1476): a metadata-read failure or
+        missing schema field on a collection with a REAL, present
+        hnsw_index.bin is a distinct "error" status, never silently
+        collapsed into "not_indexed" (which would discard the real
+        HNSW-presence signal). Similarly, unique_file_count and
+        hnsw_index.last_rebuild are never backfilled from the
+        dimensionally-different hnsw_index.vector_count (chunk count, not
+        file count) or created_at (creation time, not rebuild time).
+        """
         index_dir = repo_path / ".code-indexer" / "index"
 
         if not index_dir.exists():
             return {"status": "not_indexed"}
 
-        metadata_file = index_dir / "metadata.json"
-        if not metadata_file.exists():
+        # Round-7 dual-review Issue 2: a real filesystem failure (e.g. an
+        # unreadable index directory -- PermissionError) raised while
+        # scanning for collections must never escape uncaught to an
+        # unhandled HTTP 500. discover_health_collections() calls
+        # index_dir.iterdir() internally, which requires read+execute
+        # permission on index_dir itself (unlike the bare .exists() check
+        # above, which only needs permission on index_dir's PARENT).
+        try:
+            semantic_collections = [
+                (name, hnsw_path)
+                for name, index_type, hnsw_path in discover_health_collections(
+                    index_dir
+                )
+                if index_type == "semantic"
+            ]
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to scan semantic index directory {index_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to scan semantic index directory: {exc}",
+            }
+        if not semantic_collections:
             return {"status": "not_indexed"}
+
+        selected = self._select_active_semantic_collection(
+            repo_path, semantic_collections
+        )
+        if selected is None:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    "Unable to determine active semantic embedder among "
+                    f"{len(semantic_collections)} candidates: "
+                    f"{[name for name, _ in semantic_collections]}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            # Round-7 dual-review Issue 3: the message must accurately
+            # describe which scenario actually occurred -- a single
+            # discovered collection that doesn't match the repo's
+            # configured active embedder (e.g. mid embedder-switch, the
+            # new embedder's collection not built yet) is a DIFFERENT
+            # situation from genuinely ambiguous multiple collections
+            # with no config to disambiguate. Always saying "Multiple
+            # semantic collections found" for the single-collection case
+            # would be misleading.
+            if len(semantic_collections) == 1:
+                error_message = (
+                    f"Found 1 semantic collection "
+                    f"('{semantic_collections[0][0]}') that does not "
+                    "match the repo's configured active embedder"
+                )
+            else:
+                error_message = (
+                    f"Found {len(semantic_collections)} semantic "
+                    "collections; cannot determine the active embedder"
+                )
+            return {
+                "status": "error",
+                "error": error_message,
+            }
+
+        _collection_name, hnsw_path = selected
+        collection_dir = hnsw_path.parent
+        metadata_file = collection_dir / "collection_meta.json"
 
         try:
             with open(metadata_file) as f:
                 metadata = json.load(f)
-
-            # Calculate index size
-            index_size_bytes = sum(
-                f.stat().st_size for f in index_dir.rglob("*") if f.is_file()
-            )
-            index_size_mb = round(index_size_bytes / self.BYTES_PER_MB, 2)
-
-            return {
-                "last_indexed": metadata.get("last_indexed"),
-                "file_count": metadata.get("file_count", 0),
-                "index_size_mb": index_size_mb,
-                "status": "up_to_date",
-            }
-        except Exception:
+            # Round-5 dual-review Issue 1: collection_meta.json can be
+            # syntactically valid JSON that is NOT a JSON object (e.g. a
+            # bare list) -- json.load() succeeds, but the .get() calls
+            # below would then raise an uncaught AttributeError instead
+            # of the intended graceful "error" status. Both isinstance
+            # checks MUST stay inside this try block so their failure is
+            # caught by the same except clause below.
+            if not isinstance(metadata, dict):
+                raise ValueError(
+                    "collection_meta.json must contain a JSON object, got "
+                    f"{type(metadata).__name__}"
+                )
+            hnsw_metadata = metadata.get("hnsw_index") or {}
+            if not isinstance(hnsw_metadata, dict):
+                raise ValueError(
+                    "collection_meta.json's hnsw_index field must be a "
+                    f"JSON object, got {type(hnsw_metadata).__name__}"
+                )
+        except Exception as exc:
             logger.warning(
                 format_error_log(
-                    "SVC-MIGRATE-005", "Failed to read semantic index metadata: {e}"
+                    "SVC-MIGRATE-005",
+                    f"Failed to read semantic index metadata at {metadata_file}: {exc}",
                 ),
                 extra=get_log_extra("SVC-MIGRATE-005"),
             )
-            return {"status": "not_indexed"}
+            return {
+                "status": "error",
+                "error": f"Failed to read semantic index metadata: {exc}",
+            }
+
+        # Real schema (Story #1456/#1458 CHUNKS_DB and legacy SHARDED_JSON
+        # both write these fields identically): file_count from the
+        # top-level unique_file_count; last_indexed from the HNSW
+        # last_rebuild timestamp. Per this project's writer/reader
+        # contract, a genuinely completed collection always has both --
+        # their absence is an anomaly, never silently backfilled from the
+        # dimensionally-different vector_count (chunk count) or created_at
+        # (creation time, not rebuild time).
+        file_count = metadata.get("unique_file_count")
+        last_indexed = hnsw_metadata.get("last_rebuild")
+
+        # Round-7 dual-review Issue 1: a present-but-wrong-typed value
+        # (e.g. a list) passes a bare `is None` check but then crashes the
+        # Pydantic response layer downstream (routers/indexing.py) with
+        # an unhandled ValidationError -> HTTP 500. Validate the ACTUAL
+        # type here, not just presence. `bool` is deliberately excluded
+        # from the int check -- isinstance(True, int) is True in Python
+        # (the same CHUNKS_DB discriminator gotcha this project has hit
+        # before).
+        file_count_is_valid = (
+            isinstance(file_count, int)
+            and not isinstance(file_count, bool)
+            and file_count >= 0
+        )
+        last_indexed_is_valid = isinstance(last_indexed, str) and last_indexed != ""
+
+        if not file_count_is_valid or not last_indexed_is_valid:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    "Semantic collection metadata at "
+                    f"{metadata_file} is missing or has invalid types for "
+                    "unique_file_count and/or hnsw_index.last_rebuild "
+                    f"(file_count={file_count!r}, last_indexed={last_indexed!r})",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": "Incomplete semantic index metadata",
+            }
+
+        # Round-3 dual-review Issue 2: scope the size computation to the
+        # SELECTED active collection directory only -- summing the whole
+        # index_dir would double-count inactive collections (e.g. an old
+        # embedder's collection during a migration window, or temporal/
+        # multimodal collections), producing a wildly inflated figure
+        # inconsistent with file_count/last_indexed, which already
+        # describe only the active collection.
+        #
+        # Round-7 dual-review Issue 2: a real filesystem failure (e.g.
+        # PermissionError) raised while scanning collection_dir must
+        # never escape uncaught to an unhandled HTTP 500.
+        try:
+            index_size_bytes = sum(
+                f.stat().st_size for f in collection_dir.rglob("*") if f.is_file()
+            )
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to compute semantic index size for {collection_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to compute semantic index size: {exc}",
+            }
+        index_size_mb = round(index_size_bytes / self.BYTES_PER_MB, 2)
+
+        return {
+            "last_indexed": last_indexed,
+            "file_count": file_count,
+            "index_size_mb": index_size_mb,
+            "status": "up_to_date",
+        }
 
     def _get_fts_status(self, repo_path: Path) -> Dict[str, Any]:
         """Get FTS index status."""
@@ -1011,14 +1265,33 @@ class ActivatedRepoIndexManager:
         )
 
         index_dir = repo_path / ".code-indexer" / "index"
-        temporal_dir = next(
-            (
-                d
-                for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
-                if d.is_dir() and _is_temporal(d.name)
-            ),
-            None,
-        )
+        # Round-7 dual-review Issue 2 (GitHub Issue #1476): this method
+        # shares index_dir with _get_semantic_status and is invoked by
+        # the SAME get_index_status() entry point -- a real filesystem
+        # failure (e.g. PermissionError from an unreadable index
+        # directory) here must not escape uncaught to an unhandled HTTP
+        # 500 either.
+        try:
+            temporal_dir = next(
+                (
+                    d
+                    for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+                    if d.is_dir() and _is_temporal(d.name)
+                ),
+                None,
+            )
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to scan temporal index directory {index_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to scan temporal index directory: {exc}",
+            }
 
         if temporal_dir is not None and not (temporal_dir / "hnsw_index.bin").exists():
             # Issue #1459 Finding 1b Site B: a name-matched local directory
