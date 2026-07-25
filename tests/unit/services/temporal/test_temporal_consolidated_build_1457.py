@@ -302,6 +302,41 @@ def test_verify_consolidated_version_detects_row_count_mismatch(tmp_path):
         _verify_consolidated_version(version_dir, wrong_expected_records, vector_dim=4)
 
 
+def test_verify_consolidated_version_detects_dropped_field_and_uses_exact_vector_match_not_tolerance(
+    tmp_path,
+):
+    """Codex round-6 CRITICAL finding #3: the temporal build verifier
+    only checked count/id/vector(np.allclose tolerance)/payload -- it
+    never checked chunk_text or other passthrough fields, and tolerated
+    small vector drift instead of exact match. Real repro: a record
+    with chunk_text DELETED and its vector CHANGED still passed
+    verification. Fix: reuse the semantic path's exact verifier
+    (float32 + np.array_equal + exact field/key-set equality) instead
+    of a looser, reinvented temporal-specific one."""
+    import pytest
+
+    expected = {
+        "id": "verify-row",
+        "vector": [0.1, 0.2, 0.3],
+        "metadata": {"language": "python"},
+        "payload": {"path": "src/load-bearing-text.py"},
+        "chunk_text": "load-bearing-text",
+    }
+    corrupted = dict(expected)
+    del corrupted["chunk_text"]
+    # A tiny vector drift that np.allclose's rtol=1e-5/atol=1e-6 would
+    # tolerate as "close enough" -- exact match must NOT.
+    corrupted["vector"] = [0.1000001, 0.2, 0.3]
+
+    verifier_dir = tmp_path / "verifier"
+    verifier_dir.mkdir()
+    with ChunkStore(verifier_dir / "chunks.db", expected_dim=3) as store:
+        store.write_batch([corrupted])
+
+    with pytest.raises(RuntimeError):
+        _verify_consolidated_version(verifier_dir, [expected], vector_dim=3)
+
+
 def test_build_creates_path_index_projection_matrix_and_structure_marker(tmp_path):
     """Story #1457 CRITICAL #4 (2026-07-23 code review): the published
     version must be a COMPLETE constituent-file set, not just

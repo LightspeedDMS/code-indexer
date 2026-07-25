@@ -452,19 +452,31 @@ async def trigger_reindex(
             # include it here contradicted that manager-level rejection.
             index_types = ["semantic", "fts", "scip"]
 
-        # Submit reindex job
-        def reindex_job():
-            """Background job to reindex repository."""
-            # This would call the actual reindex logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+        # Bug #1472: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Wire the job to the REAL indexing
+        # pipeline instead of inventing a new one: ActivatedRepoIndexManager
+        # (server/services/activated_repo_index_manager.py) is the existing,
+        # already-tested entry point that spawns real `cidx index` / `cidx
+        # index --fts` / `cidx scip generate` subprocesses per index type
+        # (see TestJobExecution in test_activated_repo_index_manager.py) and
+        # is already reused this same way by the sibling
+        # /api/v1/repos/{alias}/reindex endpoint in routers/indexing.py.
+        # The already-normalized/validated `index_types` built above is
+        # threaded straight through -- never re-derived.
+        from code_indexer.server.services.activated_repo_index_manager import (
+            ActivatedRepoIndexManager,
+        )
 
-        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
-        job_id = job_manager.submit_job(
-            "reindex_activated_repo",
-            reindex_job,
-            submitter_username=current_user.username,
+        index_manager_service = ActivatedRepoIndexManager(
+            background_job_manager=job_manager,
+            activated_repo_manager=activated_manager,
+        )
+        job_id = index_manager_service.trigger_reindex(
             repo_alias=user_alias,
+            index_types=index_types,
+            clear=False,
+            username=current_user.username,
         )
 
         return ReindexResponse(
@@ -550,19 +562,27 @@ async def add_index_type(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit add index job
-        def add_index_job():
-            """Background job to add index type."""
-            # This would call the actual add index logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing indexing pipeline
+        # (ActivatedRepoIndexManager, already reused above by trigger_reindex
+        # and by the sibling /api/v1/repos/{alias}/reindex endpoint) instead
+        # of inventing a new mechanism. "Adding" a single index type is
+        # semantically a reindex scoped to that one type.
+        from code_indexer.server.services.activated_repo_index_manager import (
+            ActivatedRepoIndexManager,
+        )
 
-        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
-        job_id = job_manager.submit_job(
-            "add_index_activated_repo",
-            add_index_job,
-            submitter_username=current_user.username,
+        index_manager_service = ActivatedRepoIndexManager(
+            background_job_manager=job_manager,
+            activated_repo_manager=activated_manager,
+        )
+        job_id = index_manager_service.trigger_reindex(
             repo_alias=user_alias,
+            index_types=[index_type],
+            clear=False,
+            username=current_user.username,
         )
 
         return AddIndexResponse(
@@ -733,12 +753,42 @@ async def sync_repository(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit sync job
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing entry point --
+        # ActivatedRepoManager.sync_with_golden_repository -- the same
+        # method the sibling synchronous PUT /api/repos/{user_alias}/sync
+        # route (routers/inline_repos.py) already calls directly, rather
+        # than inventing a new sync mechanism. When the caller requests
+        # reindex=True, chain a REAL follow-up reindex through the same
+        # ActivatedRepoIndexManager.trigger_reindex entry point used by
+        # trigger_reindex/add_index_type above -- this submits its OWN
+        # job-tracked background job (dashboard/admin UI visibility per
+        # CLAUDE.md's background-jobs mandate) rather than doing the
+        # indexing work inline/untracked.
         def sync_job():
-            """Background job to sync repository."""
-            # This would call the actual sync logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+            """Background job to sync repository with its golden repository."""
+            sync_result = activated_manager.sync_with_golden_repository(
+                username=current_user.username,
+                user_alias=user_alias,
+            )
+            if request.reindex:
+                from code_indexer.server.services.activated_repo_index_manager import (
+                    ActivatedRepoIndexManager,
+                )
+
+                index_manager_service = ActivatedRepoIndexManager(
+                    background_job_manager=job_manager,
+                    activated_repo_manager=activated_manager,
+                )
+                sync_result["reindex_job_id"] = index_manager_service.trigger_reindex(
+                    repo_alias=user_alias,
+                    index_types=["semantic", "fts", "scip"],
+                    clear=False,
+                    username=current_user.username,
+                )
+            return sync_result
 
         # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
@@ -834,12 +884,26 @@ async def switch_branch(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit branch switch job
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing entry point --
+        # ActivatedRepoManager.switch_branch -- the same method the sibling
+        # synchronous PUT /api/repos/{user_alias}/branch route
+        # (routers/inline_repos.py) already calls directly, rather than
+        # inventing a new branch-switch mechanism. switch_branch() already
+        # performs the Bug #1203 branch-aware delta reindex internally when
+        # switching to a non-default branch, so this docstring's "triggers
+        # a reindex" claim is satisfied by the real method itself -- no
+        # separate reindex call needed here.
         def switch_branch_job():
-            """Background job to switch branch."""
-            # This would call the actual branch switch logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+            """Background job to switch branch for an activated repository."""
+            return activated_manager.switch_branch(
+                username=current_user.username,
+                user_alias=user_alias,
+                branch_name=request.branch_name,
+                create=False,
+            )
 
         # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(

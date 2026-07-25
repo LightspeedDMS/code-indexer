@@ -49,8 +49,6 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
-import numpy as np
-
 from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
@@ -58,6 +56,10 @@ from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     write_chunks_db_discriminator,
+)
+from code_indexer.storage.shared.collection_migration import (
+    ConsolidationVerificationError,
+    _verify_record_field_for_field,
 )
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
 from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
@@ -119,49 +121,24 @@ def _verify_consolidated_version(
                 f"expected {len(unique_expected_records)} unique rows, "
                 f"chunks.db contains {actual_count}. Refusing to publish."
             )
+        # Codex round-6 CRITICAL finding #3: the previous per-field checks
+        # here only compared id/vector(np.allclose tolerance)/payload --
+        # never chunk_text, git_blob_hash, metadata, or any other
+        # passthrough field, and tolerated small vector drift instead of
+        # requiring an exact match. Reuse the semantic path's own exact
+        # verifier (collection_migration.py's _verify_record_field_for_
+        # field, hardened by the round-6 CRITICAL #1 key-set-equality
+        # fix) rather than maintaining a second, looser reimplementation.
         for record in unique_expected_records:
             point_id = record.get("id")
             stored = store.read(point_id)
-            if stored is None:
+            try:
+                _verify_record_field_for_field(point_id, record, stored)
+            except ConsolidationVerificationError as exc:
                 raise RuntimeError(
                     f"Read-back verification failed for {version_dir}: "
-                    f"row {point_id!r} was written but is not readable "
-                    f"back from chunks.db. Refusing to publish."
-                )
-            if stored.get("id") != point_id:
-                raise RuntimeError(
-                    f"Read-back verification failed for {version_dir}: "
-                    f"row read back under key {point_id!r} has id "
-                    f"{stored.get('id')!r} instead. Refusing to publish."
-                )
-            stored_vector = stored.get("vector")
-            expected_vector = record.get("vector")
-            if stored_vector is None or expected_vector is None:
-                raise RuntimeError(
-                    f"Read-back verification failed for {version_dir}: "
-                    f"row {point_id!r} is missing a vector. Refusing to "
-                    f"publish."
-                )
-            # ChunkStore quantizes vectors to float32 (<f4, AC3) -- exact
-            # equality would spuriously fail on precision loss alone, so
-            # compare within float32 tolerance.
-            if not np.allclose(
-                np.asarray(stored_vector, dtype=np.float32),
-                np.asarray(expected_vector, dtype=np.float32),
-                rtol=1e-5,
-                atol=1e-6,
-            ):
-                raise RuntimeError(
-                    f"Read-back verification failed for {version_dir}: "
-                    f"row {point_id!r}'s vector does not match what was "
-                    f"written. Refusing to publish."
-                )
-            if stored.get("payload") != record.get("payload"):
-                raise RuntimeError(
-                    f"Read-back verification failed for {version_dir}: "
-                    f"row {point_id!r}'s payload does not match what was "
-                    f"written. Refusing to publish."
-                )
+                    f"{exc}. Refusing to publish."
+                ) from exc
     finally:
         store.close()
 

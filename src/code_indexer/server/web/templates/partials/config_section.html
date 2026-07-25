@@ -884,6 +884,66 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Fleet Migration Settings Section (Story #1458, Epic #1454) -->
+<details class="config-section" id="section-fleet-migration">
+    <summary>
+        <h2>Fleet Migration</h2>
+    </summary>
+    <p class="section-description">
+        Configures the background scheduler that consolidates each golden repo's sharded
+        vector_*.json layout into chunks.db, one repo at a time. This scheduler DELETES real
+        on-disk sharded files after a verified consolidation -- it defaults to disabled and
+        requires an explicit operator opt-in. Changes take effect on the scheduler's next
+        cycle -- no server restart is required.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-fleet-migration">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.fleet_migration.enabled else 'No' }}</td>
+                    <td class="config-description">Whether the fleet migration scheduler is active (default: No -- deletes real on-disk chunk data, explicit opt-in required)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Tick Interval (minutes)</td>
+                    <td class="config-value">{{ config.fleet_migration.tick_interval_minutes }}</td>
+                    <td class="config-description">Minutes between ticks -- how promptly the next unmigrated repo is picked up (default: 30)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('fleet-migration')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-fleet-migration" method="post" action="/admin/config/fleet_migration" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.fleet_migration %}
+            <div class="validation-error">{{ validation_errors.fleet_migration }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="fleet-migration-enabled">
+                    Enabled
+                    <select id="fleet-migration-enabled" name="enabled">
+                        <option value="true" {% if config.fleet_migration.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.fleet_migration.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turn the fleet migration scheduler on or off -- this DELETES real on-disk sharded files after a verified consolidation.</small>
+                </label>
+                <label>
+                    Tick Interval (minutes)
+                    <input type="number" id="fleet-migration-tick-interval" name="tick_interval_minutes" value="{{ config.fleet_migration.tick_interval_minutes }}" min="1">
+                    <small>Minimum: 1 (default: 30). Minutes between ticks -- each tick migrates at most one repo.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('fleet-migration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Query & Search Timeouts Settings Section (Issue #1398) -->
 <details class="config-section" id="section-search-timeouts">
     <summary>

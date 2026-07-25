@@ -73,6 +73,8 @@
 - [project_staging_workers_config_durability.md](project_staging_workers_config_durability.md) - Durable uvicorn worker-count is the DB runtime.workers setting (NOT config.json, which strips it); set via web-UI form POST /admin/config/server over HTTPS (Secure session cookie + CSRF + TOTP elevation) — no JSON /api/admin/config; 3 layers DB->launch.json->applied_launch.json
 - [project_local_server_solo_sqlite.md](project_local_server_solo_sqlite.md) - Local dev cidx-server (:8000) is solo/SQLite (storage_mode=sqlite, no postgres_dsn) — local E2E validates ONLY solo/SQLite branches; PG/cluster paths (#1313 temporal, cluster-aware state, PG advisory locks) need staging; local temporal subprocess runs the env=None branch
 
+- [project_backup_scope_dev_staging_only.md](project_backup_scope_dev_staging_only.md) - Epic #1454 backup-before-migration is a manual dev/staging-only precaution, NOT baked into migration code — production has no room for old-style backups
+
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA auth: `.local-testing` stores TOTP as a shell `$(...)` command (NOT a static seed) — eval it for a live code, then two-step /auth/login -> /auth/mfa/verify; do these staging tests ALWAYS, never ask the user
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field

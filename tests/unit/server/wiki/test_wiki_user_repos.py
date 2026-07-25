@@ -529,3 +529,57 @@ class TestUserWikiSearchRoute:
         resp = client.get("/wiki/u/alice/my-repo/_search?q=x")
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+@pytest.mark.slow
+class TestUserWikiSearchQueryTrackerWiring:
+    """Codex Finding #7 (HIGH): user_wiki_search must wire the SAME
+    QueryTracker refcount protection MCP search.py already has, using a
+    REAL QueryTracker (not a mock of it) -- proves the ACTUAL route body
+    calls track_activated_repo_query, not just that the helper works in
+    isolation."""
+
+    def test_refcount_is_held_during_the_query_and_released_after(
+        self, tmp_path
+    ) -> None:
+        from code_indexer.global_repos.query_tracker import QueryTracker
+
+        repo_path = str(tmp_path / "repo")
+        Path(repo_path).mkdir()
+
+        app = _make_user_wiki_app(
+            username="alice",
+            alias="my-repo",
+            repo_path=repo_path,
+            wiki_enabled=True,
+            viewer_username="alice",
+        )
+        real_tracker = QueryTracker()
+        app.state.query_tracker = real_tracker
+        app.state.activated_repo_manager.activated_repos_dir = str(
+            tmp_path / "activated-repos"
+        )
+        expected_key = str(tmp_path / "activated-repos" / "alice" / "my-repo")
+
+        observed_refcount_during_call = {"value": None}
+
+        def _query_side_effect(**kwargs):
+            observed_refcount_during_call["value"] = real_tracker.get_ref_count(
+                expected_key
+            )
+            return {"results": []}
+
+        mock_qm = MagicMock()
+        mock_qm.query_user_repositories.side_effect = _query_side_effect
+        app.state.semantic_query_manager = mock_qm
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/wiki/u/alice/my-repo/_search?q=test")
+
+        assert resp.status_code == 200
+        assert observed_refcount_during_call["value"] == 1, (
+            "Bug: user_wiki_search did not hold a QueryTracker refcount "
+            "during the query -- deactivation's drain would observe zero "
+            "in-flight queries and could purge chunks.db mid-read."
+        )
+        assert real_tracker.get_ref_count(expected_key) == 0

@@ -1057,6 +1057,46 @@ class HNSWOrphanRepairSweepConfig:
 
 
 @dataclass
+class FleetMigrationConfig:
+    """
+    Configuration for the fleet migration scheduler (Story #1458, Epic
+    #1454).
+
+    Controls the paced, resumable background job that consolidates each
+    golden repo's MUTABLE BASE CLONE in place (sharded vector_*.json ->
+    chunks.db) and bootstraps its in-repo temporal shards to the sister
+    location, one repo at a time (AC1: "Serialized, one-repo-at-a-time,
+    bounded resource use").
+
+    Unlike the HNSW orphan repair sweep (read-only integrity repair),
+    fleet migration DELETES real on-disk sharded files after a verified
+    consolidation -- so this MUST default to `enabled=False`, requiring an
+    explicit operator opt-in before it ever touches a fleet repo.
+
+    This opt-in is exposed as a Web UI Config Screen section ("Fleet
+    Migration", `fleet_migration` entry in `web/routes.py`'s
+    `_VALID_CONFIG_SECTIONS` and `config_service.py`'s
+    `_fleet_migration_settings`/`_update_fleet_migration_setting`),
+    mirroring Story #1397's `HNSWOrphanRepairSweepConfig` pattern
+    exactly -- an operator toggles `enabled` and `tick_interval_minutes`
+    through the admin UI, no direct database/config edit required.
+    """
+
+    # Whether the scheduler is active (default: False -- explicit opt-in
+    # required; this touches/deletes real on-disk chunk data).
+    enabled: bool = False
+
+    # Minutes between scheduler ticks (default: 30). Each tick submits at
+    # most ONE per-repo migration job -- a single repo's migration can
+    # legitimately run for a long time (no per-job timeout, per this
+    # project's "Indexing Path Has No Job/Subprocess/Per-File Timeouts"
+    # invariant), so this interval only governs how promptly the NEXT
+    # unmigrated repo is picked up once the current one finishes (or when
+    # no migration is currently in flight).
+    tick_interval_minutes: int = 30
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1523,6 +1563,9 @@ class ServerConfig:
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
 
+    # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+    fleet_migration_config: Optional[FleetMigrationConfig] = None
+
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -1706,6 +1749,16 @@ class ServerConfig:
     # (also 900s / 15 min).
     snapshot_min_retention_age_seconds: float = 900.0
 
+    # Story #1458 AC13 — bounded wait (seconds) for an in-flight, same-
+    # worker-process activated-repo query to release its QueryTracker
+    # refcount before deactivation's Phase-2 purge deletes the trashed
+    # clone's consolidated chunks.db. Reuses the SAME bounded-wait-then-
+    # proceed shape Story #1457 AC11 establishes: on expiry, deactivation
+    # LOGS a WARNING and proceeds with the purge anyway -- never an
+    # unbounded/blocking wait that could wedge deactivation. Runtime / Web
+    # UI configurable, no server restart required.
+    deactivation_query_drain_max_wait_seconds: float = 30.0
+
     # Bug #1084 (staging follow-up) — NFS read-after-create visibility deadline
     # (seconds) for the versioned-snapshot barrier. Staging PROVED that under
     # concurrent reflink load a freshly-created versioned dir can take >15s to
@@ -1805,6 +1858,9 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        # Story #1458 (Epic #1454) - Initialize fleet migration scheduler config
+        if self.fleet_migration_config is None:
+            self.fleet_migration_config = FleetMigrationConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2534,6 +2590,22 @@ class ServerConfigManager:
                 HNSWOrphanRepairSweepConfig(
                     **{k: v for k, v in _hnsw_dict.items() if k in _hnsw_allowed}
                 )
+            )
+
+        # Story #1458 (Epic #1454): Convert fleet_migration_config dict to
+        # FleetMigrationConfig. Same rationale as
+        # hnsw_orphan_repair_sweep_config above -- without this block, the
+        # raw dict round-tripped through the runtime DB's JSON column
+        # survives unconverted and `cfg.enabled` access raises
+        # AttributeError (Bug #1368-class regression). Unknown keys
+        # filtered for rolling-upgrade safety.
+        if "fleet_migration_config" in config_dict and isinstance(
+            config_dict["fleet_migration_config"], dict
+        ):
+            _fm_dict = config_dict["fleet_migration_config"]
+            _fm_allowed = {f.name for f in fields(FleetMigrationConfig)}
+            config_dict["fleet_migration_config"] = FleetMigrationConfig(
+                **{k: v for k, v in _fm_dict.items() if k in _fm_allowed}
             )
 
         # Story #977: Convert xray_config dict to XRayConfig

@@ -118,6 +118,15 @@ def _wire_query_tracker_into_semantic_query_manager(
     if semantic_query_manager is not None:
         semantic_query_manager.set_query_tracker(query_tracker)
 
+    # Story #1458 AC13: same singleton, into ActivatedRepoManager, so its
+    # deactivation drain (wait_for_activated_repo_query_drain) has a real,
+    # live tracker to observe -- without this, ActivatedRepoManager's
+    # _query_tracker stays None and the drain is a permanent, silent
+    # (fail-open by design) no-op in production.
+    activated_repo_manager = getattr(app.state, "activated_repo_manager", None)
+    if activated_repo_manager is not None:
+        activated_repo_manager.set_query_tracker(query_tracker)
+
 
 def make_lifespan(
     background_job_manager: Any,
@@ -1982,6 +1991,49 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-090",
                     f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize Fleet Migration Scheduler (Story #1458,
+        # Epic #1454). Ships DISABLED by default (fleet_migration_config.
+        # enabled defaults to False) -- requires explicit operator opt-in
+        # via the Web UI Config Screen's "Fleet Migration" section
+        # (round-6 item #10: web/routes.py's _VALID_CONFIG_SECTIONS +
+        # config_service.py's _fleet_migration_settings/_update_fleet_
+        # migration_setting) before it ever consolidates/deletes real
+        # on-disk chunk data for any golden repo.
+        fleet_migration_scheduler = None
+        logger.info(
+            "Server startup: Initializing fleet migration scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.fleet_migration.scheduler import (
+                FleetMigrationScheduler as _FleetMigrationScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if refresh_scheduler is None:
+                raise RuntimeError("refresh_scheduler is not available")
+
+            fleet_migration_scheduler = _FleetMigrationScheduler(
+                golden_repo_manager=golden_repo_manager,
+                refresh_scheduler=refresh_scheduler,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            fleet_migration_scheduler.start()
+            app.state.fleet_migration_scheduler = fleet_migration_scheduler
+            logger.info(
+                "Fleet migration scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-091",
+                    f"Failed to initialize fleet migration scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -4619,6 +4671,31 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop fleet migration scheduler (Story #1458, Epic
+        # #1454). Codex MEDIUM finding (round 5): this daemon thread was
+        # started at startup (fleet_migration_scheduler.start()) but
+        # never signaled to stop/joined during shutdown, unlike every
+        # sibling scheduler.
+        fleet_migration_scheduler_state = getattr(
+            app.state, "fleet_migration_scheduler", None
+        )
+        if fleet_migration_scheduler_state is not None:
+            try:
+                fleet_migration_scheduler_state.stop()
+                logger.info(
+                    "Fleet migration scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1458",
+                        f"Error stopping fleet migration scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

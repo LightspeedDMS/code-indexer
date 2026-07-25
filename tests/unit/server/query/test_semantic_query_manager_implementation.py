@@ -244,4 +244,5 @@ class TestSemanticQueryManagerImplementation:
                     repo_path=self.test_repo_path,
                     search_request=mock_request,
                     precomputed_query_vector=None,
+                    activation_id=None,
                 )

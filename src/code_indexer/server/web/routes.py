@@ -295,6 +295,8 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+    "fleet_migration",
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -6353,6 +6355,8 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+        FleetMigrationConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -6584,6 +6588,10 @@ def _get_current_config() -> dict:
         # Story #1397: HNSW orphan-repair sweep operating-hours window config
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
+        # Story #1458 (Epic #1454): Fleet migration scheduler configuration
+        "fleet_migration": settings.get(
+            "fleet_migration", asdict(FleetMigrationConfig())
         ),
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
@@ -7476,6 +7484,19 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch Size must be at least 1"
             except (ValueError, TypeError):
                 return "Batch Size must be a valid number"
+
+    elif section == "fleet_migration":
+        # Story #1458 (Epic #1454), round-6 item #10: fleet migration
+        # scheduler configuration validation -- mirrors the
+        # hnsw_orphan_sweep tick_interval_minutes check exactly.
+        tick_interval_minutes = data.get("tick_interval_minutes")
+        if tick_interval_minutes is not None:
+            try:
+                val_int = int(tick_interval_minutes)
+                if val_int < 1:
+                    return "Tick Interval Minutes must be at least 1"
+            except (ValueError, TypeError):
+                return "Tick Interval Minutes must be a valid number"
 
     elif section == "search_timeouts":
         # Issue #1398: Query & search timeouts configuration validation.

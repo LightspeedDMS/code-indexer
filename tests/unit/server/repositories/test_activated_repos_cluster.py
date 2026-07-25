@@ -101,6 +101,7 @@ class SqlitePoolAdapter:
                 ssh_key_used INTEGER DEFAULT 0,
                 is_composite INTEGER DEFAULT 0,
                 wiki_enabled INTEGER DEFAULT 0,
+                activation_id TEXT,
                 metadata_json TEXT,
                 UNIQUE(username, user_alias)
             )

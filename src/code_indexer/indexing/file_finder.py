@@ -205,6 +205,19 @@ class FileFinder:
         except (OSError, ValueError):
             return False
 
+    def matches_exclude_pattern(self, relative_path: str) -> bool:
+        """Return True if relative_path matches the canonical exclude_spec
+        pathspec (Bug #1467).
+
+        Pure string-pattern matching -- deliberately independent of whether
+        the file still exists on disk, so callers classifying DELETED files
+        (e.g. git-diff-based incremental discovery, which must still detect
+        a removed file even though it can no longer be stat()'d) can safely
+        reuse this SAME canonical exclusion source find_files() applies,
+        rather than reimplementing a divergent, incomplete subset of it.
+        """
+        return bool(self.exclude_spec.match_file(relative_path))
+
     def _get_base_filtering_result(self, file_path: Path) -> bool:
         """Get base filtering result from config and gitignore rules."""
         try:

@@ -24,6 +24,10 @@ import asyncio
 import logging
 import socket
 import time
+
+from code_indexer.server.services.deactivation_query_drain import (
+    track_activated_repo_query,
+)
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
 
 if TYPE_CHECKING:
@@ -1169,7 +1173,24 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     del kwargs["user_repos"]
     kwargs["repository_alias"] = params.get("repository_alias")
     kwargs["precomputed_query_vector"] = shared_query_vector
-    result = _utils.app_module.semantic_query_manager.query_user_repositories(**kwargs)
+
+    # Story #1458 AC13 gap (b): wire QueryTracker ref-counting around this
+    # read, using the SAME shared track_activated_repo_query() helper the
+    # REST/wiki front doors use (Codex HIGH finding, round 2 -- this call
+    # site previously duplicated the key-construction + increment/
+    # decrement logic instead of reusing the shared helper). Fail-open (no
+    # tracker, no repository_alias e.g. omni queries, or a -global alias --
+    # golden-repo queries are a separate, already-covered concern) preserves
+    # today's behavior exactly.
+    with track_activated_repo_query(
+        _get_query_tracker(),
+        getattr(_utils.app_module, "activated_repo_manager", None),
+        user.username,
+        params.get("repository_alias"),
+    ):
+        result = _utils.app_module.semantic_query_manager.query_user_repositories(
+            **kwargs
+        )
 
     # Touch last_accessed for the activated repo (throttled, non-fatal).
     # Fixes Bug #1098 defect 2: search path never stamped last_accessed,

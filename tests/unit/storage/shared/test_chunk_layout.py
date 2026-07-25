@@ -48,16 +48,6 @@ class TestResolveChunkLayoutFailClosed:
         result = resolve_chunk_layout(tmp_path)
         assert result == ChunkLayout.SHARDED_JSON
 
-    def test_chunks_db_key_present_but_enabled_false_resolves_sharded_json(
-        self, tmp_path: Path
-    ) -> None:
-        meta_path = tmp_path / "collection_meta.json"
-        meta_path.write_text(
-            json.dumps({"chunks_db": {"enabled": False, "version": 1}})
-        )
-        result = resolve_chunk_layout(tmp_path)
-        assert result == ChunkLayout.SHARDED_JSON
-
     def test_chunks_db_key_wrong_type_resolves_sharded_json(
         self, tmp_path: Path
     ) -> None:
@@ -66,11 +56,47 @@ class TestResolveChunkLayoutFailClosed:
         result = resolve_chunk_layout(tmp_path)
         assert result == ChunkLayout.SHARDED_JSON
 
-    def test_chunks_db_enabled_missing_type_resolves_sharded_json(
+    def test_chunks_db_dict_without_version_key_resolves_sharded_json(
+        self, tmp_path: Path
+    ) -> None:
+        # Story #1458 AC3 Finding 4 canonical schema: validity is governed
+        # SOLELY by an integer version >= 1. A dict with no "version" key at
+        # all (e.g. only a legacy "enabled" field) is invalid.
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(json.dumps({"chunks_db": {"enabled": "yes"}}))
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.SHARDED_JSON
+
+    def test_chunks_db_version_zero_resolves_sharded_json(self, tmp_path: Path) -> None:
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(json.dumps({"chunks_db": {"version": 0}}))
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.SHARDED_JSON
+
+    def test_chunks_db_version_negative_resolves_sharded_json(
         self, tmp_path: Path
     ) -> None:
         meta_path = tmp_path / "collection_meta.json"
-        meta_path.write_text(json.dumps({"chunks_db": {"enabled": "yes"}}))
+        meta_path.write_text(json.dumps({"chunks_db": {"version": -1}}))
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.SHARDED_JSON
+
+    def test_chunks_db_version_non_integer_string_resolves_sharded_json(
+        self, tmp_path: Path
+    ) -> None:
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(json.dumps({"chunks_db": {"version": "1"}}))
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.SHARDED_JSON
+
+    def test_chunks_db_version_boolean_resolves_sharded_json(
+        self, tmp_path: Path
+    ) -> None:
+        # Defensive: bool is a subclass of int in Python (isinstance(True,
+        # int) is True) -- a bare True/False must NOT be accepted as a
+        # valid integer version.
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(json.dumps({"chunks_db": {"version": True}}))
         result = resolve_chunk_layout(tmp_path)
         assert result == ChunkLayout.SHARDED_JSON
 
@@ -108,15 +134,51 @@ class TestResolveChunkLayoutFailClosed:
 
 
 class TestResolveChunkLayoutValidDiscriminator:
-    def test_valid_enabled_discriminator_resolves_chunks_db(
+    def test_version_only_discriminator_resolves_chunks_db(
         self, tmp_path: Path
     ) -> None:
+        # Story #1458 AC3 Finding 4: the canonical schema is {"version": <int>}
+        # -- "enabled" is NOT required at all, only a valid integer version.
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(
+            json.dumps({"chunks_db": {"version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION}})
+        )
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.CHUNKS_DB
+
+    def test_extra_enabled_key_alongside_valid_version_resolves_chunks_db(
+        self, tmp_path: Path
+    ) -> None:
+        # A harmless superset shape (extra "enabled" key alongside a valid
+        # version) must still resolve CHUNKS_DB -- "enabled" is simply not
+        # part of the validity contract, present or absent.
         meta_path = tmp_path / "collection_meta.json"
         meta_path.write_text(
             json.dumps(
                 {
                     "chunks_db": {
                         "enabled": True,
+                        "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
+                    }
+                }
+            )
+        )
+        result = resolve_chunk_layout(tmp_path)
+        assert result == ChunkLayout.CHUNKS_DB
+
+    def test_enabled_false_is_ignored_version_alone_governs_validity(
+        self, tmp_path: Path
+    ) -> None:
+        # Story #1458 AC3 Finding 4 deliberately changes prior (#1456
+        # pulled-forward) behavior: "enabled" is not part of the canonical
+        # schema at all -- a present, valid integer version >= 1 is BOTH
+        # necessary and sufficient, regardless of any "enabled" value.
+        meta_path = tmp_path / "collection_meta.json"
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "chunks_db": {
+                        "enabled": False,
                         "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
                     }
                 }
@@ -160,7 +222,6 @@ class TestWriteChunksDbDiscriminator:
 
         reloaded = json.loads(meta_path.read_text())
         assert reloaded["chunks_db"] == {
-            "enabled": True,
             "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
         }
         assert reloaded["name"] == "coll"
@@ -235,7 +296,6 @@ class TestWriteChunksDbDiscriminatorAtomicity:
         reloaded = json.loads(meta_path.read_text())
         assert reloaded["metadata"]["hnsw_index"]["id_mapping"] == {"0": "point-a"}
         assert reloaded["chunks_db"] == {
-            "enabled": True,
             "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
         }
 

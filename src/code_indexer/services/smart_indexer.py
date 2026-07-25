@@ -176,6 +176,29 @@ class SmartIndexer(HighThroughputProcessor):
                     continue
 
                 status = parts[0]
+
+                # Codex round-6 MEDIUM finding (Bug #1467 follow-up):
+                # classify a RENAME record's old and new paths
+                # INDEPENDENTLY, before the common exclude-filter check
+                # below -- never after. parts[1] for a rename is the OLD
+                # path; applying the common filter to it FIRST would
+                # `continue` past the whole line (dropping new_path too)
+                # whenever the old path happens to be excluded, even if
+                # the new path is genuinely included and should be
+                # indexed as new.
+                if status.startswith("R"):
+                    # Renamed file: R100\told_path\tnew_path
+                    if len(parts) >= 3:
+                        old_path = parts[1]
+                        new_path = parts[2]
+                        renamed.append((old_path, new_path))
+                        # Treat rename as delete old + add new for indexing
+                        if self._should_index_file(old_path):
+                            deleted.append(old_path)
+                        if self._should_index_file(new_path):
+                            added.append(new_path)
+                    continue
+
                 file_path = parts[1]
 
                 # Filter files based on our indexing criteria
@@ -188,17 +211,6 @@ class SmartIndexer(HighThroughputProcessor):
                     modified.append(file_path)
                 elif status == "D":
                     deleted.append(file_path)
-                elif status.startswith("R"):
-                    # Renamed file: R100\told_path\tnew_path
-                    if len(parts) >= 3:
-                        old_path = parts[1]
-                        new_path = parts[2]
-                        renamed.append((old_path, new_path))
-                        # Treat rename as delete old + add new for indexing
-                        if self._should_index_file(old_path):
-                            deleted.append(old_path)
-                        if self._should_index_file(new_path):
-                            added.append(new_path)
 
             logger.info(
                 f"Git delta: +{len(added)} ~{len(modified)} -{len(deleted)} R{len(renamed)}"
@@ -216,19 +228,60 @@ class SmartIndexer(HighThroughputProcessor):
         try:
             path = Path(file_path)
 
+            base_result = True
+
             # Check file extension (lstrip dot: .java -> java to match config format)
             if path.suffix.lower().lstrip(".") not in self.config.file_extensions:
-                return False
+                base_result = False
 
             # Check exclude patterns using path component boundaries
             # (not substring: "build" must match "build/" dir, not "builder/")
-            parts = Path(file_path).parts
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in parts:
-                    return False
+            if base_result:
+                parts = Path(file_path).parts
+                for exclude_dir in self.config.exclude_dirs:
+                    if exclude_dir in parts:
+                        base_result = False
+                        break
 
-            return True
-        except Exception:
+            # Bug #1467: also apply the canonical FileFinder exclude_spec
+            # (e.g. .code-indexer-override.yaml and other generated
+            # config artifacts). This git-diff-based incremental
+            # discovery path previously reimplemented only the
+            # extension/exclude_dirs subset of file_finder.py's
+            # filtering, silently diverging from the first (full-walk)
+            # index run's scope -- letting a generated artifact slip
+            # through as a real "changed file" once committed to git.
+            # Pure string matching, safe for deleted files too (no
+            # filesystem access, unlike file_finder's other checks).
+            if base_result and self.file_finder.matches_exclude_pattern(file_path):
+                base_result = False
+
+            # Codex Finding #10 (MEDIUM): apply the SAME force-include/
+            # force-exclude override parity full discovery
+            # (file_finder.py's _should_include_file) already has, reusing
+            # the SAME OverrideFilterService instance rather than
+            # reimplementing its pattern logic -- without this, a file
+            # matching .code-indexer-override.yaml's force_include_patterns
+            # is correctly indexed on the first (full-walk) run but
+            # silently rejected once committed and picked up incrementally.
+            override_filter_service = getattr(
+                self.file_finder, "override_filter_service", None
+            )
+            if override_filter_service is not None:
+                return bool(
+                    override_filter_service.should_include_file(path, base_result)
+                )
+
+            return base_result
+        except Exception as exc:
+            # Fail-soft is intentional here: a single malformed git-diff
+            # path must not abort the whole delta computation loop. The
+            # exception is logged (not silently swallowed) so a genuine
+            # filtering bug remains diagnosable.
+            logger.debug(
+                f"_should_index_file: treating '{file_path}' as not-indexed "
+                f"after unexpected error: {exc}"
+            )
             return False
 
     def _delete_files_from_backend(

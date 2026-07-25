@@ -5,13 +5,18 @@ Formats standardized error responses following CLAUDE.md Foundation #1: No mocks
 Provides consistent error response formatting across all endpoints.
 """
 
+from __future__ import annotations
+
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union, cast
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError as PydanticValidationError
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Union, cast
+
+if TYPE_CHECKING:
+    # Bug #1468: type-only (generate_correlation_id() needs no fastapi).
+    from fastapi.responses import JSONResponse
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError as PydanticValidationError
 
 from ..models.error_models import (
     ErrorType,
@@ -293,6 +298,8 @@ def create_json_response(
     Returns:
         JSONResponse with proper status code and headers
     """
+    from fastapi.responses import JSONResponse  # Bug #1468: lazy, only real use site
+
     error_type = error_data.get("error", ErrorType.INTERNAL_SERVER_ERROR)
     status_code = status_code_map.get(error_type, 500)
 

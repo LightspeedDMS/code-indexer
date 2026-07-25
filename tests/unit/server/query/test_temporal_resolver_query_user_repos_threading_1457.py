@@ -85,6 +85,9 @@ def test_golden_repo_alias_threaded_for_is_global_and_activated_repos(
         def get_activated_repo_path(self, _u, _a):
             return str(tmp_path / "activated" / _a)
 
+        def get_activation_id(self, _u, _a):
+            return None
+
     manager.activated_repo_manager = _FakeARM()
 
     import code_indexer.server.app as _app_mod

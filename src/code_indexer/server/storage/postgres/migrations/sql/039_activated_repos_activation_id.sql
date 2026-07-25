@@ -1,0 +1,21 @@
+-- Migration 039: Add activation_id to activated_repos (Story #1458 AC11).
+--
+-- A dedicated, guaranteed-unique per-activation UUID token, generated
+-- exactly once at clone-materialization time (ActivatedRepoManager) and
+-- embedded into FilesystemVectorStore's shared HNSW/id_index cache keys so
+-- a deactivate-then-reactivate cycle that places a DIFFERENT clone at the
+-- SAME filesystem path is a guaranteed structural cache-miss -- the
+-- pre-existing `activated_at` timestamp is second-resolution and
+-- collision-prone within one clock tick, insufficient as a per-clone
+-- generation/identity token on its own.
+--
+-- Backward compatible: additive nullable column only, no default value
+-- required, no backfill. Rows inserted before this migration simply read
+-- activation_id as NULL and degrade gracefully to the pre-fix pure-path-
+-- derived cache-key behavior (ActivatedRepoManager.get_activation_id()
+-- returns None; FilesystemVectorStore(activation_id=None) is byte-
+-- identical to today). Never blocks a rolling upgrade -- an
+-- already-upgraded node writing activation_id and a not-yet-upgraded node
+-- ignoring it can coexist during a rolling restart.
+
+ALTER TABLE activated_repos ADD COLUMN IF NOT EXISTS activation_id TEXT;

@@ -343,6 +343,7 @@ class FilesystemVectorStore:
         memory_governor: Optional[Any] = None,
         use_chunks_db_for_new_collections: Optional[bool] = None,
         temporal_shard_resolver: Optional[Any] = None,
+        activation_id: Optional[str] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -371,6 +372,18 @@ class FilesystemVectorStore:
                 per-instance-gated); non-temporal names and the None default
                 (CLI/solo, semantic store, build/index store) are UNCHANGED,
                 direct base_path/collection_name construction.
+            activation_id: Story #1458 AC11 -- optional per-clone generation/
+                identity token (a UUID stamped once at activated-repo clone
+                materialization). Embedded into the HNSW/id_index shared
+                cache keys via _activation_scoped_cache_key() so a
+                deactivate-then-reactivate cycle that places a DIFFERENT
+                clone at the SAME filesystem path is a guaranteed structural
+                cache-miss, even when the chunks_db layout discriminator
+                value is identical between the two clones (the discriminator
+                alone is necessary but not sufficient for this case).
+                Defaults to None for the CLI/solo/non-activated path, which
+                keeps today's pure path-derived cache key byte-for-byte
+                unchanged.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -417,6 +430,11 @@ class FilesystemVectorStore:
         # Bug #1078: Server-side id_index cache to eliminate per-query pathlib deserialization
         # (~33% GIL time). Mirrors HNSW cache pattern. None in CLI/standalone mode.
         self.id_index_cache = id_index_cache
+
+        # Story #1458 AC11: per-clone generation/identity token, embedded
+        # into shared cache keys via _activation_scoped_cache_key(). None in
+        # CLI/solo/non-activated mode (byte-identical pure-path key).
+        self.activation_id: Optional[str] = activation_id
 
         # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable versioned snapshots.
         # Set True by the server layer when project_root is a proven-immutable .versioned path.
@@ -511,6 +529,39 @@ class FilesystemVectorStore:
         )
 
         return bool(resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB)
+
+    def _activation_scoped_cache_key(
+        self, path_str: str, *, chunk_layout_token: Optional[str] = None
+    ) -> str:
+        """Story #1458 AC11: compose the shared (HNSW/id_index) cache key
+        for ``path_str``, embedding the ``chunks_db`` layout-discriminator
+        token (AC11 Technical Requirement #1) and this instance's
+        ``activation_id`` (AC11 Technical Requirement #2 / Finding 7) when
+        present.
+
+        Returns ``path_str`` UNCHANGED when both ``chunk_layout_token`` is
+        None and ``self.activation_id`` is None -- byte-identical to the
+        pre-AC11 pure-path-derived key.
+
+        ``chunk_layout_token`` (typically ``resolve_chunk_layout(...).value``,
+        e.g. ``"sharded_json"`` or ``"chunks_db"``) is appended FIRST so a
+        post-consolidation read (the discriminator flips at the SAME path)
+        is a structural cache-miss, without requiring any active cross-node
+        invalidation broadcast -- the miss is by-construction from the
+        changed key.
+
+        ``activation_id``, when set, is appended AFTER the layout token, so
+        a different clone materialized at the SAME filesystem path
+        (deactivate-then-reactivate) is ALSO a guaranteed structural
+        cache-miss regardless of the layout-discriminator value, which alone
+        is necessary but not sufficient for that case (Finding 7).
+        """
+        key = path_str
+        if chunk_layout_token is not None:
+            key = f"{key}:{chunk_layout_token}"
+        if self.activation_id is not None:
+            key = f"{key}:{self.activation_id}"
+        return key
 
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
@@ -1051,7 +1102,10 @@ class FilesystemVectorStore:
         # fresh CHUNKS_DB build -- must use the combined
         # _is_chunks_db_collection authority via an explicit override,
         # exactly like end_indexing()'s own rebuild_from_vectors() calls.
-        from code_indexer.storage.shared.chunk_layout import ChunkLayout
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
 
         layout_override = (
             ChunkLayout.CHUNKS_DB
@@ -1071,12 +1125,36 @@ class FilesystemVectorStore:
         # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
         self._branch_isolation_did_filtered_rebuild = True
 
+        # Story #1458 AC11: invalidate() must target the EXACT key search()'s
+        # get_or_load() stored the entry under, which embeds the freshly
+        # (uncached) resolved chunks_db layout token -- NOT the in-memory
+        # layout_override computed above (that reflects THIS session's
+        # fresh-build intent, which can diverge from the on-disk resolver
+        # search() actually keys against). Using a mismatched key here would
+        # make invalidate() a silent no-op once the key format includes the
+        # layout token.
+        _invalidate_layout_token = resolve_chunk_layout(collection_path).value
+
         # Invalidate HNSW cache if present (server-side cache must be refreshed)
+        # Codex Finding #9 (MEDIUM): .resolve() here, matching search()'s
+        # OWN key composition -- a non-canonical (e.g. symlinked) base_path
+        # would otherwise make invalidate() compose a DIFFERENT key than
+        # search() stored under, a silent no-op eviction.
         if self.hnsw_index_cache is not None:
-            self.hnsw_index_cache.invalidate(str(collection_path))
+            self.hnsw_index_cache.invalidate(
+                self._activation_scoped_cache_key(
+                    str(collection_path.resolve()),
+                    chunk_layout_token=_invalidate_layout_token,
+                )
+            )
         # Bug #1078: invalidate id_index cache in lockstep with HNSW (same rebuild event)
         if self.id_index_cache is not None:
-            self.id_index_cache.invalidate(str(collection_path))
+            self.id_index_cache.invalidate(
+                self._activation_scoped_cache_key(
+                    str(collection_path.resolve()),
+                    chunk_layout_token=_invalidate_layout_token,
+                )
+            )
 
         self.logger.info(
             f"Filtered HNSW rebuild complete for '{collection_name}': "
@@ -3276,8 +3354,16 @@ class FilesystemVectorStore:
 
             # Story #526: Use cache if available
             if self.hnsw_index_cache is not None:
-                # Cache key is collection_path (unique per repository)
-                cache_key = str(collection_path.resolve())
+                # Cache key is collection_path (unique per repository), plus
+                # Story #1458 AC11's chunks_db layout-discriminator token
+                # (so a post-consolidation read at the same path is a
+                # structural miss) and activation_id token (so a deactivate-
+                # then-reactivate clone at the same path is a structural
+                # miss too).
+                cache_key = self._activation_scoped_cache_key(
+                    str(collection_path.resolve()),
+                    chunk_layout_token=_search_chunk_layout.value,
+                )
 
                 def hnsw_loader():
                     """Loader function for cache miss.
@@ -3344,9 +3430,14 @@ class FilesystemVectorStore:
             if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
                 id_index = None
             elif self.id_index_cache is not None:
-                # Bug #1078: use shared cross-query cache (server mode)
+                # Bug #1078: use shared cross-query cache (server mode).
+                # Story #1458 AC11: same chunks_db-layout-token + activation_id
+                # -scoped key as the HNSW cache above.
                 id_index = self.id_index_cache.get_or_load(
-                    str(collection_path.resolve()),
+                    self._activation_scoped_cache_key(
+                        str(collection_path.resolve()),
+                        chunk_layout_token=_search_chunk_layout.value,
+                    ),
                     lambda: self._load_id_index(collection_name),
                 )
             else:

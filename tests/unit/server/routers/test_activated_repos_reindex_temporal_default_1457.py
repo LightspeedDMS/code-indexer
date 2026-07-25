@@ -47,11 +47,17 @@ def client(app_with_router):
     return TestClient(app_with_router, raise_server_exceptions=False)
 
 
-def test_reindex_default_index_types_excludes_temporal(client, tmp_path):
+def test_reindex_default_index_types_excludes_temporal(client, tmp_path, monkeypatch):
     """POST .../reindex with NO index_types must default to only the
     types AC12 actually supports for activated repos -- never 'temporal'."""
-    repo_dir = tmp_path / "my-repo"
-    repo_dir.mkdir()
+    # Bug #1472: trigger_reindex is now wired to the real
+    # ActivatedRepoIndexManager, which enforces path confinement against
+    # its data_dir (CIDX_SERVER_DATA_DIR/data). Place repo_dir under that
+    # tree so the real security check passes, matching a real deployment's
+    # activated-repos layout.
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
+    repo_dir = tmp_path / "data" / "activated-repos" / "alice" / "my-repo"
+    repo_dir.mkdir(parents=True)
 
     activated_manager = MagicMock()
     activated_manager.get_activated_repo_path.return_value = str(repo_dir)
@@ -194,7 +200,7 @@ def test_reindex_unsupported_index_type_is_rejected(client, tmp_path):
 
 
 def test_reindex_mixed_case_valid_types_are_normalized_for_job_and_response(
-    client, tmp_path
+    client, tmp_path, monkeypatch
 ):
     """2026-07-24 round-5 re-review (Codex): validation lowercases entries
     ONLY for the allowlist check, but the job submission and response body
@@ -204,8 +210,14 @@ def test_reindex_mixed_case_valid_types_are_normalized_for_job_and_response(
     currently FAIL (RED) since the response today echoes the raw mixed
     casing ["Semantic", "FTS", "ScIp"] instead of
     ["semantic", "fts", "scip"]."""
-    repo_dir = tmp_path / "my-repo"
-    repo_dir.mkdir()
+    # Bug #1472: trigger_reindex is now wired to the real
+    # ActivatedRepoIndexManager, which enforces path confinement against
+    # its data_dir (CIDX_SERVER_DATA_DIR/data). Place repo_dir under that
+    # tree so the real security check passes, matching a real deployment's
+    # activated-repos layout.
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
+    repo_dir = tmp_path / "data" / "activated-repos" / "alice" / "my-repo"
+    repo_dir.mkdir(parents=True)
 
     activated_manager = MagicMock()
     activated_manager.get_activated_repo_path.return_value = str(repo_dir)

@@ -9,8 +9,10 @@ migration (backup/verify/flip) -- that is Story #1458's responsibility, and
 it will import and reuse THIS module rather than reimplementing the
 discriminator.
 
-Discriminator schema
----------------------
+Discriminator schema (Story #1458 AC3 Finding 4 -- CANONICAL, defined SOLELY
+here; every other module/story imports and reuses this resolver rather than
+restating the schema)
+---------------------------------------------------------------------------
 A ``chunks_db`` key lives at the TOP LEVEL of ``collection_meta.json``, as a
 sibling of the existing ``metadata``/``hnsw_index`` keys -- never nested
 inside them (those remain completely untouched by this module, per AC1)::
@@ -19,8 +21,16 @@ inside them (those remain completely untouched by this module, per AC1)::
         "name": "my_collection",
         "vector_size": 1024,
         "metadata": {"hnsw_index": {"id_mapping": {...}}},
-        "chunks_db": {"enabled": true, "version": 1}
+        "chunks_db": {"version": 1}
     }
+
+The discriminator's value is a versioned object carrying EXACTLY an integer
+``version >= 1`` (a versioned object, NOT a bare boolean, so a future
+consolidated-format revision can bump the version without ambiguity). An
+``enabled`` key is NOT part of the validity contract -- an object that also
+happens to carry an ``enabled`` key (present for historical reasons in some
+existing callers) is validated SOLELY on its ``version`` field; ``enabled``
+is never inspected.
 
 Fail-closed contract
 ---------------------
@@ -31,13 +41,16 @@ following resolve to ``ChunkLayout.SHARDED_JSON``:
   decodable as UTF-8 text.
 - The top-level JSON value is not an object (dict).
 - The ``chunks_db`` key is absent.
-- The ``chunks_db`` value is not an object, or ``enabled`` is not
-  ``True`` (a bool, not merely truthy), or ``enabled`` is missing/wrong type.
+- The ``chunks_db`` value is not an object.
+- The ``version`` key is absent, is not an ``int`` (a bare ``bool`` does
+  NOT count as a valid integer version, even though
+  ``isinstance(True, int)`` is technically ``True`` in Python), or is
+  less than 1.
 - Any OSError while reading (permission error, path is a file not a
   directory, etc.).
 
-Only a well-formed, explicitly-``enabled: true`` discriminator resolves to
-``ChunkLayout.CHUNKS_DB``.
+Only a well-formed discriminator carrying an integer ``version >= 1``
+resolves to ``ChunkLayout.CHUNKS_DB``.
 
 Durability
 ----------
@@ -109,7 +122,10 @@ def resolve_chunk_layout(collection_dir: Union[str, Path]) -> ChunkLayout:
     if not isinstance(discriminator, dict):
         return ChunkLayout.SHARDED_JSON
 
-    if discriminator.get("enabled") is True:
+    version = discriminator.get("version")
+    # bool is a subclass of int in Python -- explicitly exclude it so a
+    # stray `"version": true` is never mistaken for a valid integer.
+    if isinstance(version, int) and not isinstance(version, bool) and version >= 1:
         return ChunkLayout.CHUNKS_DB
 
     return ChunkLayout.SHARDED_JSON
@@ -187,7 +203,6 @@ def write_chunks_db_discriminator(collection_dir: Union[str, Path]) -> None:
 
     meta = json.loads(meta_path.read_text())
     meta[_DISCRIMINATOR_KEY] = {
-        "enabled": True,
         "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
     }
     _atomic_write_json_durable(meta_path, meta)

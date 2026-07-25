@@ -21,15 +21,33 @@ from __future__ import annotations
 import logging
 import time as _time
 from contextlib import contextmanager
-from typing import Generator
+from typing import TYPE_CHECKING, Any, Generator, Optional
 
-import psycopg  # noqa: F401  (imported for type annotations in callers)
-from psycopg_pool import ConnectionPool as _PsycopgPool
+if TYPE_CHECKING:
+    # Bug #1468: psycopg is a heavy PostgreSQL-only dependency that
+    # previously loaded unconditionally merely by importing this module
+    # (which happens transitively from FilesystemVectorStore, including pure
+    # CLI/solo usage with no PostgreSQL need at all). Type-only here.
+    import psycopg  # noqa: F401  (type annotations only)
 
 logger = logging.getLogger(__name__)
 
 # Bug #545: Warn when connection acquisition takes longer than this (seconds).
 _SLOW_ACQUISITION_THRESHOLD = 5.0
+
+# Bug #1468: module-level sentinel, deliberately None (not yet imported) so
+# merely importing this module never forces psycopg_pool to load. Kept as a
+# real module attribute (not folded entirely into a local import) so the
+# pre-existing test suite's `unittest.mock.patch(
+# "...connection_pool._PsycopgPool")` continues to work: ConnectionPool.
+# __init__ reads this SAME module-global name, so a test's patched Mock is
+# picked up transparently -- the real `psycopg_pool.ConnectionPool` is only
+# ever imported lazily, on first non-mocked construction, and cached back
+# here for subsequent calls in the same process. Typed as Optional[Any]
+# (not the real psycopg_pool.ConnectionPool[...] generic type) specifically
+# so it can hold either None or a plain class object without a mypy
+# "Cannot assign to a type" conflict.
+_PsycopgPool: Optional[Any] = None
 
 
 class ConnectionPool:
@@ -59,6 +77,20 @@ class ConnectionPool:
             timeout: Max seconds to wait for a connection (Bug #545).
             name: Pool name for logging (e.g., 'general', 'critical').
         """
+        # Bug #1468: lazy import via the module-global sentinel -- this is
+        # the ONLY runtime use site of psycopg_pool in this module, deferred
+        # so importing this module (or anything that transitively imports
+        # it, e.g. FilesystemVectorStore) does not force psycopg/psycopg_pool
+        # to load for callers that never actually construct a ConnectionPool.
+        # Reading/caching the SAME module-global name (rather than a purely
+        # local import) keeps `unittest.mock.patch("...connection_pool.
+        # _PsycopgPool")` working for tests.
+        global _PsycopgPool
+        if _PsycopgPool is None:
+            from psycopg_pool import ConnectionPool as _imported_psycopg_pool
+
+            _PsycopgPool = _imported_psycopg_pool
+
         self._connection_string = connection_string
         self._name = name
         self._timeout = timeout
