@@ -134,6 +134,7 @@ class TestRunFleetMigrationForRepoHappyPath:
             semantic_collection_dirs=[collection_dir],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "completed"
@@ -162,6 +163,7 @@ class TestRunFleetMigrationForRepoHappyPath:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert scheduler.is_write_locked("evolution") is False
@@ -196,6 +198,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
                 )
             ],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "completed"
@@ -229,6 +232,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "incomplete"
@@ -255,6 +259,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "incomplete"
@@ -296,6 +301,7 @@ class TestRunFleetMigrationForRepoAC1aRowlessEmptyArtifact:
                 )
             ],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "completed"
@@ -337,6 +343,7 @@ class TestRunFleetMigrationForRepoRefusesImmutablePath:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "refused_immutable_path"
@@ -461,9 +468,11 @@ class TestSnapshotGateReVerifiesBeforeFiring:
             ConsolidationResult,
         )
 
-        def _lying_consolidate(collection_dir_arg):
+        def _lying_consolidate(collection_dir_arg, **kwargs):
             # Simulates finding #5's duplicate-ID bug: claims success
             # without the collection actually being verifiably migrated.
+            # **kwargs absorbs Story #1460's deletion_authorized param --
+            # irrelevant to this test's own concern (a lying status).
             return ConsolidationResult(status="consolidated")
 
         monkeypatch.setattr(
@@ -482,6 +491,7 @@ class TestSnapshotGateReVerifiesBeforeFiring:
             semantic_collection_dirs=[collection_dir],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status != "completed", (
@@ -527,6 +537,7 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
             semantic_collection_dirs=[collection_dir],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "refresh_in_flight"
@@ -559,6 +570,7 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         # Not left holding the lock forever -- released so a retry (or
@@ -593,6 +605,7 @@ class TestRunFleetMigrationForRepoAC2AC8WriteLock:
             semantic_collection_dirs=[],
             temporal_namespaces=[],
             sister_root=sister_root,
+            deletion_authorized=True,
         )
 
         assert result.status == "lock_held"

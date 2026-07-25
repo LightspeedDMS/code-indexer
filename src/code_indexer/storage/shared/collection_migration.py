@@ -308,6 +308,13 @@ class ConsolidationResult:
     old_files_deleted: int = 0
     detail: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
+    #: Story #1460 AC1/AC2 rollout-safety gate: True iff a REAL legacy file
+    #: existed on disk AND destructive cleanup (step 5) was WITHHELD this
+    #: call because the caller passed ``deletion_authorized=False`` --
+    #: physical-truth, mirroring ``old_files_deleted``: an already-clean
+    #: collection (nothing left to delete) is False regardless of the
+    #: flag, and cleanup that genuinely ran is always False too.
+    deletion_gated: bool = False
 
 
 def _estimate_bytes_needed(json_paths: Iterable[Path]) -> int:
@@ -793,6 +800,8 @@ def verify_collection_fully_migrated(collection_dir: Union[str, Path]) -> bool:
 
 def consolidate_collection_in_place(
     collection_dir: Union[str, Path],
+    *,
+    deletion_authorized: bool = True,
 ) -> ConsolidationResult:
     """Consolidate ONE collection's sharded ``vector_*.json`` layout into a
     ``chunks.db`` written into the SAME directory, in place.
@@ -806,9 +815,30 @@ def consolidate_collection_in_place(
             collection inside the target repo's MUTABLE BASE CLONE, per
             AC3 -- this function itself is location-agnostic and simply
             operates on whatever path it is given).
+        deletion_authorized: Story #1460 AC1/AC2 rollout-safety gate.
+            Defaults to True (Story #1458's original unconditional
+            behavior -- byte-identical for every pre-existing caller that
+            does not pass this parameter). When False, steps 1-4 (the
+            PURE-ADDITION build/verify/durable-flip sequence) still run in
+            full -- producing the AC1 "bake window" mixed-layout state,
+            where both an old sharded-JSON-only reader (via the untouched
+            legacy files) and a new dual-layout-aware reader (via the now
+            -committed ``chunks.db``) see correct data simultaneously --
+            but step 5's DESTRUCTIVE legacy-file deletion is withheld
+            entirely. The real production caller
+            (``run_fleet_migration_for_repo``, server/services/
+            fleet_migration/orchestrator.py) resolves this from the
+            operator-controlled, ``get_config_service()``-backed
+            ``fleet_migration_config.enabled`` flag (default OFF) --
+            never an env var.
 
     Returns:
         A :class:`ConsolidationResult` describing what happened.
+        ``deletion_gated`` is True iff a REAL legacy file existed on disk
+        AND was withheld this call because ``deletion_authorized`` was
+        False -- an already-clean collection (nothing left to delete)
+        reports ``deletion_gated=False`` regardless of the flag, mirroring
+        ``old_files_deleted``'s own physical-truth contract.
 
     Raises:
         ConsolidationVerificationError: read-back verification (step 3)
@@ -824,6 +854,25 @@ def consolidate_collection_in_place(
         # chunks.db fresh and verify it actually has every still-present
         # legacy record before deleting anything.
         _verify_chunks_db_before_resume_cleanup(collection_dir, still_present_id_map)
+        if not deletion_authorized:
+            # Physical-truth principle (Codex review finding): a REAL
+            # deletion target must actually exist for this to count as
+            # "gated" -- an already-clean collection (still_present_id_map
+            # empty) has nothing to withhold, so deletion_gated must be
+            # False even though deletion_authorized is False this call.
+            had_legacy_files = bool(still_present_id_map)
+            if had_legacy_files:
+                logger.info(
+                    "consolidate_collection_in_place: resume-path cleanup "
+                    "WITHHELD for %s -- deletion_authorized=False (rollout "
+                    "gate closed); legacy sharded files remain on disk",
+                    collection_dir,
+                )
+            return ConsolidationResult(
+                status="already_consolidated",
+                old_files_deleted=0,
+                deletion_gated=had_legacy_files,
+            )
         deleted = _cleanup_old_sharded_files(collection_dir)
         return ConsolidationResult(
             status="already_consolidated", old_files_deleted=deleted
@@ -893,7 +942,34 @@ def consolidate_collection_in_place(
     # Step 4: durable discriminator flip -- only after full verification.
     write_chunks_db_discriminator(collection_dir)
 
-    # Step 5: delete the old files individually.
+    # Step 5: delete the old files individually -- gated by Story #1460's
+    # rollout-safety flag. When withheld, the collection is left in the
+    # deliberate AC1 "bake window" mixed-layout state: chunks.db is fully
+    # built/verified/committed (a new dual-layout-aware reader already
+    # sees ChunkLayout.CHUNKS_DB) while the legacy sharded files remain
+    # physically present (an old/un-upgraded reader still finds them).
+    if not deletion_authorized:
+        # Physical-truth principle (Codex review finding): id_map is the
+        # exact set of legacy files step 5 would otherwise delete -- an
+        # empty id_map (a genuinely empty collection) means there is
+        # nothing to withhold, so deletion_gated must be False even
+        # though deletion_authorized is False this call.
+        had_legacy_files = bool(id_map)
+        if had_legacy_files:
+            logger.info(
+                "consolidate_collection_in_place: fresh-path cleanup "
+                "WITHHELD for %s -- deletion_authorized=False (rollout "
+                "gate closed); chunks.db is built+verified+committed but "
+                "legacy sharded files remain on disk",
+                collection_dir,
+            )
+        return ConsolidationResult(
+            status="consolidated",
+            records_written=len(id_map),
+            old_files_deleted=0,
+            deletion_gated=had_legacy_files,
+        )
+
     deleted = _cleanup_old_sharded_files(collection_dir)
 
     return ConsolidationResult(

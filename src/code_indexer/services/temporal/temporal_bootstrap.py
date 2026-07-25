@@ -269,6 +269,14 @@ class BootstrapOutcome:
     reclaimed: bool
     version_path: Optional[Path] = None
     records_migrated: int = 0
+    #: Story #1460 AC1/AC2 rollout-safety gate: True iff the destructive
+    #: in-repo-tree reclaim was WITHHELD this call because the caller
+    #: passed ``deletion_authorized=False`` -- physical-truth, mirroring
+    #: ``reclaimed``: an in-repo tree that was ALREADY physically absent
+    #: before this call has nothing to withhold, so this is False
+    #: regardless of the flag; reclaim that genuinely ran is always False
+    #: too.
+    deletion_gated: bool = False
 
 
 def _reclaim_in_repo_tree(legacy_shard_dir: Path) -> bool:
@@ -281,6 +289,47 @@ def _reclaim_in_repo_tree(legacy_shard_dir: Path) -> bool:
     return not legacy_shard_dir.exists()
 
 
+def _reclaim_in_repo_tree_if_authorized(
+    legacy_shard_dir: Path, deletion_authorized: bool
+) -> tuple[bool, bool]:
+    """Story #1460 AC1/AC2 rollout-safety gate wrapper around the ONE
+    destructive call site every disposition branch below funnels through.
+
+    Returns ``(reclaimed, deletion_gated)``. Both follow the SAME
+    physical-truth principle -- checked BEFORE deciding whether to act,
+    never inferred purely from ``deletion_authorized``'s value:
+
+    When ``deletion_authorized`` is False and a real in-repo tree exists,
+    it is left physically untouched (``reclaimed=False``,
+    ``deletion_gated=True``) -- the deliberate AC1 "mixed/bootstrap
+    cutover state" where an old/un-upgraded node that only understands the
+    pre-relocation ``clone_path/.code-indexer/index`` location can still
+    find the data, while a new sister-root-resolver-aware node already
+    finds it via the published pointer.
+
+    When ``deletion_authorized`` is False but the tree is ALREADY
+    physically absent (nothing to withhold -- e.g. a prior pass already
+    reclaimed it, or this disposition never had a leftover tree to begin
+    with), this call is a true no-op: ``reclaimed=True`` (it genuinely IS
+    absent, matching ``_reclaim_in_repo_tree``'s own physical-truth
+    contract) and ``deletion_gated=False`` (nothing was withheld, so
+    reporting a withheld deletion would be misleading -- Codex review
+    finding).
+    """
+    if not deletion_authorized:
+        had_data = legacy_shard_dir.exists()
+        if had_data:
+            logger.info(
+                "bootstrap_temporal_namespace_to_sister: in-repo-tree "
+                "reclaim WITHHELD for %s -- deletion_authorized=False "
+                "(rollout gate closed); legacy temporal tree remains on "
+                "disk",
+                legacy_shard_dir,
+            )
+        return (not had_data), had_data
+    return _reclaim_in_repo_tree(legacy_shard_dir), False
+
+
 def bootstrap_temporal_namespace_to_sister(
     *,
     alias_manager: AliasManager,
@@ -288,6 +337,7 @@ def bootstrap_temporal_namespace_to_sister(
     pointer_namespace: str,
     legacy_shard_dir: Path,
     embedder_slug: str,
+    deletion_authorized: bool = True,
 ) -> BootstrapOutcome:
     """Bootstrap ONE (embedder, quarter) in-repo temporal namespace to the
     sister location, per its classified disposition.
@@ -305,11 +355,35 @@ def bootstrap_temporal_namespace_to_sister(
         embedder_slug: Sanitized embedder model slug, threaded into the
             v2 temporal_structure.json marker (see
             `build_fresh_consolidated_temporal_version`).
+        deletion_authorized: Story #1460 AC1/AC2 rollout-safety gate.
+            Defaults to True (Story #1458's original unconditional
+            behavior -- byte-identical for every pre-existing caller that
+            does not pass this parameter). When False, build/publish work
+            (NEEDS_BOOTSTRAP's fresh consolidated version) and read-only
+            validation (ALREADY_PUBLISHED's pointer-target check) still
+            run in full, but the destructive in-repo-tree reclaim is
+            withheld across ALL THREE dispositions -- the AC1 "mixed/
+            bootstrap cutover state" where an old/un-upgraded node that
+            only understands the pre-relocation
+            ``clone_path/.code-indexer/index`` location can still find the
+            data, while a new sister-root-resolver-aware node already
+            finds it via the published pointer. The real production
+            caller (``run_fleet_migration_for_repo``, server/services/
+            fleet_migration/orchestrator.py) resolves this from the
+            operator-controlled, ``get_config_service()``-backed
+            ``fleet_migration_config.enabled`` flag (default OFF) --
+            never an env var.
 
     Returns:
         A :class:`BootstrapOutcome` describing what happened. ``reclaimed``
         is True iff the in-repo tree is physically absent from disk when
-        this call returns -- the state this story's completion gate checks.
+        this call returns -- the state this story's completion gate checks
+        -- regardless of whether ``deletion_authorized`` was True or
+        False (a tree that was ALREADY absent is trivially "reclaimed").
+        ``deletion_gated`` is True iff a REAL in-repo tree existed AND was
+        withheld this call because ``deletion_authorized`` was False --
+        an already-clean namespace (nothing left to withhold) reports
+        ``deletion_gated=False`` regardless of the flag.
     """
     disposition = classify_bootstrap_disposition(
         alias_manager, pointer_namespace, legacy_shard_dir
@@ -330,12 +404,24 @@ def bootstrap_temporal_namespace_to_sister(
                 f"{legacy_shard_dir} (see WARNING log above for the "
                 f"specific validation failure)"
             )
-        reclaimed = _reclaim_in_repo_tree(legacy_shard_dir)
-        return BootstrapOutcome(disposition=disposition, reclaimed=reclaimed)
+        reclaimed, deletion_gated = _reclaim_in_repo_tree_if_authorized(
+            legacy_shard_dir, deletion_authorized
+        )
+        return BootstrapOutcome(
+            disposition=disposition,
+            reclaimed=reclaimed,
+            deletion_gated=deletion_gated,
+        )
 
     if disposition == BootstrapDisposition.EMPTY_ARTIFACT:
-        reclaimed = _reclaim_in_repo_tree(legacy_shard_dir)
-        return BootstrapOutcome(disposition=disposition, reclaimed=reclaimed)
+        reclaimed, deletion_gated = _reclaim_in_repo_tree_if_authorized(
+            legacy_shard_dir, deletion_authorized
+        )
+        return BootstrapOutcome(
+            disposition=disposition,
+            reclaimed=reclaimed,
+            deletion_gated=deletion_gated,
+        )
 
     # NEEDS_BOOTSTRAP: build fresh, read-back verify (inside the build
     # primitive itself), publish, THEN reclaim -- never reclaim before the
@@ -365,8 +451,16 @@ def bootstrap_temporal_namespace_to_sister(
 
     publish_temporal_shard_version(alias_manager, pointer_namespace, version_path)
 
-    reclaimed = _reclaim_in_repo_tree(legacy_shard_dir)
-    if not reclaimed:
+    reclaimed, deletion_gated = _reclaim_in_repo_tree_if_authorized(
+        legacy_shard_dir, deletion_authorized
+    )
+    # A genuine reclaim FAILURE (gate open, reclaim attempted, tree still
+    # present -- e.g. a permissions/race issue) is worth a WARNING so it
+    # gets swept on a later pass. A deliberately WITHHELD reclaim
+    # (deletion_authorized=False) is expected, already logged at INFO by
+    # _reclaim_in_repo_tree_if_authorized, and must never be conflated
+    # with a failure here.
+    if not reclaimed and deletion_authorized:
         logger.warning(
             "bootstrap_temporal_namespace_to_sister: published %s but "
             "failed to fully reclaim in-repo tree %s -- will be swept on "
@@ -380,4 +474,5 @@ def bootstrap_temporal_namespace_to_sister(
         reclaimed=reclaimed,
         version_path=version_path,
         records_migrated=len(rows),
+        deletion_gated=deletion_gated,
     )

@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.fleet_migration.completion_gate import (
     mark_post_consolidation_snapshot_published,
     repo_has_zero_residual_temporal_dirs,
@@ -150,8 +151,15 @@ def _bare_alias(alias: str) -> str:
 
 def _consolidate_semantic_collections(
     semantic_collection_dirs: List[Path],
+    *,
+    deletion_authorized: bool = True,
 ) -> Tuple[int, int]:
-    """AC1 step (1). Returns (consolidated_count, skipped_disk_count)."""
+    """AC1 step (1). Returns (consolidated_count, skipped_disk_count).
+
+    ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
+    threaded straight through to ``consolidate_collection_in_place`` --
+    see that function's own docstring for the full semantics.
+    """
     consolidated_count = 0
     skipped_disk_count = 0
     for collection_dir in semantic_collection_dirs:
@@ -173,7 +181,9 @@ def _consolidate_semantic_collections(
                 f"validation but changed before this destructive write "
                 f"could run."
             )
-        result = consolidate_collection_in_place(collection_dir)
+        result = consolidate_collection_in_place(
+            collection_dir, deletion_authorized=deletion_authorized
+        )
         if result.status in ("consolidated", "already_consolidated"):
             consolidated_count += 1
         elif result.status == "skipped_insufficient_disk":
@@ -185,9 +195,16 @@ def _bootstrap_temporal_namespaces(
     temporal_namespaces: List[TemporalNamespaceSpec],
     sister_alias_manager: AliasManager,
     sister_root: Path,
+    *,
+    deletion_authorized: bool = True,
 ) -> None:
     """AC1 step (2): synchronous, in-process, inside THIS same write-lock
-    hold, as a literal sub-step of this job (Story #1457 AC11)."""
+    hold, as a literal sub-step of this job (Story #1457 AC11).
+
+    ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
+    threaded straight through to ``bootstrap_temporal_namespace_to_sister``
+    -- see that function's own docstring for the full semantics.
+    """
     for spec in temporal_namespaces:
         bootstrap_temporal_namespace_to_sister(
             alias_manager=sister_alias_manager,
@@ -195,6 +212,7 @@ def _bootstrap_temporal_namespaces(
             pointer_namespace=spec.pointer_namespace,
             legacy_shard_dir=spec.legacy_shard_dir,
             embedder_slug=spec.embedder_slug,
+            deletion_authorized=deletion_authorized,
         )
 
 
@@ -207,14 +225,29 @@ def _run_migration_sequence(
     semantic_collection_dirs: List[Path],
     temporal_namespaces: List[TemporalNamespaceSpec],
     sister_root: Path,
+    *,
+    deletion_authorized: bool = True,
 ) -> FleetMigrationRepoResult:
     """AC1 steps (1)-(3), run under the ALREADY-acquired write lock and
-    AFTER AC9's in-flight-refresh check has already passed."""
+    AFTER AC9's in-flight-refresh check has already passed.
+
+    ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate --
+    when False, both the semantic and temporal DESTRUCTIVE deletion steps
+    are withheld while the non-destructive build/publish work still runs
+    (see ``consolidate_collection_in_place``/
+    ``bootstrap_temporal_namespace_to_sister`` docstrings). The completion
+    gate below naturally refuses to fire AC10's snapshot in that case,
+    since withheld deletion always leaves either a residual temporal
+    directory or a not-yet-fully-migrated semantic collection.
+    """
     consolidated_count, skipped_disk_count = _consolidate_semantic_collections(
-        semantic_collection_dirs
+        semantic_collection_dirs, deletion_authorized=deletion_authorized
     )
     _bootstrap_temporal_namespaces(
-        temporal_namespaces, sister_alias_manager, sister_root
+        temporal_namespaces,
+        sister_alias_manager,
+        sister_root,
+        deletion_authorized=deletion_authorized,
     )
 
     # AC1 step (3) / AC10: the completion gate is UNCONDITIONAL physical
@@ -290,6 +323,7 @@ def run_fleet_migration_for_repo(
     semantic_collection_dirs: List[Path],
     temporal_namespaces: List[TemporalNamespaceSpec],
     sister_root: Path,
+    deletion_authorized: Optional[bool] = None,
 ) -> FleetMigrationRepoResult:
     """Run the full per-repo fleet-migration pass for one golden repo.
 
@@ -311,6 +345,16 @@ def run_fleet_migration_for_repo(
             AC11, step 2 of AC1's ordering).
         sister_root: Root directory under which sister-location published
             temporal versions live.
+        deletion_authorized: Story #1460 AC1/AC2 rollout-safety gate.
+            Explicit True/False always wins (test/admin-tool override).
+            None (the default) resolves from the operator-controlled,
+            ``get_config_service()``-backed ``fleet_migration_config.
+            enabled`` flag (default OFF, Web-UI-configurable -- never an
+            env var) at call time, immediately before it is needed --
+            genuine defense-in-depth so ANY caller of this function
+            (not just ``FleetMigrationScheduler``, the only production
+            caller today) gets the real, fail-closed config value rather
+            than silently deleting unconditionally.
 
     Returns:
         A :class:`FleetMigrationRepoResult` describing the outcome.
@@ -364,6 +408,19 @@ def run_fleet_migration_for_repo(
                 ),
             )
 
+        # Story #1460 AC1/AC2: resolve the rollout-safety gate ONLY here,
+        # immediately before it is needed -- an explicit override always
+        # wins; otherwise fall back to the SAME operator-controlled,
+        # get_config_service()-backed flag Story #1458 already wired
+        # through the Web UI Config Screen. Deferred this late (never at
+        # function entry) so the lock_held/refresh_in_flight/immutable
+        # -path early-return paths above never touch the config service.
+        resolved_deletion_authorized = (
+            deletion_authorized
+            if deletion_authorized is not None
+            else bool(get_config_service().get_config().fleet_migration_config.enabled)
+        )
+
         return _run_migration_sequence(
             refresh_scheduler,
             sister_alias_manager,
@@ -373,6 +430,7 @@ def run_fleet_migration_for_repo(
             semantic_collection_dirs,
             temporal_namespaces,
             sister_root,
+            deletion_authorized=resolved_deletion_authorized,
         )
     finally:
         # AC2: held continuously through the whole sequence above,

@@ -34,6 +34,10 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.services.config_service import (
+    reset_config_service,
+    set_config_service,
+)
 from code_indexer.server.services.fleet_migration.completion_gate import (
     mark_post_consolidation_snapshot_published,
     repo_has_published_post_consolidation_snapshot,
@@ -131,6 +135,21 @@ def job_tracker(tmp_path: Path) -> JobTracker:
     return JobTracker(db_path)
 
 
+@pytest.fixture(autouse=True)
+def _reset_config_service_singleton():
+    """Story #1460: run_fleet_migration_for_repo() now independently
+    resolves its deletion_authorized rollout-safety gate from the global
+    get_config_service() singleton when the scheduler doesn't override it
+    -- _make_scheduler() registers the SAME config_service object into
+    that singleton (mirroring lifespan.py's real production wiring, where
+    both the scheduler and the orchestrator's default resolution share
+    literally one ConfigService instance). Reset around every test so
+    this file's fakes never leak into a sibling test module."""
+    reset_config_service()
+    yield
+    reset_config_service()
+
+
 def _make_refresh_scheduler(tmp_path: Path) -> RefreshScheduler:
     golden_repos_dir = tmp_path / "golden-repos"
     golden_repos_dir.mkdir(parents=True, exist_ok=True)
@@ -222,11 +241,18 @@ def _make_scheduler(
     background_job_manager,
     config_service=None,
 ) -> FleetMigrationScheduler:
+    resolved_config_service = config_service or _RecordingConfigService()
+    # Mirror lifespan.py's real production wiring: the scheduler AND
+    # run_fleet_migration_for_repo()'s Story #1460 default deletion
+    # -authorized resolution must observe the SAME config_service, or the
+    # scheduler's own kill-switch check and the orchestrator's independent
+    # rollout-safety-gate resolution can silently disagree in a test.
+    set_config_service(resolved_config_service)
     return FleetMigrationScheduler(
         golden_repo_manager=golden_repo_manager,
         refresh_scheduler=refresh_scheduler,
         background_job_manager=background_job_manager,
-        config_service=config_service or _RecordingConfigService(),
+        config_service=resolved_config_service,
     )
 
 
