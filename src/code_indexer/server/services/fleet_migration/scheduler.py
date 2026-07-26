@@ -54,11 +54,23 @@ from code_indexer.server.services.fleet_migration.completion_gate import (
     invalidate_post_consolidation_snapshot_marker,
 )
 from code_indexer.server.services.fleet_migration.discovery import (
+    FleetMigrationCandidate,
     enumerate_fleet_migration_candidates,
     is_repo_already_migrated,
 )
 from code_indexer.server.services.fleet_migration.orchestrator import (
     run_fleet_migration_for_repo,
+)
+from code_indexer.server.services.fleet_migration.quarantine import (
+    QuarantineStateUnavailableError,
+    classify_failure_cause,
+    compute_repo_state_signature,
+    count_quarantined,
+    is_quarantined,
+    probe_quarantine_backend_health,
+    record_migration_failure,
+    reset_migration_failure,
+    status_counts_as_quarantine_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,6 +222,72 @@ class FleetMigrationScheduler:
         logger.info("FleetMigrationScheduler: triggered migration job_id=%s", job_id)
         return job_id
 
+    def _record_failure_or_abort(
+        self,
+        candidate: "FleetMigrationCandidate",
+        *,
+        original_exc: Optional[BaseException] = None,
+        detail: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Attempt to record a fleet-migration failure for `candidate`,
+        consolidating BOTH call sites `_run_next_candidate()` needs this
+        for (the raised-exception path and the non-raising counted-status
+        path) into ONE place (Finding D + Finding I, Codex round-5
+        review) -- so the failure-cause classification and the abort-
+        status handling stay consistent in exactly one place rather than
+        diverging across two call sites.
+
+        `detail` (the orchestrator result's `.detail`, only meaningful
+        for the non-raising path -- an exception carries none) is
+        classified via `classify_failure_cause()` into a persisted
+        failure cause (Finding I), so `is_quarantined()` can later choose
+        the correct auto-clear strategy.
+
+        Returns:
+            None on success (the caller proceeds normally: re-raise the
+            original exception, or continue to the next candidate).
+            An abort-status dict on a bookkeeping WRITE failure (Finding
+            D): the caller must return this immediately rather than
+            re-raising `original_exc` -- bookkeeping could not be
+            trusted for this attempt. `original_exc` (if given) is
+            logged here for visibility since it will NOT be re-raised.
+        """
+        try:
+            record_migration_failure(
+                self._golden_repo_manager,
+                candidate.golden_alias,
+                compute_repo_state_signature(candidate),
+                failure_cause=classify_failure_cause(detail=detail),
+            )
+            return None
+        except QuarantineStateUnavailableError as bookkeeping_exc:
+            if original_exc is not None:
+                logger.error(
+                    "FleetMigrationScheduler: repo '%s' migration failed "
+                    "(%s) AND recording that failure ALSO failed (%s) -- "
+                    "aborting this scheduling tick. The original "
+                    "migration exception is logged here for visibility "
+                    "but is NOT re-raised, since bookkeeping could not "
+                    "be trusted for this attempt.",
+                    candidate.golden_alias,
+                    original_exc,
+                    bookkeeping_exc,
+                )
+            else:
+                logger.error(
+                    "FleetMigrationScheduler: repo '%s' migration "
+                    "returned a non-progress status, AND recording that "
+                    "failure ALSO failed (%s) -- aborting this "
+                    "scheduling tick.",
+                    candidate.golden_alias,
+                    bookkeeping_exc,
+                )
+            return {
+                "status": "quarantine_state_unavailable",
+                "golden_alias": candidate.golden_alias,
+                "detail": str(bookkeeping_exc),
+            }
+
     def _run_next_candidate(self) -> Dict[str, Any]:
         """Enumerate candidates fresh, run the real orchestrator on the
         FIRST not-yet-migrated one found.
@@ -233,6 +311,95 @@ class FleetMigrationScheduler:
             if is_repo_already_migrated(candidate):
                 continue
 
+            # Issue #1477: a repo that has reached the consecutive-failure
+            # quarantine threshold is skipped so the fleet-wide queue can
+            # advance past it -- otherwise a single permanently-failing
+            # repo (e.g. genuinely corrupt legacy data) is re-selected as
+            # the first pending candidate on EVERY tick forever,
+            # permanently starving every alphabetically-later repo.
+            # is_quarantined() itself auto-clears the quarantine (and
+            # returns False) when the on-disk state has genuinely changed
+            # since the last recorded failure.
+            try:
+                candidate_is_quarantined = is_quarantined(
+                    self._golden_repo_manager, candidate
+                )
+            except QuarantineStateUnavailableError as exc:
+                # Finding A (Codex round-3 review, live-reproduced): a
+                # PERSISTENT backend read failure must NEVER be silently
+                # treated as "not quarantined" -- that would retry this
+                # SAME candidate on every subsequent tick forever,
+                # recreating Issue #1477's exact fleet-starvation bug via
+                # a backend outage instead of corrupt data. ABORT this
+                # tick immediately -- never attempt migration this call,
+                # never continue to another candidate (a persistent
+                # outage would affect them identically), and never report
+                # the misleading "nothing_to_migrate" (the truth is "we
+                # genuinely don't know"). The NEXT tick retries once
+                # persistence recovers.
+                logger.error(
+                    "FleetMigrationScheduler: quarantine state for repo "
+                    "'%s' is UNAVAILABLE (backend read failed) -- "
+                    "aborting this scheduling tick WITHOUT running any "
+                    "migration attempt: %s",
+                    candidate.golden_alias,
+                    exc,
+                )
+                return {
+                    "status": "quarantine_state_unavailable",
+                    "golden_alias": candidate.golden_alias,
+                    "detail": str(exc),
+                }
+
+            if candidate_is_quarantined:
+                logger.warning(
+                    "FleetMigrationScheduler: repo '%s' is quarantined "
+                    "after repeated consecutive failures -- skipping and "
+                    "advancing to the next candidate",
+                    candidate.golden_alias,
+                )
+                continue
+
+            # Finding G (HIGH, Codex round-5 review, live-reproduced --
+            # the real blocker): during a PERSISTENT write outage,
+            # is_quarantined()'s READ still succeeds (the count can never
+            # advance past its last successfully-written value), so
+            # without this probe the EXPENSIVE/DESTRUCTIVE
+            # run_fleet_migration_for_repo() call below would be
+            # re-invoked on EVERY tick, not just the cheap bookkeeping
+            # call.
+            #
+            # Finding J (coordinator review, round 6): this probe MUST
+            # run UNCONDITIONALLY on every tick, never gated behind an
+            # in-process "did the last attempt for this repo fail"
+            # flag. This project's absolute Cluster-Aware State rule
+            # forbids per-node RAM for cross-request-visible state --
+            # multiple cluster nodes each run their OWN _loop() timer
+            # independently, and register_job_if_no_conflict's single-
+            # flight only guarantees ONE node wins a given tick's
+            # submission, NOT that the SAME node wins every tick. A
+            # remembered flag on THIS scheduler instance would be
+            # invisible to whichever node's instance picks up the next
+            # tick, silently defeating the whole gate. The probe itself
+            # is cheap (one write+read round-trip against a throwaway
+            # sentinel, nowhere near the cost of the actual destructive
+            # migration) -- unconditional is simpler AND correct
+            # regardless of node identity, at the cost of one extra
+            # cheap check per tick even on the healthy path.
+            if not probe_quarantine_backend_health(self._golden_repo_manager):
+                logger.error(
+                    "FleetMigrationScheduler: quarantine backend health "
+                    "probe FAILED for repo '%s' -- aborting this tick "
+                    "WITHOUT attempting the expensive/destructive "
+                    "migration call.",
+                    candidate.golden_alias,
+                )
+                return {
+                    "status": "quarantine_state_unavailable",
+                    "golden_alias": candidate.golden_alias,
+                    "detail": "quarantine backend health probe failed",
+                }
+
             # Codex CRITICAL finding (round 4): invalidate a stale marker
             # from a PRIOR migration generation as soon as new
             # unconsolidated work is detected, BEFORE the write lock is
@@ -242,16 +409,88 @@ class FleetMigrationScheduler:
             # earlier generation.
             invalidate_post_consolidation_snapshot_marker(candidate.index_path)
 
-            result = run_fleet_migration_for_repo(
-                refresh_scheduler=self._refresh_scheduler,
-                sister_alias_manager=candidate.sister_alias_manager,
-                repo_alias=candidate.golden_alias,
-                base_clone_path=candidate.base_clone_path,
-                index_path=candidate.index_path,
-                semantic_collection_dirs=candidate.semantic_collection_dirs,
-                temporal_namespaces=candidate.temporal_namespaces,
-                sister_root=candidate.sister_root,
-            )
+            try:
+                result = run_fleet_migration_for_repo(
+                    refresh_scheduler=self._refresh_scheduler,
+                    sister_alias_manager=candidate.sister_alias_manager,
+                    repo_alias=candidate.golden_alias,
+                    base_clone_path=candidate.base_clone_path,
+                    index_path=candidate.index_path,
+                    semantic_collection_dirs=candidate.semantic_collection_dirs,
+                    temporal_namespaces=candidate.temporal_namespaces,
+                    sister_root=candidate.sister_root,
+                )
+            except Exception as migration_exc:
+                # Issue #1477: record the failure (and the on-disk state
+                # signature at the moment of this failure) BEFORE
+                # re-raising -- the existing job-failure/dashboard
+                # semantics are preserved unchanged; this only ALSO feeds
+                # the quarantine's consecutive-failure counter. Finding G
+                # + Finding D: a bookkeeping write failure aborts this
+                # tick with the distinct status instead (via the shared
+                # helper), rather than re-raising the original exception
+                # as if bookkeeping had silently succeeded.
+                abort_result = self._record_failure_or_abort(
+                    candidate, original_exc=migration_exc
+                )
+                if abort_result is not None:
+                    return abort_result
+                raise
+
+            if result.status == "completed":
+                # A genuine success resets the failure counter -- a repo
+                # that failed a few times and then succeeded must not
+                # carry stale failure history toward a future quarantine.
+                try:
+                    reset_migration_failure(
+                        self._golden_repo_manager, candidate.golden_alias
+                    )
+                except QuarantineStateUnavailableError as reset_exc:
+                    # Finding H (Codex round-5 review): a completed
+                    # migration whose quarantine-CLEANUP failed must
+                    # still report the migration's own success -- don't
+                    # punish the user for the migration itself -- but
+                    # must NOT silently claim quarantine state was
+                    # cleared when it wasn't. Log loudly and let a
+                    # subsequent read reflect the TRUE persisted (stale)
+                    # state rather than a falsely-claimed cleared one.
+                    logger.error(
+                        "FleetMigrationScheduler: repo '%s' migration "
+                        "completed successfully, but clearing its "
+                        "quarantine failure state ALSO failed (%s) -- "
+                        "the migration's own success is NOT affected; a "
+                        "stale quarantine row may persist until the "
+                        "next successful clear.",
+                        candidate.golden_alias,
+                        reset_exc,
+                    )
+            elif status_counts_as_quarantine_failure(result.status):
+                # Issue #1477 Finding 2 (dual review round): a NON-RAISING
+                # result can ALSO mean "no progress was made and a bare
+                # retry won't help" (e.g. "incomplete" from a persistent
+                # disk-space skip) -- this must count toward the SAME
+                # consecutive-failure counter an exception increments, or
+                # this repo is re-selected as the first pending candidate
+                # forever, reproducing Issue #1477's starvation bug via a
+                # non-exception path. Transient statuses ("lock_held",
+                # "refresh_in_flight" -- someone else is legitimately
+                # using this repo right now) are explicitly excluded by
+                # status_counts_as_quarantine_failure() and never reach
+                # here. Finding G: consolidated through the SAME shared
+                # helper as the exception path.
+                abort_result = self._record_failure_or_abort(
+                    candidate, detail=result.detail
+                )
+                if abort_result is not None:
+                    return abort_result
+                logger.warning(
+                    "FleetMigrationScheduler: repo '%s' migration returned "
+                    "non-progress status=%s -- counted toward the "
+                    "consecutive-failure quarantine breaker",
+                    candidate.golden_alias,
+                    result.status,
+                )
+
             logger.info(
                 "FleetMigrationScheduler: repo '%s' migration status=%s "
                 "(collections_consolidated=%d, temporal_namespaces_processed=%d)",
@@ -282,11 +521,27 @@ class FleetMigrationScheduler:
         candidates = list(
             enumerate_fleet_migration_candidates(self._golden_repo_manager)
         )
-        migrated_count = sum(1 for c in candidates if is_repo_already_migrated(c))
+        migrated_flags = [is_repo_already_migrated(c) for c in candidates]
+        migrated_count = sum(1 for flag in migrated_flags if flag)
+        # Issue #1477 Finding 5 (dual review round): scope the quarantined
+        # count to only PENDING candidates -- a repo migrated via a
+        # DIRECT orchestrator call outside the scheduler (its stale
+        # quarantine row is reset ONLY by _run_next_candidate()'s own
+        # success path) must never be double-counted as both migrated AND
+        # quarantined; quarantined_repos must never exceed pending_repos.
+        pending_aliases = [
+            candidate.golden_alias
+            for candidate, migrated in zip(candidates, migrated_flags)
+            if not migrated
+        ]
+        quarantined_count = count_quarantined(
+            self._golden_repo_manager, pending_aliases
+        )
         return {
             "total_repos": len(candidates),
             "migrated_repos": migrated_count,
             "pending_repos": len(candidates) - migrated_count,
+            "quarantined_repos": quarantined_count,
         }
 
     def _is_enabled_now(self) -> bool:

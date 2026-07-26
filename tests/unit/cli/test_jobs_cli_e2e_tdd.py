@@ -65,12 +65,14 @@ class AsyncServerWrapper:
         loop_ready = threading.Event()
 
         def _run_loop():
-            asyncio.set_event_loop(self.loop)
-            self.loop.call_soon(loop_ready.set)
+            assert self.loop is not None
+            loop = self.loop
+            asyncio.set_event_loop(loop)
+            loop.call_soon(loop_ready.set)
             try:
-                self.loop.run_forever()
+                loop.run_forever()
             finally:
-                self.loop.close()
+                loop.close()
 
         self._thread = threading.Thread(target=_run_loop, daemon=True)
         self._thread.start()

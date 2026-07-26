@@ -46,6 +46,12 @@ from code_indexer.server.services.fleet_migration.discovery import (
     enumerate_fleet_migration_candidates,
     is_repo_already_migrated,
 )
+from code_indexer.server.services.fleet_migration.orchestrator import (
+    FleetMigrationRepoResult,
+)
+from code_indexer.server.services.fleet_migration.quarantine import (
+    FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD,
+)
 from code_indexer.server.services.fleet_migration.scheduler import (
     FleetMigrationScheduler,
 )
@@ -54,9 +60,13 @@ from code_indexer.server.services.job_tracker import (
     JobTracker,
 )
 from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.storage.sqlite_backends import (
+    GoldenRepoMetadataSqliteBackend,
+)
 from code_indexer.server.storage.shared.snapshot_manager import (
     VersionedSnapshotManager,
 )
+from code_indexer.storage.id_index_manager import DuplicateSourceIdError
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     resolve_chunk_layout,
@@ -66,10 +76,21 @@ from code_indexer.storage.shared.chunk_layout import (
 class _FakeGoldenRepoManager:
     """Test double (not the SUT) -- controlled stand-in for the minimal
     golden_repo_manager surface enumerate_fleet_migration_candidates()
-    needs, mirroring hnsw_orphan_sweep's own test convention."""
+    needs, mirroring hnsw_orphan_sweep's own test convention.
 
-    def __init__(self, repos: Dict[str, Path]):
+    Issue #1477: an optional ``sqlite_backend`` (a REAL
+    GoldenRepoMetadataSqliteBackend, never a mock) may be supplied, stored
+    under the SAME ``_sqlite_backend`` attribute name the real
+    GoldenRepoManager uses -- this is the exact attribute
+    quarantine.py's ``_get_quarantine_backend()`` reuses (mirroring
+    golden_repo_reconciler.py's own ``_get_breaker_backend()`` convention).
+    Defaults to None so every pre-existing test in this file (which never
+    exercises quarantine) is unaffected.
+    """
+
+    def __init__(self, repos: Dict[str, Path], sqlite_backend=None):
         self._repos = repos
+        self._sqlite_backend = sqlite_backend
 
     def list_golden_repos(self) -> List[Dict[str, str]]:
         return [{"alias": alias} for alias in self._repos]
@@ -233,6 +254,39 @@ def _build_already_migrated_repo(golden_repos_dir: Path, alias: str) -> Path:
     return base_clone
 
 
+def _build_corrupt_repo_with_duplicate_point_id(
+    golden_repos_dir: Path, alias: str
+) -> Path:
+    """A real golden repo base clone whose semantic collection has TWO
+    vector_*.json files sharing the SAME point 'id' in different
+    hash-shard subdirectories -- genuine pre-existing data corruption that
+    scan_vectors_for_id_map correctly refuses to auto-resolve (Messi Rule
+    #13 Anti-Silent-Failure), reproducing the exact real-world Issue #1477
+    failure mode ("click" repo failing identically on every tick)."""
+    base_clone = golden_repos_dir / alias
+    index_path = base_clone / ".code-indexer" / "index"
+    collection_dir = index_path / "semantic_collection"
+    collection_dir.mkdir(parents=True)
+    (collection_dir / "collection_meta.json").write_text(
+        json.dumps({"name": "coll", "vector_size": 2})
+    )
+    duplicate_id = "dupe0001"
+    record = {
+        "id": duplicate_id,
+        "vector": [0.1, 0.2],
+        "metadata": {},
+        "payload": {"path": "src/a.py"},
+        "chunk_text": "x",
+    }
+    shard_a = collection_dir / "aa" / "bb"
+    shard_a.mkdir(parents=True, exist_ok=True)
+    (shard_a / f"vector_{duplicate_id}_a.json").write_text(json.dumps(record))
+    shard_b = collection_dir / "cc" / "dd"
+    shard_b.mkdir(parents=True, exist_ok=True)
+    (shard_b / f"vector_{duplicate_id}_b.json").write_text(json.dumps(record))
+    return base_clone
+
+
 def _make_scheduler(
     tmp_path: Path,
     golden_repo_manager,
@@ -383,6 +437,7 @@ class TestGetStats:
             "total_repos": 3,
             "migrated_repos": 1,
             "pending_repos": 2,
+            "quarantined_repos": 0,
         }
 
 
@@ -652,3 +707,848 @@ class TestReadCycleConfigValidatesTickInterval:
             )
         finally:
             scheduler.stop()  # no-op: .start() was never called
+
+
+class TestFleetMigrationFailureQuarantine:
+    """Issue #1477: a golden repo whose migration throws every single time
+    (genuinely corrupt legacy data `scan_vectors_for_id_map` correctly
+    refuses to auto-resolve) must NOT be retried forever, permanently
+    starving every alphabetically-later repo in the fleet -- this is the
+    exact live-observed incident ("click" failing every tick, "evolution"
+    never reached).
+
+    Real corrupt on-disk data (two vector_*.json files sharing the same
+    point 'id'), real GoldenRepoMetadataSqliteBackend persistence -- no
+    mocking of the scheduler/orchestrator/quarantine logic itself.
+    """
+
+    def _make_backend(self, tmp_path: Path) -> GoldenRepoMetadataSqliteBackend:
+        db_path = str(tmp_path / "golden_repo_metadata.db")
+        backend = GoldenRepoMetadataSqliteBackend(db_path)
+        backend.ensure_table_exists()
+        return backend
+
+    def test_below_threshold_the_same_corrupt_repo_is_attempted_every_call(
+        self, tmp_path: Path
+    ) -> None:
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD - 1):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        state = backend.get_fleet_migration_failure_state("click")
+        assert state is not None
+        assert (
+            state["consecutive_failure_count"]
+            == FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD - 1
+        )
+
+    def test_repo_is_quarantined_and_scheduler_advances_to_next_candidate(
+        self, tmp_path: Path
+    ) -> None:
+        """The CORE fix: once the corrupt repo reaches the quarantine
+        threshold, the scheduler must skip it and migrate the next
+        alias-sorted candidate instead of raising the same error
+        forever."""
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager(
+            {"click": corrupt_base, "evolution": pending_base},
+            sqlite_backend=backend,
+        )
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        # "click" is now quarantined -- the NEXT call must skip it and
+        # migrate "evolution" instead of raising the identical error again.
+        result = scheduler._run_next_candidate()
+
+        assert result["status"] == "completed"
+        assert result["golden_alias"] == "evolution"
+        evolution_collection = (
+            pending_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        assert resolve_chunk_layout(evolution_collection) == ChunkLayout.CHUNKS_DB
+        # The corrupt repo's own collection must remain untouched --
+        # quarantine skips it, it does not "fix" or delete anything.
+        corrupt_collection = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        assert resolve_chunk_layout(corrupt_collection) == ChunkLayout.SHARDED_JSON
+
+    def test_success_resets_the_failure_counter(self, tmp_path: Path) -> None:
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        # Two failures (below threshold).
+        for _ in range(2):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+        assert (
+            backend.get_fleet_migration_failure_state("click")[
+                "consecutive_failure_count"
+            ]
+            == 2
+        )
+
+        # Operator remediation: remove the duplicate, leaving one valid
+        # record -- the collection can now genuinely consolidate.
+        collection_dir = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        (collection_dir / "cc" / "dd" / "vector_dupe0001_b.json").unlink()
+
+        result = scheduler._run_next_candidate()
+
+        assert result["status"] == "completed"
+        assert backend.get_fleet_migration_failure_state("click") is None
+
+    def test_quarantine_auto_clears_on_genuine_on_disk_state_change(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import code_indexer.server.services.fleet_migration.quarantine as quarantine_module
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        # Quarantined: a further call with NO on-disk change returns
+        # nothing_to_migrate (the only candidate is skipped) rather than
+        # raising again.
+        assert scheduler._run_next_candidate() == {"status": "nothing_to_migrate"}
+
+        # Genuine on-disk state change (e.g. a partial operator remediation
+        # attempt that still leaves the corruption unresolved) -- this must
+        # auto-clear the quarantine and allow a retry, which fails again
+        # for the SAME underlying reason.
+        collection_dir = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        (collection_dir / "unrelated_new_file_added_by_operator").mkdir()
+
+        # Finding C (Codex round-3 review): the scheduler always calls
+        # is_quarantined() via its production default (no override), so
+        # bypass the new throttle window here -- this test validates the
+        # auto-clear DETECTION logic itself (immediately after a genuine
+        # change), which is a SEPARATE concern from throttle timing
+        # (covered by quarantine.py's own dedicated throttle tests).
+        monkeypatch.setattr(quarantine_module, "_SIGNATURE_RECHECK_INTERVAL_SECONDS", 0)
+
+        with pytest.raises(DuplicateSourceIdError):
+            scheduler._run_next_candidate()
+
+        # The retry's own failure was recorded fresh (count reset to 1,
+        # not accumulated on top of the old quarantine-triggering count).
+        assert (
+            backend.get_fleet_migration_failure_state("click")[
+                "consecutive_failure_count"
+            ]
+            == 1
+        )
+
+    def test_get_stats_reports_quarantined_repos_count(self, tmp_path: Path) -> None:
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager(
+            {"click": corrupt_base, "evolution": pending_base},
+            sqlite_backend=backend,
+        )
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        stats = scheduler.get_stats()
+
+        assert stats["quarantined_repos"] == 1
+
+    def test_quarantine_auto_clears_when_nested_shard_duplicate_is_removed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Finding 1 (dual code-review round): the auto-clear signature
+        must be sensitive to NESTED shard-directory state, not just the
+        top-level collection directory -- deleting the duplicate file deep
+        inside a hash-shard subdirectory (the real operator remediation
+        for this exact corruption) previously left the top-level dir's own
+        mtime/entry-count unchanged, so the quarantine never cleared."""
+        import code_indexer.server.services.fleet_migration.quarantine as quarantine_module
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        # Quarantined -- confirm skip with no on-disk change.
+        assert scheduler._run_next_candidate() == {"status": "nothing_to_migrate"}
+
+        # Real operator remediation: delete ONE of the two nested
+        # duplicate files (the genuine fix for this corruption), deep
+        # inside a hash-shard subdirectory -- this must NOT be invisible
+        # to the auto-clear signature.
+        collection_dir = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        (collection_dir / "cc" / "dd" / "vector_dupe0001_b.json").unlink()
+
+        # Finding C (Codex round-3 review): bypass the new throttle
+        # window here -- this test validates NESTED-shard-change
+        # detection itself (Finding 1), a separate concern from throttle
+        # timing (covered by quarantine.py's own dedicated tests).
+        monkeypatch.setattr(quarantine_module, "_SIGNATURE_RECHECK_INTERVAL_SECONDS", 0)
+
+        result = scheduler._run_next_candidate()
+
+        assert result["status"] == "completed"
+        assert resolve_chunk_layout(collection_dir) == ChunkLayout.CHUNKS_DB
+
+
+class TestQuarantineCountsNonRaisingStatuses:
+    """Finding 2 (Codex-found, reproduced concretely, dual review round):
+    a repo whose migration returns a non-raising, no-progress status (e.g.
+    "incomplete" from a persistent disk-space skip) was never recorded as
+    a failure, never quarantined, and re-selected as the first pending
+    candidate on EVERY subsequent tick forever -- the EXACT fleet-
+    starvation bug #1477 reports, triggered via a non-exception path
+    instead of an exception.
+
+    Uses a monkeypatched `run_fleet_migration_for_repo` returning a canned
+    `FleetMigrationRepoResult` -- isolating the SCHEDULER's status
+    classification/quarantine-counting logic from the orchestrator's own
+    (separately, already fully tested in test_orchestrator_1458.py)
+    disk-headroom/lock-conflict plumbing.
+    """
+
+    def _make_backend(self, tmp_path: Path) -> GoldenRepoMetadataSqliteBackend:
+        db_path = str(tmp_path / "golden_repo_metadata.db")
+        backend = GoldenRepoMetadataSqliteBackend(db_path)
+        backend.ensure_table_exists()
+        return backend
+
+    def test_repeated_incomplete_results_eventually_quarantine_and_advance(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import code_indexer.server.services.fleet_migration.scheduler as sched_mod
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        stuck_base = _build_unconsolidated_repo(golden_repos_dir, "click")
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager(
+            {"click": stuck_base, "evolution": pending_base},
+            sqlite_backend=backend,
+        )
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        def _fake_incomplete(*args, **kwargs):
+            # Deliberately a GENERIC (not disk-headroom-specific) detail
+            # -- this test validates that ANY non-progress "incomplete"
+            # status counts toward quarantine and lets the queue
+            # advance, independent of Finding I's disk-headroom-specific
+            # auto-clear path (covered separately by
+            # TestIsQuarantinedClearsDiskHeadroomCauseIndependently in
+            # test_quarantine_1477.py). A disk-headroom-worded detail
+            # here would trigger that INDEPENDENT auto-clear against a
+            # repo with no real disk-space problem, which is a correct
+            # but unrelated interaction this test does not intend to
+            # exercise.
+            return FleetMigrationRepoResult(
+                status="incomplete",
+                detail="residual in-repo temporal directories remain (simulated)",
+            )
+
+        monkeypatch.setattr(sched_mod, "run_fleet_migration_for_repo", _fake_incomplete)
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "incomplete"
+            assert result["golden_alias"] == "click"
+
+        state = backend.get_fleet_migration_failure_state("click")
+        assert state is not None
+        assert (
+            state["consecutive_failure_count"]
+            == FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD
+        )
+
+        # "click" is now quarantined -- restore the REAL orchestrator so
+        # the next candidate ("evolution") can genuinely migrate.
+        monkeypatch.undo()
+        result = scheduler._run_next_candidate()
+
+        assert result["status"] == "completed"
+        assert result["golden_alias"] == "evolution"
+
+    @pytest.mark.parametrize("transient_status", ["lock_held", "refresh_in_flight"])
+    def test_transient_statuses_never_increment_the_failure_counter(
+        self, tmp_path: Path, monkeypatch, transient_status: str
+    ) -> None:
+        import code_indexer.server.services.fleet_migration.scheduler as sched_mod
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        base_clone = _build_unconsolidated_repo(golden_repos_dir, "click")
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": base_clone}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        monkeypatch.setattr(
+            sched_mod,
+            "run_fleet_migration_for_repo",
+            lambda *a, **k: FleetMigrationRepoResult(status=transient_status),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD + 2):
+            result = scheduler._run_next_candidate()
+            assert result["status"] == transient_status
+
+        assert backend.get_fleet_migration_failure_state("click") is None
+
+
+class TestGetStatsScopedToPendingCandidates:
+    """Finding 5 (Codex, dual review round): `quarantined_repos` must only
+    ever count repos that are STILL pending -- a repo could be migrated
+    via a DIRECT orchestrator call outside the scheduler (reset only
+    happens inside the scheduler's own success path) and still carry a
+    stale quarantine row. `quarantined_repos` must never exceed
+    `pending_repos`."""
+
+    def _make_backend(self, tmp_path: Path) -> GoldenRepoMetadataSqliteBackend:
+        db_path = str(tmp_path / "golden_repo_metadata.db")
+        backend = GoldenRepoMetadataSqliteBackend(db_path)
+        backend.ensure_table_exists()
+        return backend
+
+    def test_quarantined_repos_excludes_a_repo_migrated_outside_the_scheduler(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.storage.shared.collection_migration import (
+            consolidate_collection_in_place,
+        )
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = self._make_backend(tmp_path)
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
+            with pytest.raises(DuplicateSourceIdError):
+                scheduler._run_next_candidate()
+
+        assert scheduler.get_stats()["quarantined_repos"] == 1
+
+        # A DIRECT orchestrator/consolidation call (bypassing the
+        # scheduler entirely, e.g. a manual operator remediation) fixes
+        # and fully migrates the repo -- WITHOUT going through
+        # scheduler._run_next_candidate()'s own reset_migration_failure()
+        # success path, so the stale quarantine row is never cleared by
+        # that path.
+        collection_dir = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        (collection_dir / "cc" / "dd" / "vector_dupe0001_b.json").unlink()
+        result = consolidate_collection_in_place(collection_dir)
+        assert result.status == "consolidated"
+        mark_post_consolidation_snapshot_published(
+            corrupt_base / ".code-indexer" / "index"
+        )
+
+        stats = scheduler.get_stats()
+
+        assert stats["migrated_repos"] == 1
+        assert stats["pending_repos"] == 0
+        assert stats["quarantined_repos"] == 0
+        assert stats["quarantined_repos"] <= stats["pending_repos"]
+
+
+class _AlwaysFailingQuarantineBackend:
+    """Simulates a PERSISTENT backend read failure for is_quarantined()'s
+    underlying get_fleet_migration_failure_state() call (Finding A,
+    Codex round-3 review, live-reproduced)."""
+
+    def get_fleet_migration_failure_state(self, golden_alias):
+        raise RuntimeError("simulated persistent backend outage")
+
+
+class TestQuarantineBackendReadFailureAbortsTheTick:
+    """Finding A (HIGH, Codex round-3 review, live-reproduced): a
+    PERSISTENT backend read failure must NEVER be silently treated as
+    "not quarantined" -- with a persistent outage, that would make the
+    scheduler proceed with the SAME first candidate on EVERY tick
+    forever, recreating the EXACT fleet-starvation bug #1477 reports via
+    a third path (backend outage, alongside corrupt data and a
+    non-raising status). `_run_next_candidate()` must instead abort the
+    scheduling tick with a distinct status -- never attempting migration,
+    never returning the misleading "nothing_to_migrate"."""
+
+    def test_persistent_backend_failure_aborts_every_tick_without_retrying_the_same_repo(
+        self, tmp_path: Path
+    ) -> None:
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        base_clone = _build_unconsolidated_repo(golden_repos_dir, "click")
+        golden = _FakeGoldenRepoManager(
+            {"click": base_clone},
+            sqlite_backend=_AlwaysFailingQuarantineBackend(),
+        )
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        repeated_tick_count = 3
+        for _ in range(repeated_tick_count):
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "quarantine_state_unavailable"
+            assert result["golden_alias"] == "click"
+
+        # The repo must remain untouched -- migration NEVER ran while
+        # quarantine state was indeterminate, on ANY of the repeated
+        # ticks above.
+        collection_dir = base_clone / ".code-indexer" / "index" / "semantic_collection"
+        assert resolve_chunk_layout(collection_dir) == ChunkLayout.SHARDED_JSON
+
+
+class _WriteFailingQuarantineBackend:
+    """Reads succeed (always reports "never failed" -- not quarantined),
+    but `record_fleet_migration_failure()` genuinely fails every time
+    (Finding D, Codex round-4 review, live-reproduced) -- a PERSISTENT
+    backend WRITE failure, distinct from Finding A's READ failure."""
+
+    def get_fleet_migration_failure_state(self, golden_alias):
+        return None
+
+    def record_fleet_migration_failure(
+        self, golden_alias, state_signature, failure_cause=None
+    ):
+        raise RuntimeError("simulated persistent backend write outage")
+
+
+class TestQuarantineBackendWriteFailureAbortsTheTick:
+    """Finding D (HIGH, Codex round-4 review, live-reproduced): the
+    round-3 fix made READ failures raise/abort, but `record_migration_
+    failure()` still swallowed WRITE failures -- with reads succeeding
+    (reporting "0 failures") but writes persistently failing, the
+    consecutive-failure count is NEVER incremented, so the corrupt repo
+    is re-selected and retried on EVERY tick forever, recreating Issue
+    #1477's exact fleet-starvation bug via a write-path outage. The
+    scheduler must never silently complete the tick as if bookkeeping
+    succeeded -- the ORIGINAL migration exception is logged, but the net
+    effect must be an explicit abort, not a silent retry loop."""
+
+    def test_persistent_write_failure_never_silently_retries_as_if_nothing_is_wrong(
+        self, tmp_path: Path
+    ) -> None:
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        golden = _FakeGoldenRepoManager(
+            {"click": corrupt_base},
+            sqlite_backend=_WriteFailingQuarantineBackend(),
+        )
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        repeated_tick_count = 4
+        for _ in range(repeated_tick_count):
+            result = scheduler._run_next_candidate()
+            # Never silently "succeeds" as if the corruption were
+            # resolved, and never silently reports nothing_to_migrate
+            # (misleading -- the repo IS pending, we just can't record
+            # the failure) -- the explicit abort status is the only
+            # acceptable outcome, mirroring Finding A's read-side
+            # handling exactly.
+            assert result["status"] == "quarantine_state_unavailable"
+            assert result["golden_alias"] == "click"
+
+        # The corrupt repo's own collection must remain untouched --
+        # migration never silently "succeeded".
+        collection_dir = (
+            corrupt_base / ".code-indexer" / "index" / "semantic_collection"
+        )
+        assert resolve_chunk_layout(collection_dir) == ChunkLayout.SHARDED_JSON
+
+
+class _RecoverableWriteFailingQuarantineBackend:
+    """Reads always succeed (backed by a real in-memory dict); WRITES
+    fail while `.writes_healthy` is False, succeed once flipped to True
+    (Finding G, Codex round-5 review) -- simulates a write outage that
+    later recovers, so the pre-flight health probe can be exercised
+    against a REAL round-trip rather than a bare mock."""
+
+    def __init__(self):
+        self.writes_healthy = False
+        self._states: dict = {}
+
+    def get_fleet_migration_failure_state(self, golden_alias):
+        return self._states.get(golden_alias)
+
+    def record_fleet_migration_failure(
+        self, golden_alias, state_signature, failure_cause=None
+    ):
+        if not self.writes_healthy:
+            raise RuntimeError("simulated persistent backend write outage")
+        row = self._states.setdefault(
+            golden_alias,
+            {
+                "golden_alias": golden_alias,
+                "consecutive_failure_count": 0,
+                "state_signature": None,
+                "signature_checked_at": None,
+                "failure_cause": None,
+            },
+        )
+        row["consecutive_failure_count"] += 1
+        row["state_signature"] = state_signature
+        row["failure_cause"] = failure_cause
+        return row["consecutive_failure_count"]
+
+    def reset_fleet_migration_failure(self, golden_alias):
+        if not self.writes_healthy:
+            raise RuntimeError("simulated persistent backend write outage")
+        self._states.pop(golden_alias, None)
+
+    def touch_fleet_migration_failure_check(self, golden_alias):
+        row = self._states.get(golden_alias)
+        if row is not None and self.writes_healthy:
+            row["signature_checked_at"] = "touched"
+
+    def list_fleet_migration_failure_states(self):
+        return list(self._states.values())
+
+
+class TestQuarantineWriteOutagePreflightProbe:
+    """Finding G (HIGH, Codex round-5 review, live-reproduced -- the real
+    blocker) + Finding J (coordinator review, round 6 -- cluster-safety
+    correction): during a persistent WRITE outage, is_quarantined()'s
+    READ still succeeds (reporting a stale, never-advancing count), so
+    run_fleet_migration_for_repo() -- the REAL, expensive, DESTRUCTIVE
+    migration call -- was previously re-invoked on EVERY tick. The fix
+    is an UNCONDITIONAL cheap pre-flight health probe run before EVERY
+    migration attempt on EVERY tick -- NEVER gated behind any in-process
+    "did the last attempt fail" flag, since this project's absolute
+    Cluster-Aware State rule forbids per-node RAM for state that must be
+    visible to another HTTP request/tick in a cluster (a different node
+    could pick up the very next tick with a fresh scheduler instance and
+    no memory of a prior node's observation)."""
+
+    def test_migration_never_invoked_during_persistent_write_outage_then_resumes_on_recovery(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import code_indexer.server.services.fleet_migration.scheduler as sched_mod
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = _RecoverableWriteFailingQuarantineBackend()
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        call_count = {"n": 0}
+        real_run = sched_mod.run_fleet_migration_for_repo
+
+        def _counting_run(*args, **kwargs):
+            call_count["n"] += 1
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(sched_mod, "run_fleet_migration_for_repo", _counting_run)
+
+        # The UNCONDITIONAL probe catches the outage on EVERY tick,
+        # BEFORE the expensive migration is ever attempted -- including
+        # the very FIRST tick (unlike the round-5 gated design, which
+        # let the first tick through before it had "observed" a
+        # failure).
+        outage_tick_count = 4
+        for _ in range(outage_tick_count):
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "quarantine_state_unavailable"
+        assert call_count["n"] == 0
+
+        # Backend recovers.
+        backend.writes_healthy = True
+
+        # Next tick: the probe succeeds -- migration resumes normally
+        # (attempted for the first time, fails for the SAME underlying
+        # corruption, and bookkeeping succeeds this time).
+        with pytest.raises(DuplicateSourceIdError):
+            scheduler._run_next_candidate()
+        assert call_count["n"] == 1
+
+        recorded_state = backend.get_fleet_migration_failure_state("click")
+        assert recorded_state is not None
+        assert recorded_state["consecutive_failure_count"] == 1
+
+    def test_no_dependency_on_scheduler_instance_identity_across_two_fresh_instances(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Simulates 'the outage is observed on node A's tick, the very
+        next tick runs on node B' -- TWO SEPARATE, FRESH
+        FleetMigrationScheduler instances sharing ONLY the real
+        persisted backend, with ZERO in-process state carried between
+        them. A correct, cluster-safe implementation behaves identically
+        regardless of which instance runs which tick."""
+        import code_indexer.server.services.fleet_migration.scheduler as sched_mod
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
+            golden_repos_dir, "click"
+        )
+        backend = _RecoverableWriteFailingQuarantineBackend()
+        golden = _FakeGoldenRepoManager({"click": corrupt_base}, sqlite_backend=backend)
+
+        call_count = {"n": 0}
+        real_run = sched_mod.run_fleet_migration_for_repo
+
+        def _counting_run(*args, **kwargs):
+            call_count["n"] += 1
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(sched_mod, "run_fleet_migration_for_repo", _counting_run)
+
+        def _make_fresh_scheduler():
+            return _make_scheduler(
+                tmp_path,
+                golden,
+                refresh_scheduler,
+                background_job_manager=MagicMock(),
+                config_service=_RecordingConfigService(enabled=True),
+            )
+
+        # "Node A": a brand-new scheduler instance observes the ongoing
+        # outage and correctly aborts -- with NO prior in-process state
+        # at all (this is its first-ever call).
+        scheduler_node_a = _make_fresh_scheduler()
+        result_a = scheduler_node_a._run_next_candidate()
+        assert result_a["status"] == "quarantine_state_unavailable"
+        assert call_count["n"] == 0
+
+        # "Node B": a SEPARATE, ALSO brand-new scheduler instance -- it
+        # has NO memory whatsoever of node A's observation (a real
+        # in-process dict-based flag would have been empty here too,
+        # but the point is this design carries NO such flag at all). The
+        # outage is STILL ongoing, so node B must independently detect
+        # it via its own unconditional probe call, not rely on anything
+        # node A supposedly "remembered".
+        scheduler_node_b = _make_fresh_scheduler()
+        result_b = scheduler_node_b._run_next_candidate()
+        assert result_b["status"] == "quarantine_state_unavailable"
+        assert call_count["n"] == 0
+
+        # Backend recovers (shared by both instances, since it is the
+        # REAL persisted backend, never per-instance state).
+        backend.writes_healthy = True
+
+        # A THIRD fresh instance ("node C", or node A/B running again)
+        # succeeds the probe and resumes migration -- proving recovery
+        # is visible through the SHARED backend alone, never through any
+        # scheduler-instance's own memory.
+        scheduler_node_c = _make_fresh_scheduler()
+        with pytest.raises(DuplicateSourceIdError):
+            scheduler_node_c._run_next_candidate()
+        assert call_count["n"] == 1
+
+
+class _ResetFailingQuarantineBackend:
+    """Reads/writes succeed normally (backed by a real in-memory dict),
+    but `reset_fleet_migration_failure()` always fails (Finding H, Codex
+    round-5 review, live-reproduced) -- simulates UPDATE working while
+    DELETE is specifically broken."""
+
+    def __init__(self):
+        self._states: dict = {}
+
+    def get_fleet_migration_failure_state(self, golden_alias):
+        return self._states.get(golden_alias)
+
+    def record_fleet_migration_failure(
+        self, golden_alias, state_signature, failure_cause=None
+    ):
+        row = self._states.setdefault(
+            golden_alias,
+            {
+                "golden_alias": golden_alias,
+                "consecutive_failure_count": 0,
+                "state_signature": None,
+                "signature_checked_at": None,
+                "failure_cause": None,
+            },
+        )
+        row["consecutive_failure_count"] += 1
+        row["state_signature"] = state_signature
+        row["failure_cause"] = failure_cause
+        return row["consecutive_failure_count"]
+
+    def reset_fleet_migration_failure(self, golden_alias) -> None:
+        raise RuntimeError("simulated persistent backend DELETE outage")
+
+    def touch_fleet_migration_failure_check(self, golden_alias) -> None:
+        row = self._states.get(golden_alias)
+        if row is not None:
+            row["signature_checked_at"] = "touched"
+
+    def list_fleet_migration_failure_states(self):
+        return list(self._states.values())
+
+
+class TestSchedulerResetFailureOnSuccessDoesNotAffectMigrationResult:
+    """Finding H (MEDIUM, Codex round-5 review): a completed migration
+    whose quarantine-cleanup (reset) failed must still report the
+    migration's OWN success (don't punish the user for the migration
+    itself) -- but must not silently claim quarantine state was cleared
+    when it wasn't; the stale row must remain genuinely visible on a
+    subsequent read."""
+
+    def test_reset_failure_on_completed_status_does_not_affect_the_reported_result(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.services.fleet_migration.quarantine import (
+            record_migration_failure,
+        )
+
+        refresh_scheduler = _make_refresh_scheduler(tmp_path)
+        golden_repos_dir = tmp_path / "golden-repos"
+        base_clone = _build_unconsolidated_repo(golden_repos_dir, "click")
+        backend = _ResetFailingQuarantineBackend()
+        golden = _FakeGoldenRepoManager({"click": base_clone}, sqlite_backend=backend)
+        # Pre-seed a prior failure record, as if earlier attempts had
+        # failed -- there is now something for the "completed" status's
+        # reset call to (attempt to) clear.
+        record_migration_failure(golden, "click", "stale-signature")
+
+        scheduler = _make_scheduler(
+            tmp_path,
+            golden,
+            refresh_scheduler,
+            background_job_manager=MagicMock(),
+            config_service=_RecordingConfigService(enabled=True),
+        )
+
+        result = scheduler._run_next_candidate()
+
+        assert result["status"] == "completed"
+        # Since reset (DELETE) is broken, the stale failure row must
+        # still be visible -- never silently claimed as cleared when it
+        # was not.
+        assert backend.get_fleet_migration_failure_state("click") is not None
