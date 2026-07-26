@@ -1058,6 +1058,7 @@ class TestHealthGatedParallelDispatch:
             accuracy,
             provider_name,
             no_embedding_cache_shortcut=False,
+            activation_id=None,
         ):
             dispatched_providers.append(provider_name)
             return []
@@ -1151,6 +1152,7 @@ class TestHealthGatedParallelDispatch:
             accuracy,
             provider_name,
             no_embedding_cache_shortcut=False,
+            activation_id=None,
         ):
             dispatched_providers.append(provider_name)
             return []

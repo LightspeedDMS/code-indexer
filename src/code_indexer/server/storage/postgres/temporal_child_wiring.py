@@ -18,10 +18,20 @@ cluster hot path.
 This module closes that gap with a minimal, path-only IPC contract:
 
   1. build_temporal_child_env(server_config, base_env=None): PARENT side.
-     Returns an env dict with CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to the
+     Story #1457 AC6 Finding-1 (round-23 correction): this builder is now
+     restructured to ALWAYS return a dict (never None), mirroring
+     build_embedding_stats_child_env's unconditional-on-storage_mode
+     design. It UNCONDITIONALLY sets CIDX_SERVER_REFRESH_CONTEXT=1 in ALL
+     storage modes -- the signal a temporal child uses to distinguish
+     "I was spawned by the server" (any storage mode, including a
+     solo/SQLite local server) from "I am a genuine standalone CLI
+     invocation with no server process at all". The PREVIOUS
+     postgres-only-return-else-None design silently dropped this signal
+     in solo/SQLite server mode, which is genuinely server-context, not
+     standalone-CLI -- that was the bug this correction fixes. It
+     continues to additionally set CIDX_TEMPORAL_PG_BOOTSTRAP_DIR to the
      server's resolved server_dir (the directory containing config.json)
-     ONLY when storage_mode == "postgres"; otherwise returns None (caller
-     passes env=None -- unchanged env, unchanged SQLite behavior). The DSN
+     ONLY when storage_mode == "postgres" (unchanged from before). The DSN
      itself NEVER crosses via argv or env: both are world-readable via
      /proc/<pid>/cmdline and /proc/<pid>/environ, so passing only a path
      avoids duplicating the secret and avoids a second source of truth on
@@ -42,6 +52,7 @@ This module closes that gap with a minimal, path-only IPC contract:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -49,11 +60,14 @@ from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
 from code_indexer.server.storage.postgres.temporal_metadata_backend import (
     make_postgres_temporal_metadata_factory,
 )
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.utils.config_manager import ServerConfig, ServerConfigManager
 from code_indexer.storage.temporal_metadata_backend_registry import (
     TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
     set_temporal_metadata_backend_factory,
 )
+
+logger = logging.getLogger(__name__)
 
 # Bounded connect/acquire timeout for the child's dedicated pool -- this is
 # infra (connection establishment), NOT an indexing-work timeout (Bug #1218:
@@ -62,33 +76,90 @@ _TEMPORAL_CHILD_POOL_MIN_SIZE = 1
 _TEMPORAL_CHILD_POOL_MAX_SIZE = 8
 _TEMPORAL_CHILD_POOL_TIMEOUT_SECONDS = 30.0
 
+#: Story #1457 AC6 Finding-1 (round-23): unconditional server-context
+#: marker set on EVERY temporal child, in ALL storage modes -- signals
+#: "this child was spawned by the server" (as opposed to a genuine
+#: standalone `cidx index` with no server process at all). Distinct from
+#: TEMPORAL_PG_BOOTSTRAP_DIR_ENV, which remains postgres-only.
+CIDX_SERVER_REFRESH_CONTEXT_ENV = "CIDX_SERVER_REFRESH_CONTEXT"
+
+#: Story #1457 AC1 safety gate (2026-07-23 code review; canonical home
+#: moved here 2026-07-24 re-review, Codex finding #4): the CHILD process
+#: (temporal_relocation_trigger.py) has no DB access, so it can only ever
+#: READ this env var. The PARENT (this function, running in the live
+#: server process) is the AUTHORITATIVE source -- it resolves the on/off
+#: decision from the config service (never raw os.environ, per CLAUDE.md's
+#: "No Environment Variables for Server Settings" rule) and transports the
+#: resolved value into the child's environment, exactly like
+#: CIDX_SERVER_REFRESH_CONTEXT_ENV above.
+CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV = "CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED"
+
 
 def build_temporal_child_env(
     server_config: Optional[ServerConfig], base_env: Optional[Dict[str, str]] = None
-) -> Optional[Dict[str, str]]:
+) -> Dict[str, str]:
     """Build the env dict for a temporal-indexing child Popen call.
+
+    Story #1457 AC6 Finding-1 (round-23 correction): ALWAYS returns a dict
+    (never None) -- the previous postgres-only-return-else-None shape
+    silently dropped the server-context signal in solo/SQLite server mode,
+    which IS genuinely server-context (not standalone-CLI).
 
     Args:
         server_config: The server's own ServerConfig, or None if unavailable
-            (bootstrap read failed -- treated the same as sqlite mode: no
-            special wiring, child gets the SQLite default).
+            (bootstrap read failed). The server-context flag is still set
+            unconditionally in this case (the function is only ever called
+            from server-side spawn sites); only the postgres-specific
+            bootstrap-dir var is skipped, since storage_mode is unknown.
         base_env: Environment to merge into (copied, never mutated). When
             None, defaults to a copy of the current process's os.environ so
             the child inherits PATH and everything else it needs.
 
     Returns:
-        None when server_config is None or storage_mode != "postgres" (the
-        caller then passes env=None to Popen -- fully unchanged behavior).
-        Otherwise a NEW dict (base_env or os.environ, copied) with
-        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to server_config.server_dir.
+        A NEW dict (base_env or os.environ, copied) with
+        CIDX_SERVER_REFRESH_CONTEXT set to "1" unconditionally,
+        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to server_config.server_dir
+        additionally when server_config.storage_mode == "postgres", and
+        CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED set to "1" when the config
+        service reports the AC1 safety gate enabled (2026-07-24 re-review,
+        Codex finding #4) -- omitted (not just "0") when disabled/unread­
+        able, matching the gate's own default-OFF, fail-safe philosophy.
     """
-    if server_config is None or server_config.storage_mode != "postgres":
-        return None
-
     merged: Dict[str, str] = (
         dict(base_env) if base_env is not None else dict(os.environ)
     )
-    merged[TEMPORAL_PG_BOOTSTRAP_DIR_ENV] = server_config.server_dir
+    merged[CIDX_SERVER_REFRESH_CONTEXT_ENV] = "1"
+    if server_config is not None and server_config.storage_mode == "postgres":
+        merged[TEMPORAL_PG_BOOTSTRAP_DIR_ENV] = server_config.server_dir
+
+    # 2026-07-24 round-4 re-review (Codex): unconditionally clear any
+    # inherited/stale value FIRST, before resolving config -- base_env or
+    # os.environ may already carry "1" from a prior enabled run or an
+    # operator's ambient shell. Without this, a disabled config or a
+    # config-read exception would leave that stale value in place,
+    # letting inherited env state silently act as a fallback authority
+    # (the opposite of this gate's claimed fail-safe direction). Only the
+    # config-resolved value below may set this key back.
+    merged.pop(CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV, None)
+
+    try:
+        sister_relocation_enabled = (
+            get_config_service()
+            .get_config()
+            .indexing_config.temporal_sister_relocation_enabled
+        )
+    except Exception as exc:
+        logger.warning(
+            "build_temporal_child_env: failed to read "
+            "temporal_sister_relocation_enabled from config service "
+            "(non-fatal, gate stays disabled): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        sister_relocation_enabled = False
+    if sister_relocation_enabled:
+        merged[CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV] = "1"
+
     return merged
 
 

@@ -75,7 +75,16 @@ class TrigramIndexManager:
         if not self._db_path.exists():
             return False
         try:
-            with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
+            # Issue #1459 code-review sweep: a naive f"file:{path}?mode=ro"
+            # string mis-parses any path containing a URI-special character
+            # ('?', '#', '%', spaces) -- SQLite's URI parser reads a literal
+            # '?'/'#' in the path as the start of the query string, truncating
+            # the path before "mode=ro" is even seen. Path.resolve().as_uri()
+            # produces a correctly percent-encoded file:// URI (same fix as
+            # storage/sqlite_chunk_store.py's ChunkStore._open_connection /
+            # chunk_store_has_real_data).
+            uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
                 row = conn.execute(
                     "SELECT value FROM meta WHERE key = 'schema_version'"
                 ).fetchone()
@@ -291,7 +300,12 @@ class TrigramIndexManager:
         tris = list({t.lower() for t in required})
         ph_all = ",".join("?" for _ in tris)
         try:
-            with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
+            # Issue #1459 code-review sweep: see the identical fix + comment
+            # in exists() above -- Path.resolve().as_uri() correctly
+            # percent-encodes URI-special characters that a naive
+            # f"file:{path}?mode=ro" string would mis-parse.
+            uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
                 # Order the required trigrams rarest-first (df 0 == absent).
                 df_map = {t: 0 for t in tris}
                 for t, df in conn.execute(

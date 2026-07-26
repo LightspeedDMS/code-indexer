@@ -8,9 +8,7 @@ Following Story #666 AC2: CorrelationContextMiddleware Implementation
 """
 
 import contextvars
-from typing import Optional
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
+from typing import Any, Optional
 
 from .error_formatters import generate_correlation_id
 
@@ -67,55 +65,80 @@ def clear_correlation_id() -> None:
     _correlation_id.set(None)
 
 
-class CorrelationContextMiddleware(BaseHTTPMiddleware):
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy attribute resolution (Bug #1468).
+
+    `CorrelationContextMiddleware` needs fastapi/starlette, but this
+    module's lightweight `get_correlation_id`/`set_correlation_id`/
+    `clear_correlation_id` functions do not -- and they are imported deep
+    inside FilesystemVectorStore's import chain (via config_service.py),
+    including pure CLI/solo usage with no fastapi need at all. Defining the
+    class lazily here means merely importing this module for the
+    contextvar helpers no longer forces fastapi/starlette to load.
+
+    `CorrelationContextMiddleware` remains fully available via
+    `from code_indexer.server.middleware.correlation import
+    CorrelationContextMiddleware`, resolved (and cached in this module's
+    globals, so subsequent accesses skip __getattr__ entirely) on first
+    actual access.
     """
-    FastAPI middleware for automatic correlation ID management.
+    if name == "CorrelationContextMiddleware":
+        from fastapi import Request
+        from starlette.middleware.base import BaseHTTPMiddleware
 
-    Features:
-    - Extracts correlation ID from X-Correlation-ID request header
-    - Generates UUID v4 if header not present
-    - Stores correlation ID in contextvars (async-safe)
-    - Adds X-Correlation-ID to response headers
-    - Ensures correlation ID persists throughout request lifecycle
+        class CorrelationContextMiddleware(BaseHTTPMiddleware):
+            """
+            FastAPI middleware for automatic correlation ID management.
 
-    Usage:
-        >>> from fastapi import FastAPI
-        >>> from code_indexer.server.middleware.correlation import CorrelationContextMiddleware
-        >>>
-        >>> app = FastAPI()
-        >>> app.add_middleware(CorrelationContextMiddleware)
+            Features:
+            - Extracts correlation ID from X-Correlation-ID request header
+            - Generates UUID v4 if header not present
+            - Stores correlation ID in contextvars (async-safe)
+            - Adds X-Correlation-ID to response headers
+            - Ensures correlation ID persists throughout request lifecycle
 
-    Following Story #666 AC2 requirements:
-    - Generate UUID v4 if X-Correlation-ID header not present ✓
-    - Store correlation ID in contextvars (async-safe) ✓
-    - Create get_correlation_id() helper function ✓
-    - Add X-Correlation-ID to response headers ✓
-    - Ensure middleware runs before all other processing ✓
-    """
+            Usage:
+                >>> from fastapi import FastAPI
+                >>> from code_indexer.server.middleware.correlation import CorrelationContextMiddleware
+                >>>
+                >>> app = FastAPI()
+                >>> app.add_middleware(CorrelationContextMiddleware)
 
-    async def dispatch(self, request: Request, call_next):
-        """
-        Process request and inject correlation ID.
+            Following Story #666 AC2 requirements:
+            - Generate UUID v4 if X-Correlation-ID header not present ✓
+            - Store correlation ID in contextvars (async-safe) ✓
+            - Create get_correlation_id() helper function ✓
+            - Add X-Correlation-ID to response headers ✓
+            - Ensure middleware runs before all other processing ✓
+            """
 
-        Args:
-            request: FastAPI request object
-            call_next: Next middleware/route handler
+            async def dispatch(self, request: Request, call_next):
+                """
+                Process request and inject correlation ID.
 
-        Returns:
-            Response with X-Correlation-ID header
-        """
-        # Extract or generate correlation ID
-        correlation_id = request.headers.get("X-Correlation-ID")
-        if not correlation_id:
-            correlation_id = generate_correlation_id()
+                Args:
+                    request: FastAPI request object
+                    call_next: Next middleware/route handler
 
-        # Store in context for request lifecycle
-        set_correlation_id(correlation_id)
+                Returns:
+                    Response with X-Correlation-ID header
+                """
+                # Extract or generate correlation ID
+                correlation_id = request.headers.get("X-Correlation-ID")
+                if not correlation_id:
+                    correlation_id = generate_correlation_id()
 
-        # Process request
-        response = await call_next(request)
+                # Store in context for request lifecycle
+                set_correlation_id(correlation_id)
 
-        # Add correlation ID to response headers
-        response.headers["X-Correlation-ID"] = correlation_id
+                # Process request
+                response = await call_next(request)
 
-        return response
+                # Add correlation ID to response headers
+                response.headers["X-Correlation-ID"] = correlation_id
+
+                return response
+
+        globals()["CorrelationContextMiddleware"] = CorrelationContextMiddleware
+        return CorrelationContextMiddleware
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

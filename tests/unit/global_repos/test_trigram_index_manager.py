@@ -216,6 +216,38 @@ class TestBuildAtomicity:
         assert list((tmp_path / "idx").glob("*.db.building")) == []
 
 
+class TestSpecialCharacterIndexPath:
+    """Issue #1459 code-review sweep: unescaped f-string SQLite read-only URI
+    construction (``f"file:{path}?mode=ro"``) misparses any path containing a
+    URI-special character. SQLite's URI parser treats a literal '?' in the path
+    as the start of the query string, truncating the path before 'mode=ro' is
+    even seen -- so a real, populated index is silently treated as absent.
+    """
+
+    def test_exists_true_for_populated_index_with_special_char_in_path(self, tmp_path):
+        repo = _repo(tmp_path)
+        special_dir = tmp_path / "repo?weird" / "idx"
+        mgr = TrigramIndexManager(special_dir)
+        mgr.build(repo, file_list=["auth.java", "a/other.py", "readme.md"])
+
+        assert mgr.exists(), (
+            "exists() must report True for a genuinely populated index even "
+            "when the index directory path contains a URI-special character "
+            "such as '?'"
+        )
+
+    def test_query_returns_candidates_with_special_char_in_path(self, tmp_path):
+        repo = _repo(tmp_path)
+        special_dir = tmp_path / "repo?weird" / "idx"
+        mgr = TrigramIndexManager(special_dir)
+        mgr.build(repo, file_list=["auth.java", "a/other.py", "readme.md"])
+
+        assert "auth.java" in mgr.query(trigrams("LSAuthenticator")), (
+            "query() must find real matches even when the index directory "
+            "path contains a URI-special character such as '?'"
+        )
+
+
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
 class TestRgEnumeration:
     def test_build_via_rg_files(self, tmp_path):

@@ -193,6 +193,7 @@ class SemanticSearchService:
         search_request: SemanticSearchRequest,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
+        activation_id: Optional[str] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -241,6 +242,7 @@ class SemanticSearchService:
             hnsw_cache=hnsw_cache,
             precomputed_query_vector=precomputed_query_vector,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
+            activation_id=activation_id,
         )
 
         return SemanticSearchResponse(
@@ -254,6 +256,7 @@ class SemanticSearchService:
         repo_path: str,
         search_request: SemanticSearchRequest,
         provider_name: Optional[str] = None,
+        activation_id: Optional[str] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search using an explicitly named embedding provider.
@@ -284,6 +287,7 @@ class SemanticSearchService:
             accuracy=search_request.accuracy,
             provider_name_override=provider_name,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
+            activation_id=activation_id,
         )
 
         return SemanticSearchResponse(
@@ -367,6 +371,7 @@ class SemanticSearchService:
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
         no_embedding_cache_shortcut: bool = False,
+        activation_id: Optional[str] = None,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -424,6 +429,7 @@ class SemanticSearchService:
                 project_root=Path(repo_path),
                 hnsw_cache=resolved_hnsw_cache,
                 memory_governor=get_memory_governor(),
+                activation_id=activation_id,
             )
             vector_store_client = backend.get_vector_store_client()
 

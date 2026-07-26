@@ -247,7 +247,11 @@ class TestInvalidationParity:
             store.rebuild_hnsw_filtered(collection_name, visible_files=set())
 
         expected_collection_path = store._get_collection_path(collection_name)
-        expected_key = str(expected_collection_path)
+        # Story #1458 AC11: invalidate() now embeds the chunks_db layout
+        # discriminator token, freshly re-derived via resolve_chunk_layout().
+        # This synthetic collection has no collection_meta.json at all, so
+        # the resolver correctly fail-closes to "sharded_json".
+        expected_key = f"{expected_collection_path}:sharded_json"
 
         hnsw_cache.invalidate.assert_called_once_with(expected_key)
         id_cache.invalidate.assert_called_once_with(expected_key)

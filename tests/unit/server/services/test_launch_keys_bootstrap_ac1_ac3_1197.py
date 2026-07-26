@@ -151,6 +151,7 @@ class TestAC1BootstrapKeysRemoved:
                 "coalesce_k_min",
                 "coalesce_k_max",
                 "snapshot_retention_keep_last",
+                "snapshot_min_retention_age_seconds",
                 "nfs_visibility_timeout_seconds",
                 "research_session_retention_days",
                 "query_embedding_cache_config",
@@ -171,6 +172,8 @@ class TestAC1BootstrapKeysRemoved:
                 "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
                 "embedding_stats_config",  # Story #1418 — runtime Web UI setting (embedding/reranker call tracking: enabled, flush_interval_seconds, retention_days)
                 "temporal_indexing_config",  # Story #1404 — runtime Web UI setting (global temporal indexing floor date)
+                "deactivation_query_drain_max_wait_seconds",  # Story #1458 AC13 — runtime Web UI setting (deactivation QueryTracker drain bound)
+                "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
             }
         )
 

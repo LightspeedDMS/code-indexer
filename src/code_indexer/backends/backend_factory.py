@@ -22,6 +22,7 @@ class BackendFactory:
         project_root: Path,
         hnsw_cache: Optional[Any] = None,
         memory_governor: Optional[Any] = None,
+        activation_id: Optional[str] = None,
     ) -> VectorStoreBackend:
         """Create appropriate backend from configuration.
 
@@ -31,6 +32,11 @@ class BackendFactory:
             hnsw_cache: Optional HNSW cache instance (server mode passes this)
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
                 Server mode passes get_memory_governor(); CLI leaves it None.
+            activation_id: Story #1458 AC11 -- optional per-clone generation/
+                identity token for an ACTIVATED repo query, threaded into
+                FilesystemVectorStore's cache-key construction. None
+                (default) for the CLI/solo/golden-repo path, preserving
+                today's pure path-derived cache key byte-for-byte.
 
         Returns:
             FilesystemBackend instance
@@ -45,6 +51,7 @@ class BackendFactory:
                 project_root=project_root,
                 hnsw_index_cache=hnsw_cache,
                 memory_governor=memory_governor,
+                activation_id=activation_id,
             )
 
         provider = config.vector_store.provider
@@ -55,6 +62,7 @@ class BackendFactory:
                 project_root=project_root,
                 hnsw_index_cache=hnsw_cache,
                 memory_governor=memory_governor,
+                activation_id=activation_id,
             )
         else:
             raise ValueError(f"Unsupported vector store provider: {provider}")

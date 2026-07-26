@@ -419,6 +419,39 @@ class TestResearchCleanupScheduler:
         provider = make_db_live_folder_provider(db_path)
         assert provider() == {"/x/research/s1"}
 
+    def test_live_folder_provider_handles_special_char_in_db_path(self, tmp_path):
+        """Issue #1459 code-review sweep: a naive f"file:{db_path}?mode=ro"
+        string mis-parses a db_path containing a URI-special character such as
+        '?' -- SQLite's URI parser reads the literal '?' as the start of the
+        query string, truncating the path before 'mode=ro' is even seen. This
+        must not turn a genuinely readable, populated research_sessions DB
+        into a read failure (which cleanup() would treat as 'abort sweep,
+        zero deletions' -- safe, but the provider itself must still work).
+        """
+        import sqlite3
+
+        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.services.research_cleanup_service import (
+            make_db_live_folder_provider,
+        )
+
+        special_dir = tmp_path / "server?weird"
+        special_dir.mkdir()
+        db_path = str(special_dir / "cidx_server.db")
+        DatabaseSchema(db_path=db_path).initialize_database()
+
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO research_sessions (id, name, folder_path, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("s1", "S1", "/x/research/s1", "now", "now"),
+        )
+        conn.commit()
+        conn.close()
+
+        provider = make_db_live_folder_provider(db_path)
+        assert provider() == {"/x/research/s1"}
+
 
 class TestDefaultDirLogLevel:
     """Bug #1099 — 'default' dir must log at DEBUG, not WARNING, every hourly sweep.
