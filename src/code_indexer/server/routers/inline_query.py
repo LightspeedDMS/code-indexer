@@ -40,6 +40,9 @@ from code_indexer.server.mcp.reranking import (
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
     extract_rerank_document as _rest_extract_rerank_document,
 )
+from code_indexer.server.services.deactivation_query_drain import (
+    track_activated_repo_query,
+)
 from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
@@ -480,6 +483,15 @@ def register_query_routes(
                 # Check FTS index availability for each repository
                 fts_available = False
                 repo_path = None
+                # Codex HIGH finding (round 5): an alias-less/omni request
+                # has request.repository_alias == None, a no-op key for
+                # track_activated_repo_query -- capture the ACTUAL repo
+                # whose FTS index gets read below, so tracking uses the
+                # real per-repository identity (mirrors the fan-out
+                # pattern semantic_query_manager.py's query_user_
+                # repositories already established, round 4), never the
+                # possibly-absent request-level alias.
+                fts_repo_alias: Optional[str] = None
                 for repo in activated_repos:
                     # Construct path - different for global vs user repos
                     if repo.get("is_global"):
@@ -514,6 +526,7 @@ def register_query_routes(
                     fts_index_dir = repo_path / ".code-indexer" / "tantivy_index"
                     if fts_index_dir.exists():
                         fts_available = True
+                        fts_repo_alias = repo.get("user_alias")
                         break
 
                 # Validate search mode based on index availability
@@ -555,101 +568,139 @@ def register_query_routes(
                         username=current_user.username
                     )
 
-                    try:
-                        # repo_path is guaranteed to be set if fts_available is True
-                        if repo_path is None:
-                            raise RuntimeError(
-                                "repo_path is None despite FTS being available"
+                    # Codex HIGH finding (round 2): this branch reads the
+                    # Tantivy FTS index directly (never calls
+                    # query_user_repositories()), so it was completely
+                    # invisible to the track_activated_repo_query()
+                    # wrapping already applied to the semantic/hybrid
+                    # branch below -- wire the SAME tracking here too.
+                    #
+                    # Codex HIGH finding (round 5): use fts_repo_alias
+                    # (the REAL repo whose index is about to be read),
+                    # not request.repository_alias -- an alias-less/omni
+                    # request has the latter as None, which would make
+                    # tracking a silent no-op even though a concrete
+                    # activated repo's chunks are being read.
+                    with track_activated_repo_query(
+                        getattr(app.state, "query_tracker", None),
+                        activated_repo_manager,
+                        current_user.username,
+                        fts_repo_alias,
+                    ):
+                        try:
+                            # repo_path is guaranteed to be set if fts_available is True
+                            if repo_path is None:
+                                raise RuntimeError(
+                                    "repo_path is None despite FTS being available"
+                                )
+
+                            # Initialize Tantivy manager for first available repository
+                            tantivy_manager = TantivyIndexManager(
+                                repo_path / ".code-indexer" / "tantivy_index"
+                            )
+                            tantivy_manager.open_for_search()
+
+                            # Handle fuzzy flag
+                            edit_dist = request.edit_distance
+                            if request.fuzzy and edit_dist == 0:
+                                edit_dist = 1
+
+                            # Execute FTS query
+                            fts_raw_results = tantivy_manager.search(
+                                query_text=request.query_text,
+                                case_sensitive=request.case_sensitive,
+                                edit_distance=edit_dist,
+                                snippet_lines=request.snippet_lines,
+                                limit=request.limit,
+                                language_filter=request.language,
+                                path_filter=request.path_filter,
+                                exclude_languages=(
+                                    [request.exclude_language]
+                                    if request.exclude_language
+                                    else None
+                                ),  # Story #503 Phase 1
+                                exclude_paths=(
+                                    [request.exclude_path]
+                                    if request.exclude_path
+                                    else None
+                                ),  # Story #503 Phase 1
+                                use_regex=request.regex,  # Story #503 Phase 1
                             )
 
-                        # Initialize Tantivy manager for first available repository
-                        tantivy_manager = TantivyIndexManager(
-                            repo_path / ".code-indexer" / "tantivy_index"
-                        )
-                        tantivy_manager.open_for_search()
+                            # Convert to API response format
+                            for result in fts_raw_results:
+                                fts_results.append(
+                                    FTSResultItem(
+                                        path=result.get("path", ""),
+                                        line_start=result.get("line_start", 0),
+                                        line_end=result.get("line_end", 0),
+                                        snippet=result.get("snippet", ""),
+                                        language=result.get("language", "unknown"),
+                                        # Codex round-6 LOW finding: use
+                                        # fts_repo_alias (the repo whose
+                                        # index was ACTUALLY read), not
+                                        # activated_repos[0] (the first
+                                        # repo in the list, which may
+                                        # lack an FTS index entirely).
+                                        repository_alias=request.repository_alias
+                                        or fts_repo_alias
+                                        or "",
+                                    )
+                                )
 
-                        # Handle fuzzy flag
-                        edit_dist = request.edit_distance
-                        if request.fuzzy and edit_dist == 0:
-                            edit_dist = 1
-
-                        # Execute FTS query
-                        fts_raw_results = tantivy_manager.search(
-                            query_text=request.query_text,
-                            case_sensitive=request.case_sensitive,
-                            edit_distance=edit_dist,
-                            snippet_lines=request.snippet_lines,
-                            limit=request.limit,
-                            language_filter=request.language,
-                            path_filter=request.path_filter,
-                            exclude_languages=(
-                                [request.exclude_language]
-                                if request.exclude_language
-                                else None
-                            ),  # Story #503 Phase 1
-                            exclude_paths=(
-                                [request.exclude_path] if request.exclude_path else None
-                            ),  # Story #503 Phase 1
-                            use_regex=request.regex,  # Story #503 Phase 1
-                        )
-
-                        # Convert to API response format
-                        for result in fts_raw_results:
-                            fts_results.append(
-                                FTSResultItem(
-                                    path=result.get("path", ""),
-                                    line_start=result.get("line_start", 0),
-                                    line_end=result.get("line_end", 0),
-                                    snippet=result.get("snippet", ""),
-                                    language=result.get("language", "unknown"),
-                                    repository_alias=request.repository_alias
-                                    or activated_repos[0]["user_alias"],
+                        except Exception as e:
+                            logger.error(
+                                format_error_log(
+                                    "APP-GENERAL-033",
+                                    f"FTS search failed: {e}",
+                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
-
-                    except Exception as e:
-                        logger.error(
-                            format_error_log(
-                                "APP-GENERAL-033",
-                                f"FTS search failed: {e}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                        )
-                        if request.search_mode == "fts":
-                            raise HTTPException(
-                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail=f"FTS search failed: {str(e)}",
-                            )
-                        # For hybrid mode, continue with semantic only
-                        search_mode_actual = "semantic"
+                            if request.search_mode == "fts":
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail=f"FTS search failed: {str(e)}",
+                                )
+                            # For hybrid mode, continue with semantic only
+                            search_mode_actual = "semantic"
 
                 # Execute semantic search for hybrid or degraded mode
                 if search_mode_actual in ["semantic", "hybrid"]:
                     try:
-                        semantic_results_raw = semantic_query_manager.query_user_repositories(
-                            username=current_user.username,
-                            query_text=request.query_text,
-                            repository_alias=request.repository_alias,
-                            limit=request.limit,
-                            min_score=request.min_score,
-                            file_extensions=request.file_extensions,
-                            # Phase 1 parameters (Story #503)
-                            exclude_language=request.exclude_language,
-                            exclude_path=request.exclude_path,
-                            accuracy=request.accuracy,
-                            # Temporal parameters (Story #446)
-                            time_range=request.time_range,
-                            time_range_all=request.time_range_all,
-                            at_commit=request.at_commit,
-                            # Phase 3 temporal filtering parameters (Story #503)
-                            diff_type=request.diff_type,
-                            author=request.author,
-                            chunk_type=request.chunk_type,
-                            # Story #1108 (S4): per-request cache bypass
-                            no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
-                            # Story #1291 AC7/AC8: explicit embedder override
-                            temporal_embedder=request.temporal_embedder,
-                        )
+                        # Codex Finding #7: wire the SAME activated-repo
+                        # QueryTracker refcount protection MCP search.py
+                        # already has, so deactivation's bounded drain has
+                        # something real to observe for THIS front door too.
+                        with track_activated_repo_query(
+                            getattr(app.state, "query_tracker", None),
+                            activated_repo_manager,
+                            current_user.username,
+                            request.repository_alias,
+                        ):
+                            semantic_results_raw = semantic_query_manager.query_user_repositories(
+                                username=current_user.username,
+                                query_text=request.query_text,
+                                repository_alias=request.repository_alias,
+                                limit=request.limit,
+                                min_score=request.min_score,
+                                file_extensions=request.file_extensions,
+                                # Phase 1 parameters (Story #503)
+                                exclude_language=request.exclude_language,
+                                exclude_path=request.exclude_path,
+                                accuracy=request.accuracy,
+                                # Temporal parameters (Story #446)
+                                time_range=request.time_range,
+                                time_range_all=request.time_range_all,
+                                at_commit=request.at_commit,
+                                # Phase 3 temporal filtering parameters (Story #503)
+                                diff_type=request.diff_type,
+                                author=request.author,
+                                chunk_type=request.chunk_type,
+                                # Story #1108 (S4): per-request cache bypass
+                                no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                                # Story #1291 AC7/AC8: explicit embedder override
+                                temporal_embedder=request.temporal_embedder,
+                            )
                         semantic_results_list = [
                             QueryResultItem(**result)
                             for result in semantic_results_raw["results"]
@@ -752,30 +803,38 @@ def register_query_routes(
                     _requested_limit, _overfetch_mul
                 )
 
-            results = semantic_query_manager.query_user_repositories(
-                username=current_user.username,
-                query_text=request.query_text,
-                repository_alias=request.repository_alias,
-                limit=_fetch_limit,
-                min_score=request.min_score,
-                file_extensions=request.file_extensions,
-                # Phase 1 parameters (Story #503)
-                exclude_language=request.exclude_language,
-                exclude_path=request.exclude_path,
-                accuracy=request.accuracy,
-                # Temporal parameters (Story #446)
-                time_range=request.time_range,
-                time_range_all=request.time_range_all,
-                at_commit=request.at_commit,
-                # Phase 3 temporal filtering parameters (Story #503)
-                diff_type=request.diff_type,
-                author=request.author,
-                chunk_type=request.chunk_type,
-                # Story #1108 (S4): per-request cache bypass
-                no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
-                # Story #1291 AC7/AC8: explicit embedder override
-                temporal_embedder=request.temporal_embedder,
-            )
+            # Codex Finding #7: wire the SAME activated-repo QueryTracker
+            # refcount protection MCP search.py already has.
+            with track_activated_repo_query(
+                getattr(app.state, "query_tracker", None),
+                activated_repo_manager,
+                current_user.username,
+                request.repository_alias,
+            ):
+                results = semantic_query_manager.query_user_repositories(
+                    username=current_user.username,
+                    query_text=request.query_text,
+                    repository_alias=request.repository_alias,
+                    limit=_fetch_limit,
+                    min_score=request.min_score,
+                    file_extensions=request.file_extensions,
+                    # Phase 1 parameters (Story #503)
+                    exclude_language=request.exclude_language,
+                    exclude_path=request.exclude_path,
+                    accuracy=request.accuracy,
+                    # Temporal parameters (Story #446)
+                    time_range=request.time_range,
+                    time_range_all=request.time_range_all,
+                    at_commit=request.at_commit,
+                    # Phase 3 temporal filtering parameters (Story #503)
+                    diff_type=request.diff_type,
+                    author=request.author,
+                    chunk_type=request.chunk_type,
+                    # Story #1108 (S4): per-request cache bypass
+                    no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                    # Story #1291 AC7/AC8: explicit embedder override
+                    temporal_embedder=request.temporal_embedder,
+                )
 
             # Apply access filtering based on user's group membership (Story #707)
             if (

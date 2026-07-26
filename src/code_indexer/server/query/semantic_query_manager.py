@@ -16,6 +16,7 @@ import re
 import io
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
+from ..services.deactivation_query_drain import track_activated_repo_query
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -314,6 +316,13 @@ class SemanticQueryManager:
         # just load-and-discard (hnsw_cache=None).
         self._shard_ownership: Optional[Any] = None
 
+        # Story #1457 AC1/AC2 live wiring: server-wide QueryTracker
+        # singleton (app.state.query_tracker). None = not yet injected (no
+        # resolver is ever constructed for a temporal query in that case --
+        # see _execute_temporal_query's gate -- byte-identical to today).
+        # Injected POST-HOC from lifespan.py, mirroring set_shard_ownership.
+        self.query_tracker: Optional[Any] = None
+
     def set_shard_ownership(self, shard_ownership: Any) -> None:
         """Inject repo-shard ownership (cluster mode only).
 
@@ -321,6 +330,16 @@ class SemanticQueryManager:
         repos this node owns; non-owned repos are served load-and-discard.
         """
         self._shard_ownership = shard_ownership
+
+    def set_query_tracker(self, query_tracker: Any) -> None:
+        """Inject the server-wide QueryTracker singleton (Story #1457 AC1/AC2).
+
+        When set (together with a golden_repo_alias), temporal queries
+        construct a REAL TemporalShardResolver whose pin() acquires actual
+        refcounts -- closing the mid-read deletion hazard. Without this, no
+        resolver is ever constructed, regardless of golden_repo_alias.
+        """
+        self.query_tracker = query_tracker
 
     def _owns_for_cache(self, repository_alias: str) -> bool:
         """Whether this node should use its shared index cache for ``alias``.
@@ -865,10 +884,27 @@ class SemanticQueryManager:
         Returns:
             Job ID for tracking query progress
         """
+
+        # Codex HIGH finding (round 2): MCP/REST/wiki all wrap their
+        # SYNCHRONOUS inline calls to query_user_repositories() with
+        # track_activated_repo_query(), but this background-job path
+        # handed the bare method straight to submit_job(), which invokes
+        # it later on a worker thread with NO tracking wrapper at all --
+        # invisible to deactivation's bounded refcount drain. Wrap here so
+        # the SAME tracking mechanism covers this path too.
+        def _tracked_query_user_repositories(**kwargs: Any) -> Dict[str, Any]:
+            with track_activated_repo_query(
+                self.query_tracker,
+                self.activated_repo_manager,
+                kwargs.get("username", ""),
+                kwargs.get("repository_alias"),
+            ):
+                return self.query_user_repositories(**kwargs)
+
         # Submit background job
         job_id = self.background_job_manager.submit_job(
             "semantic_query",
-            self.query_user_repositories,  # type: ignore[arg-type]
+            _tracked_query_user_repositories,  # type: ignore[arg-type]
             username=username,
             query_text=query_text,
             repository_alias=repository_alias,
@@ -1051,62 +1087,133 @@ class SemanticQueryManager:
                         continue  # Skip if alias can't be resolved
 
                     repo_path = target_path
+                    # Story #1457 AC1/AC2: an is_global repo's OWN alias IS
+                    # the golden repo's alias (resolved directly above via
+                    # AliasManager against golden-repos/aliases).
+                    golden_repo_alias_for_temporal: Optional[str] = repo_alias
+                    # Story #1458 AC11: golden/-global repos have no
+                    # activation_id concept -- None preserves today's pure
+                    # path-derived FSV cache key.
+                    activation_id: Optional[str] = None
+                    # Codex HIGH finding (round 4): golden-repo queries are
+                    # a separate, already-covered refcounting concern
+                    # (_execute_tracked_search) -- leave tracking a true
+                    # no-op here.
+                    _tracking_alias: Optional[str] = None
                 # Check if repo_path is already provided
                 elif "repo_path" in repo_info and repo_info["repo_path"]:
                     repo_path = repo_info["repo_path"]
+                    # Story #1457 AC1/AC2: no golden-repo lineage info is
+                    # available for this shape -- no resolver constructed.
+                    golden_repo_alias_for_temporal = None
+                    # Story #1458 AC11: no activated-repo context for this
+                    # shape either -- None.
+                    activation_id = None
+                    # Codex HIGH finding (round 4): an explicit repo_path
+                    # bypasses activated_repo_manager entirely, so no
+                    # accurate refcount key can be constructed for it --
+                    # leave tracking a true no-op for this shape.
+                    _tracking_alias = None
                 else:
                     # Fall back to activated repo manager for regular activated repos
                     repo_path = self.activated_repo_manager.get_activated_repo_path(
                         username, repo_alias
                     )
+                    # Story #1457 AC1/AC2: the UNDERLYING golden repo this
+                    # activation was cloned from -- NEVER repo_alias itself
+                    # (the activation's own, possibly-renamed, user_alias).
+                    golden_repo_alias_for_temporal = repo_info.get("golden_repo_alias")
+                    # Story #1458 AC11: the per-clone generation/identity
+                    # token for THIS activation, threaded into FSV's
+                    # cache-key construction so a deactivate-then-reactivate
+                    # cycle at the same path is a structural cache-miss.
+                    activation_id = self.activated_repo_manager.get_activation_id(
+                        username, repo_alias
+                    )
+                    # Codex round-6 HIGH finding #9: migration 039's
+                    # activation_id column is correctly additive/nullable,
+                    # but a NULL VALUE FROM A GENUINE ACTIVATED-REPO
+                    # LOOKUP (e.g. an activation created by an OLD node
+                    # during a rolling upgrade, before activation_id
+                    # generation existed) must never be forwarded bare --
+                    # FilesystemVectorStore._activation_scoped_cache_key()
+                    # treats None as "no activation_id component", so TWO
+                    # DIFFERENT such activations at the SAME path would
+                    # derive the IDENTICAL cache key. A fresh, unique
+                    # per-call sentinel forces a structural cache miss
+                    # (genuine bypass) that can never collide with
+                    # another NULL-activation_id activation.
+                    if activation_id is None:
+                        activation_id = f"__missing_activation_id__{uuid.uuid4().hex}"
+                    # Codex HIGH finding (round 4): this is the ONLY branch
+                    # that is unambiguously "a real activated repo, resolved
+                    # via activated_repo_manager" -- the same identity the
+                    # explicit-alias query paths already track.
+                    _tracking_alias = repo_alias
 
                 # Create temporary config and search engine for this repository
                 # This would need actual implementation with proper config management
                 _strat_out: List[str] = []
-                results = self._search_single_repository(
-                    repo_path,
-                    repo_alias,
-                    query_text,
-                    limit,
-                    min_score,
-                    file_extensions,
-                    language,
-                    exclude_language,
-                    path_filter,
-                    exclude_path,
-                    accuracy,
-                    # Search mode (Story #503 - FTS Bug Fix)
-                    search_mode=search_mode,
-                    # Temporal parameters (Story #446)
-                    time_range=time_range,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit,
-                    # FTS-specific parameters (Story #503 Phase 2)
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    edit_distance=edit_distance,
-                    snippet_lines=snippet_lines,
-                    regex=regex,
-                    # Temporal filtering parameters (Story #503 Phase 3)
-                    diff_type=diff_type,
-                    author=author,
-                    chunk_type=chunk_type,
-                    # Query strategy parameters (Story #488 Phase 4)
-                    query_strategy=query_strategy,
-                    score_fusion=score_fusion,
-                    # Multi-provider routing (Story #593)
-                    preferred_provider=preferred_provider,
-                    # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
-                    precomputed_query_vector=precomputed_query_vector,
-                    # Story #1108 (S4): per-request cache bypass
-                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                    # Story #1291 AC7/AC8: forward explicit embedder override
-                    temporal_embedder=temporal_embedder,
-                    # AC7 (Bug #1202): collect resolved routing decision
-                    _effective_strategy_out=_strat_out,
-                    # Bug #1298: relay the embedder-specific warning out-param
-                    _temporal_warning_out=_temporal_warning_out,
-                )
+                # Codex HIGH finding (round 4): alias-less fan-out queries
+                # were completely invisible to deactivation's bounded
+                # refcount drain -- track EACH physical repo actually
+                # searched here, keyed by the per-repository identity
+                # resolved during execution (never the possibly-absent
+                # request-level repository_alias).
+                with track_activated_repo_query(
+                    getattr(self, "query_tracker", None),
+                    self.activated_repo_manager,
+                    username,
+                    _tracking_alias,
+                ):
+                    results = self._search_single_repository(
+                        repo_path,
+                        repo_alias,
+                        query_text,
+                        limit,
+                        min_score,
+                        file_extensions,
+                        language,
+                        exclude_language,
+                        path_filter,
+                        exclude_path,
+                        accuracy,
+                        # Search mode (Story #503 - FTS Bug Fix)
+                        search_mode=search_mode,
+                        # Temporal parameters (Story #446)
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        # FTS-specific parameters (Story #503 Phase 2)
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        edit_distance=edit_distance,
+                        snippet_lines=snippet_lines,
+                        regex=regex,
+                        # Temporal filtering parameters (Story #503 Phase 3)
+                        diff_type=diff_type,
+                        author=author,
+                        chunk_type=chunk_type,
+                        # Query strategy parameters (Story #488 Phase 4)
+                        query_strategy=query_strategy,
+                        score_fusion=score_fusion,
+                        # Multi-provider routing (Story #593)
+                        preferred_provider=preferred_provider,
+                        # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
+                        precomputed_query_vector=precomputed_query_vector,
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        # Story #1291 AC7/AC8: forward explicit embedder override
+                        temporal_embedder=temporal_embedder,
+                        # AC7 (Bug #1202): collect resolved routing decision
+                        _effective_strategy_out=_strat_out,
+                        # Bug #1298: relay the embedder-specific warning out-param
+                        _temporal_warning_out=_temporal_warning_out,
+                        # Story #1457 AC1/AC2: forward the golden repo alias.
+                        golden_repo_alias=golden_repo_alias_for_temporal,
+                        # Story #1458 AC11: forward the per-clone generation token.
+                        activation_id=activation_id,
+                    )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
                     query_strategy or "primary_only"
@@ -1232,6 +1339,15 @@ class SemanticQueryManager:
         # Bug #1298: out-param for the embedder-specific temporal "no
         # indexed collections" warning. Per-request, no shared state.
         _temporal_warning_out: Optional[List[str]] = None,
+        # Story #1457 AC1/AC2 live wiring: the underlying GOLDEN repo's own
+        # alias, forwarded to _execute_temporal_query on the temporal path.
+        # None (every current production caller) preserves today's behavior.
+        golden_repo_alias: Optional[str] = None,
+        # Story #1458 AC11: per-clone generation/identity token for an
+        # ACTIVATED repo query, forwarded into SemanticSearchService's
+        # FSV cache-key construction. None (golden/-global repos, CLI/solo)
+        # preserves today's pure path-derived cache key.
+        activation_id: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1301,6 +1417,7 @@ class SemanticQueryManager:
                 accuracy=accuracy,
                 provider_name=preferred_provider,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                activation_id=activation_id,
             )
             for r in results:
                 r.source_provider = preferred_provider
@@ -1388,6 +1505,7 @@ class SemanticQueryManager:
                     accuracy=accuracy,
                     provider_name="cohere",
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    activation_id=activation_id,
                 )
 
             def _to_strategy_failover(r: QueryResult) -> StrategyQueryResult:
@@ -1468,6 +1586,7 @@ class SemanticQueryManager:
                         provider_name="voyage-ai",
                         # Story #1108 (S4): per-request cache bypass
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        activation_id=activation_id,
                     ),
                 ),
                 (
@@ -1487,6 +1606,7 @@ class SemanticQueryManager:
                         provider_name="cohere",
                         # Story #1108 (S4): per-request cache bypass
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        activation_id=activation_id,
                     ),
                 ),
             ]
@@ -1786,6 +1906,8 @@ class SemanticQueryManager:
                     temporal_embedder=temporal_embedder,
                     # Bug #1298: relay the embedder-specific warning out-param
                     _temporal_warning_out=_temporal_warning_out,
+                    # Story #1457 AC1/AC2: forward the golden repo alias.
+                    golden_repo_alias=golden_repo_alias,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -1850,6 +1972,7 @@ class SemanticQueryManager:
                 repo_path=repo_path,
                 search_request=search_request,
                 precomputed_query_vector=precomputed_query_vector,
+                activation_id=activation_id,
             )
 
             # Convert search results to QueryResult objects
@@ -1916,6 +2039,9 @@ class SemanticQueryManager:
         provider_name: Optional[str] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1458 AC11: per-clone generation/identity token, forwarded
+        # into search_repository_path_with_provider's cache-key construction.
+        activation_id: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using an explicitly named embedding provider.
@@ -1961,6 +2087,7 @@ class SemanticQueryManager:
             repo_path=repo_path,
             search_request=search_request,
             provider_name=provider_name,
+            activation_id=activation_id,
         )
 
         results = []
@@ -2320,6 +2447,12 @@ class SemanticQueryManager:
         # specific message survives instead of being re-derived generically
         # by the caller. Per-request, no shared state.
         _temporal_warning_out: Optional[List[str]] = None,
+        # Story #1457 AC1/AC2 live wiring: the underlying GOLDEN repo's own
+        # alias (for is_global queries, repository_alias itself; for a
+        # regular activated repo, its golden_repo_alias -- NEVER the
+        # activated repo's own user-facing alias). None (every current
+        # production caller) constructs no resolver -- byte-identical.
+        golden_repo_alias: Optional[str] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2383,6 +2516,57 @@ class SemanticQueryManager:
                         val = diff_type.strip()
                         diff_types_list = [val] if val else None
 
+            # Story #1457 AC1/AC2 live wiring: construct a REAL
+            # TemporalShardResolver when a golden_repo_alias is known AND a
+            # real query_tracker is available. Gated on BOTH: without a
+            # query_tracker, pin() is a true no-op (per its own documented
+            # CLI/solo semantics) -- constructing a resolver anyway would
+            # silently reintroduce the mid-read deletion hazard AC8 Step 6
+            # exists to prevent, so we do NOT construct one in that case.
+            resolver = None
+            _query_tracker = getattr(self, "query_tracker", None)
+            if golden_repo_alias and _query_tracker is not None:
+                from ...global_repos.alias_manager import AliasManager
+                from ...services.temporal.temporal_shard_resolver import (
+                    TemporalShardResolver,
+                )
+
+                golden_repos_dir = (
+                    Path(self.activated_repo_manager.activated_repos_dir).parent
+                    / "golden-repos"
+                )
+                # 2026-07-23 code review HIGH #7 (global alias namespace
+                # mismatch): an is_global query passes its full
+                # '-global'-suffixed user_alias as golden_repo_alias, but
+                # maybe_relocate_shard_to_sister_location ALWAYS publishes
+                # under the bare codebase_dir.name (golden repo
+                # directories are never named with '-global' -- that
+                # suffix is purely a query-facing alias-registry
+                # convention). Strip exactly one trailing '-global' so
+                # the resolver's namespace matches what was published.
+                normalized_repo_alias = golden_repo_alias.removesuffix("-global")
+                resolver = TemporalShardResolver(
+                    alias_manager=AliasManager(str(golden_repos_dir / "aliases")),
+                    repo_alias=normalized_repo_alias,
+                    sister_root=golden_repos_dir,
+                    legacy_index_path=index_path,
+                    query_tracker=_query_tracker,
+                )
+
+                # 2026-07-23 code review CRITICAL #1 (the "disconnected
+                # reader"): the resolver was previously threaded ONLY into
+                # execute_temporal_query_with_fusion's discovery/pin
+                # bookkeeping -- the vector_store instance that actually
+                # PERFORMS the search (constructed above by
+                # reconstruct_temporal_backend) never received it, so
+                # _get_collection_path() silently fell back to the legacy
+                # base_path / collection_name path even after AC1
+                # relocated the data. Attach the resolver to the SAME
+                # store instance used for search, preserving its existing
+                # hnsw_index_cache/memory_governor wiring (no new store
+                # construction, no lost caching).
+                vector_store._temporal_shard_resolver = resolver
+
             # Execute temporal query via fusion dispatch (Story #640)
             temporal_results = execute_temporal_query_with_fusion(
                 config=config,
@@ -2403,6 +2587,9 @@ class SemanticQueryManager:
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 # Story #1291 AC7/AC8: forward explicit embedder override
                 temporal_embedder=temporal_embedder,
+                # Story #1457 AC1/AC2: forward the resolver (None unless
+                # golden_repo_alias + a real query_tracker were both given).
+                resolver=resolver,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully

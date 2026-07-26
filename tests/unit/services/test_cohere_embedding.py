@@ -751,6 +751,12 @@ def _setup_filesystem_store(tmp_path):
     store.id_index_cache = None
     store._id_index = {}
     store._id_index_lock = threading.Lock()
+    # Story #1457 AC8: _get_collection_path() reads this attribute
+    # unconditionally; __new__() bypasses __init__'s assignment, so it must
+    # be set explicitly here. None matches this test's pre-existing
+    # behavior (no temporal resolver injected -- direct base_path
+    # construction, byte-identical to before AC8).
+    store._temporal_shard_resolver = None
 
     # Create collection directory with metadata so collection_exists() returns True
     col_path = tmp_path / "test_collection"

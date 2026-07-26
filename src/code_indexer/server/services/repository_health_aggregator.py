@@ -37,6 +37,8 @@ from code_indexer.services.hnsw_health_service import (
     HNSWHealthService,
     check_health_batch,
 )
+from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 
 # Bug #1394: shared health-check cache TTL, matching the 5-minute value both
 # routers' previous separate HNSWHealthService instances already used.
@@ -139,19 +141,38 @@ def _classify_index_type(collection_name: str) -> str:
 
 
 def collection_has_vector_shards(collection_dir: Path) -> bool:
-    """Return True if the collection holds at least one vector shard.
+    """Return True if the collection holds at least one real chunk record.
 
-    Vector shards (``vector_*.json``) are written incrementally during
-    indexing and live in nested subdirectories, so rglob is required. Their
-    presence means indexing populated the collection -- as opposed to a
-    genuinely empty / never-indexed collection directory, which has none.
+    Issue #1459 AC1/AC5: routes exclusively through the canonical
+    ``resolve_chunk_layout`` resolver -- never an independent flag/file
+    check. For a CHUNKS_DB-layout collection, real chunk data lives in
+    ``chunks.db`` (a bare ``vector_*.json`` rglob would always report False
+    even for a populated collection), so presence is checked via
+    ``chunk_store_has_real_data`` (Issue #1459 remediation Findings 2/3/4
+    -- a read-only, side-effect-free row-count query that never creates a
+    missing chunks.db and degrades gracefully on a corrupt one, the ONE
+    shared primitive this reporting surface routes through instead of
+    reimplementing "open ChunkStore -> count -> close"). For a legacy
+    SHARDED_JSON collection, presence is checked the pre-existing way:
+    vector shards (``vector_*.json``) are written incrementally during
+    indexing and live in nested subdirectories, so rglob is required.
+    Their presence means indexing populated the collection -- as opposed
+    to a genuinely empty / never-indexed collection directory, which has
+    none.
 
     Args:
         collection_dir: Path to a single collection directory.
 
     Returns:
-        True if any vector_*.json shard exists anywhere under collection_dir.
+        True if the collection holds at least one real chunk record,
+        regardless of on-disk layout.
     """
+    if resolve_chunk_layout(collection_dir) == ChunkLayout.CHUNKS_DB:
+        # bool(...) wrap: this project's known mypy quirk where this
+        # cross-module call resolves under a src.-prefixed module identity
+        # when checked from the repo root, otherwise inferring Any (see
+        # collection_migration.py's analogous documented workaround).
+        return bool(chunk_store_has_real_data(collection_dir / "chunks.db"))
     return next(collection_dir.rglob("vector_*.json"), None) is not None
 
 

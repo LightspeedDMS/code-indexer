@@ -43,7 +43,7 @@ class TestBackendDeletionBehindRefcountGate:
         cow_path = "/mnt/cow-storage/.versioned/repo/v_1700000000"
         sm = _make_snapshot_manager(is_snapshot_for={cow_path})
 
-        cm = CleanupManager(query_tracker=qt)
+        cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
         cm.schedule_cleanup(cow_path)
 
@@ -63,7 +63,7 @@ class TestBackendDeletionBehindRefcountGate:
         cow_path = "/mnt/cow-storage/.versioned/repo/v_1700000000"
         sm = _make_snapshot_manager(is_snapshot_for={cow_path})
 
-        cm = CleanupManager(query_tracker=qt)
+        cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
         cm.schedule_cleanup(cow_path)
 
@@ -108,7 +108,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         sm = _make_snapshot_manager(is_snapshot_for=set())  # nothing is a snapshot
 
-        cm = CleanupManager(query_tracker=qt)
+        cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
         cm.schedule_cleanup(local_path)
 
@@ -125,7 +125,9 @@ class TestBackendDeletionBehindRefcountGate:
         local_dir.mkdir()
         local_path = str(local_dir)
 
-        cm = CleanupManager(query_tracker=qt)  # no set_snapshot_manager
+        cm = CleanupManager(
+            query_tracker=qt, min_retention_age_seconds=0.0
+        )  # no set_snapshot_manager
         cm.schedule_cleanup(local_path)
 
         cm._process_cleanup_queue()
@@ -142,7 +144,7 @@ class TestBackendDeletionFailureBackoff:
         sm = _make_snapshot_manager(is_snapshot_for={cow_path})
         sm.delete_snapshot.side_effect = RuntimeError("daemon unreachable")
 
-        cm = CleanupManager(query_tracker=qt)
+        cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
         cm.schedule_cleanup(cow_path)
 

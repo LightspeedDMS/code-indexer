@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import logging
 import time
+import uuid
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
@@ -234,6 +236,12 @@ class ActivatedRepoManager:
         # Bug #1203: injected index manager for branch-delta reindex on
         # non-default branch activations/switches/syncs. None = skip reindex.
         self._index_manager = index_manager
+        # Story #1458 AC13: server's QueryTracker, wired post-hoc via
+        # set_query_tracker() (mirrors set_connection_pool). None (CLI/
+        # solo, or not-yet-wired server startup) makes the deactivation
+        # drain a no-op -- the SAME fail-open contract
+        # wait_for_activated_repo_query_drain already has for a None tracker.
+        self._query_tracker: Any = None
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -242,6 +250,16 @@ class ActivatedRepoManager:
         instead of JSON files, enabling cross-node visibility.
         """
         self._pool = pool
+
+    def set_query_tracker(self, query_tracker: Any) -> None:
+        """Wire the server's QueryTracker (Story #1458 AC13).
+
+        Used by the deactivation drain (_do_deactivate_single /
+        _do_deactivate_composite) to wait for an in-flight, same-worker-
+        process activated-repo query to release its refcount before the
+        trashed clone's consolidated chunks.db is physically purged.
+        """
+        self._query_tracker = query_tracker
         self.logger.info(
             "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
         )
@@ -320,6 +338,11 @@ class ActivatedRepoManager:
                 "ssh_key_used",
                 "is_composite",
                 "wiki_enabled",
+                # Story #1458 AC11: activation_id has its own dedicated
+                # column (backward-compatible ADD COLUMN migration) --
+                # excluded here so it is never double-stuffed into the
+                # generic metadata_json catch-all blob.
+                "activation_id",
             )
         }
         with self._pool.connection() as conn:
@@ -327,8 +350,8 @@ class ActivatedRepoManager:
                 "INSERT INTO activated_repos "
                 "(username, user_alias, golden_repo_alias, repo_path, current_branch, "
                 "activated_at, last_accessed, git_committer_email, ssh_key_used, "
-                "is_composite, wiki_enabled, metadata_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "is_composite, wiki_enabled, activation_id, metadata_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (username, user_alias) DO UPDATE SET "
                 "golden_repo_alias = EXCLUDED.golden_repo_alias, "
                 "repo_path = EXCLUDED.repo_path, "
@@ -338,6 +361,7 @@ class ActivatedRepoManager:
                 "ssh_key_used = EXCLUDED.ssh_key_used, "
                 "is_composite = EXCLUDED.is_composite, "
                 "wiki_enabled = EXCLUDED.wiki_enabled, "
+                "activation_id = EXCLUDED.activation_id, "
                 "metadata_json = EXCLUDED.metadata_json",
                 (
                     username,
@@ -351,6 +375,7 @@ class ActivatedRepoManager:
                     metadata.get("ssh_key_used") or None,
                     metadata.get("is_composite", False),
                     metadata.get("wiki_enabled", False),
+                    metadata.get("activation_id"),
                     json.dumps(extra) if extra else None,
                 ),
             )
@@ -415,6 +440,9 @@ class ActivatedRepoManager:
             "ssh_key_used": row.get("ssh_key_used"),
             "is_composite": bool(row.get("is_composite", False)),
             "wiki_enabled": bool(row.get("wiki_enabled", False)),
+            # Story #1458 AC11: dedicated column, NULL for any row inserted
+            # before this migration -- degrades gracefully to None.
+            "activation_id": row.get("activation_id"),
         }
         metadata_json = row.get("metadata_json")
         if metadata_json:
@@ -425,6 +453,22 @@ class ActivatedRepoManager:
             )
             result.update(extra)
         return result
+
+    def get_activation_id(self, username: str, user_alias: str) -> Optional[str]:
+        """Return the persisted per-activation UUID token for this
+        activated repo, or None (Story #1458 AC11).
+
+        None covers three cases uniformly: the repo is not activated at
+        all, its metadata predates this story's field (JSON file with no
+        "activation_id" key, or a PG row with a NULL column), or the field
+        is present but empty -- callers must always treat None as "no
+        clone-generation token available" and fall back to the pure
+        path-derived cache key (see FilesystemVectorStore.activation_id).
+        """
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            return None
+        return metadata.get("activation_id")
 
     def _delete_metadata(self, username: str, user_alias: str) -> None:
         """Delete activated repo metadata (PG or JSON file)."""
@@ -900,6 +944,11 @@ class ActivatedRepoManager:
             # Step 6: Create metadata file with discovered repos
             update_progress(95, "Creating composite repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): a dedicated, guaranteed-unique
+            # per-activation UUID -- activated_at alone is second-resolution
+            # and collision-prone within one clock tick, insufficient as a
+            # per-clone generation/identity token on its own.
+            activation_id = str(uuid.uuid4())
 
             # Get discovered repos from proxy config
             discovered_repos = proxy_config.get_repositories()
@@ -913,6 +962,7 @@ class ActivatedRepoManager:
                 "discovered_repos": discovered_repos,
                 "activated_at": activated_at,
                 "last_accessed": activated_at,
+                "activation_id": activation_id,
             }
 
             try:
@@ -2176,6 +2226,10 @@ class ActivatedRepoManager:
             # Create metadata file
             update_progress(90, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): see the composite-activation
+            # site above for the full rationale -- same dedicated,
+            # guaranteed-unique per-activation UUID token.
+            activation_id = str(uuid.uuid4())
             metadata = {
                 "username": username,
                 "user_alias": user_alias,
@@ -2185,6 +2239,7 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
                 "git_committer_email": git_committer_email,
                 "ssh_key_used": ssh_key_used,
+                "activation_id": activation_id,
             }
 
             self._save_metadata(username, user_alias, metadata)
@@ -2410,7 +2465,34 @@ class ActivatedRepoManager:
             if os.path.exists(repo_dir):
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier -- mark this path quiescing BEFORE the drain
+                # wait even starts, so a NEW query arriving after this
+                # point is refused by track_activated_repo_query()
+                # rather than racing the drain-then-rename sequence
+                # (drain observes zero -> a late query starts anyway ->
+                # rename proceeds -> the query reads a path that's
+                # already gone). Cleared in the finally below on every
+                # exit path so a later reactivation at this same path is
+                # never permanently and incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(repo_dir)
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 5): the
+                    # bounded drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it. The prior
+                    # ordering (rename first, drain second) let the rename
+                    # yank repo_dir out from under an in-flight reader
+                    # before the drain even started checking for
+                    # stragglers -- exactly the race this drain exists to
+                    # prevent. Keyed by the ORIGINAL, pre-rename repo_dir
+                    # -- the SAME path-key format _search_activated_repo's
+                    # QueryTracker wiring uses. Fail-open when
+                    # self._query_tracker is None (never blocks
+                    # deactivation).
+                    wait_for_activated_repo_query_drain(self._query_tracker, repo_dir)
+
                     # Phase 1: fd-anchored atomic rename into .trash.
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
@@ -2441,6 +2523,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: slow recursive delete via fd-anchored helper.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2490,6 +2573,14 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure) -- a
+                    # later reactivation at this same path must never be
+                    # permanently and incorrectly refused because a prior
+                    # deactivation attempt left it marked.
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(repo_dir)
 
             # Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use the explicit
@@ -2637,7 +2728,30 @@ class ActivatedRepoManager:
             if repo_path.exists():
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier, mirroring _do_deactivate_single exactly --
+                # mark this path quiescing BEFORE the drain wait even
+                # starts. Cleared in the finally below on every exit
+                # path so a later reactivation is never permanently and
+                # incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(str(repo_path))
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 6,
+                    # matches Claude's independent finding): the bounded
+                    # drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it --
+                    # matching _do_deactivate_single's already-fixed
+                    # ordering exactly (a PRIOR version of this comment
+                    # falsely claimed this call site already mirrored
+                    # that ordering; it only mirrored the drain
+                    # mechanics, not the sequencing). Keyed by the
+                    # ORIGINAL, pre-rename repo_path.
+                    wait_for_activated_repo_query_drain(
+                        self._query_tracker, str(repo_path)
+                    )
+
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
                         username=username,
@@ -2673,6 +2787,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: fd-anchored recursive delete.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2723,6 +2838,11 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure).
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(str(repo_path))
 
             # Step 4: Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use explicit

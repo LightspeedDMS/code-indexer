@@ -15,6 +15,7 @@
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - When install-footprint purity conflicts with reliability (e.g. an "unneeded" extra dependency), default to installing it — recurrence-of-bug-class elimination beats minimal footprint
+- [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - Dispatched subagents (tdd-engineer etc.) must implement/act directly themselves — NEVER spawn nested Task/Agent calls for implementation, review, or E2E; main context is sole orchestrator
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
@@ -53,6 +54,7 @@
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted requests must NOT trigger UI rewrites or unrelated styling changes
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low
+- [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - Standing rule: dual review (Claude code-reviewer + independent Codex) for every review gate — Codex caught a critical bug Claude's review missed on Story #1457
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real Codex run via ~/.codex/sessions before claiming "codex reviewed it"
 - [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - fast-automation/server-fast flake under concurrent load (SQLite DB-open errors, timeouts); run them ALONE, re-run failures in isolation before concluding regression; omni '*' is MCP-only not REST
@@ -71,6 +73,8 @@
 - [project_cluster_temporal_metadata_pg_backed.md](project_cluster_temporal_metadata_pg_backed.md) - Cluster temporal metadata is PostgreSQL-backed (v11.23.0, #1313); process-local backend registry does NOT cross the child cidx-index subprocess boundary, so all 5 temporal launch sites pass CIDX_TEMPORAL_PG_BOOTSTRAP_DIR; validate against PG not SQLite; decisive tell = no temporal_metadata.db reappears on NFS
 - [project_staging_workers_config_durability.md](project_staging_workers_config_durability.md) - Durable uvicorn worker-count is the DB runtime.workers setting (NOT config.json, which strips it); set via web-UI form POST /admin/config/server over HTTPS (Secure session cookie + CSRF + TOTP elevation) — no JSON /api/admin/config; 3 layers DB->launch.json->applied_launch.json
 - [project_local_server_solo_sqlite.md](project_local_server_solo_sqlite.md) - Local dev cidx-server (:8000) is solo/SQLite (storage_mode=sqlite, no postgres_dsn) — local E2E validates ONLY solo/SQLite branches; PG/cluster paths (#1313 temporal, cluster-aware state, PG advisory locks) need staging; local temporal subprocess runs the env=None branch
+
+- [project_backup_scope_dev_staging_only.md](project_backup_scope_dev_staging_only.md) - Epic #1454 backup-before-migration is a manual dev/staging-only precaution, NOT baked into migration code — production has no room for old-style backups
 
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA auth: `.local-testing` stores TOTP as a shell `$(...)` command (NOT a static seed) — eval it for a live code, then two-step /auth/login -> /auth/mfa/verify; do these staging tests ALWAYS, never ask the user

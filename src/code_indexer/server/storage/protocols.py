@@ -492,6 +492,33 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]: ...
 
+    # Issue #1477: fleet-migration per-repo failure quarantine state (see
+    # server/services/fleet_migration/quarantine.py).
+    def record_fleet_migration_failure(
+        self,
+        golden_alias: str,
+        state_signature: str,
+        failure_cause: Optional[str] = None,
+    ) -> int: ...
+
+    def reset_fleet_migration_failure(self, golden_alias: str) -> None: ...
+
+    # Issue #1477 Finding N: fallback used when the full reset (DELETE)
+    # above fails but a plain UPDATE still works -- zeroes
+    # consecutive_failure_count while keeping the row, so a just-repaired
+    # repo gets a genuinely fresh failure budget instead of resuming from
+    # a stale, elevated count (see quarantine.py's
+    # _clear_quarantine_after_detected_repair()).
+    def soft_reset_fleet_migration_failure_count(self, golden_alias: str) -> None: ...
+
+    def touch_fleet_migration_failure_check(self, golden_alias: str) -> None: ...
+
+    def get_fleet_migration_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 

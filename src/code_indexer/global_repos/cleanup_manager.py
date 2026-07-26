@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 from .query_tracker import QueryTracker
 
@@ -40,11 +40,21 @@ class CleanupManager:
     BASE_BACKOFF_DELAY = 1.0  # seconds
     FD_USAGE_THRESHOLD = 0.80  # 80%
 
+    #: Story #1457 AC13: default minimum retention age (seconds) a
+    #: superseded versioned snapshot must remain undeleted after being
+    #: scheduled for cleanup, even once its refcount reaches zero. Closes
+    #: the cross-process residual the in-process resolution-scope pin
+    #: cannot close (QueryTracker is process-local). Mirrors the existing
+    #: PayloadCache default TTL (also 900s).
+    MIN_RETENTION_AGE_SECONDS = 900.0
+
     def __init__(
         self,
         query_tracker: QueryTracker,
         check_interval: float = 1.0,
         job_tracker=None,
+        min_retention_age_seconds: float = MIN_RETENTION_AGE_SECONDS,
+        min_retention_age_getter: Optional[Callable[[], float]] = None,
     ):
         """
         Initialize the cleanup manager.
@@ -53,11 +63,34 @@ class CleanupManager:
             query_tracker: QueryTracker instance for ref count monitoring
             check_interval: How often to check for cleanups (seconds)
             job_tracker: Optional JobTracker for dashboard visibility (Story #314)
+            min_retention_age_seconds: Story #1457 AC13 -- minimum seconds a
+                scheduled path must remain undeleted since being enqueued,
+                independent of and in addition to the refcount-zero gate.
+                Defaults to MIN_RETENTION_AGE_SECONDS (900s / 15 min). Used
+                as-is when min_retention_age_getter is not provided.
+            min_retention_age_getter: Story #1457 AC13 PT-13 follow-up --
+                optional callable consulted LIVE on every retention check
+                (never cached), taking priority over
+                min_retention_age_seconds when provided. Lets the caller wire
+                a runtime-configurable source (e.g. Web UI Config Screen)
+                without cleanup_manager.py importing the server-only
+                ConfigService directly -- keeps this shared/CLI-reachable
+                module free of a server dependency and avoids a background
+                thread accidentally constructing a real ConfigService() in a
+                unit-test context with no server fixtures. None (default)
+                preserves today's byte-identical static-value behavior.
         """
         self._query_tracker = query_tracker
         self._check_interval = check_interval
         self._cleanup_queue: Set[str] = set()
         self._queue_lock = threading.Lock()
+        self._min_retention_age_seconds = min_retention_age_seconds
+        self._min_retention_age_getter = min_retention_age_getter
+        # Story #1457 AC13: enqueue-time (time.monotonic()) per scheduled
+        # path, set on first enqueue only (schedule_cleanup may be called
+        # more than once for the same path; the ORIGINAL supersession
+        # moment is what "scheduled_at" must mean).
+        self._scheduled_at: Dict[str, float] = {}
         self._running = False
         self._thread: Optional[threading.Thread] = None
         # Per-path failure tracking for backoff and circuit breaker
@@ -83,9 +116,15 @@ class CleanupManager:
         self._snapshot_manager = snapshot_manager
 
     def schedule_cleanup(self, index_path: str) -> None:
-        """Schedule index_path for deletion once its ref count reaches zero."""
+        """Schedule index_path for deletion once its ref count reaches zero
+        AND the minimum retention age has elapsed (Story #1457 AC13)."""
         with self._queue_lock:
             self._cleanup_queue.add(index_path)
+            # setdefault: schedule_cleanup fires AT the swap that supersedes
+            # a version, so "scheduled_at" genuinely is the supersession
+            # moment -- a re-schedule of an already-queued path must NOT
+            # reset its age.
+            self._scheduled_at.setdefault(index_path, time.monotonic())
             logger.info(f"Scheduled cleanup for: {index_path}")
 
     def get_pending_cleanups(self) -> Set[str]:
@@ -316,6 +355,10 @@ class CleanupManager:
             if failure_count >= self.MAX_FAILURES:
                 with self._queue_lock:
                     self._cleanup_queue.discard(path)
+                    # Story #1457 AC13: drop the age-tracking entry too, so
+                    # a circuit-breaker-abandoned path does not leak in
+                    # _scheduled_at forever.
+                    self._scheduled_at.pop(path, None)
                 logger.critical(
                     f"Circuit breaker tripped for {path}: "
                     f"{failure_count} consecutive failures. "
@@ -330,6 +373,32 @@ class CleanupManager:
             ref_count = self._query_tracker.get_ref_count(path)
             if ref_count != 0:
                 logger.debug(f"Skipping cleanup for {path}: {ref_count} active queries")
+                continue
+
+            # Story #1457 AC13: minimum-retention-age floor, ADDED IN
+            # ADDITION TO the refcount-zero gate above. Closes the
+            # cross-process residual a process-local QueryTracker cannot
+            # see (another worker/node's in-flight reader). Re-evaluated
+            # on the next poll -- the path stays queued, never dropped.
+            with self._queue_lock:
+                scheduled_at = self._scheduled_at.get(path, 0.0)
+            age = time.monotonic() - scheduled_at
+            # Story #1457 AC13 PT-13 follow-up: consult the live getter (if
+            # provided) on EVERY check rather than caching it -- lets a
+            # runtime config change (e.g. Web UI Config Screen) take effect
+            # without a server restart, mirroring how refresh_scheduler.py
+            # reads snapshot_retention_keep_last live at the point of use.
+            effective_min_retention_age_seconds = (
+                self._min_retention_age_getter()
+                if self._min_retention_age_getter is not None
+                else self._min_retention_age_seconds
+            )
+            if age < effective_min_retention_age_seconds:
+                logger.debug(
+                    f"Skipping cleanup for {path}: minimum retention age "
+                    f"not yet elapsed ({age:.1f}s < "
+                    f"{effective_min_retention_age_seconds:.1f}s)"
+                )
                 continue
 
             # Story #314: Register index_cleanup job for dashboard visibility
@@ -352,6 +421,9 @@ class CleanupManager:
                 self._delete_index(path)
                 with self._queue_lock:
                     self._cleanup_queue.discard(path)
+                    # Story #1457 AC13: clear the age-tracking entry now
+                    # that deletion actually happened.
+                    self._scheduled_at.pop(path, None)
                 self._reset_failure_count(path)
                 logger.info(f"Deleted old index: {path}")
 

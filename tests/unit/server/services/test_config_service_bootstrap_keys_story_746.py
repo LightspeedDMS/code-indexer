@@ -84,6 +84,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "coalesce_k_min",  # Story #1079 Phase E — runtime AIMD floor seed
             "coalesce_k_max",  # Story #1079 Phase E — runtime AIMD ceiling seed
             "snapshot_retention_keep_last",  # Bug #1084 Phase A6 — runtime keep-last-N knob
+            "snapshot_min_retention_age_seconds",  # Story #1457 AC13 — runtime CleanupManager retention-floor knob
             "nfs_visibility_timeout_seconds",  # Bug #1084 staging follow-up — runtime NFS visibility deadline
             "research_session_retention_days",  # Bug #1085 — runtime research GC retention
             "query_embedding_cache_config",  # Story #1105 — runtime Web UI cache config
@@ -99,6 +100,8 @@ def test_all_server_config_fields_are_classified() -> None:
             "search_timeouts_config",  # Story #1398 — runtime Web UI setting (search/embedding/rerank timeouts)
             "embedding_stats_config",  # Story #1418 Phase 3 — runtime Web UI setting (embedding/reranker call tracking)
             "temporal_indexing_config",  # Story #1404 — runtime Web UI setting (global temporal indexing floor date)
+            "deactivation_query_drain_max_wait_seconds",  # Story #1458 AC13 — runtime Web UI setting (deactivation QueryTracker drain bound)
+            "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
         }
     )
 

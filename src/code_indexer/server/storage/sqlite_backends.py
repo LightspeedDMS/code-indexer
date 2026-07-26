@@ -1831,6 +1831,26 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Issue #1477: per-golden-alias fleet-migration failure
+            # quarantine tracking (see record_fleet_migration_failure()
+            # below). Unlike the singleton-row breaker-state table above,
+            # this is keyed per golden_alias since many repos are tracked
+            # independently.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fleet_migration_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    state_signature TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT,
+                    signature_checked_at TEXT,
+                    failure_cause TEXT
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
 
     def add_repo(
@@ -2388,6 +2408,206 @@ class GoldenRepoMetadataSqliteBackend:
         removed_aliases_csv, occurred_at = row
         removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
         return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
+
+    def record_fleet_migration_failure(
+        self,
+        golden_alias: str,
+        state_signature: str,
+        failure_cause: Optional[str] = None,
+    ) -> int:
+        """
+        Record one fleet-migration consolidation failure for a golden repo
+        (Issue #1477).
+
+        The stored ``state_signature`` is ALWAYS overwritten to the value
+        supplied for THIS failure (a cheap, non-recursive fingerprint of
+        the repo's on-disk collection/temporal state at the moment of this
+        failure) -- this is what lets a later scheduling attempt detect a
+        GENUINE on-disk state change since the last failure, mirroring
+        description_refresh_scheduler.py's commit-based quarantine
+        auto-clear gate (Bug #1096).
+
+        ``failure_cause`` (Finding I, Codex round-5 review) is ALSO always
+        overwritten to the value supplied for THIS failure -- e.g.
+        "disk_headroom" vs "generic" -- so ``is_quarantined()`` can
+        distinguish a disk-headroom-caused quarantine (clears via a
+        disk-space oracle, independent of directory content) from a
+        corrupt-data-caused one (clears via the signature).
+
+        Returns:
+            The consecutive-failure count after recording this one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count "
+                "FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                # Issue #1477 Finding C (Codex round-3 review): every
+                # column bound via an explicit placeholder (no inline
+                # literal mixed with "?" markers) -- 8 columns, 8 "?", 8
+                # tuple elements, unambiguous to verify by eye.
+                conn.execute(
+                    "INSERT INTO fleet_migration_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, state_signature, "
+                    "first_failed_at, last_failed_at, updated_at, "
+                    "signature_checked_at, failure_cause) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        golden_alias,
+                        1,
+                        state_signature,
+                        now,
+                        now,
+                        now,
+                        now,
+                        failure_cause,
+                    ),
+                )
+                return 1
+
+            new_count = row[0] + 1
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET consecutive_failure_count = ?, state_signature = ?, "
+                "last_failed_at = ?, updated_at = ?, signature_checked_at = ?, "
+                "failure_cause = ? "
+                "WHERE golden_alias = ?",
+                (
+                    new_count,
+                    state_signature,
+                    now,
+                    now,
+                    now,
+                    failure_cause,
+                    golden_alias,
+                ),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_fleet_migration_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted fleet-migration failure/quarantine state for a
+        golden repo (Issue #1477) -- called on a successful migration pass,
+        or when a quarantine is auto-cleared after detecting a genuine
+        on-disk state change since the last recorded failure.
+        """
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def soft_reset_fleet_migration_failure_count(self, golden_alias: str) -> None:
+        """
+        Issue #1477 Finding N: fallback used by
+        `_clear_quarantine_after_detected_repair()` when the full reset
+        (DELETE) above fails but a plain UPDATE still works. Zeroes
+        `consecutive_failure_count` while KEEPING the row (unlike
+        `reset_fleet_migration_failure`, which deletes it) -- this is
+        what gives a just-repaired repo a genuinely fresh failure budget
+        instead of resuming from a stale, elevated count that
+        `record_fleet_migration_failure` would otherwise merely
+        increment further.
+
+        A no-op (never raises) when no row exists for `golden_alias` --
+        there is nothing to reset, not an error condition (mirrors
+        `touch_fleet_migration_failure_check`'s own no-op-on-missing-row
+        contract).
+        """
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET consecutive_failure_count = ? WHERE golden_alias = ?",
+                (0, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def touch_fleet_migration_failure_check(self, golden_alias: str) -> None:
+        """
+        Update ONLY the `signature_checked_at` throttle-bookkeeping
+        timestamp for `golden_alias` (Issue #1477 Finding C, Codex round-3
+        review) -- used when `is_quarantined()` re-verifies an unchanged
+        on-disk signature, so the NEXT recheck window starts fresh WITHOUT
+        touching `consecutive_failure_count` or `state_signature` (those
+        change ONLY via a genuine new failure or an actual detected
+        on-disk change -- never via this bookkeeping-only touch).
+
+        A no-op (never raises) when no row exists for `golden_alias` --
+        there is nothing to touch, not an error condition.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET signature_checked_at = ? WHERE golden_alias = ?",
+                (now, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_fleet_migration_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted fleet-migration failure state for a
+        golden repo, or None if it has never failed (or was reset since).
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, state_signature, "
+            "first_failed_at, last_failed_at, signature_checked_at, failure_cause "
+            "FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "state_signature": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+            "signature_checked_at": row[5],
+            "failure_cause": row[6],
+        }
+
+    def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]:
+        """
+        Return every persisted fleet-migration failure-tracking row (Issue
+        #1477) -- used by FleetMigrationScheduler.get_stats() to compute a
+        dashboard-visible quarantined-repo count without one query per
+        golden alias.
+        """
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, state_signature, "
+            "first_failed_at, last_failed_at, signature_checked_at, failure_cause "
+            "FROM fleet_migration_quarantine_state"
+        ).fetchall()
+        return [
+            {
+                "golden_alias": row[0],
+                "consecutive_failure_count": row[1],
+                "state_signature": row[2],
+                "first_failed_at": row[3],
+                "last_failed_at": row[4],
+                "signature_checked_at": row[5],
+                "failure_cause": row[6],
+            }
+            for row in rows
+        ]
 
     def close(self) -> None:
         """Close database connections."""

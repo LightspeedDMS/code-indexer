@@ -32,6 +32,7 @@ class FilesystemBackend(VectorStoreBackend):
         project_root: Path,
         hnsw_index_cache: Any = None,
         memory_governor: Any = None,
+        activation_id: Any = None,
     ):
         """Initialize FilesystemBackend.
 
@@ -41,6 +42,10 @@ class FilesystemBackend(VectorStoreBackend):
                              Server mode passes this explicitly. None for CLI mode.
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
                              Server mode passes get_memory_governor(); CLI leaves it None.
+            activation_id: Story #1458 AC11 -- optional per-clone generation/
+                identity token for an ACTIVATED repo, threaded into the
+                FilesystemVectorStore this backend constructs. None
+                (default) preserves today's pure path-derived cache key.
         """
         super().__init__(project_root)
         self.vectors_dir = self.project_root / ".code-indexer" / "index"
@@ -49,6 +54,9 @@ class FilesystemBackend(VectorStoreBackend):
         self.hnsw_index_cache = hnsw_index_cache
         # Story #1213 Story 3: Server passes governor; CLI leaves it None
         self.memory_governor = memory_governor
+        # Story #1458 AC11: server passes this for an activated-repo query;
+        # None everywhere else (CLI, golden-repo/-global queries).
+        self.activation_id = activation_id
         # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
         # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
         # constructed once per server query, so this fired on every hot-path call.
@@ -167,6 +175,7 @@ class FilesystemBackend(VectorStoreBackend):
             id_index_cache=id_index_cache,
             skip_staleness_check=skip_staleness,
             memory_governor=self.memory_governor,
+            activation_id=self.activation_id,
         )
 
     def health_check(self) -> bool:

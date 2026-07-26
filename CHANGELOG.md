@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.80.0] - 2026-07-26
+
+### Added
+
+- **Epic #1454 (Chunk Storage Consolidation)**: consolidates legacy per-chunk `vector_*.json` sharded storage into a single SQLite `chunks.db` per collection (dramatically reducing activation-time file-copy cost from file-count-proportional to collection-count-proportional), relocates temporal quarter data to a golden-owned sister location (out of the mutable repo tree), and introduces a fleet-wide migration mechanism to consolidate already-indexed golden repos. Migration is gated behind a default-OFF, Web-UI-configurable `fleet_migration_config.enabled` operator flag -- ships inert until explicitly enabled, after confirming the reader-capable release has baked fleet-wide (Story #1460).
+- **#1477**: hardened the fleet migration scheduler with a per-repo consecutive-failure quarantine circuit breaker (mirroring the existing description-refresh quarantine pattern), closing a starvation bug where a single permanently-failing repo (corrupt legacy data, persistent backend read/write outages) could block every alphabetically-later repo in the fleet forever. Includes a bounded-recursion on-disk state signature for genuine-repair auto-clear, an unconditional cheap backend health probe before any destructive migration attempt (cluster-safe by construction, no per-node memory), and an atomic PostgreSQL upsert for the failure counter (closing a lost-update race under concurrent cluster writers).
+
 ## [11.79.0] - 2026-07-22
 
 ### Fixed

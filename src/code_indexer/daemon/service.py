@@ -1488,8 +1488,23 @@ class CIDXDaemonService(Service):
             id_manager = IDIndexManager()
             id_index = id_manager.load_index(collection_path)
 
+            # Story #1456: CHUNKS_DB collections never have id_index.bin
+            # (retired for this layout) -- an empty id_index here is
+            # EXPECTED, not a failure, and must not block installing an
+            # otherwise-working hnsw_index. Full daemon-mode CHUNKS_DB
+            # query-serving (whatever downstream consumes entry.id_index)
+            # is a separate concern, out of scope for this gate fix.
+            from code_indexer.storage.shared.chunk_layout import (
+                ChunkLayout,
+                resolve_chunk_layout,
+            )
+
+            is_chunks_db = (
+                resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+            )
+
             # Set semantic indexes
-            if hnsw_index and id_index:
+            if hnsw_index and (id_index or is_chunks_db):
                 entry.set_semantic_indexes(hnsw_index, id_index)
                 # Store collection metadata for search execution
                 entry.collection_name = collection_name

@@ -28,6 +28,7 @@ from ...global_repos.query_tracker import QueryTracker
 from ...global_repos.cleanup_manager import CleanupManager
 from ...global_repos.refresh_scheduler import RefreshScheduler
 from ...global_repos.shared_operations import GlobalRepoOperations
+from ..services.config_service import get_config_service
 
 
 logger = logging.getLogger(__name__)
@@ -79,10 +80,20 @@ class GlobalReposLifecycleManager:
         self.query_tracker = QueryTracker()
 
         # Create CleanupManager with QueryTracker dependency
+        # Story #1457 AC13 PT-13 follow-up: min_retention_age_getter is
+        # consulted LIVE on every retention check (never cached), reading
+        # the Web UI Config Screen's snapshot_min_retention_age_seconds
+        # setting -- runtime-configurable with no server restart, mirroring
+        # how refresh_scheduler.py reads snapshot_retention_keep_last live.
         self.cleanup_manager = CleanupManager(
             query_tracker=self.query_tracker,
             check_interval=1.0,  # Check every second
             job_tracker=job_tracker,
+            min_retention_age_getter=(
+                lambda: get_config_service()
+                .get_config()
+                .snapshot_min_retention_age_seconds
+            ),
         )
 
         # Bug #1084 Phase A5: hand the snapshot manager to the CleanupManager so

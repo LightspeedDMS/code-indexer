@@ -13,6 +13,7 @@ Verifies the subprocess cmd and prompt built by invoke_verification_pass:
 """
 
 import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,8 +37,44 @@ _PROMPT_PREVIEW_CHARS = 300
 
 @pytest.fixture(autouse=True)
 def reset_semaphore():
+    """Isolate every test in this file from the process-wide verification
+    semaphore singleton (Bug #1470).
+
+    `_get_verification_semaphore` (dependency_map_analyzer.py) is a
+    process-wide singleton keyed by `_VERIFICATION_SEMAPHORE_STATE`: the
+    first caller in the pytest process wins and fixes the semaphore's
+    capacity; any later caller passing a DIFFERENT `max_concurrent` raises
+    ValueError. Clearing the dict here only protects against SEQUENTIAL
+    pollution from a previous test in this file. It does NOT protect
+    against a background daemon thread from an UNRELATED, concurrently
+    running test (e.g. test_invoke_claude_cli_semaphore.py /
+    test_verification_semaphore.py, whose threads may outlive their own
+    test's join() timeout under full-suite CPU load) racing to
+    re-initialize the singleton with a mismatched capacity between our
+    clear() and our own call.
+
+    Proven root cause of the #1470 flake (fast-automation.sh:
+    dependency_map_analyzer / verification_pass tests timing out at
+    "ClaudeInvoker: timed out after 60s" only under full-suite load): a
+    targeted repro spawning a background thread that repeatedly calls
+    `_get_verification_semaphore(7)` reproduced this file's exact failure
+    mode 100% of the time (3/3 runs) despite this reset fixture already
+    being in place — the ValueError from the mismatched cap is caught by
+    `invoke_verification_pass`'s broad exception handler, which returns
+    False without ever reaching the (mocked) subprocess.run call, leaving
+    `cmds`/`prompts` empty.
+
+    The robust fix is to stop depending on the shared singleton entirely:
+    patch the getter itself so every call in this file returns a fresh,
+    unshared `threading.Semaphore`, immune to any other test's process-wide
+    state or stray threads.
+    """
     _VERIFICATION_SEMAPHORE_STATE.clear()
-    yield
+    with patch(
+        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        side_effect=lambda max_concurrent: threading.Semaphore(max_concurrent),
+    ):
+        yield
     _VERIFICATION_SEMAPHORE_STATE.clear()
 
 

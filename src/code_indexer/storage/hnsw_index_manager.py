@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from code_indexer.storage.shared.chunk_layout import ChunkLayout
 from code_indexer.utils.file_locking import (
     nfs_safe_flock,
     nfs_safe_funlock,
@@ -650,6 +651,7 @@ class HNSWIndexManager:
         visible_files: Optional[Set[str]] = None,
         current_branch: Optional[str] = None,
         clear_stale: bool = True,
+        layout_override: Optional[ChunkLayout] = None,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -680,6 +682,17 @@ class HNSWIndexManager:
                          publishes vector_count=0 rather than a silent no-op,
                          and files-exist-but-all-invalid raises instead of a
                          silent no-op (never bless a stale index as fresh).
+            layout_override: Story #1456 AC1 -- when provided, bypasses
+                         resolve_chunk_layout() entirely and uses this value
+                         directly. Reserved for the fresh-CHUNKS_DB-build
+                         orchestrator, which knows FOR CERTAIN it just wrote
+                         chunks.db but has not yet committed the on-disk
+                         discriminator (that commit must be the mandatory
+                         FINAL step of a fresh build) -- the resolver alone
+                         would incorrectly see SHARDED_JSON in that window.
+                         None (default) preserves today's resolver-driven
+                         behavior exactly; this is NEVER a parallel decision
+                         mechanism for any other caller.
 
         Returns:
             Number of vectors indexed
@@ -715,9 +728,24 @@ class HNSWIndexManager:
                     e,
                 )
 
-        # Scan all vector JSON files
-        vector_files = list(collection_path.rglob("vector_*.json"))
-        total_files_on_disk = len(vector_files)
+        # Story #1456 AC2: dispatch CHUNKS_DB vs legacy sharded-JSON loading
+        # via the shared resolver -- NEVER an independent flag-check/probe.
+        # layout_override (AC1) is the sole, explicitly-documented exception:
+        # the fresh-build orchestrator asserting a fact it already knows.
+        if layout_override is not None:
+            layout = layout_override
+        else:
+            from code_indexer.storage.shared.chunk_layout import (
+                resolve_chunk_layout,
+            )
+
+            layout = resolve_chunk_layout(collection_path)
+        vector_files: List[Path] = []
+        if layout == ChunkLayout.CHUNKS_DB:
+            total_files_on_disk = self._count_chunks_db_records(collection_path)
+        else:
+            vector_files = list(collection_path.rglob("vector_*.json"))
+            total_files_on_disk = len(vector_files)
 
         if total_files_on_disk == 0:
             if visible_files is not None:
@@ -747,41 +775,17 @@ class HNSWIndexManager:
         if progress_callback:
             progress_callback(0, 0, Path(""), info="🔧 Rebuilding HNSW index...")
 
-        # Load all vectors and IDs, applying visibility filter if provided
-        vectors_list = []
-        ids_list = []
-
-        for vector_file in vector_files:
-            try:
-                with open(vector_file) as f:
-                    data = json.load(f)
-
-                vector = np.array(data["vector"], dtype=np.float32)
-                point_id = data["id"]
-
-                # Validate dimension
-                if len(vector) != expected_dim:
-                    continue  # Skip mismatched dimensions
-
-                # Apply visibility filter: skip vectors for hidden files
-                if visible_files is not None:
-                    file_path = data.get("payload", {}).get("path")
-                    if file_path not in visible_files:
-                        continue  # Skip vectors not in visible set
-                elif current_branch is not None:
-                    # Branch-aware filter: skip vectors hidden for current_branch
-                    # (Bug #306: makes ALL rebuilds branch-aware via hidden_branches metadata)
-                    payload = data.get("payload", {})
-                    hidden_branches = payload.get("hidden_branches", [])
-                    if current_branch in hidden_branches:
-                        continue  # Skip vectors hidden for this branch
-
-                vectors_list.append(vector)
-                ids_list.append(point_id)
-
-            except (json.JSONDecodeError, KeyError, ValueError):
-                # Skip malformed files
-                continue
+        # Load all vectors and IDs, applying visibility filter if provided.
+        # Story #1456 AC2: CHUNKS_DB collections stream from chunks.db;
+        # legacy collections keep the exact original rglob-based loading.
+        if layout == ChunkLayout.CHUNKS_DB:
+            vectors_list, ids_list = self._load_vectors_from_chunks_db(
+                collection_path, expected_dim, visible_files, current_branch
+            )
+        else:
+            vectors_list, ids_list = self._load_vectors_from_json_files(
+                vector_files, expected_dim, visible_files, current_branch
+            )
 
         if not vectors_list:
             # No vectors pass the filter - return 0 without building index
@@ -885,6 +889,117 @@ class HNSWIndexManager:
             )
 
         return len(vectors)
+
+    def _count_chunks_db_records(self, collection_path: Path) -> int:
+        """Story #1456 AC2: cheap ``COUNT(*)`` over chunks.db, mirroring the
+        legacy ``len(rglob("vector_*.json"))`` total-on-disk count."""
+        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+
+        store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        try:
+            return int(store.count())
+        finally:
+            store.close()
+
+    def _load_vectors_from_chunks_db(
+        self,
+        collection_path: Path,
+        expected_dim: int,
+        visible_files: Optional[Set[str]],
+        current_branch: Optional[str],
+    ) -> Tuple[List[np.ndarray], List[str]]:
+        """Story #1456 AC2: stream vector+payload from ``chunks.db`` via
+        ``ChunkStore.stream_all()`` instead of rglob-scanning
+        ``vector_*.json`` files. Preserves the EXACT dimension-validation,
+        ``visible_files``, and Bug #306 ``hidden_branches`` filtering
+        semantics of :meth:`_load_vectors_from_json_files`.
+        """
+        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+
+        store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        try:
+            vectors_list: List[np.ndarray] = []
+            ids_list: List[str] = []
+
+            for record in store.stream_all():
+                try:
+                    vector = np.array(record["vector"], dtype=np.float32)
+                    point_id = record["id"]
+                except (KeyError, ValueError, TypeError):
+                    # Skip malformed records (mirrors legacy malformed-file skip).
+                    continue
+
+                if len(vector) != expected_dim:
+                    continue  # Skip mismatched dimensions
+
+                if visible_files is not None:
+                    file_path = record.get("payload", {}).get("path")
+                    if file_path not in visible_files:
+                        continue  # Skip vectors not in visible set
+                elif current_branch is not None:
+                    # Bug #306: branch-aware filter, identical semantics to
+                    # the legacy sharded-JSON path.
+                    payload = record.get("payload", {})
+                    hidden_branches = payload.get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        continue  # Skip vectors hidden for this branch
+
+                vectors_list.append(vector)
+                ids_list.append(point_id)
+
+            return vectors_list, ids_list
+        finally:
+            store.close()
+
+    def _load_vectors_from_json_files(
+        self,
+        vector_files: List[Path],
+        expected_dim: int,
+        visible_files: Optional[Set[str]],
+        current_branch: Optional[str],
+    ) -> Tuple[List[np.ndarray], List[str]]:
+        """Legacy sharded-JSON vector loading (unchanged behavior, extracted
+        verbatim from the pre-Story #1456 body of ``rebuild_from_vectors``)."""
+        vectors_list: List[np.ndarray] = []
+        ids_list: List[str] = []
+
+        for vector_file in vector_files:
+            try:
+                with open(vector_file) as f:
+                    data = json.load(f)
+
+                vector = np.array(data["vector"], dtype=np.float32)
+                point_id = data["id"]
+
+                # Validate dimension
+                if len(vector) != expected_dim:
+                    continue  # Skip mismatched dimensions
+
+                # Apply visibility filter: skip vectors for hidden files
+                if visible_files is not None:
+                    file_path = data.get("payload", {}).get("path")
+                    if file_path not in visible_files:
+                        continue  # Skip vectors not in visible set
+                elif current_branch is not None:
+                    # Branch-aware filter: skip vectors hidden for current_branch
+                    # (Bug #306: makes ALL rebuilds branch-aware via hidden_branches metadata)
+                    payload = data.get("payload", {})
+                    hidden_branches = payload.get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        continue  # Skip vectors hidden for this branch
+
+                vectors_list.append(vector)
+                ids_list.append(point_id)
+
+            except (json.JSONDecodeError, KeyError, ValueError):
+                # Skip malformed files
+                continue
+
+        return vectors_list, ids_list
 
     def _publish_empty_rebuild_state(self, collection_path: Path) -> None:
         """Amendment 5 (Bug #1407): durably publish an empty index state for

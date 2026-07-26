@@ -36,6 +36,10 @@ from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
+from .snapshot_retention import (
+    discover_and_enforce_temporal_retention,
+    enforce_snapshot_retention,
+)
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import (
@@ -537,38 +541,24 @@ class RefreshScheduler:
         ``previous_path``. Enabled on local + cow-daemon; on ONTAP the discovery
         API returns ``[]`` so this is naturally inert. Non-fatal: any failure is
         logged and swallowed so a refresh never fails on retention.
+
+        Story #1457 MEDIUM #14 (2026-07-23 code review): delegates to the
+        shared ``enforce_snapshot_retention`` primitive (extracted so
+        temporal sister-location aliases can reuse the exact same
+        keep-last-N logic via ``discover_and_enforce_temporal_retention``,
+        called separately below in ``_execute_refresh``). ``_retention_keep_last``
+        stays a method here (not delegated) so this class's own existing
+        test suite's ``get_config_service`` patch target is preserved
+        byte-identical.
         """
-        if self._snapshot_manager is None:
-            return
-        try:
-            keep_last = self._retention_keep_last()
-            snapshots = self._snapshot_manager.list_snapshots(alias_name)
-            if len(snapshots) <= keep_last:
-                return
-
-            # Force-keep set: current target + previous_path (rollback) + N newest.
-            protected: set = set()
-            if current_target:
-                protected.add(current_target)
-            previous_path = self.alias_manager.get_previous_path(alias_name)
-            if previous_path:
-                protected.add(previous_path)
-            # snapshots are sorted ascending by ts; the last keep_last are newest.
-            for path, _ts in snapshots[-keep_last:]:
-                protected.add(path)
-
-            for path, _ts in snapshots:
-                if path not in protected:
-                    logger.info(
-                        f"[retention] Scheduling cleanup of superseded snapshot "
-                        f"{path} (keep_last={keep_last}) for {alias_name}"
-                    )
-                    self.cleanup_manager.schedule_cleanup(path)
-        except Exception as exc:
-            logger.warning(
-                f"[retention] keep-last-N enforcement failed for {alias_name} "
-                f"(non-fatal): {type(exc).__name__}: {exc}"
-            )
+        enforce_snapshot_retention(
+            alias_name,
+            current_target,
+            snapshot_manager=self._snapshot_manager,
+            alias_manager=self.alias_manager,
+            cleanup_manager=self.cleanup_manager,
+            retention_keep_last=self._retention_keep_last(),
+        )
 
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
@@ -2338,6 +2328,19 @@ class RefreshScheduler:
                     # CleanupManager) of all but the N newest snapshots, never the
                     # current target or previous_path. Inert on ONTAP (discovery []).
                     self._enforce_retention(alias_name, new_index_path)
+
+                    # Story #1457 MEDIUM #14: temporal sister-location aliases
+                    # ({bare_alias}-temporal-{embedder_slug}[-{quarter}]) are
+                    # published directly via AliasManager, NOT as golden_repos
+                    # registry rows, so they are invisible to the enumeration
+                    # loop feeding _enforce_retention above -- sweep them
+                    # separately here, reusing the SAME keep-last-N primitive.
+                    discover_and_enforce_temporal_retention(
+                        alias_name.removesuffix("-global"),
+                        snapshot_manager=self._snapshot_manager,
+                        alias_manager=self.alias_manager,
+                        cleanup_manager=self.cleanup_manager,
+                    )
 
                     # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)

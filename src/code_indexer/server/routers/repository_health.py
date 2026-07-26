@@ -6,7 +6,7 @@ Provides REST endpoints for checking HNSW index health with caching support.
 
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -232,6 +232,43 @@ def _get_background_job_manager():
             "Server must set app.state.background_job_manager during startup."
         )
     return manager
+
+
+def _resolve_golden_repo_alias_for_activated_repo(
+    username: str, user_alias: str
+) -> Optional[str]:
+    """Resolve the underlying golden repo alias for an activated repo.
+
+    GitHub Issue #1459 AC4: the resolver-aware temporal-status helper needs
+    the golden repo's BARE alias (never the activated repo's own
+    user_alias) to build the sister-location pointer namespace. Reuses the
+    `golden_repo_alias` field ActivatedRepoManager.get_repository() already
+    tracks (Story #1457's own docstring confirms this field exists,
+    contrary to an earlier round's tentative "not found" report).
+
+    Returns None if the activated repo cannot be found or has no tracked
+    golden_repo_alias (e.g. a composite repo with no single backing golden
+    repo) -- callers must treat None as "cannot resolve sister-location
+    temporal data for this repo", not raise.
+    """
+    try:
+        activated_repo_manager = _get_activated_repo_manager()
+        metadata = activated_repo_manager.get_repository(
+            username, user_alias, touch=False
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to resolve golden_repo_alias for activated repo "
+            "'%s' (user '%s'): %s",
+            user_alias,
+            username,
+            exc,
+        )
+        return None
+    if not metadata:
+        return None
+    golden_alias = metadata.get("golden_repo_alias")
+    return golden_alias if isinstance(golden_alias, str) and golden_alias else None
 
 
 def _resolve_repository_path(repo_alias: str, current_user: User) -> Tuple[str, Path]:
@@ -470,9 +507,15 @@ async def get_repository_indexes(
         fts_path = clone_path / ".code-indexer" / "tantivy_index"
         has_fts = fts_path.exists() and fts_path.is_dir()
 
-        # Temporal index: temporal/ (legacy) OR any code-indexer-temporal* directory
-        from code_indexer.services.temporal.temporal_collection_naming import (
-            is_temporal_collection as _is_temporal,
+        # Temporal index: legacy bare "temporal" dir (pre-#1290, no
+        # sister-location equivalent, never migrated -- kept as a pure
+        # local-clone check) OR resolver-aware detection of
+        # code-indexer-temporal* namespaces, which may have relocated to
+        # Story #1457's golden-owned sister location (GitHub Issue #1459
+        # AC4) -- routes through the SAME TemporalShardResolver/catalog
+        # mechanism the query path uses, never a parallel sister-root scan.
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
         )
 
         has_temporal = False
@@ -480,13 +523,26 @@ async def get_repository_indexes(
         legacy_temporal = index_base_path / "temporal"
         if legacy_temporal.is_dir():
             has_temporal = (legacy_temporal / "hnsw_index.bin").is_file()
-        # Scan for provider-aware or legacy code-indexer-temporal* directories
-        if not has_temporal and index_base_path.is_dir():
-            has_temporal = any(
-                (d / "hnsw_index.bin").is_file()
-                for d in sorted(index_base_path.iterdir())
-                if d.is_dir() and _is_temporal(d.name)
+
+        if not has_temporal:
+            golden_repo_alias_for_temporal = (
+                resolved_alias
+                if repo
+                else _resolve_golden_repo_alias_for_activated_repo(
+                    current_user.username, repo_alias
+                )
             )
+            if golden_repo_alias_for_temporal:
+                golden_repos_dir = (
+                    Path(_get_activated_repo_manager().activated_repos_dir).parent
+                    / "golden-repos"
+                )
+                temporal_status = get_temporal_repo_status(
+                    golden_repos_dir=golden_repos_dir,
+                    repo_alias=golden_repo_alias_for_temporal,
+                    legacy_index_path=index_base_path,
+                )
+                has_temporal = temporal_status.is_queryable
 
         # SCIP index: scip/ directory with .scip.db files
         scip_path = clone_path / ".code-indexer" / "scip"

@@ -28,6 +28,66 @@ class QueryTracker:
         """Initialize the query tracker with empty ref counts."""
         self._ref_counts: Dict[str, int] = {}
         self._lock = threading.Lock()
+        # Story #1458 round-6 Codex HIGH finding #6b: an admission-barrier
+        # primitive, distinct from ref counting. Deactivation marks a
+        # path quiescing FIRST (atomically, under the same lock query
+        # admission checks), so a NEW query arriving after that point is
+        # refused rather than racing the drain-then-rename sequence.
+        self._quiescing: Set[str] = set()
+
+    def mark_quiescing(self, path: str) -> None:
+        """Mark ``path`` as quiescing (about to be destructively purged).
+        Query admission must refuse new refcount increments for this
+        path once marked. Thread-safe."""
+        with self._lock:
+            self._quiescing.add(path)
+
+    def clear_quiescing(self, path: str) -> None:
+        """Clear the quiescing mark for ``path``. A no-op if ``path`` was
+        never marked (e.g. a failed deactivation attempt cleaning up).
+        Thread-safe."""
+        with self._lock:
+            self._quiescing.discard(path)
+
+    def is_quiescing(self, path: str) -> bool:
+        """True iff ``path`` is currently marked quiescing. Thread-safe."""
+        with self._lock:
+            return path in self._quiescing
+
+    def try_increment_ref_if_not_quiescing(self, path: str) -> bool:
+        """Atomically check quiescing status and increment the refcount,
+        both inside ONE critical section (single lock acquisition).
+
+        Round-8 HIGH finding (Codex empirical reproduction): a caller
+        composing `is_quiescing()` then `increment_ref()` as two SEPARATE
+        lock-acquiring calls leaves a TOCTOU window -- another thread can
+        call `mark_quiescing()` for the SAME path in the gap between the
+        check and the increment, and the increment still succeeds. This
+        method closes that window by performing both steps under the
+        SAME lock acquisition, so no other thread can observe or mutate
+        quiescing/refcount state in between.
+
+        Args:
+            path: The index path to admit a query against.
+
+        Returns:
+            True if admitted (refcount incremented by 1). False if
+            refused (``path`` is currently marked quiescing; refcount is
+            left UNCHANGED).
+
+        Thread-safe: single lock acquisition covers both the check and
+        the mutation.
+        """
+        with self._lock:
+            if path in self._quiescing:
+                return False
+            current = self._ref_counts.get(path, 0)
+            self._ref_counts[path] = current + 1
+            logger.debug(
+                f"Incremented ref count for {path}: {current} -> {current + 1} "
+                f"(atomic quiescing-gated admission)"
+            )
+            return True
 
     def increment_ref(self, index_path: str) -> None:
         """

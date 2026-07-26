@@ -10,6 +10,7 @@ Tests the multi-pass Claude CLI pipeline for generating dependency maps:
 """
 
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +20,50 @@ from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnaly
 # The subprocess command has the shape: ['script', '-q', '-e', '-c', <shell_str>, '/dev/null']
 # Index 4 is the embedded shell command string containing the actual claude invocation.
 _SCRIPT_SHELL_CMD_IDX = 4
+
+
+@pytest.fixture(autouse=True)
+def _isolate_verification_semaphore():
+    """Isolate EVERY test in this file from the process-wide verification
+    semaphore singleton (Bug #1470).
+
+    `_get_verification_semaphore` (dependency_map_analyzer.py) is a
+    process-wide singleton keyed by `_VERIFICATION_SEMAPHORE_STATE`: the
+    first caller in the pytest process fixes the semaphore's capacity; any
+    later caller passing a DIFFERENT `max_concurrent` raises ValueError.
+    Multiple classes in this file reach that singleton — directly via
+    `_invoke_claude_cli` (e.g. TestAllowedToolsPerPass) or indirectly via
+    the `run_pass_2_per_domain` insufficient-output retry path (e.g.
+    TestEmptyOutputDetection, TestInsufficientOutputThreshold,
+    TestIteration13HookThresholdFix, TestIteration14PurposeDrivenHooks,
+    TestIteration10QualityGate, TestIteration13LargeDomainRetry) — so a
+    fixture scoped to only one class leaves the rest exposed; whichever
+    class happens to run first "wins" the capacity race, and any other
+    class run standalone (or after a differently-configured caller
+    elsewhere in the same pytest process) can raise ValueError before
+    `subprocess.run` is ever called.
+
+    Proven root cause of the #1470 flake (fast-automation.sh:
+    dependency_map_analyzer / verification_pass tests failing only under
+    full-suite load, a different pair each run): confirmed via a targeted
+    repro that pre-polluting the singleton to a mismatched capacity breaks
+    all of TestAllowedToolsPerPass, TestEmptyOutputDetection,
+    TestInsufficientOutputThreshold, TestIteration13HookThresholdFix,
+    TestIteration14PurposeDrivenHooks, TestIteration10QualityGate, and
+    TestIteration13LargeDomainRetry (10 failing tests across those last 6
+    classes alone) whenever they run without this isolation.
+
+    Patching the getter itself to hand back a fresh, unshared
+    `threading.Semaphore` per call removes all dependency on the shared
+    singleton for every test in this file, mirroring the file-wide
+    `reset_semaphore` fixture in the sibling file
+    test_verification_pass_cli_args.py (same root cause, same fix pattern).
+    """
+    with patch(
+        "code_indexer.global_repos.dependency_map_analyzer._get_verification_semaphore",
+        side_effect=lambda max_concurrent: threading.Semaphore(max_concurrent),
+    ):
+        yield
 
 
 class TestOrientationFilesGeneration:
@@ -1053,7 +1098,12 @@ class TestIncrementalPass2:
 
 
 class TestAllowedToolsPerPass:
-    """Test Fix 1: Make --allowedTools per-pass configurable."""
+    """Test Fix 1: Make --allowedTools per-pass configurable.
+
+    Isolation from the process-wide verification semaphore singleton
+    (Bug #1470) is provided by the module-level `_isolate_verification_semaphore`
+    autouse fixture defined above — see its docstring for the full rationale.
+    """
 
     @patch("subprocess.run")
     def test_pass_1_no_allowed_tools(self, mock_subprocess, tmp_path):

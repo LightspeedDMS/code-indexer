@@ -85,6 +85,23 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return fleet_migration settings dict from ServerConfig (Story
+    #1458, Epic #1454, round-6 item #10).
+
+    Surfaces both fields of FleetMigrationConfig for the Web UI Config
+    screen, mirroring Story #1397's HNSWOrphanRepairSweepConfig pattern
+    exactly. `enabled` defaults to False -- this scheduler deletes real
+    on-disk chunk data, so an explicit operator opt-in is required.
+    """
+    fm = config.fleet_migration_config
+    assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": fm.enabled,
+        "tick_interval_minutes": fm.tick_interval_minutes,
+    }
+
+
 def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return search_timeouts settings dict from ServerConfig (Issue #1398).
 
@@ -773,6 +790,7 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            "fleet_migration": _fleet_migration_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -826,6 +844,13 @@ class ConfigService:
                 # Story #1412: golden/server temporal all-branches gate display wiring
                 "temporal_all_branches_enabled": (
                     config.indexing_config.temporal_all_branches_enabled
+                    if config.indexing_config is not None
+                    else False
+                ),
+                # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
+                # sister-location relocation safety gate display wiring.
+                "temporal_sister_relocation_enabled": (
+                    config.indexing_config.temporal_sister_relocation_enabled
                     if config.indexing_config is not None
                     else False
                 ),
@@ -1033,6 +1058,9 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
+        elif category == "fleet_migration":
+            self._update_fleet_migration_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -2477,6 +2505,28 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
 
+    def _update_fleet_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a fleet_migration setting (Story #1458, Epic #1454,
+        round-6 item #10).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the
+        Web UI submits an explicit "true"/"false" string (boolean
+        <select>, not a checkbox), so `_parse_bool("false")` must persist
+        False rather than silently no-op, mirroring Story #1397's own
+        "enabled-checkbox trap" fix exactly. `tick_interval_minutes` is a
+        plain integer.
+        """
+        fm = config.fleet_migration_config
+        assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            fm.enabled = _parse_bool(value)
+        elif key == "tick_interval_minutes":
+            fm.tick_interval_minutes = int(value)
+        else:
+            raise ValueError(f"Unknown fleet_migration setting: {key}")
+
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -2711,6 +2761,15 @@ class ConfigService:
                 embedders = [v.strip() for v in str(value).split(",") if v.strip()]
             if not embedders:
                 raise ValueError("temporal_embedders must not be empty")
+            # Story #1457 AC6 (round-13 Codex N13-1) defense-in-depth: reject
+            # a colliding embedder set HERE, at the Web UI Config Screen
+            # submission boundary, rather than silently persisting it and
+            # only failing later inside a background index run.
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                validate_embedder_slug_uniqueness,
+            )
+
+            validate_embedder_slug_uniqueness(embedders)
             indexing.temporal_embedders = embedders
             self.save_config(config)
             logger.info(
@@ -2765,6 +2824,18 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
+        # sister-location relocation safety gate (default OFF).
+        if key == "temporal_sister_relocation_enabled":
+            indexing.temporal_sister_relocation_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_sister_relocation_enabled to %s",
+                indexing.temporal_sister_relocation_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

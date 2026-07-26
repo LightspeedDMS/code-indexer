@@ -37,8 +37,16 @@ def _create_temporal_collection(index_dir: Path, name: str) -> Path:
     return coll
 
 
-def _add_json_file(coll_dir: Path, filename: str = "chunk_0001.json") -> Path:
-    """Add a JSON file inside a collection directory."""
+def _add_json_file(coll_dir: Path, filename: str = "vector_0001.json") -> Path:
+    """Add a JSON file inside a collection directory.
+
+    Default filename matches the real production sharded-legacy naming
+    convention (``vector_<hash>.json``, see
+    ``filesystem_vector_store.py``'s ``vector_{hash_prefix}.json`` writer) --
+    Issue #1459 AC1 made ``_index_exists`` check specifically for
+    ``vector_*.json`` files rather than a bare ``*.json`` glob, so a fixture
+    using an arbitrary filename no longer represents real on-disk data.
+    """
     f = coll_dir / filename
     f.write_text('{"data": "x"}')
     return f
