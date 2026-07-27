@@ -799,8 +799,13 @@ class TestBug1373AliasSuffixMismatch:
         mock_grm = MagicMock()
         mock_grm._sqlite_backend.update_enable_temporal.return_value = True
         mock_grm.data_dir = "/tmp/bug-1373-fake-data-dir"
-        fake_repo_meta = MagicMock(enable_temporal=False)
-        mock_grm.golden_repos = {"evolution": fake_repo_meta}
+        stale_repo_meta = MagicMock(enable_temporal=False)
+        mock_grm.golden_repos = {"evolution": stale_repo_meta}
+        # Bug #1481: the cache entry is now REPLACED wholesale with the
+        # fresh object returned by get_golden_repo() (reflecting the
+        # backend write that just succeeded above), not patched in place.
+        fresh_repo_meta = MagicMock(enable_temporal=True)
+        mock_grm.get_golden_repo.return_value = fresh_repo_meta
 
         mock_global_registry_instance = MagicMock()
         mock_global_registry_instance._sqlite_backend = MagicMock()
@@ -827,8 +832,71 @@ class TestBug1373AliasSuffixMismatch:
         mock_global_registry_instance._sqlite_backend.update_enable_temporal.assert_called_once_with(
             "evolution-global", True
         )
-        # In-memory cache (keyed bare) must reflect the update too.
-        assert fake_repo_meta.enable_temporal is True
+        # In-memory cache (keyed bare) must reflect the update too -- full-object
+        # replacement via get_golden_repo(), not the old single-field mutation
+        # of whatever was already cached (Bug #1481). Assert identity against
+        # the fresh object get_golden_repo() returns, not merely the boolean
+        # field -- a bare field-mutation fix would also satisfy a field-only
+        # assertion, but would NOT satisfy this identity check.
+        assert (
+            mock_grm.golden_repos["evolution"] is mock_grm.get_golden_repo.return_value
+        )
+        assert mock_grm.golden_repos["evolution"].enable_temporal is True
+
+
+class TestBug1481CrossNodeCacheColdRefresh:
+    """Bug #1481: _set_enable_temporal_flag must refresh this worker's cache
+    via the authoritative get_golden_repo() read, not read-and-patch a
+    single field on whatever happens to already be cached locally.
+
+    Cross-node/cross-worker scenario: the authoritative backend write
+    (grm._sqlite_backend.update_enable_temporal) just succeeded, but this
+    worker's own `golden_repos` cache never held this alias (e.g. another
+    node/worker registered or last touched it). The old code read
+    `grm.golden_repos.get(bare_alias)` -- None here -- and silently did
+    nothing, leaving this worker's cache permanently cold despite having
+    fresh, correct data in hand from get_golden_repo().
+    """
+
+    def test_cross_node_cache_populated_after_fix_bug1481(self):
+        """RED (pre-fix): fails because grm.golden_repos stays empty.
+        GREEN (post-fix): grm.golden_repos[bare_alias] is populated with the
+        fresh object from get_golden_repo(), with enable_temporal=True.
+        """
+        from code_indexer.server.mcp.handlers.repos import (
+            _set_enable_temporal_flag,
+        )
+
+        mock_grm = MagicMock()
+        mock_grm._sqlite_backend.update_enable_temporal.return_value = True
+        mock_grm.golden_repos = {}  # cross-node cold cache -- never cached
+
+        fresh_repo_meta = MagicMock(enable_temporal=True)
+        mock_grm.get_golden_repo.return_value = fresh_repo_meta
+
+        mock_global_registry_instance = MagicMock()
+        mock_global_registry_instance._sqlite_backend = MagicMock()
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.return_value = True
+
+        bare_alias = "cross-node-repo"
+
+        with (
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                return_value=mock_global_registry_instance,
+            ),
+        ):
+            mock_app_module.golden_repo_manager = mock_grm
+
+            _set_enable_temporal_flag(bare_alias)
+
+        assert bare_alias in mock_grm.golden_repos, (
+            "pre-fix read-and-patch pattern leaves the cold cache empty "
+            "despite fresh, correct data being available via get_golden_repo()"
+        )
+        assert mock_grm.golden_repos[bare_alias].enable_temporal is True
+        assert mock_grm.golden_repos[bare_alias] is fresh_repo_meta
 
 
 class TestBug648OrphanedSnapshotCleanup:

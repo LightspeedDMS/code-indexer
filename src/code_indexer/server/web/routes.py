@@ -3497,8 +3497,12 @@ def refresh_golden_repo(
     # Try to refresh the repository
     try:
         manager = _get_golden_repo_manager()
-        # Validate repo exists before scheduling
-        if alias not in manager.golden_repos:
+        # Validate repo exists before scheduling.
+        # Bug #1481: use get_golden_repo() (authoritative shared-backend
+        # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+        # cluster, a repo registered/refreshed on another node/worker is
+        # invisible to this worker's cache, causing false "not found" errors.
+        if manager.get_golden_repo(alias) is None:
             raise Exception(f"Repository '{alias}' not found")
         # Delegate to RefreshScheduler (index-source-first versioned pipeline)
         from code_indexer.server import app as app_module
@@ -3550,8 +3554,12 @@ def force_resync_golden_repo(
     # Try to force re-sync the repository
     try:
         manager = _get_golden_repo_manager()
-        # Validate repo exists before scheduling
-        if alias not in manager.golden_repos:
+        # Validate repo exists before scheduling.
+        # Bug #1481: use get_golden_repo() (authoritative shared-backend
+        # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+        # cluster, a repo registered/refreshed on another node/worker is
+        # invisible to this worker's cache, causing false "not found" errors.
+        if manager.get_golden_repo(alias) is None:
             raise Exception(f"Repository '{alias}' not found")
         # Delegate to RefreshScheduler with force_reset=True
         from code_indexer.server import app as app_module

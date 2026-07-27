@@ -1777,9 +1777,16 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     try:
         if grm._sqlite_backend.update_enable_temporal(bare_alias, True):
-            repo_meta = grm.golden_repos.get(bare_alias)
+            # Bug #1481: refresh via the authoritative get_golden_repo() read
+            # and REPLACE the cache entry wholesale, instead of patching a
+            # single field on whatever object happened to already be
+            # cached. The old read-and-patch pattern silently did nothing
+            # when this worker's cache never held the alias (cross-node/
+            # cross-worker cold cache), leaving it permanently cold despite
+            # the backend write above having just succeeded.
+            repo_meta = grm.get_golden_repo(bare_alias)
             if repo_meta is not None:
-                repo_meta.enable_temporal = True
+                grm.golden_repos[bare_alias] = repo_meta
             logger.info(
                 "Set enable_temporal=True for %s in golden_repos_metadata", bare_alias
             )
