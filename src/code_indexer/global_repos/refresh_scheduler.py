@@ -175,61 +175,47 @@ def _read_max_commits_from_sister_temporal(
     `temporal_meta.json` at all: it writes `temporal_progress.json`
     (`TemporalProgressiveMetadata`, a `completed_commits` list) instead.
 
-    This reuses Story #1457/#1459's `get_temporal_repo_status()`
-    resolver-based sister/in-repo union (the SAME primitive
-    `_sister_temporal_data_exists()` on RefreshScheduler already reuses for
-    Bug #1461 salvage item #1) to find the best resolved shard, then reads
-    `len(completed_commits)` from that shard's `temporal_progress.json` as
-    the same "conservative upper bound" fallback semantics the legacy
-    `total_commits` field provided.
+    #1461-6 review correction: the legacy `temporal_meta.json.total_commits`
+    field this fallback replaces was a REPO-WIDE total, but the original
+    fix here read `len(completed_commits)` from only the single "best"
+    shard `get_temporal_repo_status()` resolves -- undercounting any repo
+    with more than one quarter and setting `--max-commits` LOWER than the
+    true repo-wide total (worse than omitting the bound). This now
+    delegates to `get_temporal_repo_max_commits()`
+    (services/temporal/temporal_status.py), which unions completed-commit
+    hashes across EVERY resolved quarter shard of the repo and fails open
+    to None (never an under-cap) whenever any shard's total cannot be
+    reliably determined.
 
     Fails open (returns None -- no --max-commits appended, identical to a
-    miss in the in-repo scan above) on any error, missing data, or missing
-    progress file: this is a best-effort safety net for an already
-    degraded case (temporal_options is NULL), and a failure here must
-    never crash indexing.
+    miss in the in-repo scan above) on any error, missing data, or
+    unreliable progress data: this is a best-effort safety net for an
+    already degraded case (temporal_options is NULL), and a failure here
+    must never crash indexing.
     """
     try:
         from code_indexer.services.temporal.temporal_status import (
-            get_temporal_repo_status,
+            get_temporal_repo_max_commits,
         )
 
-        status = get_temporal_repo_status(
+        # Explicit annotation works around a mypy limitation where the
+        # return type of a function-scoped (local) import is not always
+        # fully resolved when forwarded directly in a return statement.
+        result: Optional[int] = get_temporal_repo_max_commits(
             golden_repos_dir=golden_repos_dir,
             repo_alias=repo_alias,
             legacy_index_path=legacy_index_path,
         )
+        return result
     except Exception as exc:
         logger.debug(
-            "Bug #1461: sister-location temporal status lookup failed for "
-            "%s max_commits fallback: %s: %s",
+            "Bug #1461: sister-location temporal max_commits lookup failed "
+            "for %s: %s: %s",
             repo_alias,
             type(exc).__name__,
             exc,
         )
         return None
-
-    if not status.has_data or status.resolved_path is None:
-        return None
-
-    progress_path = status.resolved_path / "temporal_progress.json"
-    if not progress_path.exists():
-        return None
-
-    try:
-        data = json.loads(progress_path.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.debug(
-            "Bug #1461: failed reading temporal_progress.json from %s: %s",
-            progress_path,
-            exc,
-        )
-        return None
-
-    completed_commits = data.get("completed_commits")
-    if not completed_commits:
-        return None
-    return len(completed_commits)
 
 
 def _is_git_repo_url(repo_url: str) -> bool:

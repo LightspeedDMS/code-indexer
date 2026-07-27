@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 FORMAT_VERSION = 2
 VALID_STATES = {"idle", "building", "failed"}
 
+# Sentinel distinguishing "key absent" from any legitimate stored value
+# (including None) when validating strict-mode schema (#1461-7 review).
+_MISSING = object()
+
 
 class TemporalProgressMetadataCorruptError(RuntimeError):
     """Raised in STRICT mode when temporal_progress.json exists but is
@@ -223,6 +227,30 @@ class TemporalProgressiveMetadata:
         # Migrate legacy format if needed
         if "format_version" not in data:
             data = self._migrate_legacy(data)
+        elif strict:
+            # #1461-7 review (LOW, defense-in-depth): a file that parses as
+            # valid JSON and is already migrated (format_version present)
+            # can still be schema-invalid -- completed_commits missing
+            # entirely or present but not a list. Passing the two checks
+            # above (parseable JSON, is a dict) is not sufficient:
+            # load_completed()'s `data.get("completed_commits", [])` would
+            # otherwise silently treat the malformed value as an empty/
+            # garbage completed-commit set, which a strict reconciliation
+            # caller would misclassify as "nothing has ever been indexed"
+            # -- the exact Bug #1390/#1406 incident class, now triggered by
+            # a structurally malformed (but syntactically valid) file
+            # rather than outright corruption. Migrated data is exempt:
+            # _migrate_legacy() always produces a valid completed_commits
+            # list, so this check only needs to run when migration did NOT
+            # just run.
+            commits_value = data.get("completed_commits", _MISSING)
+            if commits_value is _MISSING or not isinstance(commits_value, list):
+                raise TemporalProgressMetadataCorruptError(
+                    f"Malformed temporal progress metadata at "
+                    f"{self.progress_path}: 'completed_commits' must be a "
+                    f"list, got "
+                    f"{'missing' if commits_value is _MISSING else type(commits_value).__name__}"
+                )
 
         return dict(data)
 

@@ -261,3 +261,99 @@ class TestSisterTemporalMaxCommitsFallback:
             f"No golden_repos_dir wired -- fallback must be a no-op, never "
             f"a crash. Got: {temporal_cmds[0]}"
         )
+
+    def test_sister_multi_quarter_progress_sums_to_repo_wide_total(self, tmp_path):
+        """#1461-6 review: the legacy temporal_meta.json.total_commits field
+        this fallback replaces was REPO-WIDE, but reading only the single
+        best-resolved quarter shard undercounts a repo with multiple
+        quarters. The fix must union completed-commit hashes across EVERY
+        resolved quarter of the embedder, not just one."""
+        alias = "my-repo-global"
+        bare_alias = "my-repo"
+        registry = _make_registry(alias, enable_temporal=True, temporal_options=None)
+        golden_meta = _make_golden_meta(None)
+
+        golden_repos_dir = tmp_path / "golden-repos"
+        source_path = golden_repos_dir / bare_alias
+        (source_path / ".code-indexer" / "index").mkdir(parents=True)
+
+        q1_commits = [f"q1-c{i:03d}" for i in range(5)]
+        q2_commits = [f"q2-c{i:03d}" for i in range(3)]
+        _make_sister_temporal_fixture(
+            golden_repos_dir,
+            bare_alias,
+            quarter="2024Q1",
+            completed_commits=q1_commits,
+        )
+        _make_sister_temporal_fixture(
+            golden_repos_dir,
+            bare_alias,
+            quarter="2024Q2",
+            completed_commits=q2_commits,
+        )
+
+        scheduler = _make_scheduler(
+            registry, golden_meta, golden_repos_dir=golden_repos_dir
+        )
+
+        cmds = _capture_subprocess_cmds(scheduler, alias, source_path)
+
+        temporal_cmds = [c for c in cmds if "--index-commits" in c]
+        assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
+        temporal_cmd = temporal_cmds[0]
+        assert "--max-commits" in temporal_cmd, (
+            f"Multi-quarter sister data must still supply a max_commits "
+            f"bound. Got: {temporal_cmd}"
+        )
+        idx = temporal_cmd.index("--max-commits")
+        assert temporal_cmd[idx + 1] == "8", (
+            f"Expected the repo-wide total (5 + 3 = 8) summed/unioned "
+            f"across BOTH quarters, not just one quarter's count. "
+            f"Got: {temporal_cmd}"
+        )
+
+    def test_sister_multi_quarter_missing_progress_on_one_quarter_omits_flag(
+        self, tmp_path
+    ):
+        """#1461-6 review: if one resolved quarter has real data but no
+        temporal_progress.json, the repo-wide total cannot be reliably
+        computed -- the flag must be OMITTED entirely (fail-open to
+        unbounded) rather than emit a total that silently excludes that
+        quarter's commits (an under-cap, worse than no bound at all)."""
+        alias = "my-repo-global"
+        bare_alias = "my-repo"
+        registry = _make_registry(alias, enable_temporal=True, temporal_options=None)
+        golden_meta = _make_golden_meta(None)
+
+        golden_repos_dir = tmp_path / "golden-repos"
+        source_path = golden_repos_dir / bare_alias
+        (source_path / ".code-indexer" / "index").mkdir(parents=True)
+
+        q1_commits = [f"q1-c{i:03d}" for i in range(5)]
+        _make_sister_temporal_fixture(
+            golden_repos_dir,
+            bare_alias,
+            quarter="2024Q1",
+            completed_commits=q1_commits,
+        )
+        # Second quarter has real data (hnsw_index.bin) but NO
+        # temporal_progress.json -- an unreliable-total scenario.
+        _make_sister_temporal_fixture(
+            golden_repos_dir,
+            bare_alias,
+            quarter="2024Q2",
+            completed_commits=None,
+        )
+
+        scheduler = _make_scheduler(
+            registry, golden_meta, golden_repos_dir=golden_repos_dir
+        )
+
+        cmds = _capture_subprocess_cmds(scheduler, alias, source_path)
+
+        temporal_cmds = [c for c in cmds if "--index-commits" in c]
+        assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
+        assert "--max-commits" not in temporal_cmds[0], (
+            f"One quarter's total is unknowable -- must omit the flag "
+            f"rather than under-cap. Got: {temporal_cmds[0]}"
+        )

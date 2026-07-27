@@ -347,6 +347,99 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
         finally:
             os.chmod(self.metadata.progress_path, 0o644)
 
+    # ------------------------------------------------------------------
+    # Helper for tests 23-25 (#1461-7 review)
+    # ------------------------------------------------------------------
+    _OMIT_KEY = object()
+
+    def _write_migrated_file(self, completed_commits_value):
+        """Write an already-migrated (format_version present) file with
+        the given value plugged in for completed_commits. Passing the
+        sentinel _OMIT_KEY writes a file with no completed_commits key
+        at all (the "missing entirely" schema-invalid case)."""
+        payload = {"format_version": FORMAT_VERSION, "state": "idle"}
+        if completed_commits_value is not self._OMIT_KEY:
+            payload["completed_commits"] = completed_commits_value
+        with open(self.metadata.progress_path, "w") as f:
+            json.dump(payload, f)
+
+    # ------------------------------------------------------------------
+    # Test 23 (#1461-7 review): strict mode raises on malformed
+    # completed_commits (valid JSON, wrong schema)
+    # ------------------------------------------------------------------
+    def test_strict_load_raises_on_completed_commits_not_a_list(self):
+        """A well-formed, already-migrated JSON dict whose
+        completed_commits field is present but not a list (e.g. a string)
+        must raise in strict mode -- valid JSON alone is not enough; the
+        schema must also hold, or downstream reconciliation would
+        misclassify every already-indexed commit as PARTIAL and drive a
+        destructive re-embed."""
+        self._write_migrated_file("not-a-list")
+
+        with self.assertRaises(TemporalProgressMetadataCorruptError):
+            self.metadata.load_completed(strict=True)
+
+        with self.assertRaises(TemporalProgressMetadataCorruptError):
+            self.metadata.mark_completed(["c1"], strict=True)
+
+    # ------------------------------------------------------------------
+    # Test 24 (#1461-7 review): lenient mode tolerates the same file
+    # ------------------------------------------------------------------
+    def test_lenient_load_tolerates_completed_commits_not_a_list(self):
+        """The SAME malformed file under lenient mode (status/dashboard
+        readers) must never raise -- proves the schema hardening is
+        strict-mode-only."""
+        self._write_migrated_file("not-a-list")
+
+        # Must not raise.
+        self.metadata.load_completed()
+        self.assertEqual(self.metadata.get_state(), "idle")
+
+    # ------------------------------------------------------------------
+    # Test 25 (#1461-7 review): strict mode raises when completed_commits
+    # is missing entirely from an already-migrated file
+    # ------------------------------------------------------------------
+    def test_strict_load_raises_on_missing_completed_commits_key(self):
+        """An already-migrated (format_version present) file missing the
+        completed_commits key entirely is schema-invalid post-migration --
+        strict mode must raise rather than silently defaulting to an
+        empty completed-commit set."""
+        self._write_migrated_file(self._OMIT_KEY)
+
+        with self.assertRaises(TemporalProgressMetadataCorruptError):
+            self.metadata.load_completed(strict=True)
+
+    # ------------------------------------------------------------------
+    # Test 26 (#1461-7 review): lenient mode tolerates the missing key
+    # ------------------------------------------------------------------
+    def test_lenient_load_tolerates_missing_completed_commits_key(self):
+        """The SAME file under lenient mode returns an empty set,
+        unchanged from pre-existing behavior."""
+        self._write_migrated_file(self._OMIT_KEY)
+
+        completed = self.metadata.load_completed()
+        self.assertEqual(completed, set())
+
+    # ------------------------------------------------------------------
+    # Test 27 (#1461-7 review): well-formed file still loads fine in
+    # strict mode; absent file still returns defaults in strict mode too
+    # ------------------------------------------------------------------
+    def test_strict_load_well_formed_file_still_works(self):
+        """A genuinely well-formed file (completed_commits is a proper
+        list) loads fine under strict mode -- the new schema check must
+        not produce false positives."""
+        self.metadata.mark_completed(["c1", "c2"])
+
+        completed = self.metadata.load_completed(strict=True)
+        self.assertEqual(completed, {"c1", "c2"})
+
+        # Absent file (fresh directory, never written to) still returns
+        # defaults under strict mode -- not a regression of Test 21.
+        other_dir = Path(self.temp_dir) / "other-shard"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        other_metadata = TemporalProgressiveMetadata(other_dir)
+        self.assertEqual(other_metadata.load_completed(strict=True), set())
+
 
 if __name__ == "__main__":
     unittest.main()
