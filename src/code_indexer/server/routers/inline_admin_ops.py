@@ -345,8 +345,13 @@ def register_admin_ops_routes(
             HTTPException: If job submission fails
         """
         try:
-            # Validate repo exists before scheduling
-            if alias not in golden_repo_manager.golden_repos:
+            # Validate repo exists before scheduling.
+            # Bug #1481: use get_golden_repo() (authoritative shared-backend
+            # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+            # cluster, a repo registered on another node/worker is invisible
+            # to this worker's cache, causing false 404s (see Bug #1316's
+            # identical fix pattern in add_golden_repo_index above).
+            if golden_repo_manager.get_golden_repo(alias) is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Golden repository '{alias}' not found",

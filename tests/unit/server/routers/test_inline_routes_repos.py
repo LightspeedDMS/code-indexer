@@ -41,6 +41,7 @@ class TestRefreshGoldenRepo:
         handler = _find_route_handler("/api/admin/golden-repos/{alias}/refresh", "POST")
         mock_grm = Mock()
         mock_grm.golden_repos = {}  # empty - alias not registered
+        mock_grm.get_golden_repo.return_value = None  # genuinely absent (Bug #1481)
 
         with _patch_closure(handler, "golden_repo_manager", mock_grm):
             response = admin_client.post(
@@ -86,6 +87,53 @@ class TestRefreshGoldenRepo:
         data = response.json()
         assert data["job_id"] == "job-refresh-123"
         assert "myrepo" in data["message"]
+
+    def test_cross_node_repo_not_cached_locally_still_succeeds_bug1481(
+        self, admin_client
+    ):
+        """Bug #1481: alias exists in the shared backend (registered by
+        another node) but this worker's per-process `golden_repos` cache
+        dict never loaded it. The 404 gate must consult the authoritative
+        `get_golden_repo()` read, not the raw per-worker cache dict.
+        """
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/refresh", "POST")
+
+        class _FakeGoldenRepoManager:
+            """Faithful stand-in: real decision logic, no black-box Mock."""
+
+            def __init__(self, alias, repo):
+                self.golden_repos: dict = {}  # empty - cold cache on this worker
+                self._alias = alias
+                self._repo = repo
+
+            def get_golden_repo(self, alias):
+                if alias == self._alias:
+                    return self._repo
+                return None
+
+        mock_grm = _FakeGoldenRepoManager("mock-test", Mock())
+
+        mock_scheduler = Mock()
+        mock_scheduler.trigger_refresh_for_repo.return_value = "job-refresh-cross-node"
+
+        mock_lifecycle = Mock()
+        mock_lifecycle.refresh_scheduler = mock_scheduler
+
+        mock_app = Mock()
+        mock_app.state.global_lifecycle_manager = mock_lifecycle
+
+        with _patch_closure(handler, "golden_repo_manager", mock_grm):
+            with _patch_closure(handler, "app", mock_app):
+                response = admin_client.post(
+                    "/api/admin/golden-repos/mock-test/refresh"
+                )
+
+        assert response.status_code == 202, (
+            f"expected 202 (cross-node repo found via authoritative read), "
+            f"got {response.status_code}: {response.text}"
+        )
+        data = response.json()
+        assert data["job_id"] == "job-refresh-cross-node"
 
 
 # ---------------------------------------------------------------------------

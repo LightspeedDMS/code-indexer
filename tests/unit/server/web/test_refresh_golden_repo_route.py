@@ -1,13 +1,19 @@
 """
-Unit tests for Story #272: Force Re-sync web route.
+Unit tests for POST /golden-repos/{alias}/refresh web route.
+
+Mirrors tests/unit/server/web/test_force_resync_route.py's structure and
+fixture approach, targeting `refresh_golden_repo` instead of
+`force_resync_golden_repo`.
 
 Tests:
-1. POST /admin/golden-repos/{alias}/force-resync requires admin session
-2. POST /admin/golden-repos/{alias}/force-resync validates CSRF token
-3. Successful force re-sync calls trigger_refresh_for_repo(force_reset=True)
+1. Requires admin session (401 when absent)
+2. Validates CSRF token (rejects missing/invalid)
+3. Successful refresh calls trigger_refresh_for_repo
 4. Success response includes job ID
 5. Error when repo not found
 6. Error when RefreshScheduler not available
+7. Bug #1481: cross-node repo (visible via get_golden_repo(), absent from
+   this worker's per-process `golden_repos` cache dict) still succeeds.
 """
 
 from unittest.mock import MagicMock, patch
@@ -30,45 +36,31 @@ def _make_session(username="admin"):
     return mock_session
 
 
-class TestForceResyncRoute:
-    """Tests for POST /admin/golden-repos/{alias}/force-resync endpoint."""
+class TestRefreshGoldenRepoRoute:
+    """Tests for POST /golden-repos/{alias}/refresh endpoint."""
 
-    def test_force_resync_requires_admin_session(self):
-        """
-        AC8: Force re-sync endpoint must require valid admin session.
-        When no session, redirect to login.
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_requires_admin_session(self):
+        """Refresh endpoint must require a valid admin session -- 401 when absent."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
 
-        with (
-            patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
-                return_value=None,
-            ),
-            patch(
-                "src.code_indexer.server.web.routes._create_login_redirect"
-            ) as mock_redirect,
+        with patch(
+            "src.code_indexer.server.web.routes._require_admin_session",
+            return_value=None,
         ):
-            mock_redirect.return_value = HTMLResponse(content="", status_code=401)
-
-            result = force_resync_golden_repo(
+            result = refresh_golden_repo(
                 request=mock_request,
                 alias="my-repo",
                 csrf_token="valid-token",
             )
 
-        # Should redirect (not proceed with force resync)
         assert result is not None
-        mock_redirect.assert_called_once_with(mock_request)
+        assert result.status_code == 401
 
-    def test_force_resync_rejects_missing_csrf_token(self):
-        """
-        AC8: CSRF protection on force re-sync endpoint.
-        POST with missing CSRF token must be rejected with error page.
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_rejects_missing_csrf_token(self):
+        """CSRF protection on refresh endpoint: missing token must be rejected."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -88,24 +80,20 @@ class TestForceResyncRoute:
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
 
-            force_resync_golden_repo(
+            refresh_golden_repo(
                 request=mock_request,
                 alias="my-repo",
-                csrf_token=None,  # Missing CSRF token
+                csrf_token=None,
             )
 
-        # Should return error page (CSRF rejected)
         assert mock_page.called
         call_kwargs = mock_page.call_args[1] if mock_page.call_args[1] else {}
         assert "error_message" in call_kwargs
         assert call_kwargs["error_message"] is not None
 
-    def test_force_resync_rejects_invalid_csrf_token(self):
-        """
-        AC8: POST with invalid CSRF token must be rejected.
-        No force re-sync operation triggered (verified by scheduler not called).
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_rejects_invalid_csrf_token(self):
+        """Invalid CSRF token must be rejected before reaching the scheduler."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -126,7 +114,7 @@ class TestForceResyncRoute:
             ),
             patch(
                 "src.code_indexer.server.web.routes.validate_login_csrf_token",
-                return_value=False,  # Invalid CSRF
+                return_value=False,
             ),
             patch(
                 "src.code_indexer.server.web.routes._get_golden_repo_manager",
@@ -143,7 +131,7 @@ class TestForceResyncRoute:
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
             try:
                 mock_page.return_value = HTMLResponse(content="<html>error</html>")
-                force_resync_golden_repo(
+                refresh_golden_repo(
                     request=mock_request,
                     alias="my-repo",
                     csrf_token="bad-token",
@@ -151,15 +139,11 @@ class TestForceResyncRoute:
             finally:
                 app_module.app.state = original_state
 
-        # Scheduler must NOT have been called (CSRF rejected before reaching scheduler)
         mock_scheduler.trigger_refresh_for_repo.assert_not_called()
 
-    def test_force_resync_success_calls_trigger_with_force_reset(self):
-        """
-        AC3: Successful force re-sync must call
-        trigger_refresh_for_repo(alias, force_reset=True).
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_success_calls_trigger_refresh_for_repo(self):
+        """Successful refresh must call trigger_refresh_for_repo(alias, submitter_username=...)."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -197,7 +181,7 @@ class TestForceResyncRoute:
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
             try:
                 mock_page.return_value = HTMLResponse(content="<html>success</html>")
-                force_resync_golden_repo(
+                refresh_golden_repo(
                     request=mock_request,
                     alias="my-repo",
                     csrf_token="valid-token",
@@ -205,18 +189,14 @@ class TestForceResyncRoute:
             finally:
                 app_module.app.state = original_state
 
-        # Must have called trigger_refresh_for_repo with force_reset=True
         mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
             "my-repo",
             submitter_username="admin",
-            force_reset=True,
         )
 
-    def test_force_resync_success_response_includes_job_id(self):
-        """
-        AC3: Success response must include job ID.
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_success_response_includes_job_id(self):
+        """Success response must include job ID."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -254,7 +234,7 @@ class TestForceResyncRoute:
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
             try:
                 mock_page.return_value = HTMLResponse(content="<html>success</html>")
-                force_resync_golden_repo(
+                refresh_golden_repo(
                     request=mock_request,
                     alias="my-repo",
                     csrf_token="valid-token",
@@ -262,23 +242,21 @@ class TestForceResyncRoute:
             finally:
                 app_module.app.state = original_state
 
-        # Success message must include job ID
         call_kwargs = mock_page.call_args[1] if mock_page.call_args[1] else {}
         assert "success_message" in call_kwargs
         assert "job-id-789" in call_kwargs["success_message"]
 
-    def test_force_resync_error_when_repo_not_found(self):
-        """
-        AC3: Error response when repo not found in golden_repos.
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_error_when_repo_not_found(self):
+        """Error response when repo genuinely absent (both golden_repos AND
+        get_golden_repo() report no such repo)."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
 
         mock_manager = MagicMock()
-        mock_manager.golden_repos = {}  # Repo not in dict
-        mock_manager.get_golden_repo.return_value = None  # genuinely absent
+        mock_manager.golden_repos = {}
+        mock_manager.get_golden_repo.return_value = None
 
         with (
             patch(
@@ -299,7 +277,7 @@ class TestForceResyncRoute:
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
 
-            force_resync_golden_repo(
+            refresh_golden_repo(
                 request=mock_request,
                 alias="nonexistent-repo",
                 csrf_token="valid-token",
@@ -309,16 +287,14 @@ class TestForceResyncRoute:
         assert "error_message" in call_kwargs
         assert call_kwargs["error_message"] is not None
 
-    def test_force_resync_cross_node_repo_not_cached_locally_still_succeeds_bug1481(
-        self,
-    ):
-        """Bug #1481: alias exists in the shared backend (registered/refreshed
-        by another node) but this worker's per-process `golden_repos` cache
+    def test_refresh_cross_node_repo_not_cached_locally_still_succeeds_bug1481(self):
+        """Bug #1481: alias exists in the shared backend (registered on
+        another node) but this worker's per-process `golden_repos` cache
         dict never loaded it. The not-found gate must consult the
         authoritative `get_golden_repo()` read, not the raw per-worker
         cache dict.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -361,7 +337,7 @@ class TestForceResyncRoute:
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
             try:
                 mock_page.return_value = HTMLResponse(content="<html>success</html>")
-                force_resync_golden_repo(
+                refresh_golden_repo(
                     request=mock_request,
                     alias="mock-test",
                     csrf_token="valid-token",
@@ -369,22 +345,17 @@ class TestForceResyncRoute:
             finally:
                 app_module.app.state = original_state
 
-        # Must have proceeded to the scheduler -- NOT short-circuited by a
-        # false "not found" from the stale/cold per-worker cache dict.
         mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
             "mock-test",
             submitter_username="admin",
-            force_reset=True,
         )
         call_kwargs = mock_page.call_args[1] if mock_page.call_args[1] else {}
         assert "success_message" in call_kwargs
         assert "job-id-cross-node" in call_kwargs["success_message"]
 
-    def test_force_resync_error_when_scheduler_not_available(self):
-        """
-        AC3: Error response when RefreshScheduler is not available.
-        """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+    def test_refresh_error_when_scheduler_not_available(self):
+        """Error response when RefreshScheduler is not available."""
+        from src.code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -419,7 +390,7 @@ class TestForceResyncRoute:
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
             try:
                 mock_page.return_value = HTMLResponse(content="<html>error</html>")
-                force_resync_golden_repo(
+                refresh_golden_repo(
                     request=mock_request,
                     alias="my-repo",
                     csrf_token="valid-token",

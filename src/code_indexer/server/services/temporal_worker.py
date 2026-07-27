@@ -185,13 +185,19 @@ def run_temporal_worker(
     job_id: str,
     progress_callback: Optional[Callable[..., None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    query_tracker: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """BGM temporal-lane worker entry point.
 
     Submitted via BackgroundJobManager.submit_job(lane="temporal", ...);
     job_id/cancel_check are BGM-injected (CRITICAL 2); progress_callback is
     accepted (declared, not actively driven -- its PRESENCE alone routes
-    this worker through BGM's hard-bound direct-call branch).
+    this worker through BGM's hard-bound direct-call branch). query_tracker
+    (Bug #1482) is a plain forwarded kwarg -- named explicitly, not BGM-
+    injected -- passed by execute_live_temporal_search's submit_job() call
+    so this worker can construct a resolution-scope-safe
+    TemporalShardResolver. Deliberately NOT part of TemporalWorkerInput: it
+    must never enter the dedup signature.
 
     Returns:
         {"result_ready": True} on success.
@@ -219,6 +225,17 @@ def run_temporal_worker(
     # must use the GOLDEN repo's OWN, CURRENT config -- never the activated
     # CoW clone's point-in-time config.json snapshot. Entirely fail-open:
     # any resolution failure leaves `config` (and thus behavior) unchanged.
+    #
+    # Bug #1482: this try block ALSO constructs a TemporalShardResolver
+    # (mirroring semantic_query_manager.py's now-retired
+    # _execute_temporal_query wiring verbatim -- Story #1400 replaced that
+    # path with this live worker, which never got the equivalent wiring,
+    # so the live MCP temporal front door could only ever read the
+    # in-repo legacy location, empty once Story #1457's AC1 relocation
+    # trigger succeeds). Failure here is likewise entirely fail-open:
+    # resolver stays None and behavior is unchanged (legacy-only
+    # resolution, today's status quo).
+    resolver: Optional[Any] = None
     try:
         from code_indexer.server.repositories.activated_repo_manager import (
             ActivatedRepoManager,
@@ -236,10 +253,52 @@ def run_temporal_worker(
             )
             if golden_config is not None:
                 config = config.model_copy(update={"temporal": golden_config.temporal})
+
+        # Gated on BOTH a known golden_repo_alias AND a real query_tracker
+        # (exactly like semantic_query_manager.py:2649-2691) -- without a
+        # tracker, pin() is a silent no-op, so constructing a resolver
+        # anyway would reintroduce the mid-read deletion hazard AC8 Step 6
+        # exists to prevent.
+        if golden_repo_alias and query_tracker is not None:
+            from code_indexer.global_repos.alias_manager import AliasManager
+            from code_indexer.services.temporal.temporal_shard_resolver import (
+                TemporalShardResolver,
+            )
+
+            golden_repos_dir = (
+                Path(_activated_repo_manager.activated_repos_dir).parent
+                / "golden-repos"
+            )
+            # Golden repo directories are never named with a '-global'
+            # suffix -- that suffix is purely a query-facing alias-
+            # registry convention (an is_global query passes its full
+            # '-global'-suffixed alias as golden_repo_alias). Strip
+            # exactly one trailing '-global' so the resolver's namespace
+            # matches what the relocation trigger actually published
+            # under.
+            normalized_repo_alias = golden_repo_alias.removesuffix("-global")
+            resolver = TemporalShardResolver(
+                alias_manager=AliasManager(str(golden_repos_dir / "aliases")),
+                repo_alias=normalized_repo_alias,
+                sister_root=golden_repos_dir,
+                legacy_index_path=index_path,
+                query_tracker=query_tracker,
+            )
+            # "Disconnected reader" lesson (semantic_query_manager.py
+            # code review CRITICAL #1): a resolver threaded ONLY into
+            # execute_temporal_query_with_fusion's discovery/pin
+            # bookkeeping never reaches the vector_store instance that
+            # actually PERFORMS the search -- _get_collection_path()
+            # would silently fall back to the legacy base_path/
+            # collection_name path even after relocation moved the data.
+            # Attach the resolver to the SAME store instance used for
+            # search, preserving its existing caching/governor wiring.
+            vector_store._temporal_shard_resolver = resolver
     except Exception:
         logger.warning(
-            "temporal worker %s: golden-repo temporal config override "
-            "failed (isolated, non-fatal); using clone-derived config as-is",
+            "temporal worker %s: golden-repo temporal config/resolver "
+            "wiring failed (isolated, non-fatal); using clone-derived "
+            "config and legacy-only resolution as-is",
             job_id,
             exc_info=True,
         )
@@ -279,6 +338,7 @@ def run_temporal_worker(
         on_shards_discovered=checkpointer.on_shards_discovered,
         on_shard_complete=checkpointer.on_shard_complete,
         cancel_check=cancel_check,
+        resolver=resolver,
     )
 
     qr_final = _to_dicts(final.results, worker_input.repository_alias)

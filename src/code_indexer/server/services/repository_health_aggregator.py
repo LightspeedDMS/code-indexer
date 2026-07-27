@@ -27,6 +27,7 @@ This module does NOT raise HTTPException -- that stays the router's job
 compute_repository_health).
 """
 
+import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -37,8 +38,17 @@ from code_indexer.services.hnsw_health_service import (
     HNSWHealthService,
     check_health_batch,
 )
+from code_indexer.services.temporal.temporal_shard_resolver import (
+    TemporalShardResolver,
+    TemporalShardSource,
+)
+from code_indexer.services.temporal.temporal_status import (
+    _enumerate_candidate_embedder_slugs,
+)
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+logger = logging.getLogger(__name__)
 
 # Bug #1394: shared health-check cache TTL, matching the 5-minute value both
 # routers' previous separate HNSWHealthService instances already used.
@@ -217,6 +227,92 @@ def discover_health_collections(
     return discovered
 
 
+def discover_sister_temporal_collections(
+    golden_repos_dir: Path,
+    repo_alias: str,
+    legacy_index_path: Path,
+) -> List[Tuple[str, str, Path]]:
+    """Discover temporal collections relocated to the golden-owned sister
+    location (Story #1457 AC1, GitHub Issue #1482 extension).
+
+    discover_health_collections() only ever scans `legacy_index_path`
+    (the repo clone's own `.code-indexer/index/` directory) -- once
+    Story #1457's relocation trigger moves a temporal shard's data to the
+    golden-owned sister location, it vanishes from health discovery
+    entirely (neither healthy nor unhealthy -- just silently absent).
+
+    Routes exclusively through the SAME resolver-aware mechanism Story
+    #1457/#1459 already established (`TemporalShardResolver.catalog()`/
+    `.resolve()`, `temporal_status.py`'s candidate-embedder-slug
+    enumeration helper) -- never a parallel sister-root scan of our own.
+
+    Only SISTER_POINTER-resolved, queryable (real ``hnsw_index.bin``)
+    shards are returned here -- a namespace still served from the in-repo
+    legacy location is already covered by discover_health_collections'
+    own local scan, and a namespace with committed rows but no HNSW yet
+    (crash window) has nothing a health check could load.
+
+    Args:
+        golden_repos_dir: The golden-owned root housing `aliases/` and
+            `.versioned/{namespace}/v_*/` (Story #1457's `sister_root`).
+        repo_alias: The golden repo's BARE alias (no `-global` suffix).
+        legacy_index_path: The repo clone's own `.code-indexer/index/`
+            directory (Story #1457's `legacy_index_path`).
+
+    Returns:
+        List of (collection_name, index_type, hnsw_file_path) tuples --
+        collection_name is the shard's base-name physical form (e.g.
+        "code-indexer-temporal-voyage_code_3-2024Q1"), index_type is
+        always "temporal", sorted by collection_name for deterministic
+        ordering. Empty if no sister-relocated queryable data exists.
+
+    Raises:
+        ValueError: If golden_repos_dir/legacy_index_path is None or an
+            empty string, or repo_alias is empty.
+    """
+    from code_indexer.global_repos.alias_manager import AliasManager
+
+    if golden_repos_dir is None or str(golden_repos_dir) == "":
+        raise ValueError("golden_repos_dir must not be None or empty")
+    if not repo_alias:
+        raise ValueError("repo_alias must be a non-empty string")
+    if legacy_index_path is None or str(legacy_index_path) == "":
+        raise ValueError("legacy_index_path must not be None or empty")
+
+    golden_repos_dir = Path(golden_repos_dir)
+    legacy_index_path = Path(legacy_index_path)
+    aliases_dir = golden_repos_dir / "aliases"
+
+    embedder_slugs = _enumerate_candidate_embedder_slugs(
+        legacy_index_path, aliases_dir, repo_alias
+    )
+    if not embedder_slugs:
+        return []
+
+    resolver = TemporalShardResolver(
+        alias_manager=AliasManager(str(aliases_dir)),
+        repo_alias=repo_alias,
+        sister_root=golden_repos_dir,
+        legacy_index_path=legacy_index_path,
+    )
+
+    discovered: List[Tuple[str, str, Path]] = []
+    for embedder_slug in sorted(embedder_slugs):
+        for quarter in resolver.catalog(embedder_slug):
+            resolved = resolver.resolve(embedder_slug, quarter)
+            if resolved is None:
+                continue
+            if resolved.source != TemporalShardSource.SISTER_POINTER:
+                continue
+            if not resolved.is_queryable:
+                continue
+            hnsw_file = resolved.path / "hnsw_index.bin"
+            discovered.append((resolved.physical_name, "temporal", hnsw_file))
+
+    discovered.sort(key=lambda t: t[0])
+    return discovered
+
+
 def discover_incomplete_collections(index_base_path: Path) -> List[Path]:
     """Scan for collections that hold vector shards but no HNSW graph.
 
@@ -332,6 +428,8 @@ def compute_repository_health(
     *,
     force_refresh: bool = False,
     max_workers: int = 4,
+    golden_repos_dir: Optional[Path] = None,
+    golden_repo_alias: Optional[str] = None,
 ) -> RepositoryHealthResult:
     """Discover and aggregate health for every collection in a repository.
 
@@ -347,6 +445,15 @@ def compute_repository_health(
         force_refresh: If True, bypass cache for every collection check.
         max_workers: Maximum concurrent health checks (passed through to
             check_health_batch).
+        golden_repos_dir: GitHub Issue #1482 extension. When provided
+            together with golden_repo_alias, sister-relocated temporal
+            collections (Story #1457 AC1) are additionally discovered via
+            discover_sister_temporal_collections() and merged into the
+            aggregated result. None (the default) preserves pre-existing,
+            local-clone-only discovery exactly.
+        golden_repo_alias: The golden repo's BARE alias (no `-global`
+            suffix), required alongside golden_repos_dir to enable
+            sister-relocated temporal discovery.
 
     Returns:
         RepositoryHealthResult with per-collection health and aggregated
@@ -370,6 +477,32 @@ def compute_repository_health(
 
     discovered = discover_health_collections(index_base_path)
     incomplete = discover_incomplete_collections(index_base_path)
+
+    # GitHub Issue #1482 extension: local-clone discovery alone misses any
+    # temporal shard relocated to the golden-owned sister location (Story
+    # #1457 AC1) -- it would otherwise silently vanish from health
+    # reporting. Gated on both params being known; entirely fail-open on
+    # any resolution error, preserving local-clone-only behavior for that
+    # collection rather than breaking the whole health report.
+    if golden_repos_dir is not None and golden_repo_alias:
+        try:
+            sister_discovered = discover_sister_temporal_collections(
+                golden_repos_dir, golden_repo_alias, index_base_path
+            )
+        except Exception:
+            logger.warning(
+                "compute_repository_health: sister-relocated temporal "
+                "discovery failed for repo %s (isolated, non-fatal); "
+                "using local-clone-only discovery",
+                repo_alias,
+                exc_info=True,
+            )
+            sister_discovered = []
+        existing_names = {name for name, _index_type, _path in discovered}
+        discovered.extend(
+            entry for entry in sister_discovered if entry[0] not in existing_names
+        )
+
     if not discovered and not incomplete:
         return _empty_repository_health_result(repo_alias)
 

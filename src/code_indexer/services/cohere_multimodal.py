@@ -473,6 +473,47 @@ class CohereMultimodalClient:
 
         return all_embeddings
 
+    def get_provider_name(self) -> str:
+        """Get the name of this embedding provider.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract (see
+        ``server/services/query_embedding_cache.py``) and by
+        ``governed_call.coalesced_query_embedding``'s cache-gating branch,
+        both of which call this before consulting the cache. Mirrors
+        ``CohereEmbeddingProvider.get_provider_name()`` exactly.
+        """
+        return "cohere"
+
+    def get_current_model(self) -> str:
+        """Get the current active model name.
+
+        Bug #1480 remediation: part of the ``QueryEmbeddingCache.qualifier()``
+        contract. Mirrors ``CohereEmbeddingProvider.get_current_model()``.
+        """
+        return str(self.config.model)
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model.
+
+        Bug #1480 remediation: required by ``QueryEmbeddingCache.qualifier()``,
+        which reads the ``"dimensions"`` key. Derives ``dimensions`` from
+        ``self.config.default_dimension`` -- the SAME value this client
+        actually sends as the ``output_dimension`` parameter in
+        ``_make_request()`` -- never a fabricated number, so the reported
+        dimension always matches the real embedding vectors this client
+        returns.
+        """
+        return {
+            "name": self.config.model,
+            "provider": "cohere",
+            "dimensions": int(self.config.default_dimension),
+            "max_tokens": COHERE_MULTIMODAL_TOKEN_LIMIT,
+            "max_images_per_request": MAX_IMAGES_PER_REQUEST,
+            "supports_batch": True,
+            "api_endpoint": self.config.api_endpoint,
+        }
+
     def get_embedding(self, text: str, **kwargs) -> List[float]:
         """Generate text-only embedding for query purposes.
 

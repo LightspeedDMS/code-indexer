@@ -5524,6 +5524,50 @@ def query(
             for d in index_dir.iterdir()
             if d.is_dir()
         )
+
+        # Bug #1482 extension: the local-clone scan above cannot see
+        # temporal data relocated to the golden-owned sister location
+        # (Story #1457 AC1). The ONE genuine standalone case where this
+        # matters is an operator running `cidx query` directly inside a
+        # golden repo's own clone (bypassing the server) --
+        # detect_golden_repo_sister_root() recognizes ONLY that exact,
+        # pre-existing structural layout and returns None for an
+        # ordinary standalone repo, so this is entirely inert (and
+        # correctly so) for the overwhelmingly common case. Fail-open:
+        # any detection/resolution error leaves _has_temporal at its
+        # local-scan value.
+        if not _has_temporal:
+            try:
+                from code_indexer.services.temporal.temporal_sister_root_detection import (
+                    detect_golden_repo_sister_root,
+                )
+                from code_indexer.services.temporal.temporal_status import (
+                    get_temporal_repo_status,
+                )
+
+                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
+                if _sister_root is not None:
+                    _sister_status = get_temporal_repo_status(
+                        _sister_root.golden_repos_dir,
+                        _sister_root.repo_alias,
+                        index_dir,
+                    )
+                    _has_temporal = _sister_status.has_data
+            except Exception:
+                # NOTE: uses logging.getLogger(...) directly, NOT the bare
+                # `logger` name -- query()'s function body later assigns a
+                # LOCAL `logger` (pre-existing, unrelated to this change),
+                # which makes `logger` a local for this whole function and
+                # would trip "referenced before assignment" here.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "cidx query temporal: sister-relocated temporal "
+                    "detection failed (isolated, non-fatal); using "
+                    "local-scan-only result",
+                    exc_info=True,
+                )
+
         if not _has_temporal:
             console.print("[yellow]⚠️  Temporal index not available[/yellow]")
             console.print()
@@ -5585,6 +5629,66 @@ def query(
 
             index_dir = config.codebase_dir / ".code-indexer" / "index"
 
+            # Bug #1482 extension: construct a TemporalShardResolver only
+            # when config.codebase_dir structurally IS a golden repo's own
+            # clone (see the existence-gate detection above for the full
+            # rationale) -- entirely inert/None for an ordinary standalone
+            # repo. Standalone CLI has no QueryTracker construct at all, so
+            # the resolver is built without one (pin() is then a
+            # documented true no-op, matching the exact same no-tracker
+            # convention get_temporal_repo_status() already uses).
+            # Attaching to vector_store_client (the "disconnected reader"
+            # lesson) is required -- a resolver threaded only into fusion's
+            # own bookkeeping would not change what _get_collection_path()
+            # resolves on the store instance that actually performs the
+            # search.
+            _cli_temporal_resolver = None
+            try:
+                from code_indexer.services.temporal.temporal_sister_root_detection import (
+                    detect_golden_repo_sister_root,
+                )
+
+                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
+                if _sister_root is not None:
+                    # Aliased import: `AliasManager` may already be a
+                    # LOCAL name earlier in this same query() function
+                    # scope (the global-repo-handling branch, conditional
+                    # on mode) -- relying on that binding unconditionally
+                    # here would be a latent NameError on other code
+                    # paths, and re-importing under the same name trips
+                    # mypy's redefinition check.
+                    from code_indexer.global_repos.alias_manager import (
+                        AliasManager as _AliasManager,
+                    )
+                    from code_indexer.services.temporal.temporal_shard_resolver import (
+                        TemporalShardResolver,
+                    )
+
+                    _cli_temporal_resolver = TemporalShardResolver(
+                        alias_manager=_AliasManager(
+                            str(_sister_root.golden_repos_dir / "aliases")
+                        ),
+                        repo_alias=_sister_root.repo_alias,
+                        sister_root=_sister_root.golden_repos_dir,
+                        legacy_index_path=index_dir,
+                    )
+                    vector_store_client._temporal_shard_resolver = (
+                        _cli_temporal_resolver
+                    )
+            except Exception:
+                # NOTE: uses logging.getLogger(...) directly -- see the
+                # matching comment on the existence-gate block above for
+                # why the bare `logger` name cannot be used here.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "cidx query temporal: sister-relocated resolver "
+                    "construction failed (isolated, non-fatal); using "
+                    "legacy-only resolution",
+                    exc_info=True,
+                )
+                _cli_temporal_resolver = None
+
             if not quiet:
                 if time_range != "all":
                     console.print(
@@ -5611,6 +5715,7 @@ def query(
                 author=author,
                 chunk_type=chunk_type,
                 temporal_embedder=temporal_embedder,
+                resolver=_cli_temporal_resolver,
             )
 
             # Story #905: Apply unified rerank funnel to temporal results.
@@ -7926,7 +8031,53 @@ def _status_impl(ctx):
 
                     temporal_collections = _get_temporal_collections(config, index_path)
 
+                    # Bug #1482 extension: the local scan above cannot see
+                    # temporal data relocated to the golden-owned sister
+                    # location (Story #1457 AC1). detect_golden_repo_sister_root()
+                    # recognizes ONLY the one genuine standalone case (an
+                    # operator running `cidx status` directly inside a
+                    # golden repo's own clone) and returns None for an
+                    # ordinary standalone repo, so this is entirely inert
+                    # for the common case. Fail-open on any error.
+                    _sister_temporal_status = None
                     if not temporal_collections:
+                        try:
+                            from .services.temporal.temporal_sister_root_detection import (
+                                detect_golden_repo_sister_root,
+                            )
+                            from .services.temporal.temporal_status import (
+                                get_temporal_repo_status,
+                            )
+
+                            _sister_root = detect_golden_repo_sister_root(
+                                config.codebase_dir
+                            )
+                            if _sister_root is not None:
+                                _sister_temporal_status = get_temporal_repo_status(
+                                    _sister_root.golden_repos_dir,
+                                    _sister_root.repo_alias,
+                                    index_path,
+                                )
+                        except Exception as e_sister:
+                            logger.warning(
+                                f"cidx status: sister-relocated temporal "
+                                f"detection failed (isolated, non-fatal): "
+                                f"{e_sister}"
+                            )
+
+                    if _sister_temporal_status and _sister_temporal_status.has_data:
+                        _sister_state = (
+                            "✅ Queryable"
+                            if _sister_temporal_status.is_queryable
+                            else "⏳ Indexed (not yet queryable)"
+                        )
+                        table.add_row(
+                            "Temporal Index",
+                            f"{_sister_state} (sister location)",
+                            "Relocated to golden-owned sister storage -- "
+                            "query via the server, not this standalone CLI",
+                        )
+                    elif not temporal_collections:
                         # No temporal collections found — show "not configured" row
                         table.add_row(
                             "Temporal Index",

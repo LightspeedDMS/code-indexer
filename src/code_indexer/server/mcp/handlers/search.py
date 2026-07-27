@@ -1376,6 +1376,11 @@ def _execute_temporal_via_live_dispatch(
         handler_deadline_monotonic=handler_deadline_monotonic,
         response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
         config_service=config_service,
+        # Bug #1482: thread the real QueryTracker into the live worker so
+        # it can construct a resolution-scope-safe TemporalShardResolver
+        # and consult the golden-owned sister location Story #1457's
+        # relocation trigger may have moved shard data to.
+        query_tracker=_get_query_tracker(),
     )
 
     status = dispatch_result.get("status")

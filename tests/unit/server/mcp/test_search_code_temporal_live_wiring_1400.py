@@ -158,5 +158,35 @@ class TestHandoffEnvelope:
         assert "error" in body
 
 
+class TestQueryTrackerThreading:
+    """Bug #1482: _execute_temporal_via_live_dispatch must fetch the
+    query tracker via the existing _get_query_tracker() helper and
+    forward it into execute_live_temporal_search so run_temporal_worker
+    can construct a resolution-scope-safe TemporalShardResolver."""
+
+    def test_query_tracker_forwarded_to_live_dispatch(self, _patch_app_module):
+        from code_indexer.server.mcp.handlers.search import search_code
+
+        sentinel_tracker = object()
+        _patch_app_module.app.state.query_tracker = sentinel_tracker
+
+        fake_result = {
+            "status": "completed",
+            "job_id": "job-tracker",
+            "results": [],
+            "shards_completed": 1,
+            "shards_total": 1,
+            "unranked": True,
+        }
+        with patch(
+            "code_indexer.server.mcp.handlers.search.execute_live_temporal_search",
+            return_value=fake_result,
+        ) as mock_dispatch:
+            search_code(_base_params(), _make_user())
+
+        _, call_kwargs = mock_dispatch.call_args
+        assert call_kwargs.get("query_tracker") is sentinel_tracker
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

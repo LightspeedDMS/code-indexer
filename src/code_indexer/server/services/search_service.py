@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, cast
 import logging
 
 from ..models.api_models import (
@@ -243,6 +243,7 @@ class SemanticSearchService:
             precomputed_query_vector=precomputed_query_vector,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
             activation_id=activation_id,
+            enable_multimodal=True,
         )
 
         return SemanticSearchResponse(
@@ -372,6 +373,7 @@ class SemanticSearchService:
         precomputed_query_vector: Optional[List[float]] = None,
         no_embedding_cache_shortcut: bool = False,
         activation_id: Optional[str] = None,
+        enable_multimodal: bool = False,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -389,6 +391,15 @@ class SemanticSearchService:
             exclude_language: Optional language to exclude (e.g. 'javascript')
             exclude_path: Optional path pattern to exclude (e.g. '*/tests/*')
             accuracy: Optional accuracy profile ('fast', 'balanced', 'high') - reserved
+            enable_multimodal: When True (Bug #1480) and a multimodal
+                collection (e.g. voyage-multimodal-3) exists on disk for this
+                repo, and no precomputed_query_vector was supplied, the
+                FilesystemVectorStore branch fans out to both the code and
+                multimodal collections via MultiIndexQueryService and merges
+                results — closing the gap where the server front door
+                (REST/MCP) never queried multimodal collections the CLI
+                already indexes. Default False so every existing caller is
+                unaffected.
 
         Returns:
             List of search results ranked by semantic similarity
@@ -504,7 +515,67 @@ class SemanticSearchService:
                     search_kwargs["precomputed_query_vector"] = precomputed_query_vector
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
-                search_results, _ = vector_store_client.search(**search_kwargs)
+
+                search_results: List[Dict[str, Any]]
+
+                # Bug #1480: the server front door never queried multimodal
+                # collections (e.g. voyage-multimodal-3) the CLI already
+                # indexes — only CLI's MultiIndexQueryService did. Reuse that
+                # SAME service (never reimplement multimodal detection/merge)
+                # when a multimodal collection genuinely exists on disk for
+                # this repo. Skipped entirely for the precomputed-vector reuse
+                # path (Story #883 Phase C / omni) — that vector lives in
+                # CODE embedding space and must never be handed to a
+                # multimodal provider expecting a different embedding space.
+                multimodal_service = None
+                if enable_multimodal and precomputed_query_vector is None:
+                    from ...services.multi_index_query_service import (
+                        MultiIndexQueryService,
+                    )
+
+                    _mm_candidate = MultiIndexQueryService(
+                        project_root=Path(repo_path),
+                        vector_store=vector_store_client,
+                        embedding_provider=embedding_service,
+                    )
+                    if _mm_candidate.has_multimodal_index():
+                        multimodal_service = _mm_candidate
+
+                if multimodal_service is not None:
+                    # Two INDEPENDENT kwargs dicts: the code-collection call
+                    # keeps the caller-supplied no_embedding_cache_shortcut
+                    # value unchanged (Story #1108 S4 behavior preserved);
+                    # the multimodal-collection call ALWAYS forces
+                    # no_embedding_cache_shortcut=True, isolating its cache
+                    # interaction from the code path regardless of the
+                    # caller's own flag (Bug #1480).
+                    code_kwargs = dict(
+                        ef=ef_value,
+                        parallel_executor=_get_query_executor(),
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    )
+                    multimodal_kwargs = dict(
+                        ef=ef_value,
+                        parallel_executor=_get_query_executor(),
+                        no_embedding_cache_shortcut=True,
+                    )
+                    search_results, _ = multimodal_service.query_with_separate_kwargs(
+                        query_text=query,
+                        limit=limit,
+                        collection_name=collection_name,
+                        filter_conditions=filter_conditions or None,
+                        code_kwargs=code_kwargs,
+                        multimodal_kwargs=multimodal_kwargs,
+                    )
+                else:
+                    # return_timing=True in search_kwargs guarantees a tuple
+                    # return at runtime; cast() resolves the static Union
+                    # ambiguity mypy cannot otherwise narrow (no behavior
+                    # change).
+                    search_results, _ = cast(
+                        Tuple[List[Dict[str, Any]], Dict[str, Any]],
+                        vector_store_client.search(**search_kwargs),
+                    )
             else:
                 # Backend: sequential execution with pre-computed embedding.
                 # Bug #1078: gate through concurrency governor to cap concurrent

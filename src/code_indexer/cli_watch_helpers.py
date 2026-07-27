@@ -17,16 +17,48 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def _any_temporal_collection_exists(index_base: Path) -> bool:
-    """Return True if any temporal collection directory exists under index_base."""
+def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> bool:
+    """Return True if any temporal collection directory exists under
+    index_base, OR (GitHub Issue #1482 extension) temporal data has
+    relocated to the golden-owned sister location (Story #1457 AC1) for
+    the ONE genuine standalone case where project_root structurally IS a
+    golden repo's own clone. An ordinary standalone repo (the common
+    case) has no such structure -- detect_golden_repo_sister_root()
+    returns None and this falls back to the pre-existing local-scan-only
+    result, unchanged.
+    """
     from .services.temporal.temporal_collection_naming import is_temporal_collection
 
-    if not index_base.exists():
-        return False
-    return any(
+    if index_base.exists() and any(
         entry.is_dir() and is_temporal_collection(entry.name)
         for entry in index_base.iterdir()
-    )
+    ):
+        return True
+
+    try:
+        from .services.temporal.temporal_sister_root_detection import (
+            detect_golden_repo_sister_root,
+        )
+
+        sister_root = detect_golden_repo_sister_root(project_root)
+        if sister_root is None:
+            return False
+
+        from .services.temporal.temporal_status import get_temporal_repo_status
+
+        status = get_temporal_repo_status(
+            sister_root.golden_repos_dir, sister_root.repo_alias, index_base
+        )
+        return status.has_data
+    except Exception:
+        logger.warning(
+            "_any_temporal_collection_exists: sister-relocated temporal "
+            "detection failed for %s (isolated, non-fatal); using "
+            "local-scan-only result",
+            project_root,
+            exc_info=True,
+        )
+        return False
 
 
 def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
@@ -55,7 +87,7 @@ def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
     return {
         "semantic": (index_base / "code-indexer-HEAD").exists(),
         "fts": (index_base / "tantivy-fts").exists(),
-        "temporal": _any_temporal_collection_exists(index_base),
+        "temporal": _any_temporal_collection_exists(index_base, project_root),
     }
 
 

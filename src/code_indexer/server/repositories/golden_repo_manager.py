@@ -4135,22 +4135,40 @@ class GoldenRepoManager:
             from code_indexer.services.temporal.temporal_collection_naming import (
                 get_temporal_collections,
             )
+            from code_indexer.services.temporal.temporal_status import (
+                get_temporal_repo_status,
+            )
 
             # Issue #1459 AC1: fixes the false-positive glob (collection_meta.json
             # alone no longer satisfies existence) for the LOCAL clone's
             # collection directories that get_temporal_collections() already
-            # returns. Scope note: this does NOT reroute through the Story
-            # #1457 TemporalShardResolver/sister-location mechanism -- that
-            # cross-cutting temporal-relocation concern is a separate AC
-            # (five OTHER call sites), not this one.
+            # returns. Kept as the FIRST check (rather than folded into
+            # get_temporal_repo_status() below) because it also covers the
+            # bare pre-Story-#1457 legacy monolith name
+            # ("code-indexer-temporal", no provider/quarter suffix), which
+            # predates the embedder-slug-based naming scheme the resolver's
+            # parser understands.
             index_dir = repo_dir / ".code-indexer" / "index"
             collections = get_temporal_collections(None, index_dir)
-            if not collections:
-                return False
-            return any(
+            if any(
                 _collection_has_real_chunk_data(coll_path)
                 for _, coll_path in collections
+            ):
+                return True
+
+            # Bug #1482: the local-clone-only check above can never see
+            # temporal shard data Story #1457's AC1 relocation trigger has
+            # moved to the golden-owned sister location (true on every
+            # local-disk/solo server, i.e. production, once relocation
+            # succeeds). Reroute through the resolver-aware
+            # get_temporal_repo_status(), which resolves BOTH the sister
+            # alias pointers AND the (provider-aware) in-repo legacy
+            # directories -- so GET /api/admin/golden-repos/{alias}/indexes
+            # correctly reports temporal.present=true for relocated data.
+            status = get_temporal_repo_status(
+                Path(self.golden_repos_dir), golden_repo.alias, index_dir
             )
+            return bool(status.has_data)
 
         elif index_type == "scip":
             # AC3: scip requires .code-indexer/scip/ directory with valid .scip.db files containing data

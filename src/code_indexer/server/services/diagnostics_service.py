@@ -1013,6 +1013,48 @@ class DiagnosticsService:
                     repos_with_issues.append(collection_issue)
                     repo_has_issues = True
 
+            # GitHub Issue #1482 extension: local-clone/general-versioned-
+            # snapshot discovery above cannot see a temporal shard
+            # relocated to the golden-owned sister location (Story #1457
+            # AC1) -- that sister root lives under a DIFFERENT namespace
+            # (.versioned/{alias}-temporal-{slug}-{quarter}/v_*/), never
+            # nested under actual_repo_dir. Reuses the SAME resolver-aware
+            # helper the repository_health_aggregator.py fix (Bug #1482
+            # extension site 2) established -- never a parallel sister
+            # scan. Entirely fail-open: any resolution error leaves this
+            # repo's local-scan-only result unchanged.
+            try:
+                from code_indexer.server.services.repository_health_aggregator import (
+                    discover_sister_temporal_collections,
+                )
+
+                sister_collections = discover_sister_temporal_collections(
+                    golden_repos_path, alias, index_base_path
+                )
+            except Exception as exc:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "_validate_hnsw_indexes: sister-relocated temporal "
+                    "discovery failed for repo %s (isolated, non-fatal): %s",
+                    repo_name,
+                    exc,
+                )
+                sister_collections = []
+
+            for collection_name, _index_type, hnsw_file in sister_collections:
+                if collection_name in index_types_found:
+                    continue
+                collections_found += 1
+                index_types_found.add(collection_name)
+
+                collection_issue = self._check_collection_health(
+                    hnsw_file.parent, repo_name, collection_name
+                )
+                if collection_issue:
+                    repos_with_issues.append(collection_issue)
+                    repo_has_issues = True
+
             # If repo had no collections, that's an issue
             if collections_found == 0:
                 repos_with_issues.append(
