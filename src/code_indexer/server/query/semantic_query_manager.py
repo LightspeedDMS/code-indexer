@@ -1381,6 +1381,80 @@ class SemanticQueryManager:
             )
             return False
 
+    def _merge_multimodal_supplement(
+        self,
+        repo_path: str,
+        query_text: str,
+        limit: int,
+        results: List[QueryResult],
+        repository_alias: str,
+        min_score: Optional[float],
+        file_extensions: Optional[List[str]],
+        language: Optional[str],
+        exclude_language: Optional[str],
+        path_filter: Optional[str],
+        exclude_path: Optional[str],
+        accuracy: Optional[str],
+        activation_id: Optional[str],
+    ) -> List[QueryResult]:
+        """Bug #1480 follow-up: fold in multimodal-collection hits for the
+        parallel/failover strategies, which bypass search_repository_path's own
+        enable_multimodal fan-out (primary_only already gets multimodal via
+        search_repository_path directly, unchanged by this method).
+
+        Reuses SemanticSearchService.query_multimodal_only() (which itself
+        reuses MultiIndexQueryService's existing multimodal detection/query
+        machinery) -- never re-implements multimodal detection or merge logic.
+        Deduplicates against the already-fused code results by
+        (file_path, line_number)/(file_path, line_start), applies the same
+        min_score/file_extensions filters as the primary path, and re-sorts
+        the combined list before truncating to limit.
+        """
+        from ..services.search_service import SemanticSearchService
+
+        search_service = SemanticSearchService()
+        multimodal_items = search_service.query_multimodal_only(
+            repo_path=repo_path,
+            query=query_text,
+            limit=limit,
+            path_filter=path_filter,
+            language=language,
+            exclude_language=exclude_language,
+            exclude_path=exclude_path,
+            accuracy=accuracy,
+            activation_id=activation_id,
+        )
+        if not multimodal_items:
+            return results
+
+        existing_keys = {(r.file_path, r.line_number) for r in results}
+        merged = list(results)
+        for item in multimodal_items:
+            if min_score is not None and item.score < min_score:
+                continue
+            if file_extensions is not None:
+                if Path(item.file_path).suffix.lower() not in [
+                    ext.lower() for ext in file_extensions
+                ]:
+                    continue
+            key = (item.file_path, item.line_start)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            merged.append(
+                QueryResult(
+                    file_path=item.file_path,
+                    line_number=item.line_start,
+                    code_snippet=item.content,
+                    similarity_score=item.score,
+                    repository_alias=repository_alias,
+                    source_repo=None,
+                    source_provider="multimodal",
+                )
+            )
+        merged.sort(key=lambda r: r.similarity_score, reverse=True)
+        return merged[:limit]
+
     def _search_single_repository(
         self,
         repo_path: str,
@@ -1634,6 +1708,27 @@ class SemanticQueryManager:
                 all_failover = [
                     r for r in all_failover if r.similarity_score >= min_score
                 ]
+
+            # Bug #1480 follow-up: fold in multimodal results for the failover
+            # strategy (bypassed by search_repository_path's own multimodal
+            # fan-out, which only fires for primary_only). Semantic-only --
+            # multimodal is a vector concept, never engaged for fts/hybrid.
+            if search_mode == "semantic":
+                all_failover = self._merge_multimodal_supplement(
+                    repo_path,
+                    query_text,
+                    limit,
+                    all_failover,
+                    repository_alias,
+                    min_score,
+                    file_extensions,
+                    language,
+                    exclude_language,
+                    path_filter,
+                    exclude_path,
+                    accuracy,
+                    activation_id,
+                )
 
             return all_failover[:limit]
 
@@ -1924,6 +2019,27 @@ class SemanticQueryManager:
             if not hasattr(self, "_last_query_degraded_providers"):
                 self._last_query_degraded_providers = []
             self._last_query_degraded_providers = _degraded_in_query
+
+            # Bug #1480 follow-up: fold in multimodal results for the parallel
+            # strategy (bypassed by search_repository_path's own multimodal
+            # fan-out, which only fires for primary_only). Semantic-only --
+            # multimodal is a vector concept, never engaged for fts/hybrid.
+            if search_mode == "semantic":
+                all_results = self._merge_multimodal_supplement(
+                    repo_path,
+                    query_text,
+                    limit,
+                    all_results,
+                    repository_alias,
+                    min_score,
+                    file_extensions,
+                    language,
+                    exclude_language,
+                    path_filter,
+                    exclude_path,
+                    accuracy,
+                    activation_id,
+                )
 
             return all_results[:limit]
 

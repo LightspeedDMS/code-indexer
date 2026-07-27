@@ -628,33 +628,7 @@ class SemanticSearchService:
 
             # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
-            # Format results for response
-            formatted_results = []
-            for result in search_results:
-                if not isinstance(result, dict):
-                    continue  # Skip malformed results
-                payload = result.get("payload", {})
-                score = result.get("score", 0.0)
-
-                # Extract source code if requested
-                source_content = None
-                if include_source:
-                    if "content" in payload:
-                        source_content = payload["content"]
-
-                search_item = SearchResultItem(
-                    file_path=payload.get("path", ""),
-                    line_start=payload.get("line_start", 0),
-                    line_end=payload.get("line_end", 0),
-                    score=score,
-                    content=source_content or payload.get("snippet", ""),
-                    language=self._detect_language_from_path(payload.get("path", "")),
-                    file_last_modified=payload.get("file_last_modified"),
-                    indexed_timestamp=payload.get("indexed_timestamp"),
-                )
-                formatted_results.append(search_item)
-
-            return formatted_results
+            return self._format_search_results(search_results, include_source)
 
         except ValueError as e:
             # Graceful handling for repos with missing/incomplete index configuration
@@ -676,6 +650,162 @@ class SemanticSearchService:
                 )
             )
             raise RuntimeError(f"Semantic search failed: {e}")
+
+    def _format_search_results(
+        self, search_results: List[Dict[str, Any]], include_source: bool
+    ) -> List[SearchResultItem]:
+        """Format raw vector-store search result dicts into SearchResultItem list.
+
+        Extracted from _perform_semantic_search's inline "Format results for
+        response" block (Bug #1480 follow-up) so query_multimodal_only can
+        reuse identical formatting logic without duplicating it.
+        """
+        formatted_results = []
+        for result in search_results:
+            if not isinstance(result, dict):
+                continue  # Skip malformed results
+            payload = result.get("payload", {})
+            score = result.get("score", 0.0)
+
+            # Extract source code if requested
+            source_content = None
+            if include_source:
+                if "content" in payload:
+                    source_content = payload["content"]
+
+            search_item = SearchResultItem(
+                file_path=payload.get("path", ""),
+                line_start=payload.get("line_start", 0),
+                line_end=payload.get("line_end", 0),
+                score=score,
+                content=source_content or payload.get("snippet", ""),
+                language=self._detect_language_from_path(payload.get("path", "")),
+                file_last_modified=payload.get("file_last_modified"),
+                indexed_timestamp=payload.get("indexed_timestamp"),
+            )
+            formatted_results.append(search_item)
+
+        return formatted_results
+
+    def query_multimodal_only(
+        self,
+        repo_path: str,
+        query: str,
+        limit: int,
+        path_filter: Optional[str] = None,
+        language: Optional[str] = None,
+        exclude_language: Optional[str] = None,
+        exclude_path: Optional[str] = None,
+        accuracy: Optional[str] = None,
+        activation_id: Optional[str] = None,
+    ) -> List[SearchResultItem]:
+        """Query ONLY the multimodal collection(s) for a repo (Bug #1480 follow-up).
+
+        The parallel/failover query strategies dispatch per-provider via
+        SemanticSearchService.search_repository_path_with_provider(), which
+        never fans out to multimodal collections (only search_repository_path's
+        enable_multimodal=True primary_only path does). This method lets
+        SemanticQueryManager fold in a SINGLE multimodal fan-out for those two
+        strategies without re-querying the code collection.
+
+        Multimodal provider selection is entirely internal to
+        MultiIndexQueryService/_get_multimodal_provider, keyed off which
+        multimodal collection exists on disk -- no provider_name_override is
+        needed or accepted here.
+
+        Returns an empty list when the vector store is not a
+        FilesystemVectorStore, or when no multimodal collection exists for
+        this repo.
+        """
+        try:
+            config = _load_repo_config(repo_path)
+
+            from ..app import _server_hnsw_cache
+
+            resolved_hnsw_cache: Any = _server_hnsw_cache
+
+            from ..services.memory_governor import get_memory_governor
+
+            backend = BackendFactory.create(
+                config=config,
+                project_root=Path(repo_path),
+                hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
+                activation_id=activation_id,
+            )
+            vector_store_client = backend.get_vector_store_client()
+
+            from ...storage.filesystem_vector_store import FilesystemVectorStore
+
+            if not isinstance(vector_store_client, FilesystemVectorStore):
+                return []
+
+            embedding_service = EmbeddingProviderFactory.create(
+                config=config,
+                http_client_factory=_get_http_client_factory(),
+            )
+
+            from ...services.multi_index_query_service import (
+                MultiIndexQueryService,
+            )
+
+            mm = MultiIndexQueryService(
+                project_root=Path(repo_path),
+                vector_store=vector_store_client,
+                embedding_provider=embedding_service,
+            )
+            if not mm.has_multimodal_index():
+                return []
+
+            filter_conditions = self._build_filter_conditions(
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+            )
+
+            accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
+            ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+
+            # collection_name is only used by MultiIndexQueryService's legacy
+            # multimodal_index/ subdirectory fallback path -- the real
+            # collection(s) queried here are resolved internally, keyed off
+            # MULTIMODAL_MODELS, independent of this value.
+            collection_name = vector_store_client.resolve_collection_name(
+                config, embedding_service
+            )
+
+            search_results, _ = mm.query_multimodal_index_only(
+                query_text=query,
+                limit=limit,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions or None,
+                ef=ef_value,
+                parallel_executor=_get_query_executor(),
+                no_embedding_cache_shortcut=True,
+            )
+
+            return self._format_search_results(search_results, include_source=True)
+
+        except ValueError as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-171",
+                    f"Skipping multimodal-only query for repo {repo_path}: "
+                    "no valid index configured",
+                    error=str(e),
+                )
+            )
+            return []
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-170",
+                    f"Multimodal-only search failed for repo {repo_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            raise RuntimeError(f"Multimodal-only search failed: {e}")
 
     def _detect_language_from_path(self, file_path: str) -> Optional[str]:
         """

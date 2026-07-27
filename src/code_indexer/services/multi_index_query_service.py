@@ -378,6 +378,39 @@ class MultiIndexQueryService:
             multimodal_kwargs=multimodal_kwargs or {},
         )
 
+    def query_multimodal_index_only(
+        self,
+        query_text: str,
+        limit: int,
+        collection_name: str,
+        filter_conditions: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Query ONLY the multimodal collection(s), skipping the code collection.
+
+        Bug #1480 follow-up gap: the parallel/failover query strategies already
+        fetch code results via their own per-provider dispatch (SemanticQueryManager
+        calls _search_with_provider once per named provider); this lets them fold
+        in a SINGLE multimodal fan-out without re-querying the code collection.
+        Reuses _query_multimodal_index() unchanged -- no detection/merge logic is
+        reimplemented here.
+
+        Args:
+            query_text: Query string
+            limit: Maximum number of results
+            collection_name: Collection name (used for legacy subdirectory
+                fallback path only)
+            filter_conditions: Optional filter conditions
+            **kwargs: Additional query parameters forwarded to the multimodal
+                collection search(es)
+
+        Returns:
+            Tuple of (results, timing_dict) from the multimodal collection(s) only.
+        """
+        return self._query_multimodal_index(
+            query_text, limit, collection_name, filter_conditions, **kwargs
+        )
+
     def _execute_parallel_query(
         self,
         query_text: str,
