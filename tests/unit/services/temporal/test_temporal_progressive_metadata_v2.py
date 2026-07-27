@@ -12,6 +12,7 @@ from pathlib import Path
 from src.code_indexer.services.temporal.temporal_progressive_metadata import (
     FORMAT_VERSION,
     TemporalProgressiveMetadata,
+    TemporalProgressMetadataCorruptError,
 )
 
 
@@ -275,6 +276,76 @@ class TestTemporalProgressiveMetadataV2(unittest.TestCase):
 
         state = self.metadata.get_state()
         self.assertEqual(state, "idle")
+
+    # ------------------------------------------------------------------
+    # Test 19 (Bug #1461 sub-part 7b): strict mode raises on corrupt JSON
+    # ------------------------------------------------------------------
+    def test_strict_load_raises_on_corrupt_json(self):
+        """strict=True on a genuinely corrupted file raises
+        TemporalProgressMetadataCorruptError instead of silently
+        returning defaults -- corruption must not masquerade as "nothing
+        completed yet" for write/publish/reconcile-classification
+        callers (that silent default would trigger a destructive full
+        re-embed of months of history)."""
+        with open(self.metadata.progress_path, "w") as f:
+            f.write("{invalid json!!!}")
+
+        with self.assertRaises(TemporalProgressMetadataCorruptError):
+            self.metadata.load_completed(strict=True)
+
+        with self.assertRaises(TemporalProgressMetadataCorruptError):
+            self.metadata.mark_completed(["c1"], strict=True)
+
+    # ------------------------------------------------------------------
+    # Test 20: lenient mode (default) unaffected by strict addition
+    # ------------------------------------------------------------------
+    def test_lenient_load_unaffected_by_strict_addition(self):
+        """The SAME corrupted file under the default lenient mode still
+        returns defaults and logs a WARNING -- never raises. Proves the
+        read-only/status path is untouched by the new strict mode."""
+        with open(self.metadata.progress_path, "w") as f:
+            f.write("{invalid json!!!}")
+
+        completed = self.metadata.load_completed()  # strict defaults False
+        self.assertEqual(completed, set())
+        self.assertEqual(self.metadata.get_state(), "idle")
+
+    # ------------------------------------------------------------------
+    # Test 21: absent file is NOT corruption, even in strict mode
+    # ------------------------------------------------------------------
+    def test_strict_load_absent_file_is_not_corruption(self):
+        """A genuinely ABSENT file (no prior write at all) is NOT
+        corruption in strict mode either -- a brand-new shard/version
+        legitimately has no progress file yet."""
+        self.assertFalse(self.metadata.progress_path.exists())
+
+        completed = self.metadata.load_completed(strict=True)
+        self.assertEqual(completed, set())
+
+        # mark_completed(strict=True) on a fresh file must succeed, not raise.
+        self.metadata.mark_completed(["c1"], strict=True)
+        self.assertIn("c1", self.metadata.load_completed(strict=True))
+
+    # ------------------------------------------------------------------
+    # Test 22: existing-but-unreadable file raises in strict mode
+    # ------------------------------------------------------------------
+    def test_strict_load_raises_on_unreadable_existing_file(self):
+        """An existing-but-unreadable file (permission denied) is an
+        operational problem, not "no data yet" -- strict mode raises
+        (mirrors the chunk_store_has_real_data on_error="raise"
+        precedent for the identical class of decision)."""
+        import os
+
+        if os.name != "posix" or os.geteuid() == 0:
+            self.skipTest("permission-based test requires a non-root POSIX user")
+
+        self.metadata.mark_completed(["c1"])
+        os.chmod(self.metadata.progress_path, 0o000)
+        try:
+            with self.assertRaises(TemporalProgressMetadataCorruptError):
+                self.metadata.load_completed(strict=True)
+        finally:
+            os.chmod(self.metadata.progress_path, 0o644)
 
 
 if __name__ == "__main__":

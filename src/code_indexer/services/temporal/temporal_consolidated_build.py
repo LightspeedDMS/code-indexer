@@ -340,7 +340,13 @@ def build_fresh_consolidated_temporal_version(
     # (points present, no completion marker) on its very next pass.
     commit_hashes = _extract_commit_hashes(all_records)
     if commit_hashes:
-        TemporalProgressiveMetadata(version_dir).mark_completed(commit_hashes)
+        # Bug #1461 sub-part 7b: strict=True -- a corrupt/malformed
+        # temporal_progress.json here must raise loudly, never be
+        # silently treated as empty (which would discard completion
+        # markers and force a future destructive re-embed).
+        TemporalProgressiveMetadata(version_dir).mark_completed(
+            commit_hashes, strict=True
+        )
 
     # Discriminator commit is the MANDATORY, TRULY FINAL step -- only
     # after chunks.db, its HNSW index, verification, AND progress
@@ -444,7 +450,16 @@ def copy_and_extend_consolidated_temporal_version(
         # the NEW delta commits need marking here.
         commit_hashes = _extract_commit_hashes(delta_batch)
         if commit_hashes:
-            TemporalProgressiveMetadata(new_version_path).mark_completed(commit_hashes)
+            # Bug #1461 sub-part 7b: strict=True -- the inherited (reflink-
+            # copied) temporal_progress.json may already be corrupt from
+            # before this refresh ran. A corrupt file here must raise
+            # loudly, never be silently treated as empty (which would
+            # publish a NEW progress file containing ONLY this refresh's
+            # delta commits, destroying every historical completion
+            # marker).
+            TemporalProgressiveMetadata(new_version_path).mark_completed(
+                commit_hashes, strict=True
+            )
 
     # Story #1457 CRITICAL #4 remaining gap: verify-then-return
     # UNCONDITIONALLY -- read back and field-for-field confirm the FULL

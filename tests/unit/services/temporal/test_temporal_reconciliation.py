@@ -13,9 +13,12 @@ is exercised faithfully.
 
 from datetime import datetime, timezone
 
+import pytest
+
 from code_indexer.services.temporal.models import CommitInfo
 from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
+    TemporalProgressMetadataCorruptError,
 )
 from code_indexer.services.temporal.temporal_reconciliation import (
     reconcile_temporal_index,
@@ -255,3 +258,49 @@ class TestShardAwareGrouping:
         missing = reconcile_temporal_index(vector_store, all_commits, MODEL_NAME)
 
         assert {c.hash for c in missing} == {"q1_missing", "q2_missing"}
+
+
+class TestCorruptProgressMetadataAborts:
+    """Bug #1461 sub-part 7b: a corrupt temporal_progress.json must abort
+    reconciliation loudly rather than silently returning an empty
+    completed-commits set -- the lenient default would misclassify EVERY
+    already-indexed commit in the shard as PARTIAL (points present, no
+    completion marker) and delete its points, forcing a destructive full
+    re-embed of the whole shard's history triggered by plain file
+    corruption (the exact Bug #1390/#1406 incident class)."""
+
+    def test_reconcile_raises_on_corrupt_progress_metadata(self, tmp_path):
+        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "good111")
+
+        shard_dir = vector_store.base_path / SHARD_2024Q1
+        (shard_dir / "temporal_progress.json").write_text("{not valid json")
+
+        with pytest.raises(TemporalProgressMetadataCorruptError):
+            reconcile_temporal_index(
+                vector_store, [_commit("good111", _TS_Q1)], MODEL_NAME
+            )
+
+    def test_reconcile_does_not_delete_points_on_corrupt_metadata_abort(self, tmp_path):
+        """The aborted attempt must not have deleted the good commit's
+        points as a side effect of raising."""
+        from code_indexer.storage.id_index_manager import IDIndexManager
+
+        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        _write_complete_commit(
+            vector_store, SHARD_2024Q1, "proj", "good111", num_chunks=2
+        )
+
+        shard_dir = vector_store.base_path / SHARD_2024Q1
+        (shard_dir / "temporal_progress.json").write_text("{not valid json")
+
+        with pytest.raises(TemporalProgressMetadataCorruptError):
+            reconcile_temporal_index(
+                vector_store, [_commit("good111", _TS_Q1)], MODEL_NAME
+            )
+
+        remaining = IDIndexManager().rebuild_from_vectors(shard_dir)
+        assert set(remaining.keys()) == {
+            "proj:commit:good111:0",
+            "proj:commit:good111:1",
+        }
