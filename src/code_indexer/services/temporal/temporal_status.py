@@ -44,6 +44,7 @@ it IS logged so the condition is visible to operators.
 from __future__ import annotations
 
 import glob
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -231,3 +232,121 @@ def get_temporal_repo_status(
         resolved_path=chosen.path if chosen else None,
         resolved_source=chosen.source if chosen else None,
     )
+
+
+def _read_shard_completed_commit_hashes(progress_path: Path) -> Optional[list]:
+    """Read one resolved shard's temporal_progress.json completed_commits
+    list (Bug #1461-6 review support helper for
+    get_temporal_repo_max_commits()).
+
+    Returns None if the file is missing, unreadable, not valid JSON, not a
+    JSON object, or has a completed_commits field that is present but not
+    a list -- any of which means this shard's contribution to a repo-wide
+    total cannot be reliably determined. A genuinely present, empty list
+    is a valid (if unusual) result and is returned as-is, never as None.
+    """
+    if not progress_path.exists():
+        return None
+    try:
+        data = json.loads(progress_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.debug(
+            "_read_shard_completed_commit_hashes: failed reading %s: %s: %s",
+            progress_path,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.debug(
+            "_read_shard_completed_commit_hashes: %s did not contain a "
+            "JSON object (got %s)",
+            progress_path,
+            type(data).__name__,
+        )
+        return None
+    shard_commits = data.get("completed_commits")
+    if not isinstance(shard_commits, list):
+        logger.debug(
+            "_read_shard_completed_commit_hashes: %s has a "
+            "completed_commits field that is not a list (got %s)",
+            progress_path,
+            type(shard_commits).__name__,
+        )
+        return None
+    return shard_commits
+
+
+def get_temporal_repo_max_commits(
+    golden_repos_dir: Path,
+    repo_alias: str,
+    legacy_index_path: Path,
+) -> Optional[int]:
+    """Bug #1461-6 review: repo-wide max_commits fallback, unioned across
+    EVERY resolved quarter shard of EVERY discoverable embedder -- never
+    just the single "best" shard get_temporal_repo_status() picks.
+
+    The legacy temporal_meta.json.total_commits field this fallback
+    replaces was a REPO-WIDE total. Reading completed_commits from only
+    one quarter shard undercounts any repo with more than one quarter --
+    setting --max-commits LOWER than the true repo-wide total, truncating
+    historical coverage. That is worse than omitting the bound entirely
+    (the by-design-cheap unbounded full walk), so this function fails
+    open to None whenever the total cannot be reliably determined, rather
+    than silently undercounting.
+
+    Returns:
+        The repo-wide completed-commit count (union of hashes across
+        every resolved quarter -- the same hash appearing in more than
+        one quarter/embedder is counted once), or None if no temporal
+        data was found, any resolved shard's progress data could not be
+        reliably read (see _read_shard_completed_commit_hashes), or the
+        aggregate union is empty. An all-empty aggregate is treated the
+        same as "unknown": emitting --max-commits 0 would cap this run to
+        zero new commits, silently defeating the indexing operation --
+        never a safe value to emit automatically.
+    """
+    legacy_index_path = Path(legacy_index_path)
+    golden_repos_dir = Path(golden_repos_dir)
+    aliases_dir = golden_repos_dir / "aliases"
+
+    embedder_slugs = _enumerate_candidate_embedder_slugs(
+        legacy_index_path, aliases_dir, repo_alias
+    )
+    if not embedder_slugs:
+        return None
+
+    resolver = TemporalShardResolver(
+        alias_manager=AliasManager(str(aliases_dir)),
+        repo_alias=repo_alias,
+        sister_root=golden_repos_dir,
+        legacy_index_path=legacy_index_path,
+    )
+
+    commit_hashes: Set[str] = set()
+    found_any_shard = False
+
+    for embedder_slug in sorted(embedder_slugs):
+        for quarter in resolver.catalog(embedder_slug):
+            resolved = resolver.resolve(embedder_slug, quarter)
+            if resolved is None:
+                continue
+            found_any_shard = True
+
+            progress_path = resolved.path / "temporal_progress.json"
+            shard_commits = _read_shard_completed_commit_hashes(progress_path)
+            if shard_commits is None:
+                logger.debug(
+                    "get_temporal_repo_max_commits: %s has real data but "
+                    "its temporal_progress.json could not be reliably "
+                    "read -- repo-wide total for %s is unknowable, "
+                    "omitting --max-commits rather than under-capping",
+                    resolved.path,
+                    repo_alias,
+                )
+                return None
+            commit_hashes.update(shard_commits)
+
+    if not found_any_shard or not commit_hashes:
+        return None
+    return len(commit_hashes)

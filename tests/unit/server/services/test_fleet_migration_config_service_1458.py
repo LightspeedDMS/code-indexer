@@ -118,4 +118,8 @@ class TestConfigServiceSqliteRoundTrip:
         assert isinstance(cfg, FleetMigrationConfig)
         assert bool(cfg.enabled) is True
         assert int(cfg.tick_interval_minutes) == 5
-        assert asdict(cfg) == {"enabled": True, "tick_interval_minutes": 5}
+        assert asdict(cfg) == {
+            "enabled": True,
+            "tick_interval_minutes": 5,
+            "canary_gate_enabled": False,
+        }

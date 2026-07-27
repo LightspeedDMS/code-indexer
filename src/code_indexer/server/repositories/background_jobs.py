@@ -137,6 +137,19 @@ _MAX_OP_TYPE_SCAN = 10000
 # Cancellation checks (_check_db_cancellation) also fire on every tick.
 PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 
+# Bug #1478 part b: minimum consecutive-call progress delta that bypasses the
+# debounce above and persists immediately. A fast burst of coarse jumps
+# (e.g. 10->20->30->40) followed by a stall used to leave the shared DB row
+# stuck at an earlier value in the burst -- only the first tick after the
+# debounce window truly persisted -- while the in-memory job object (visible
+# only to the node actually running the job) already held the true, later
+# value. Under HAProxy round-robin, a poll routed to a different node then
+# read the stale DB row, producing non-monotonic progress oscillation across
+# repeated polls of the same job. A milestone-sized jump like this is rare
+# and cheap to persist immediately; ordinary fine-grained ticks (delta < 10)
+# are unaffected and continue to respect PROGRESS_DEBOUNCE_INTERVAL.
+PROGRESS_COARSE_JUMP_THRESHOLD: int = 10
+
 # Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
 # Prevents unbounded DB fetches caused by large or uncapped page_size values.
 # The dashboard and API consumers use at most 50 rows per page in practice.
@@ -1454,6 +1467,17 @@ class BackgroundJobManager:
                 # _last_persist_time is a single-element list used as a mutable
                 # closure cell (Python closures cannot rebind bare names).
                 _last_persist_time: list = [0.0]
+                # Bug #1478 part b: tracks the progress value seen on the
+                # PREVIOUS progress_callback invocation (not the value last
+                # actually persisted to the DB). The baseline is deliberately
+                # "previous call" rather than "cumulative since last actual
+                # persist" so that a long run of many fine (delta < 1
+                # threshold) ticks is never affected by the bypass below,
+                # regardless of how much total distance the progress value
+                # travels over that run. Initialized to 10, matching the
+                # job.progress = 10 already persisted synchronously at the
+                # RUNNING transition above.
+                _last_seen_progress: list = [10]
 
                 def progress_callback(
                     progress: int,
@@ -1474,9 +1498,24 @@ class BackgroundJobManager:
                     # get_job() is always current even when the persist is skipped.
                     # Story #267 Component 3-4: Persist outside lock.
                     now_ts = time.monotonic()
-                    if now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL:
+                    # Bug #1478 part b: a coarse jump (delta >= threshold since
+                    # the immediately preceding call) bypasses the debounce and
+                    # persists immediately -- this closes the cross-node
+                    # non-monotonic progress oscillation where a fast burst of
+                    # coarse milestones (e.g. 10->20->30->40) followed by a
+                    # long stall left the shared DB row stuck at an earlier
+                    # value in the burst until the next tick, which may never
+                    # come in time (or at all) if the job stalls.
+                    is_coarse_jump = (
+                        progress - _last_seen_progress[0]
+                        >= PROGRESS_COARSE_JUMP_THRESHOLD
+                    )
+                    if is_coarse_jump or (
+                        now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL
+                    ):
                         self._persist_jobs(job_id=job_id)
                         _last_persist_time[0] = now_ts
+                    _last_seen_progress[0] = progress
                     # Bug #584: Check DB for cross-node cancellation on every tick
                     # (cheap read; must not be gated by the debounce window).
                     self._check_db_cancellation(job_id)

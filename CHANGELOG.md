@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.81.0] - 2026-07-27
+
+### Fixed
+
+- **Story #1461 (Epic #1454 salvage items)**: closed 10 gaps a dual-review found in Epic #1454. Highlights: temporal `enable_temporal` fleet reconciliation is now sister-location-aware (CRITICAL -- previously a repo whose temporal data relocated to the sister location was seen as "gone" and got `enable_temporal` flipped off fleet-wide); strict parse+schema validation of `temporal_progress.json` before any publish/`mark_completed` (HIGH -- a corrupt progress file previously cascaded into stray-point deletion + full re-embed); the HNSW orphan-repair sweep now covers the relocated temporal sister-location with an immutable-safe rebuild-and-swap; activated-repo temporal queries select the embedder from the golden worktree's current config (not the stale activated clone); composite-repo temporal queries are explicitly rejected instead of silently dropping the time filter; sister-location publication is gated on fleet reader-capability; an opt-in first-repo migration canary gate; repo-wide `max_commits` fallback after relocation; and HNSW rebuild no longer eagerly decompresses text columns it does not use.
+- **#1478**: fixed non-monotonic (40<->10) job-progress reporting on the cluster -- coarse progress milestones now bypass the persist debounce so cross-node polls stay consistent (the activation stall itself was a since-fixed NFS-mount wedge, not a code defect).
+- **#1475**: closed as an accepted, documented design residual (in-process `QueryTracker` refcount is deliberately not cross-node, per Story #1457 AC14's reviewed tradeoff).
+
 ## [11.80.0] - 2026-07-26
 
 ### Added

@@ -100,9 +100,16 @@ class _FakeGoldenRepoManager:
 
 
 class _RecordingConfigService:
-    def __init__(self, *, enabled: bool = True, tick_interval_minutes: int = 30):
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        tick_interval_minutes: int = 30,
+        canary_gate_enabled: bool = False,
+    ):
         self.enabled = enabled
         self.tick_interval_minutes = tick_interval_minutes
+        self.canary_gate_enabled = canary_gate_enabled
 
     def get_config(self):
         cfg = self

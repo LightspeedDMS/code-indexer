@@ -66,6 +66,7 @@ from code_indexer.server.services.fleet_migration.quarantine import (
     classify_failure_cause,
     compute_repo_state_signature,
     count_quarantined,
+    get_failure_state,
     is_quarantined,
     probe_quarantine_backend_health,
     record_migration_failure,
@@ -86,6 +87,23 @@ _TICK_SECONDS = 60
 _DISABLED_POLL_SECONDS = 60
 
 _DEFAULT_TICK_INTERVAL_MINUTES = 30
+
+#: Story #1461 salvage item #8: sentinel alias used SOLELY to persist the
+#: proactive cross-repo canary-pending marker via the SAME
+#: fleet_migration_quarantine_state backend quarantine.py's own
+#: record_migration_failure()/get_failure_state()/reset_migration_failure()
+#: already read/write -- no new storage layer. Mirrors quarantine.py's own
+#: `_HEALTH_PROBE_ALIAS` convention: a fixed string no REAL golden repo
+#: alias will ever collide with.
+_CANARY_MARKER_ALIAS = "__fleet_migration_canary_marker__"
+
+#: The `failure_cause` value stored alongside the canary marker -- reuses
+#: the existing (golden_alias, state_signature, failure_cause) backend
+#: shape without repurposing either of the two REAL failure-cause values
+#: (DISK_HEADROOM_FAILURE_CAUSE/GENERIC_FAILURE_CAUSE) quarantine.py
+#: defines for genuine migration failures. This marker represents
+#: "waiting for admin confirmation", never an actual failure.
+_CANARY_PENDING_FAILURE_CAUSE = "canary_pending"
 
 #: Codex round-6 MEDIUM finding: bounded join wait in stop(). A real
 #: repro confirmed the worker thread can still be alive after this join
@@ -183,8 +201,17 @@ class FleetMigrationScheduler:
     # Manual trigger / job submission
     # ------------------------------------------------------------------
 
-    def trigger_now(self) -> Optional[str]:
+    def trigger_now(self, *, confirm_canary: bool = False) -> Optional[str]:
         """Submit one per-repo migration job immediately.
+
+        Args:
+            confirm_canary: Story #1461 salvage item #8 -- when True (and
+                only after the kill-switch check below passes), durably
+                clears the canary-pending marker (via `confirm_canary()`)
+                BEFORE submitting the job, so this same call is free to
+                migrate a second repo even while the proactive cross-repo
+                canary gate is enabled. Defaults to False, so every
+                pre-existing caller of `trigger_now()` is byte-identical.
 
         Returns:
             job_id, or None when another migration is already in flight
@@ -204,6 +231,8 @@ class FleetMigrationScheduler:
                 "fleet_migration_config.enabled is False"
             )
             return None
+        if confirm_canary:
+            self.confirm_canary()
         try:
             job_id: str = self._background_job_manager.submit_job(
                 self.OPERATION_TYPE,
@@ -305,10 +334,51 @@ class FleetMigrationScheduler:
             )
             return {"status": "disabled"}
 
+        # Story #1461 salvage item #8: the proactive cross-repo canary
+        # gate. Unlike the REACTIVE consecutive-failure quarantine
+        # breaker below (which only reacts AFTER the SAME repo fails
+        # repeatedly), this PROACTIVELY holds the entire fleet-wide sweep
+        # after the very first repo of a fresh sweep migrates, pending an
+        # explicit admin confirmation -- so a systemic converter defect
+        # cannot silently touch a second repo before anything notices.
+        canary_gate_enabled = self._is_canary_gate_enabled_now()
+        if canary_gate_enabled:
+            try:
+                pending_marker = self._get_pending_canary_marker()
+            except QuarantineStateUnavailableError as exc:
+                logger.error(
+                    "FleetMigrationScheduler: canary-gate marker state is "
+                    "UNAVAILABLE (backend read failed) -- aborting this "
+                    "scheduling tick WITHOUT attempting any migration: %s",
+                    exc,
+                )
+                return {
+                    "status": "quarantine_state_unavailable",
+                    "detail": str(exc),
+                }
+            if pending_marker is not None:
+                logger.info(
+                    "FleetMigrationScheduler: canary gate is enabled and a "
+                    "migration is pending admin confirmation for repo "
+                    "'%s' -- holding the fleet-wide sweep until "
+                    "confirm_canary() is called",
+                    pending_marker.get("state_signature"),
+                )
+                return {
+                    "status": "canary_pending",
+                    "golden_alias": pending_marker.get("state_signature"),
+                }
+
+        # Story #1461: tracks whether any candidate earlier in THIS loop
+        # was already migrated -- used below to identify the canary
+        # candidate (the first repo actually migrated in a fresh sweep,
+        # never a repo that was merely skipped for already being done).
+        any_repo_migrated_before_this_one = False
         for candidate in enumerate_fleet_migration_candidates(
             self._golden_repo_manager
         ):
             if is_repo_already_migrated(candidate):
+                any_repo_migrated_before_this_one = True
                 continue
 
             # Issue #1477: a repo that has reached the consecutive-failure
@@ -409,6 +479,13 @@ class FleetMigrationScheduler:
             # earlier generation.
             invalidate_post_consolidation_snapshot_marker(candidate.index_path)
 
+            # Story #1461: the canary candidate is the FIRST repo actually
+            # attempted for migration in this fresh sweep (never a repo
+            # merely skipped above for already being done).
+            is_canary_candidate = canary_gate_enabled and not (
+                any_repo_migrated_before_this_one
+            )
+
             try:
                 result = run_fleet_migration_for_repo(
                     refresh_scheduler=self._refresh_scheduler,
@@ -464,6 +541,38 @@ class FleetMigrationScheduler:
                         candidate.golden_alias,
                         reset_exc,
                     )
+
+                if is_canary_candidate:
+                    # Story #1461: this was the FIRST repo migrated in a
+                    # fresh sweep with the canary gate enabled -- durably
+                    # record the pending-confirmation marker so every
+                    # subsequent tick holds the fleet-wide sweep until an
+                    # admin explicitly confirms. A write failure here must
+                    # be reported distinctly and immediately -- never
+                    # fall through to the normal "completed" return below,
+                    # since the NEXT tick's pending-check would then have
+                    # no marker to see, silently defeating the gate for
+                    # exactly the case it exists to guard.
+                    try:
+                        self._record_canary_pending(candidate.golden_alias)
+                    except QuarantineStateUnavailableError as canary_exc:
+                        logger.error(
+                            "FleetMigrationScheduler: repo '%s' migration "
+                            "completed successfully as this sweep's "
+                            "canary, but recording the canary-pending "
+                            "marker FAILED (%s) -- the fleet-wide gate "
+                            "cannot be guaranteed on the next tick; "
+                            "aborting rather than silently reporting a "
+                            "plain 'completed' the gate would not "
+                            "actually see.",
+                            candidate.golden_alias,
+                            canary_exc,
+                        )
+                        return {
+                            "status": "quarantine_state_unavailable",
+                            "golden_alias": candidate.golden_alias,
+                            "detail": str(canary_exc),
+                        }
             elif status_counts_as_quarantine_failure(result.status):
                 # Issue #1477 Finding 2 (dual review round): a NON-RAISING
                 # result can ALSO mean "no progress was made and a bare
@@ -552,6 +661,57 @@ class FleetMigrationScheduler:
         config-read glitch must never be interpreted as "enabled"."""
         return bool(self._read_cycle_config()["enabled"])
 
+    def _is_canary_gate_enabled_now(self) -> bool:
+        """Story #1461 salvage item #8: whether the proactive cross-repo
+        canary gate is currently active. Delegates to the same fail-closed
+        config read `_is_enabled_now()` uses -- a config-read glitch must
+        never be interpreted as "gate active" in some novel way; it
+        degrades to the same default-off value as every other fail-closed
+        read in this scheduler."""
+        return bool(self._read_cycle_config()["canary_gate_enabled"])
+
+    def _get_pending_canary_marker(self) -> Optional[Dict[str, Any]]:
+        """Durable canary-pending marker, if any (None = never started or
+        already confirmed).
+
+        Propagates QuarantineStateUnavailableError on a genuine backend
+        read failure -- callers must abort the tick, never silently treat
+        as "no canary pending" (that would defeat the gate during a
+        backend outage, the same starvation-class risk
+        quarantine.py's own get_failure_state() documents for the
+        reactive breaker).
+        """
+        return get_failure_state(  # type: ignore[no-any-return]
+            self._golden_repo_manager, _CANARY_MARKER_ALIAS
+        )
+
+    def _record_canary_pending(self, golden_alias: str) -> None:
+        """Durably record that `golden_alias` is the first repo migrated
+        in this sweep and the fleet-wide sweep must now hold pending an
+        admin confirmation. The real migrated repo's alias is stored as
+        the marker's `state_signature` (not `golden_alias`, which is
+        fixed to the sentinel `_CANARY_MARKER_ALIAS`) so
+        `_get_pending_canary_marker()`'s caller can report which repo is
+        awaiting confirmation.
+        """
+        record_migration_failure(
+            self._golden_repo_manager,
+            _CANARY_MARKER_ALIAS,
+            golden_alias,
+            failure_cause=_CANARY_PENDING_FAILURE_CAUSE,
+        )
+
+    def confirm_canary(self) -> None:
+        """Admin-confirm entry point: durably clears the canary-pending
+        marker so the next scheduling attempt is free to migrate a second
+        repo.
+
+        Propagates QuarantineStateUnavailableError on a genuine backend
+        clear failure -- an explicit admin confirmation must never
+        silently no-op.
+        """
+        reset_migration_failure(self._golden_repo_manager, _CANARY_MARKER_ALIAS)
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -587,6 +747,7 @@ class FleetMigrationScheduler:
             return {
                 "enabled": bool(cfg.enabled),
                 "interval_minutes": interval_minutes,
+                "canary_gate_enabled": bool(cfg.canary_gate_enabled),
             }
         except Exception as exc:
             logger.warning(
@@ -598,6 +759,7 @@ class FleetMigrationScheduler:
             return {
                 "enabled": False,
                 "interval_minutes": _DEFAULT_TICK_INTERVAL_MINUTES,
+                "canary_gate_enabled": False,
             }
 
     def _loop(self) -> None:

@@ -44,6 +44,11 @@ from code_indexer.storage.shared.chunk_layout import (
     write_chunks_db_discriminator as _real_write_chunks_db_discriminator,
 )
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
+from code_indexer.services.temporal.temporal_progressive_metadata import (
+    TemporalProgressiveMetadata,
+    TemporalProgressMetadataCorruptError,
+)
+import pytest
 
 
 def _fake_records(count: int, dim: int = 4):
@@ -603,3 +608,58 @@ def test_extend_appends_delta_rows_to_inherited_temporal_metadata_db(tmp_path):
         "the new delta row's point_id mapping must be appended to the "
         "inherited temporal_metadata.db"
     )
+
+
+def test_copy_and_extend_raises_on_corrupt_inherited_progress_json(tmp_path):
+    """Bug #1461 sub-part 7b: copy_and_extend_consolidated_temporal_version
+    reflink-copies temporal_progress.json byte-for-byte via create_snapshot
+    (VersionedSnapshotManager.create_snapshot). If the SOURCE version's
+    progress file is already corrupt (e.g. bit-rot/truncation before this
+    refresh ran), the inherited copy is corrupt too. mark_completed's
+    strict=True call must raise loudly instead of silently treating the
+    corrupt file as "nothing completed yet" and publishing a NEW
+    temporal_progress.json containing ONLY this refresh's delta commit --
+    silently destroying every historical completion marker right before
+    the version would be published."""
+    sister_root = tmp_path / "sister"
+    ns = "evolution-temporal-voyage_code_3-2024Q1"
+
+    historical_records = [
+        {
+            "id": f"proj:commit:c{i}:0",
+            "vector": [float(i)] * 4,
+            "payload": {"commit_hash": f"c{i}"},
+        }
+        for i in range(3)
+    ]
+    current_version = build_fresh_consolidated_temporal_version(
+        sister_root, ns, [historical_records], vector_dim=4
+    )
+
+    # Sanity: the fresh build legitimately marked c0..c2 complete.
+    original_completed = TemporalProgressiveMetadata(current_version).load_completed()
+    assert original_completed == {"c0", "c1", "c2"}
+
+    # Corrupt the SOURCE version's progress file (simulates on-disk
+    # corruption prior to this refresh -- create_snapshot will copy this
+    # corrupted file byte-for-byte into the new version directory).
+    progress_path = current_version / "temporal_progress.json"
+    progress_path.write_text("{not valid json")
+
+    snapshot_manager = VersionedSnapshotManager(versioned_base=str(sister_root))
+    delta_rows = [
+        {
+            "id": "proj:commit:c3:0",
+            "vector": [9.0, 9.0, 9.0, 9.0],
+            "payload": {"commit_hash": "c3"},
+        }
+    ]
+
+    with pytest.raises(TemporalProgressMetadataCorruptError):
+        copy_and_extend_consolidated_temporal_version(
+            snapshot_manager, ns, current_version, delta_rows, vector_dim=4
+        )
+
+    # The SOURCE version's own corrupted file must not have been "fixed"
+    # or otherwise mutated by the failed attempt.
+    assert progress_path.read_text() == "{not valid json"

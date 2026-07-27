@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 from code_indexer.server.cache.payload_cache import PayloadCache
 from code_indexer.server.query.semantic_query_manager import (
     convert_temporal_result_to_query_result,
+    load_golden_temporal_config,
     reconstruct_temporal_backend,
 )
 from code_indexer.server.services.temporal_snapshot_store import (
@@ -47,6 +48,41 @@ from code_indexer.services.temporal.temporal_worker_input import TemporalWorkerI
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_MIN_GAP_SECONDS = 2.0
+
+
+def _resolve_golden_repo_alias(
+    username: str, repository_alias: str, activated_repo_manager: Any
+) -> Optional[str]:
+    """Resolve the underlying GOLDEN repo alias for a temporal worker query
+    (Story #1461 salvage item 4, MCP-path analog of
+    SemanticQueryManager._search_single_repository's own is_global/
+    activated-repo distinction).
+
+    An is_global repository_alias (ends with '-global') IS its own golden
+    alias. A regular activated repo's golden alias is looked up via
+    ActivatedRepoManager.get_repository. Fail-open: any lookup failure
+    (repo not found, backend error) returns None, preserving today's
+    clone-config behavior for that query.
+    """
+    if repository_alias.endswith("-global"):
+        return repository_alias
+    try:
+        repo_info = activated_repo_manager.get_repository(
+            username, repository_alias, touch=False
+        )
+    except Exception:
+        logger.warning(
+            "temporal worker: failed to resolve golden_repo_alias for "
+            "activated repo '%s' (user=%s); using clone config as-is",
+            repository_alias,
+            username,
+            exc_info=True,
+        )
+        return None
+    if not repo_info:
+        return None
+    golden_alias = repo_info.get("golden_repo_alias")
+    return golden_alias if isinstance(golden_alias, str) and golden_alias else None
 
 
 def _build_ctx(worker_input: TemporalWorkerInput) -> Dict[str, Any]:
@@ -177,6 +213,36 @@ def run_temporal_worker(
     config, index_path, vector_store = reconstruct_temporal_backend(
         Path(worker_input.repo_path), worker_input.repository_alias
     )
+
+    # Story #1461 salvage item 4 (MCP-path analog of the REST fix in
+    # semantic_query_manager._execute_temporal_query): embedder SELECTION
+    # must use the GOLDEN repo's OWN, CURRENT config -- never the activated
+    # CoW clone's point-in-time config.json snapshot. Entirely fail-open:
+    # any resolution failure leaves `config` (and thus behavior) unchanged.
+    try:
+        from code_indexer.server.repositories.activated_repo_manager import (
+            ActivatedRepoManager,
+        )
+
+        _activated_repo_manager = ActivatedRepoManager()
+        golden_repo_alias = _resolve_golden_repo_alias(
+            worker_input.username,
+            worker_input.repository_alias,
+            _activated_repo_manager,
+        )
+        if golden_repo_alias:
+            golden_config = load_golden_temporal_config(
+                golden_repo_alias, _activated_repo_manager
+            )
+            if golden_config is not None:
+                config = config.model_copy(update={"temporal": golden_config.temporal})
+    except Exception:
+        logger.warning(
+            "temporal worker %s: golden-repo temporal config override "
+            "failed (isolated, non-fatal); using clone-derived config as-is",
+            job_id,
+            exc_info=True,
+        )
 
     # INITIAL empty snapshot -- written before fusion starts so an early
     # poll (Scenario 14: zero-shard/PENDING) sees a real, empty snapshot

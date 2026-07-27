@@ -131,7 +131,12 @@ def _reconcile_shard_legacy(
         if len(parts) == 4 and parts[1] == "commit":
             hashes_with_points.setdefault(parts[2], []).append(json_path)
 
-    completed = TemporalProgressiveMetadata(shard_dir).load_completed()
+    # Bug #1461 sub-part 7b: strict=True -- a corrupt temporal_progress.json
+    # must abort reconciliation loudly. The lenient default would return an
+    # empty completed set, misclassifying every already-indexed commit in
+    # this shard as PARTIAL and deleting its points for a destructive
+    # full re-embed triggered by plain file corruption.
+    completed = TemporalProgressiveMetadata(shard_dir).load_completed(strict=True)
 
     missing: List[CommitInfo] = []
     partial_paths: List = []
@@ -194,7 +199,9 @@ def _reconcile_shard_chunks_db(
             if len(parts) == 4 and parts[1] == "commit":
                 hashes_with_points.setdefault(parts[2], []).append(point_id)
 
-        completed = TemporalProgressiveMetadata(shard_dir).load_completed()
+        # Bug #1461 sub-part 7b: strict=True -- see the identical comment
+        # in _reconcile_shard_legacy for the full rationale.
+        completed = TemporalProgressiveMetadata(shard_dir).load_completed(strict=True)
 
         missing: List[CommitInfo] = []
         partial_point_ids: List[str] = []

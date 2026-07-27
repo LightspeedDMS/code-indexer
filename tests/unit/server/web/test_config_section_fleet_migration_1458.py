@@ -38,9 +38,9 @@ def test_template_contains_fleet_migration_section():
     assert "fleet migration" in section.lower()
 
 
-def test_template_contains_both_field_inputs():
+def test_template_contains_all_field_inputs():
     section = _extract_section(_read_template())
-    for field_name in ("enabled", "tick_interval_minutes"):
+    for field_name in ("enabled", "tick_interval_minutes", "canary_gate_enabled"):
         assert f'name="{field_name}"' in section, f"Missing input for {field_name}"
 
 

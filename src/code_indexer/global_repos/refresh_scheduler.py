@@ -159,6 +159,65 @@ def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
     return None
 
 
+def _read_max_commits_from_sister_temporal(
+    golden_repos_dir: Path, repo_alias: str, legacy_index_path: Path
+) -> Optional[int]:
+    """Bug #1461 salvage item #6: sister-location fallback for the Bug #642
+    NULL-temporal_options max_commits safety net above.
+
+    `_read_max_commits_from_temporal_meta()` above only scans the golden
+    repo's OWN in-repo `.code-indexer/index/` tree for the legacy
+    `temporal_meta.json` artifact. Story #1457 can relocate a quarter
+    shard's data to the golden-owned sister location, and Story #1458's
+    fleet-migration bootstrap can reclaim (delete) the in-repo tree
+    entirely once migrated -- at which point the in-repo scan above finds
+    nothing. Worse, the NEW consolidated per-version build never writes
+    `temporal_meta.json` at all: it writes `temporal_progress.json`
+    (`TemporalProgressiveMetadata`, a `completed_commits` list) instead.
+
+    #1461-6 review correction: the legacy `temporal_meta.json.total_commits`
+    field this fallback replaces was a REPO-WIDE total, but the original
+    fix here read `len(completed_commits)` from only the single "best"
+    shard `get_temporal_repo_status()` resolves -- undercounting any repo
+    with more than one quarter and setting `--max-commits` LOWER than the
+    true repo-wide total (worse than omitting the bound). This now
+    delegates to `get_temporal_repo_max_commits()`
+    (services/temporal/temporal_status.py), which unions completed-commit
+    hashes across EVERY resolved quarter shard of the repo and fails open
+    to None (never an under-cap) whenever any shard's total cannot be
+    reliably determined.
+
+    Fails open (returns None -- no --max-commits appended, identical to a
+    miss in the in-repo scan above) on any error, missing data, or
+    unreliable progress data: this is a best-effort safety net for an
+    already degraded case (temporal_options is NULL), and a failure here
+    must never crash indexing.
+    """
+    try:
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_max_commits,
+        )
+
+        # Explicit annotation works around a mypy limitation where the
+        # return type of a function-scoped (local) import is not always
+        # fully resolved when forwarded directly in a return statement.
+        result: Optional[int] = get_temporal_repo_max_commits(
+            golden_repos_dir=golden_repos_dir,
+            repo_alias=repo_alias,
+            legacy_index_path=legacy_index_path,
+        )
+        return result
+    except Exception as exc:
+        logger.debug(
+            "Bug #1461: sister-location temporal max_commits lookup failed "
+            "for %s: %s: %s",
+            repo_alias,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def _is_git_repo_url(repo_url: str) -> bool:
     """
     Return True if repo_url represents a remote git repository.
@@ -1780,7 +1839,7 @@ class RefreshScheduler:
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
                     detected_indexes = self._detect_existing_indexes(
-                        Path(current_target)
+                        Path(current_target), repo_alias=repo_name
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -2348,7 +2407,8 @@ class RefreshScheduler:
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
                     detected_indexes = self._detect_existing_indexes(
-                        Path(new_index_path)
+                        Path(new_index_path),
+                        repo_alias=alias_name.removesuffix("-global"),
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -2589,6 +2649,29 @@ class RefreshScheduler:
                         alias_name,
                         _fallback_max,
                     )
+                else:
+                    # Bug #1461 salvage item #6 (see
+                    # _read_max_commits_from_sister_temporal above): the
+                    # in-repo scan found nothing (relocated and/or
+                    # reclaimed by Story #1457/#1458) -- consult the
+                    # golden-owned sister location before giving up.
+                    _golden_repos_dir = getattr(self, "golden_repos_dir", None)
+                    if _golden_repos_dir is not None:
+                        _fallback_max = _read_max_commits_from_sister_temporal(
+                            Path(_golden_repos_dir),
+                            bare_alias,
+                            Path(source_path) / ".code-indexer" / "index",
+                        )
+                        if _fallback_max is not None:
+                            logger.info(
+                                "Bug #1461: temporal_options NULL for %s, "
+                                "in-repo temporal_meta.json absent, using "
+                                "max_commits=%s from sister-location "
+                                "temporal_progress.json",
+                                alias_name,
+                                _fallback_max,
+                            )
+                if _fallback_max is not None:
                     temporal_command.extend(["--max-commits", str(_fallback_max)])
 
         # Step 3: SCIP indexing on source (if enabled)
@@ -3266,19 +3349,29 @@ class RefreshScheduler:
             )
         return False
 
-    def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
+    def _detect_existing_indexes(
+        self, repo_path: Path, repo_alias: Optional[str] = None
+    ) -> Dict[str, bool]:
         """
         Detect which index types exist in the repository's .code-indexer directory.
 
         Args:
             repo_path: Path to the repository root
+            repo_alias: Bare (no "-global" suffix) golden repo alias, used to
+                additionally consult the golden-owned sister location for
+                relocated temporal data (Bug #1461). Optional and defaults to
+                None for backward compatibility with existing positional-only
+                callers -- when None, temporal detection is EXACTLY the
+                in-repo-only scan below, unchanged.
 
         Returns:
             Dictionary with index types as keys and existence as boolean values:
             - semantic: True if semantic vector index exists
             - fts: True if FTS (Tantivy) index exists
             - temporal: True if a temporal collection exists WITH real shard data
-              (Bug #1390: name-match alone is not enough -- see below)
+              (Bug #1390: name-match alone is not enough -- see below), OR if
+              real temporal data exists at the golden-owned sister location
+              (Bug #1461, only checked when repo_alias is provided)
             - scip: True if SCIP code intelligence indexes exist
         """
         from code_indexer.services.temporal.temporal_collection_naming import (
@@ -3325,6 +3418,18 @@ class RefreshScheduler:
                     temporal_exists = True
                     break
 
+        # Bug #1461: the in-repo scan above cannot see temporal data that
+        # Story #1457 relocated to the golden-owned sister location. If the
+        # in-repo scan alone found nothing, additionally consult the sister
+        # location (fail-open, never raises) before concluding "no temporal
+        # data" -- otherwise a relocated-but-alive repo would trigger Bug
+        # #1406's one-way auto-DISABLE downgrade against operator/system
+        # intent.
+        if not temporal_exists and repo_alias is not None:
+            temporal_exists = self._sister_temporal_data_exists(
+                repo_alias, semantic_index_dir
+            )
+
         # Check SCIP indexes: delegate to _has_scip_indexes()
         scip_exists = self._has_scip_indexes(repo_path)
 
@@ -3334,6 +3439,46 @@ class RefreshScheduler:
             "temporal": temporal_exists,
             "scip": scip_exists,
         }
+
+    def _sister_temporal_data_exists(
+        self, repo_alias: str, legacy_index_path: Path
+    ) -> bool:
+        """Bug #1461 (Epic #1454 Story #1461 salvage item #1): the in-repo-only
+        scan above cannot see temporal data that Story #1457 relocated to the
+        golden-owned sister location. Consult get_temporal_repo_status()'s
+        resolver-based union (sister pointer OR in-repo, real-data-presence
+        only) so a relocated-but-alive repo is not misreported as "no temporal
+        data", which would otherwise trigger Bug #1406's one-way auto-DISABLE
+        downgrade against operator/system intent.
+
+        Fails open (returns False, in-repo-only result stands unchanged) on
+        ANY error -- reconciliation must never crash because this best-effort
+        secondary check could not run (e.g. golden_repos_dir unavailable on a
+        bare/test instance, a malformed alias pointer, an OSError).
+        """
+        golden_repos_dir: Optional[Path] = getattr(self, "golden_repos_dir", None)
+        if golden_repos_dir is None:
+            return False
+        try:
+            from code_indexer.services.temporal.temporal_status import (
+                get_temporal_repo_status,
+            )
+
+            status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=repo_alias,
+                legacy_index_path=legacy_index_path,
+            )
+            return bool(status.has_data)
+        except Exception as exc:
+            logger.warning(
+                "Reconciliation: sister-location temporal status check failed "
+                "for %s: %s: %s -- falling back to in-repo-only detection",
+                repo_alias,
+                type(exc).__name__,
+                exc,
+            )
+            return False
 
     def _has_scip_indexes(self, repo_path: Path) -> bool:
         """

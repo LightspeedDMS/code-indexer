@@ -339,6 +339,55 @@ class ChunkStore:
         finally:
             cursor.close()
 
+    def stream_for_index_rebuild(self, need_payload: bool):
+        """Yield ``(point_id, vector, path, payload)`` for every stored
+        record, WITHOUT the full-record decode ``stream_all()`` always pays
+        for (Story #1461 salvage item #9, Epic #1454).
+
+        HNSW rebuild only ever needs the vector, the point_id, and the
+        top-level indexed ``path`` column in the common (unfiltered /
+        visible_files-filtered) case -- it decodes the opaque ``data`` blob
+        ONLY to read ``hidden_branches`` for the Bug #306 branch-visibility
+        filter. Decompressing + JSON-parsing the ENTIRE text corpus
+        (payload + chunk_text/git_blob_hash + diff) to read one column that
+        already has its own dedicated, indexed SQL column is pure waste.
+
+        Args:
+            need_payload: When False, selects only ``point_id, vector,
+                path`` -- the ``data`` column is never read, so
+                ``_decode_data``/zstd-decompress/json.loads is never
+                invoked, and ``payload`` is always yielded as ``None``.
+                When True, decodes ``data`` exactly like ``stream_all()``
+                and yields the decoded ``payload`` dict (``record.get(
+                "payload", {})``) as the fourth element -- required for the
+                hidden_branches filter.
+
+        Byte-identical in result to reading the equivalent fields off
+        ``stream_all()``'s records -- this is a pure I/O optimization, not
+        a behavior change. The cursor is guaranteed closed even if the
+        caller stops iterating early or an exception propagates mid-stream,
+        mirroring ``stream_all()``'s own contract.
+        """
+        if need_payload:
+            cursor = self._conn.execute(
+                "SELECT point_id, vector, path, data FROM chunks"
+            )
+            try:
+                for point_id, vector_blob, path, data_blob in cursor:
+                    record = self._decode_data(data_blob)
+                    vector = self._decode_vector(vector_blob)
+                    yield point_id, vector, path, record.get("payload", {})
+            finally:
+                cursor.close()
+        else:
+            cursor = self._conn.execute("SELECT point_id, vector, path FROM chunks")
+            try:
+                for point_id, vector_blob, path in cursor:
+                    vector = self._decode_vector(vector_blob)
+                    yield point_id, vector, path, None
+            finally:
+                cursor.close()
+
     def count(self) -> int:
         """Return the number of chunk records currently stored."""
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()

@@ -99,6 +99,7 @@ def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     return {
         "enabled": fm.enabled,
         "tick_interval_minutes": fm.tick_interval_minutes,
+        "canary_gate_enabled": fm.canary_gate_enabled,
     }
 
 
@@ -2524,6 +2525,8 @@ class ConfigService:
             fm.enabled = _parse_bool(value)
         elif key == "tick_interval_minutes":
             fm.tick_interval_minutes = int(value)
+        elif key == "canary_gate_enabled":
+            fm.canary_gate_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown fleet_migration setting: {key}")
 
