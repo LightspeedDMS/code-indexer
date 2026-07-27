@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.82.0] - 2026-07-27
+
+### Fixed
+
+- **#1482 (temporal read-path resolver wiring)**: temporal shards relocated to the golden-owned sister location (Story #1457) were unqueryable on any local-disk server (production is solo/local-disk) because the live temporal read paths only resolved the in-repo legacy location. Wired `TemporalShardResolver` into every live temporal read/status path -- single-repo (`temporal_worker`/`temporal_live_dispatch`/`search_code`, threading `query_tracker` through), multi-repo (`multi_search_service` -- REST multi-search + MCP omni-search), status (`golden_repo_manager._index_exists` -> `get_temporal_repo_status`, `repository_health_aggregator`, `diagnostics_service`), and standalone (`cli`/`daemon`/`watch` via a new structural `detect_golden_repo_sister_root` primitive that honors the Story #1460 standalone boundary). Found the full set via a Codex audit; chunk-layout (CHUNKS_DB) migration confirmed clean.
+- **#1483 (multimodal query dimension mismatch)**: on a repo with both multimodal collections (voyage-multimodal-3 1024-dim + embed-v4.0-multimodal 1536-dim), `MultiIndexQueryService` embedded the query with one provider but searched the other's collection, so the multimodal branch failed a dimension check and silently returned zero results. Provider selection is now the sole authority keyed by each collection's own model, and every present multimodal collection is queried with its matching provider and merged -- restoring multimodal image-content search on dual-provider repos.
+- **#1480 (server-side multimodal query)**: the REST/MCP front door indexed multimodal collections but never queried them; wired an `enable_multimodal` fan-out into the query path (reusing `MultiIndexQueryService`) and made the multimodal clients first-class embedding providers so they satisfy the query-embedding cache's qualifier contract.
+- **#1481 (cluster-aware golden-repo lookup)**: refresh/force-resync/enable-temporal routes validated repo existence against a per-worker in-memory dict, causing false 404/500 in a cluster (a repo registered on another node was invisible); rerouted all five sites through the authoritative shared-backend `get_golden_repo()` read.
+
 ## [11.81.0] - 2026-07-27
 
 ### Fixed
