@@ -159,6 +159,79 @@ def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
     return None
 
 
+def _read_max_commits_from_sister_temporal(
+    golden_repos_dir: Path, repo_alias: str, legacy_index_path: Path
+) -> Optional[int]:
+    """Bug #1461 salvage item #6: sister-location fallback for the Bug #642
+    NULL-temporal_options max_commits safety net above.
+
+    `_read_max_commits_from_temporal_meta()` above only scans the golden
+    repo's OWN in-repo `.code-indexer/index/` tree for the legacy
+    `temporal_meta.json` artifact. Story #1457 can relocate a quarter
+    shard's data to the golden-owned sister location, and Story #1458's
+    fleet-migration bootstrap can reclaim (delete) the in-repo tree
+    entirely once migrated -- at which point the in-repo scan above finds
+    nothing. Worse, the NEW consolidated per-version build never writes
+    `temporal_meta.json` at all: it writes `temporal_progress.json`
+    (`TemporalProgressiveMetadata`, a `completed_commits` list) instead.
+
+    This reuses Story #1457/#1459's `get_temporal_repo_status()`
+    resolver-based sister/in-repo union (the SAME primitive
+    `_sister_temporal_data_exists()` on RefreshScheduler already reuses for
+    Bug #1461 salvage item #1) to find the best resolved shard, then reads
+    `len(completed_commits)` from that shard's `temporal_progress.json` as
+    the same "conservative upper bound" fallback semantics the legacy
+    `total_commits` field provided.
+
+    Fails open (returns None -- no --max-commits appended, identical to a
+    miss in the in-repo scan above) on any error, missing data, or missing
+    progress file: this is a best-effort safety net for an already
+    degraded case (temporal_options is NULL), and a failure here must
+    never crash indexing.
+    """
+    try:
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
+        )
+
+        status = get_temporal_repo_status(
+            golden_repos_dir=golden_repos_dir,
+            repo_alias=repo_alias,
+            legacy_index_path=legacy_index_path,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Bug #1461: sister-location temporal status lookup failed for "
+            "%s max_commits fallback: %s: %s",
+            repo_alias,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+    if not status.has_data or status.resolved_path is None:
+        return None
+
+    progress_path = status.resolved_path / "temporal_progress.json"
+    if not progress_path.exists():
+        return None
+
+    try:
+        data = json.loads(progress_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.debug(
+            "Bug #1461: failed reading temporal_progress.json from %s: %s",
+            progress_path,
+            exc,
+        )
+        return None
+
+    completed_commits = data.get("completed_commits")
+    if not completed_commits:
+        return None
+    return len(completed_commits)
+
+
 def _is_git_repo_url(repo_url: str) -> bool:
     """
     Return True if repo_url represents a remote git repository.
@@ -2590,6 +2663,29 @@ class RefreshScheduler:
                         alias_name,
                         _fallback_max,
                     )
+                else:
+                    # Bug #1461 salvage item #6 (see
+                    # _read_max_commits_from_sister_temporal above): the
+                    # in-repo scan found nothing (relocated and/or
+                    # reclaimed by Story #1457/#1458) -- consult the
+                    # golden-owned sister location before giving up.
+                    _golden_repos_dir = getattr(self, "golden_repos_dir", None)
+                    if _golden_repos_dir is not None:
+                        _fallback_max = _read_max_commits_from_sister_temporal(
+                            Path(_golden_repos_dir),
+                            bare_alias,
+                            Path(source_path) / ".code-indexer" / "index",
+                        )
+                        if _fallback_max is not None:
+                            logger.info(
+                                "Bug #1461: temporal_options NULL for %s, "
+                                "in-repo temporal_meta.json absent, using "
+                                "max_commits=%s from sister-location "
+                                "temporal_progress.json",
+                                alias_name,
+                                _fallback_max,
+                            )
+                if _fallback_max is not None:
                     temporal_command.extend(["--max-commits", str(_fallback_max)])
 
         # Step 3: SCIP indexing on source (if enabled)
