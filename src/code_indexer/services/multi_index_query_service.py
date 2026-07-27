@@ -55,45 +55,54 @@ class MultiIndexQueryService:
         self.project_root = project_root
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
-        # Lazy-initialized multimodal embedding provider (VoyageMultimodalClient or
-        # CohereMultimodalClient — no common base class, so typed as Optional[Any])
-        self._multimodal_provider: Optional[Any] = None
+        # Lazy-initialized multimodal embedding providers, keyed by model name
+        # (VoyageMultimodalClient or CohereMultimodalClient — no common base
+        # class, so typed as Dict[str, Any]). Bug #1483: provider selection is
+        # ALWAYS keyed by the SAME model_name used to select which collection
+        # to search, so the two decisions can never disagree.
+        self._multimodal_providers: Dict[str, Any] = {}
 
-    def _get_multimodal_provider(self):
-        """Get or create the multimodal embedding provider (lazy initialization).
+    def _get_multimodal_provider(self, model_name: str):
+        """Get or create the multimodal embedding provider for a SPECIFIC
+        model (lazy initialization, cached per model_name).
 
-        Detects provider by checking which multimodal collection exists on disk.
-        Cohere takes precedence when its collection is found; falls back to VoyageAI.
+        Bug #1483: this is the SOLE authority for provider selection. Every
+        caller supplies the model_name of the collection it is about to
+        search, so the provider returned here always embeds queries in the
+        SAME vector space as that collection — provider selection and
+        collection selection can never independently disagree again.
         """
-        if self._multimodal_provider is not None:
-            return self._multimodal_provider
+        if model_name in self._multimodal_providers:
+            return self._multimodal_providers[model_name]
 
-        # Check for Cohere multimodal collection first
-        cohere_path = (
-            self.project_root / ".code-indexer" / "index" / COHERE_MULTIMODAL_MODEL
-        )
-        if cohere_path.exists() and cohere_path.is_dir():
+        # Mutually exclusive branches below assign different concrete types
+        # (CohereMultimodalClient vs VoyageMultimodalClient, no common base
+        # class) — Any is the correct declared type, not an inference gap.
+        provider: Any
+        if model_name == COHERE_MULTIMODAL_MODEL:
             from ..config import CohereConfig
             from .cohere_multimodal import CohereMultimodalClient
 
             cohere_config = CohereConfig(model="embed-v4.0")
-            self._multimodal_provider = CohereMultimodalClient(cohere_config)
+            provider = CohereMultimodalClient(cohere_config)
             logger.debug(
                 "Initialized Cohere multimodal embedding provider: %s",
-                COHERE_MULTIMODAL_MODEL,
+                model_name,
             )
-            return self._multimodal_provider
+        elif model_name == VOYAGE_MULTIMODAL_MODEL:
+            from .voyage_multimodal import VoyageMultimodalClient
 
-        # Default to VoyageAI multimodal
-        from .voyage_multimodal import VoyageMultimodalClient
+            multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
+            provider = VoyageMultimodalClient(multimodal_config)
+            logger.debug(
+                "Initialized VoyageAI multimodal embedding provider: %s",
+                model_name,
+            )
+        else:
+            raise ValueError(f"Unknown multimodal model: {model_name!r}")
 
-        multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
-        self._multimodal_provider = VoyageMultimodalClient(multimodal_config)
-        logger.debug(
-            "Initialized VoyageAI multimodal embedding provider: %s",
-            VOYAGE_MULTIMODAL_MODEL,
-        )
-        return self._multimodal_provider
+        self._multimodal_providers[model_name] = provider
+        return provider
 
     def will_query_multimodal(self) -> bool:
         """Check if multimodal index will actually be queried.
@@ -166,11 +175,20 @@ class MultiIndexQueryService:
         **kwargs,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Query multimodal collection (VoyageAI or Cohere).
+        Query ALL present multimodal collections (VoyageAI and/or Cohere),
+        each with its OWN matching embedding provider, and merge their
+        results.
 
-        CRITICAL: Uses the matching multimodal provider for query embedding
-        to match the model used during indexing. Mismatched models produce
-        incorrect similarity scores due to different vector spaces.
+        CRITICAL (Bug #1483): the provider used to embed the query and the
+        collection being searched must always correspond to the SAME model.
+        Iterating per-collection here — and resolving the provider from the
+        SAME model_name that selects the collection — guarantees this: there
+        is no longer a separate "pick a provider" decision that can
+        independently disagree with "pick a collection" (the Bug #1483 root
+        cause). A dual-provider repo (both voyage-multimodal-3 and
+        embed-v4.0-multimodal present) is therefore searchable via BOTH
+        vector spaces instead of raising a dimension mismatch on one of
+        them.
 
         Args:
             query_text: Query string
@@ -180,58 +198,63 @@ class MultiIndexQueryService:
             **kwargs: Additional query parameters
 
         Returns:
-            Tuple of (results, timing_dict) from multimodal collection
+            Tuple of (results, timing_dict) merged from every present
+            multimodal collection.
         """
-        logger.debug("Querying multimodal collection for: %s", query_text)
+        logger.debug("Querying multimodal collection(s) for: %s", query_text)
 
-        # Get multimodal embedding provider
-        multimodal_provider = self._get_multimodal_provider()
-
-        # Find which multimodal collection exists
-        actual_collection = None
-        for model_name in MULTIMODAL_MODELS:
-            coll_path = self.project_root / ".code-indexer" / "index" / model_name
-            if coll_path.exists() and coll_path.is_dir():
-                actual_collection = model_name
-                break
+        # Fixed-size loop (len(MULTIMODAL_MODELS) == 2 today) — bounded by
+        # construction, never a source of unbounded iteration.
+        present_collections = [
+            model_name
+            for model_name in MULTIMODAL_MODELS
+            if (self.project_root / ".code-indexer" / "index" / model_name).is_dir()
+        ]
 
         query_start = time.time()
 
-        # Check if legacy subdirectory exists, use it for backward compatibility
-        legacy_multimodal_path = (
-            self.project_root / ".code-indexer" / "multimodal_index"
-        )
-        if (
-            actual_collection is None
-            and legacy_multimodal_path.exists()
-            and legacy_multimodal_path.is_dir()
-        ):
-            logger.debug("Using legacy multimodal_index subdirectory")
-            results, timing = self.vector_store.search(
-                query=query_text,
-                embedding_provider=multimodal_provider,
-                collection_name=collection_name,
-                limit=limit * 2,
-                filter_conditions=filter_conditions,
-                subdirectory="multimodal_index",
-                return_timing=True,
-                **kwargs,
-            )
-        elif actual_collection is not None:
-            logger.debug("Querying %s collection directly", actual_collection)
-            results, timing = self.vector_store.search(
-                query=query_text,
-                embedding_provider=multimodal_provider,
-                collection_name=actual_collection,
-                limit=limit * 2,
-                filter_conditions=filter_conditions,
-                subdirectory=None,
-                return_timing=True,
-                **kwargs,
-            )
+        if present_collections:
+            combined_results: List[Dict[str, Any]] = []
+            combined_timing: Dict[str, Any] = {}
+            for model_name in present_collections:
+                provider = self._get_multimodal_provider(model_name)
+                logger.debug("Querying %s collection directly", model_name)
+                coll_results, coll_timing = self.vector_store.search(
+                    query=query_text,
+                    embedding_provider=provider,
+                    collection_name=model_name,
+                    limit=limit * 2,
+                    filter_conditions=filter_conditions,
+                    subdirectory=None,
+                    return_timing=True,
+                    **kwargs,
+                )
+                combined_results.extend(coll_results)
+                combined_timing.update(coll_timing)
+            results, timing = combined_results, combined_timing
         else:
-            logger.debug("No multimodal collection found, returning empty results")
-            return [], {"elapsed_ms": 0}
+            # Check if legacy subdirectory exists, use it for backward
+            # compatibility. This predates the per-collection architecture
+            # and only ever held VoyageAI multimodal data.
+            legacy_multimodal_path = (
+                self.project_root / ".code-indexer" / "multimodal_index"
+            )
+            if legacy_multimodal_path.exists() and legacy_multimodal_path.is_dir():
+                logger.debug("Using legacy multimodal_index subdirectory")
+                provider = self._get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL)
+                results, timing = self.vector_store.search(
+                    query=query_text,
+                    embedding_provider=provider,
+                    collection_name=collection_name,
+                    limit=limit * 2,
+                    filter_conditions=filter_conditions,
+                    subdirectory="multimodal_index",
+                    return_timing=True,
+                    **kwargs,
+                )
+            else:
+                logger.debug("No multimodal collection found, returning empty results")
+                return [], {"elapsed_ms": 0}
 
         timing["elapsed_ms"] = (time.time() - query_start) * 1000
         return results, timing

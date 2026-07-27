@@ -131,7 +131,7 @@ def multimodal_service(mock_api_key, voyage_config, tmp_path, mock_httpx_client)
         vector_store=mock_vector_store,
         embedding_provider=mock_code_provider,
     )
-    service._multimodal_provider = real_multimodal_client
+    service._multimodal_providers[VOYAGE_MULTIMODAL_MODEL] = real_multimodal_client
 
     return service, real_multimodal_client
 
