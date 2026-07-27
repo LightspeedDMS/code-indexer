@@ -296,12 +296,83 @@ class MultiIndexQueryService:
             limit: Maximum number of results to return
             collection_name: Collection name (typically "code_index")
             filter_conditions: Optional filter conditions
-            **kwargs: Additional query parameters
+            **kwargs: Additional query parameters (forwarded identically to
+                both the code and multimodal collection queries)
 
         Returns:
             Tuple of (results, timing_dict) where:
             - results: Merged and deduplicated list of results sorted by score descending
             - timing_dict: Dictionary with timing information and flags
+        """
+        return self._execute_parallel_query(
+            query_text,
+            limit,
+            collection_name,
+            filter_conditions,
+            code_kwargs=kwargs,
+            multimodal_kwargs=kwargs,
+        )
+
+    def query_with_separate_kwargs(
+        self,
+        query_text: str,
+        limit: int,
+        collection_name: str,
+        filter_conditions: Optional[Dict[str, Any]] = None,
+        *,
+        code_kwargs: Optional[Dict[str, Any]] = None,
+        multimodal_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Execute parallel multi-index query with INDEPENDENT extra kwargs per
+        collection (Bug #1480).
+
+        Identical to `query()` except the code-collection and
+        multimodal-collection searches can receive genuinely different extra
+        parameters (e.g. a cache-bypass flag that must be forced True for the
+        multimodal call while the code call keeps the caller-supplied value).
+        `query()`'s shared `**kwargs` cannot express this divergence.
+
+        Args:
+            query_text: Query string
+            limit: Maximum number of results to return
+            collection_name: Collection name (typically "code_index")
+            filter_conditions: Optional filter conditions
+            code_kwargs: Extra kwargs forwarded ONLY to the code-collection
+                search. Defaults to {} when omitted.
+            multimodal_kwargs: Extra kwargs forwarded ONLY to the
+                multimodal-collection search. Defaults to {} when omitted.
+
+        Returns:
+            Tuple of (results, timing_dict) — same shape as `query()`.
+        """
+        return self._execute_parallel_query(
+            query_text,
+            limit,
+            collection_name,
+            filter_conditions,
+            code_kwargs=code_kwargs or {},
+            multimodal_kwargs=multimodal_kwargs or {},
+        )
+
+    def _execute_parallel_query(
+        self,
+        query_text: str,
+        limit: int,
+        collection_name: str,
+        filter_conditions: Optional[Dict[str, Any]],
+        code_kwargs: Dict[str, Any],
+        multimodal_kwargs: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Shared parallel-dispatch-and-merge implementation for `query()` and
+        `query_with_separate_kwargs()`.
+
+        Queries code_index and multimodal_index (if exists) concurrently,
+        each with its own extra kwargs dict. Merges results in an
+        order-independent way, deduplicates by (file_path, chunk_offset),
+        sorts by score descending, and applies limit. Handles timeouts
+        gracefully by returning partial results from successful queries.
         """
         has_multimodal = self.will_query_multimodal()
 
@@ -330,7 +401,7 @@ class MultiIndexQueryService:
                 limit,
                 collection_name,
                 filter_conditions,
-                **kwargs,
+                **code_kwargs,
             )
             futures[code_future] = "code"
 
@@ -342,7 +413,7 @@ class MultiIndexQueryService:
                     limit,
                     collection_name,
                     filter_conditions,
-                    **kwargs,
+                    **multimodal_kwargs,
                 )
                 futures[multimodal_future] = "multimodal"
 

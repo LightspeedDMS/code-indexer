@@ -345,3 +345,49 @@ class VoyageMultimodalClient:
         "voyage-ai" correctly routes multimodal telemetry to the voyage branch.
         """
         return "voyage-ai"
+
+    def get_current_model(self) -> str:
+        """Get the current active model name.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract (see
+        ``server/services/query_embedding_cache.py``), which every embedding
+        provider driven through ``governed_call.coalesced_query_embedding``
+        must satisfy once the query-embedding cache is enabled. Mirrors
+        ``VoyageAIClient.get_current_model()`` exactly.
+        """
+        return str(self.config.model)
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract, which reads the
+        ``"dimensions"`` key. Reuses the SAME ``_VOYAGE_MODEL_DIMENSIONS``
+        table ``VoyageAIClient.get_model_info()`` uses -- never a fabricated
+        value. Unlike the text client, this raises loudly (no silent
+        default) when the configured model has no known dimension, since a
+        wrong/undeclared dimension here would corrupt the cache qualifier.
+
+        Raises:
+            ValueError: If ``self.config.model`` has no entry in
+                ``_VOYAGE_MODEL_DIMENSIONS``.
+        """
+        from .voyage_ai import _VOYAGE_MODEL_DIMENSIONS
+
+        model_name = self.config.model
+        dimensions = _VOYAGE_MODEL_DIMENSIONS.get(model_name)
+        if dimensions is None:
+            raise ValueError(
+                f"Unknown VoyageAI multimodal model '{model_name}': no "
+                "dimension entry in _VOYAGE_MODEL_DIMENSIONS (voyage_ai.py)."
+            )
+
+        return {
+            "name": model_name,
+            "provider": "voyage-ai",
+            "dimensions": dimensions,
+            "max_tokens": self._get_model_token_limit(),
+            "supports_batch": True,
+            "api_endpoint": self.config.api_endpoint,
+        }
