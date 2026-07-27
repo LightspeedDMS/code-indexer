@@ -1095,6 +1095,21 @@ class FleetMigrationConfig:
     # no migration is currently in flight).
     tick_interval_minutes: int = 30
 
+    # Proactive cross-repo canary gate (Story #1461 salvage item #8,
+    # default: False -- an ADDITIONAL safety gate on top of `enabled`,
+    # defaulting off preserves today's exact fleet-wide sweep behavior).
+    # When True, the scheduler holds the fleet-wide sweep after the FIRST
+    # repo of a fresh sweep migrates, pending an explicit admin
+    # confirmation (`FleetMigrationScheduler.confirm_canary()` /
+    # `trigger_now(confirm_canary=True)`), before touching a second repo.
+    # This is DISTINCT from the existing reactive consecutive-failure
+    # quarantine breaker (`quarantine.py`) -- that breaker only reacts
+    # AFTER the SAME repo fails repeatedly; this gate proactively pauses
+    # the whole fleet after the very first successful migration of a
+    # sweep, so a systemic converter defect cannot silently touch multiple
+    # repos before anything notices.
+    canary_gate_enabled: bool = False
+
 
 @dataclass
 class XRayConfig:

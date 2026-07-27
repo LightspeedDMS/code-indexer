@@ -30,10 +30,10 @@ class TestGetAllSettingsFleetMigrationSection:
         settings = svc.get_all_settings()
         assert "fleet_migration" in settings
 
-    def test_section_has_both_keys(self, tmp_path) -> None:
+    def test_section_has_all_keys(self, tmp_path) -> None:
         svc = _make_service(str(tmp_path))
         section = svc.get_all_settings()["fleet_migration"]
-        for key in ("enabled", "tick_interval_minutes"):
+        for key in ("enabled", "tick_interval_minutes", "canary_gate_enabled"):
             assert key in section, f"Missing key: {key}"
 
     def test_section_default_values(self, tmp_path) -> None:
@@ -41,9 +41,11 @@ class TestGetAllSettingsFleetMigrationSection:
         section = svc.get_all_settings()["fleet_migration"]
         # FleetMigrationConfig defaults: enabled=False (deliberate --
         # this scheduler deletes real on-disk chunk data), 30-minute
-        # tick interval.
+        # tick interval, canary_gate_enabled=False (Story #1461 salvage
+        # item #8 -- an additional safety gate, off by default).
         assert section["enabled"] is False
         assert section["tick_interval_minutes"] == 30
+        assert section["canary_gate_enabled"] is False
 
 
 class TestUpdateSettingEnabledCheckboxTrap:
@@ -61,6 +63,24 @@ class TestUpdateSettingEnabledCheckboxTrap:
         svc.update_setting("fleet_migration", "enabled", "true")
         svc.update_setting("fleet_migration", "enabled", "false")
         assert svc.get_config().fleet_migration_config.enabled is False
+
+
+class TestUpdateSettingCanaryGateEnabledField:
+    """Mirrors TestUpdateSettingEnabledCheckboxTrap's true/false persistence
+    pattern for the new canary_gate_enabled field (Story #1461 salvage item
+    #8) -- the Web UI submits an explicit true/false <select>, not a
+    checkbox, so "false" must persist False rather than silently no-op."""
+
+    def test_update_canary_gate_enabled_true_persists(self, tmp_path) -> None:
+        svc = _make_service(str(tmp_path))
+        svc.update_setting("fleet_migration", "canary_gate_enabled", "true")
+        assert svc.get_config().fleet_migration_config.canary_gate_enabled is True
+
+    def test_update_canary_gate_enabled_false_persists(self, tmp_path) -> None:
+        svc = _make_service(str(tmp_path))
+        svc.update_setting("fleet_migration", "canary_gate_enabled", "true")
+        svc.update_setting("fleet_migration", "canary_gate_enabled", "false")
+        assert svc.get_config().fleet_migration_config.canary_gate_enabled is False
 
 
 class TestUpdateSettingTickIntervalField:

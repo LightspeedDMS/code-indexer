@@ -910,6 +910,11 @@ function saveLlmCredsConfig() {
                     <td class="config-value">{{ config.fleet_migration.tick_interval_minutes }}</td>
                     <td class="config-description">Minutes between ticks -- how promptly the next unmigrated repo is picked up (default: 30)</td>
                 </tr>
+                <tr>
+                    <td class="config-label">Canary Gate Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.fleet_migration.canary_gate_enabled else 'No' }}</td>
+                    <td class="config-description">Whether the proactive cross-repo canary gate is active (default: No). When on, the sweep holds after the first repo migrates until an admin confirms the canary.</td>
+                </tr>
             </table>
             <div class="form-actions">
                 <button class="outline small" onclick="toggleEditMode('fleet-migration')">Edit</button>
@@ -934,6 +939,14 @@ function saveLlmCredsConfig() {
                     Tick Interval (minutes)
                     <input type="number" id="fleet-migration-tick-interval" name="tick_interval_minutes" value="{{ config.fleet_migration.tick_interval_minutes }}" min="1">
                     <small>Minimum: 1 (default: 30). Minutes between ticks -- each tick migrates at most one repo.</small>
+                </label>
+                <label for="fleet-migration-canary-gate-enabled">
+                    Canary Gate Enabled
+                    <select id="fleet-migration-canary-gate-enabled" name="canary_gate_enabled">
+                        <option value="true" {% if config.fleet_migration.canary_gate_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.fleet_migration.canary_gate_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>When on, holds the fleet-wide sweep after the first repo migrates until an admin confirms the canary via a fresh trigger.</small>
                 </label>
             </div>
             <div class="form-actions">
