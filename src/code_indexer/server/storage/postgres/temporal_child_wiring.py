@@ -56,6 +56,10 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+from code_indexer.server.services.temporal_reader_capability import (
+    MIN_DUAL_LAYOUT_READER_VERSION,
+    all_serving_nodes_reader_capable,
+)
 from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
 from code_indexer.server.storage.postgres.temporal_metadata_backend import (
     make_postgres_temporal_metadata_factory,
@@ -122,8 +126,16 @@ def build_temporal_child_env(
         additionally when server_config.storage_mode == "postgres", and
         CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED set to "1" when the config
         service reports the AC1 safety gate enabled (2026-07-24 re-review,
-        Codex finding #4) -- omitted (not just "0") when disabled/unread­
-        able, matching the gate's own default-OFF, fail-safe philosophy.
+        Codex finding #4) AND all_serving_nodes_reader_capable() confirms
+        every node currently serving this fleet reports a server_version
+        at or above the release that first shipped the dual-layout
+        chunks.db resolver and the sister-location temporal shard
+        resolver (Story #1461 salvage item #3) -- omitted (not just "0")
+        when disabled/unreadable/incapable, matching the gate's own
+        default-OFF, fail-safe philosophy. Solo deployments are trivially
+        always capable (see all_serving_nodes_reader_capable's own
+        docstring); a partial-rollout cluster fleet withholds
+        sister-location publication until every node has upgraded.
     """
     merged: Dict[str, str] = (
         dict(base_env) if base_env is not None else dict(os.environ)
@@ -157,8 +169,31 @@ def build_temporal_child_env(
             exc,
         )
         sister_relocation_enabled = False
+
     if sister_relocation_enabled:
-        merged[CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV] = "1"
+        # Story #1461 salvage item #3: the operator toggle alone is not
+        # enough -- during a rolling deploy a partial-rollout fleet could
+        # have a just-upgraded node publish sister-location temporal data
+        # (Story #1457 AC6) that an old, not-yet-upgraded node cannot
+        # resolve/read. AND the toggle with a fleet-wide reader-capability
+        # check, resolved fresh on every call so it self-heals the moment
+        # the last node in the fleet finishes upgrading.
+        _storage_mode_for_capability = (
+            server_config.storage_mode if server_config is not None else ""
+        )
+        if all_serving_nodes_reader_capable(
+            MIN_DUAL_LAYOUT_READER_VERSION, _storage_mode_for_capability
+        ):
+            merged[CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV] = "1"
+        else:
+            logger.warning(
+                "build_temporal_child_env: temporal_sister_relocation_enabled "
+                "is on but not every serving node reports a reader-capable "
+                "server_version (>= %s) -- withholding sister-location "
+                "publication for this child to protect a partial-rollout "
+                "fleet from an older node reading data it cannot parse.",
+                MIN_DUAL_LAYOUT_READER_VERSION,
+            )
 
     return merged
 
