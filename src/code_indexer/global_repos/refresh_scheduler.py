@@ -1780,7 +1780,7 @@ class RefreshScheduler:
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
                     detected_indexes = self._detect_existing_indexes(
-                        Path(current_target)
+                        Path(current_target), repo_alias=repo_name
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -2348,7 +2348,8 @@ class RefreshScheduler:
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
                     detected_indexes = self._detect_existing_indexes(
-                        Path(new_index_path)
+                        Path(new_index_path),
+                        repo_alias=alias_name.removesuffix("-global"),
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -3266,19 +3267,29 @@ class RefreshScheduler:
             )
         return False
 
-    def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
+    def _detect_existing_indexes(
+        self, repo_path: Path, repo_alias: Optional[str] = None
+    ) -> Dict[str, bool]:
         """
         Detect which index types exist in the repository's .code-indexer directory.
 
         Args:
             repo_path: Path to the repository root
+            repo_alias: Bare (no "-global" suffix) golden repo alias, used to
+                additionally consult the golden-owned sister location for
+                relocated temporal data (Bug #1461). Optional and defaults to
+                None for backward compatibility with existing positional-only
+                callers -- when None, temporal detection is EXACTLY the
+                in-repo-only scan below, unchanged.
 
         Returns:
             Dictionary with index types as keys and existence as boolean values:
             - semantic: True if semantic vector index exists
             - fts: True if FTS (Tantivy) index exists
             - temporal: True if a temporal collection exists WITH real shard data
-              (Bug #1390: name-match alone is not enough -- see below)
+              (Bug #1390: name-match alone is not enough -- see below), OR if
+              real temporal data exists at the golden-owned sister location
+              (Bug #1461, only checked when repo_alias is provided)
             - scip: True if SCIP code intelligence indexes exist
         """
         from code_indexer.services.temporal.temporal_collection_naming import (
@@ -3325,6 +3336,18 @@ class RefreshScheduler:
                     temporal_exists = True
                     break
 
+        # Bug #1461: the in-repo scan above cannot see temporal data that
+        # Story #1457 relocated to the golden-owned sister location. If the
+        # in-repo scan alone found nothing, additionally consult the sister
+        # location (fail-open, never raises) before concluding "no temporal
+        # data" -- otherwise a relocated-but-alive repo would trigger Bug
+        # #1406's one-way auto-DISABLE downgrade against operator/system
+        # intent.
+        if not temporal_exists and repo_alias is not None:
+            temporal_exists = self._sister_temporal_data_exists(
+                repo_alias, semantic_index_dir
+            )
+
         # Check SCIP indexes: delegate to _has_scip_indexes()
         scip_exists = self._has_scip_indexes(repo_path)
 
@@ -3334,6 +3357,46 @@ class RefreshScheduler:
             "temporal": temporal_exists,
             "scip": scip_exists,
         }
+
+    def _sister_temporal_data_exists(
+        self, repo_alias: str, legacy_index_path: Path
+    ) -> bool:
+        """Bug #1461 (Epic #1454 Story #1461 salvage item #1): the in-repo-only
+        scan above cannot see temporal data that Story #1457 relocated to the
+        golden-owned sister location. Consult get_temporal_repo_status()'s
+        resolver-based union (sister pointer OR in-repo, real-data-presence
+        only) so a relocated-but-alive repo is not misreported as "no temporal
+        data", which would otherwise trigger Bug #1406's one-way auto-DISABLE
+        downgrade against operator/system intent.
+
+        Fails open (returns False, in-repo-only result stands unchanged) on
+        ANY error -- reconciliation must never crash because this best-effort
+        secondary check could not run (e.g. golden_repos_dir unavailable on a
+        bare/test instance, a malformed alias pointer, an OSError).
+        """
+        golden_repos_dir: Optional[Path] = getattr(self, "golden_repos_dir", None)
+        if golden_repos_dir is None:
+            return False
+        try:
+            from code_indexer.services.temporal.temporal_status import (
+                get_temporal_repo_status,
+            )
+
+            status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=repo_alias,
+                legacy_index_path=legacy_index_path,
+            )
+            return bool(status.has_data)
+        except Exception as exc:
+            logger.warning(
+                "Reconciliation: sister-location temporal status check failed "
+                "for %s: %s: %s -- falling back to in-repo-only detection",
+                repo_alias,
+                type(exc).__name__,
+                exc,
+            )
+            return False
 
     def _has_scip_indexes(self, repo_path: Path) -> bool:
         """
