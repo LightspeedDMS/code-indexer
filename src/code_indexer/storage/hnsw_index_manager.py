@@ -910,11 +910,23 @@ class HNSWIndexManager:
         visible_files: Optional[Set[str]],
         current_branch: Optional[str],
     ) -> Tuple[List[np.ndarray], List[str]]:
-        """Story #1456 AC2: stream vector+payload from ``chunks.db`` via
-        ``ChunkStore.stream_all()`` instead of rglob-scanning
-        ``vector_*.json`` files. Preserves the EXACT dimension-validation,
-        ``visible_files``, and Bug #306 ``hidden_branches`` filtering
-        semantics of :meth:`_load_vectors_from_json_files`.
+        """Story #1456 AC2: stream vector+payload from ``chunks.db`` instead
+        of rglob-scanning ``vector_*.json`` files. Preserves the EXACT
+        dimension-validation, ``visible_files``, and Bug #306
+        ``hidden_branches`` filtering semantics of
+        :meth:`_load_vectors_from_json_files`.
+
+        Story #1461 salvage item #9 (perf): uses
+        ``ChunkStore.stream_for_index_rebuild(need_payload=...)`` instead of
+        the full-decode ``stream_all()`` -- the payload (and therefore the
+        zstd-decompress + json.loads of the entire text corpus) is only
+        actually needed to read ``hidden_branches`` for the Bug #306
+        branch-aware filter, which is reached ONLY when ``visible_files`` is
+        None AND ``current_branch`` is set (``visible_files`` always takes
+        priority per the ``elif`` below). In the common unfiltered and
+        visible_files-filtered cases, the top-level indexed ``path`` column
+        is used directly and the payload is never decoded. Byte-identical
+        result set to the pre-optimization ``stream_all()``-based path.
         """
         from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
 
@@ -925,11 +937,14 @@ class HNSWIndexManager:
             vectors_list: List[np.ndarray] = []
             ids_list: List[str] = []
 
-            for record in store.stream_all():
+            need_payload = visible_files is None and current_branch is not None
+
+            for point_id, vector, path, payload in store.stream_for_index_rebuild(
+                need_payload=need_payload
+            ):
                 try:
-                    vector = np.array(record["vector"], dtype=np.float32)
-                    point_id = record["id"]
-                except (KeyError, ValueError, TypeError):
+                    vector = np.array(vector, dtype=np.float32)
+                except (ValueError, TypeError):
                     # Skip malformed records (mirrors legacy malformed-file skip).
                     continue
 
@@ -937,14 +952,12 @@ class HNSWIndexManager:
                     continue  # Skip mismatched dimensions
 
                 if visible_files is not None:
-                    file_path = record.get("payload", {}).get("path")
-                    if file_path not in visible_files:
+                    if path not in visible_files:
                         continue  # Skip vectors not in visible set
                 elif current_branch is not None:
                     # Bug #306: branch-aware filter, identical semantics to
                     # the legacy sharded-JSON path.
-                    payload = record.get("payload", {})
-                    hidden_branches = payload.get("hidden_branches", [])
+                    hidden_branches = (payload or {}).get("hidden_branches", [])
                     if current_branch in hidden_branches:
                         continue  # Skip vectors hidden for this branch
 
