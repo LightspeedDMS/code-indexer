@@ -94,6 +94,7 @@ def execute_live_temporal_search(
     dedup_cache: Optional[TemporalDedupCache] = None,
     worker_fn: Callable[..., Dict[str, Any]] = run_temporal_worker,
     config_service: Optional[Any] = None,
+    query_tracker: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Core protocol-agnostic async-hybrid temporal dispatch.
 
@@ -107,6 +108,12 @@ def execute_live_temporal_search(
             actually invoke the real rerank wiring (postprocess_temporal_
             snapshot's terminal-only rerank step). None (default) keeps
             every read conservatively unranked=True.
+        query_tracker: Bug #1482 -- forwarded into the submitted worker's
+            kwargs (never into TemporalWorkerInput/the dedup signature) so
+            run_temporal_worker can construct a resolution-scope-safe
+            TemporalShardResolver and consult the golden-owned sister
+            location. None (default) preserves today's legacy-only
+            resolution behavior exactly.
 
     Returns:
         A dict with at least "status" ("completed"|"waiting"|"failed"|
@@ -147,6 +154,7 @@ def execute_live_temporal_search(
             lane="temporal",
             worker_input=worker_input,
             payload_cache=payload_cache,
+            query_tracker=query_tracker,
         )
         return new_job_id
 
