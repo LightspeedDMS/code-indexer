@@ -224,6 +224,95 @@ def reconstruct_temporal_backend(
     return config, index_path, vector_store
 
 
+def load_golden_temporal_config(
+    golden_repo_alias: str,
+    activated_repo_manager: Any,
+) -> Optional[Any]:
+    """Load the GOLDEN repo's OWN, CURRENT Config (Story #1461 salvage item 4).
+
+    An activated repo's CoW clone config.json is a point-in-time snapshot
+    taken at activation and is NEVER live-synced with the golden repo it
+    was cloned from. If the golden repo's active_embedder (and its
+    `embedders` registry) changes after activation, a temporal query
+    resolved purely from the clone's own config would silently select the
+    WRONG embedder -- both for shard discovery (config.temporal.
+    active_embedder) and for the query-embedding provider construction
+    that matches a resolved collection back against config.temporal.
+    embedders (temporal_fusion_dispatch._create_embedding_provider_for_
+    collection). Callers must swap the ENTIRE returned config's `temporal`
+    sub-object into their own config (never just the active_embedder
+    scalar) so both stay mutually consistent.
+
+    Uses GoldenRepoManager.get_actual_repo_path -- the SAME canonical
+    flat-vs-versioned resolver every other golden-repo-path consumer in
+    this codebase uses -- never a bespoke path derivation.
+
+    Args:
+        golden_repo_alias: The golden repo's own alias (a trailing
+            '-global' suffix, if present, is stripped -- callers may pass
+            either the bare golden alias or an is_global query's
+            '-global'-suffixed user_alias).
+        activated_repo_manager: Any object exposing a `.golden_repo_manager`
+            attribute (e.g. ActivatedRepoManager).
+
+    Returns:
+        The golden repo's real Config, or None (fail-open) if the golden
+        repo cannot be resolved or its config cannot be loaded -- callers
+        must keep using their existing (clone-derived) config in that
+        case; this function never raises.
+    """
+    if not golden_repo_alias:
+        return None
+
+    bare_alias = golden_repo_alias.removesuffix("-global")
+
+    try:
+        golden_repo_manager = activated_repo_manager.golden_repo_manager
+        golden_path = golden_repo_manager.get_actual_repo_path(bare_alias)
+    except Exception:
+        logger.warning(
+            "Failed to resolve golden repo path for temporal embedder "
+            "selection (golden_repo_alias=%s); using existing config as-is",
+            golden_repo_alias,
+            exc_info=True,
+        )
+        return None
+
+    from ...proxy.config_manager import ConfigManager
+
+    # Require a REAL, on-disk config.json directly under golden_path --
+    # ConfigManager.create_with_backtrack() silently falls back to a
+    # DEFAULT Config() when no config file is found anywhere up the
+    # directory tree, which would otherwise let a bogus/unresolvable
+    # golden_path (e.g. an under-wired collaborator in a test, or a
+    # dangling registry entry) silently overwrite a correct clone config
+    # with default (wrong) embedder settings instead of failing open.
+    golden_config_file = Path(golden_path) / ".code-indexer" / "config.json"
+    if not golden_config_file.exists():
+        logger.warning(
+            "Golden repo path has no config.json for temporal embedder "
+            "selection (golden_repo_alias=%s, path=%s); using existing "
+            "config as-is",
+            golden_repo_alias,
+            golden_path,
+        )
+        return None
+
+    try:
+        golden_config_manager = ConfigManager.create_with_backtrack(Path(golden_path))
+        return golden_config_manager.get_config()
+    except Exception:
+        logger.warning(
+            "Failed to load golden repo's own config for temporal embedder "
+            "selection (golden_repo_alias=%s, path=%s); using existing "
+            "config as-is",
+            golden_repo_alias,
+            golden_path,
+            exc_info=True,
+        )
+        return None
+
+
 def convert_temporal_result_to_query_result(
     temporal_result: Any, repository_alias: str
 ) -> "QueryResult":
@@ -1842,6 +1931,18 @@ class SemanticQueryManager:
             # Check if this is a composite repository
             repo_path_obj = Path(repo_path)
             if self._is_composite_repository(repo_path_obj):
+                # Story #1461 salvage item 5 (anti-fallback / anti-silent-
+                # failure): the composite CLI path (_execute_cli_query /
+                # _build_cli_args) has no wiring for time_range/
+                # time_range_all/at_commit -- silently dropping the time
+                # filter while honoring other filters would return HTTP 200
+                # with non-temporal results and no error. Reject the WHOLE
+                # temporal request explicitly instead of partially honoring
+                # it.
+                if time_range or time_range_all or at_commit:
+                    raise SemanticQueryError(
+                        "Temporal queries are not supported for composite repositories"
+                    )
                 # Use CLI integration for composite repos (supports all filters)
                 self.logger.debug(
                     f"Composite repository detected: {repo_path}. Using CLI integration for search.",
@@ -2494,6 +2595,28 @@ class SemanticQueryManager:
                 repository_alias,
                 shard_ownership=getattr(self, "_shard_ownership", None),
             )
+
+            # Story #1461 salvage item 4: embedder SELECTION must use the
+            # GOLDEN repo's OWN, CURRENT config -- never the activated CoW
+            # clone's point-in-time config.json snapshot (never live-synced
+            # after activation). Swap the ENTIRE config.temporal sub-object
+            # (never just active_embedder) so config.temporal.embedders
+            # stays mutually consistent with active_embedder -- otherwise
+            # _create_embedding_provider_for_collection's downstream match
+            # against a stale embedders list would silently fall back to
+            # the WRONG (clone's) active_embedder even after discovery
+            # correctly found the golden's new embedder's shards.
+            # Fail-open: golden_repo_alias=None (is_global-without-tracker,
+            # CLI, solo) or any resolution failure keeps today's
+            # clone-derived config unchanged.
+            if golden_repo_alias:
+                golden_config = load_golden_temporal_config(
+                    golden_repo_alias, self.activated_repo_manager
+                )
+                if golden_config is not None:
+                    config = config.model_copy(
+                        update={"temporal": golden_config.temporal}
+                    )
 
             # Resolve time range tuple before calling fusion dispatch
             if time_range:
