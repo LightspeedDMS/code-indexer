@@ -1800,7 +1800,7 @@ def make_lifespan(
         try:
             from code_indexer.server.services.research_cleanup_service import (
                 ResearchCleanupScheduler,
-                make_backend_live_folder_provider,
+                make_backend_live_session_id_provider,
             )
             from code_indexer.server.services.research_assistant_service import (
                 _default_research_base_dir,
@@ -1827,7 +1827,7 @@ def make_lifespan(
             # reflects the active store.
             def _research_sessions_backend_supplier():
                 # Resolve the active backend lazily (the registry is only wired
-                # after startup). None -> make_backend_live_folder_provider
+                # after startup). None -> make_backend_live_session_id_provider
                 # raises -> cleanup() aborts with ZERO deletions (fail-safe).
                 if backend_registry is not None:
                     registry_backend = backend_registry.research_sessions
@@ -1845,7 +1845,7 @@ def make_lifespan(
             research_cleanup_scheduler = ResearchCleanupScheduler(
                 research_base_dir=_default_research_base_dir(),
                 retention_days_provider=_research_retention_days_provider,
-                live_folder_provider=make_backend_live_folder_provider(
+                live_session_id_provider=make_backend_live_session_id_provider(
                     _research_sessions_backend_supplier
                 ),
             )

@@ -135,6 +135,28 @@ class ResearchAssistantService:
         else:
             self._conn_manager = None  # type: ignore[assignment]
 
+    def _resolve_node_local_session_folder(self, session_id: str) -> Path:
+        """
+        Resolve the node-local filesystem path for a session's working folder
+        (Bug #1485).
+
+        The ``folder_path`` value persisted in (and returned from) the
+        session backend/DB may be a stale absolute path written by a PRIOR
+        deployment whose service-account home differed from THIS node's. It
+        is retained purely for advisory/display purposes; it must NEVER be
+        trusted for an actual filesystem operation (mkdir, chdir, upload,
+        delete). The only trustworthy source of truth for where a session's
+        folder actually lives on THIS node is ``self._research_base_dir``
+        combined with the session id.
+
+        Args:
+            session_id: Session ID (e.g. "default" or a UUID)
+
+        Returns:
+            The node-local Path for the session's working folder.
+        """
+        return self._research_base_dir / session_id
+
     def _detect_repo_root(self) -> Optional[str]:
         """
         Detect CIDX repository root from file location.
@@ -472,7 +494,12 @@ class ResearchAssistantService:
                     folder_path=folder_path,
                 )
                 session = self._backend.get_session("default")
-            self._ensure_session_folder_setup(session["folder_path"])
+            # Bug #1485: NEVER trust session["folder_path"] read back from
+            # shared cluster storage for a filesystem operation -- a prior
+            # deployment with a different service-account home may have
+            # persisted a now-foreign absolute path. Always recompute from
+            # THIS node's own research_base_dir instead.
+            self._ensure_session_folder_setup(folder_path)
             return session  # type: ignore[no-any-return]
 
         result: dict = {"session": None, "created": False, "folder_path": None}
@@ -503,8 +530,11 @@ class ResearchAssistantService:
         self._conn_manager.execute_atomic(_do_get_or_create)
 
         if result["session"] is not None:
-            # Ensure folder and softlink exist even if session already in DB
-            self._ensure_session_folder_setup(result["session"]["folder_path"])
+            # Ensure folder and softlink exist even if session already in DB.
+            # Bug #1485: recompute from research_base_dir, never trust the
+            # stored folder_path -- it may be a stale absolute path from a
+            # prior deployment with a different service-account home.
+            self._ensure_session_folder_setup(folder_path)
             return result["session"]  # type: ignore[no-any-return]
 
         # Ensure folder and softlink exist (AC3)
@@ -541,7 +571,11 @@ class ResearchAssistantService:
             session = self._backend.get_session(session_id)
             if session is None:
                 return False
-            folder_path = session["folder_path"]
+            # Bug #1485: NEVER trust session["folder_path"] for the actual
+            # delete -- it may be a stale absolute path persisted by a
+            # prior deployment with a different service-account home.
+            # Recompute from THIS node's own research_base_dir instead.
+            folder_path = str(self._resolve_node_local_session_folder(session_id))
             self._backend.delete_session(session_id)
             folder = Path(folder_path)
             if folder.exists():
@@ -571,7 +605,11 @@ class ResearchAssistantService:
         if not result["found"]:
             return False
 
-        folder_path = result["folder_path"]
+        # Bug #1485: NEVER trust result["folder_path"] (the stored DB value)
+        # for the actual delete -- it may be a stale absolute path
+        # persisted by a prior deployment with a different service-account
+        # home. Recompute from THIS node's own research_base_dir instead.
+        folder_path = str(self._resolve_node_local_session_folder(session_id))
 
         # Delete session folder from filesystem
         folder = Path(folder_path)
@@ -1461,7 +1499,19 @@ class ResearchAssistantService:
             session = self.get_session(session_id)
             if not session:
                 session = self.get_default_session()
-            working_dir = Path(session["folder_path"])
+            # Bug #1485: NEVER trust session["folder_path"] for the Claude
+            # CLI working directory -- it may be a stale absolute path
+            # persisted by a prior deployment with a different
+            # service-account home. Always recompute from THIS node's own
+            # research_base_dir instead. session.get("id", session_id) uses
+            # the method's own authoritative session_id parameter as a
+            # fallback for an incomplete session dict (e.g. one that only
+            # carries folder_path) -- a real get_session()/
+            # get_default_session() row always has "id", so this is
+            # byte-identical in production.
+            working_dir = self._resolve_node_local_session_folder(
+                session.get("id", session_id)
+            )
 
             # Story #997: Enforce pace-maker config before Claude CLI invocation (non-fatal)
             try:
@@ -1808,7 +1858,11 @@ class ResearchAssistantService:
         if not session:
             return 0
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         if not uploads_dir.exists():
             return 0
 
@@ -1874,7 +1928,13 @@ class ResearchAssistantService:
                 }
 
             # AC2: Create uploads folder
-            uploads_dir = Path(session["folder_path"]) / "uploads"
+            # Bug #1485: NEVER trust session["folder_path"] for the uploads
+            # dir -- it may be a stale absolute path persisted by a prior
+            # deployment with a different service-account home. Always
+            # recompute from THIS node's own research_base_dir instead.
+            uploads_dir = (
+                self._resolve_node_local_session_folder(session_id) / "uploads"
+            )
             uploads_dir.mkdir(exist_ok=True)
 
             # AC2: Sanitize filename
@@ -1919,7 +1979,11 @@ class ResearchAssistantService:
         if not session:
             return []
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         if not uploads_dir.exists():
             return []
 
@@ -1960,7 +2024,11 @@ class ResearchAssistantService:
         # Sanitize filename to prevent path traversal
         safe_filename = self.sanitize_filename(filename)
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         file_path = (uploads_dir / safe_filename).resolve()
 
         # Verify path is within uploads directory (path traversal protection)
@@ -1999,7 +2067,11 @@ class ResearchAssistantService:
         # Sanitize filename to prevent path traversal
         safe_filename = self.sanitize_filename(filename)
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         file_path = (uploads_dir / safe_filename).resolve()
 
         # Verify path is within uploads directory (path traversal protection)
