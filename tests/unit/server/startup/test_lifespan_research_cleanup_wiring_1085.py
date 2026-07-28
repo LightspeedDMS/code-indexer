@@ -59,29 +59,29 @@ class TestLifespanResearchCleanupWiring:
     def test_live_set_is_backend_aware_not_sqlite_only(self):
         """Bug #1085 BLOCKING-1 guard: the live set must be sourced from the
         ACTIVE research_sessions backend (postgres in cluster / sqlite in solo),
-        via ``make_backend_live_folder_provider`` over ``research_sessions``.
+        via ``make_backend_live_session_id_provider`` over ``research_sessions``.
 
         A SQLite-only provider read an EMPTY table in postgres mode and caused
         mass-deletion of live sessions. This guard fails if the wiring regresses
-        to using ONLY make_db_live_folder_provider as the live source.
+        to using ONLY make_db_live_session_id_provider as the live source.
         """
         source = _LIFESPAN_PATH.read_text()
-        assert "make_backend_live_folder_provider" in source, (
+        assert "make_backend_live_session_id_provider" in source, (
             "lifespan must wire the backend-aware live-set provider "
-            "(make_backend_live_folder_provider)"
+            "(make_backend_live_session_id_provider)"
         )
         assert "backend_registry.research_sessions" in source, (
             "lifespan must source the live set from backend_registry.research_sessions"
         )
 
         ctor_args = self._scheduler_ctor_args(source)
-        arg_value = self._kwarg_value(ctor_args, "live_folder_provider")
+        arg_value = self._kwarg_value(ctor_args, "live_session_id_provider")
         assert arg_value is not None, (
-            "ResearchCleanupScheduler must receive a live_folder_provider= argument"
+            "ResearchCleanupScheduler must receive a live_session_id_provider= argument"
         )
-        assert "make_backend_live_folder_provider" in arg_value, (
+        assert "make_backend_live_session_id_provider" in arg_value, (
             "the backend-aware provider must be the scheduler's "
-            "live_folder_provider= argument value (got: " + arg_value + ")"
+            "live_session_id_provider= argument value (got: " + arg_value + ")"
         )
 
     @staticmethod

@@ -45,7 +45,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),  # no live sessions
+            live_session_id_provider=lambda: set(),  # no live sessions
         )
         result = svc.cleanup()
 
@@ -56,12 +56,16 @@ class TestResearchCleanupService:
     def test_live_session_dir_preserved(self, tmp_path):
         """A dir mapping to a live DB row is NEVER deleted, even if aged."""
         base = tmp_path / "research"
-        live = _make_session_dir(base, "bbbbbbbb-live", age_days=100)
+        live = _make_session_dir(
+            base, "bbbbbbbb-0000-4000-8000-00000000b1b2", age_days=100
+        )
 
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: {str(live)},
+            # Bug #1485 follow-up: matched by SESSION ID (path.name), never
+            # by the stored/full path string.
+            live_session_id_provider=lambda: {live.name},
         )
         result = svc.cleanup()
 
@@ -77,7 +81,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=0.0001,  # tiny retention so age alone wouldn't save it
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -92,7 +96,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=7,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -111,7 +115,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
 
         from unittest.mock import patch
@@ -139,7 +143,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=0,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -152,7 +156,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=tmp_path / "does-not-exist",
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()  # must not raise
         assert result.dirs_scanned == 0
@@ -167,7 +171,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
             max_dirs_per_run=2,
         )
         result = svc.cleanup()
@@ -185,7 +189,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=_boom,
+            live_session_id_provider=_boom,
         )
         result = svc.cleanup()  # must NOT raise
 
@@ -204,7 +208,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -232,7 +236,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()  # must NOT raise on the dangling link
 
@@ -262,7 +266,7 @@ class TestResearchCleanupService:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=_provider_that_removes,
+            live_session_id_provider=_provider_that_removes,
         )
         result = svc.cleanup()  # must NOT raise
 
@@ -290,7 +294,7 @@ class TestResearchCleanupSchedulerErrorPaths:
         sched = ResearchCleanupScheduler(
             research_base_dir=base,
             retention_days_provider=_bad_retention,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
             interval_seconds=3600,
         )
         result = sched._run_one_sweep()  # direct call exercises the cycle safely
@@ -344,7 +348,7 @@ class TestResearchCleanupScheduler:
         sched = ResearchCleanupScheduler(
             research_base_dir=base,
             retention_days_provider=lambda: 3,
-            live_folder_provider=_provider,
+            live_session_id_provider=_provider,
             interval_seconds=3600,
         )
         sched.start()
@@ -367,7 +371,7 @@ class TestResearchCleanupScheduler:
         sched = ResearchCleanupScheduler(
             research_base_dir=tmp_path / "research",
             retention_days_provider=lambda: 3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
             interval_seconds=3600,
         )
         sched.start()
@@ -388,20 +392,21 @@ class TestResearchCleanupScheduler:
         sched = ResearchCleanupScheduler(
             research_base_dir=tmp_path / "research",
             retention_days_provider=lambda: 3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
             interval_seconds=3600,
         )
         sched.start()
         sched.stop()  # must not raise / hang
         assert not sched.is_running()
 
-    def test_live_folder_provider_reads_research_sessions(self, tmp_path):
-        """The DB-backed provider returns folder_path strings for live rows."""
+    def test_live_session_id_provider_reads_research_sessions(self, tmp_path):
+        """The DB-backed provider returns session id strings for live rows
+        (Bug #1485 follow-up: NEVER folder_path strings)."""
         import sqlite3
 
         from src.code_indexer.server.storage.database_manager import DatabaseSchema
         from code_indexer.server.services.research_cleanup_service import (
-            make_db_live_folder_provider,
+            make_db_live_session_id_provider,
         )
 
         db_path = str(tmp_path / "cidx_server.db")
@@ -416,10 +421,10 @@ class TestResearchCleanupScheduler:
         conn.commit()
         conn.close()
 
-        provider = make_db_live_folder_provider(db_path)
-        assert provider() == {"/x/research/s1"}
+        provider = make_db_live_session_id_provider(db_path)
+        assert provider() == {"s1"}
 
-    def test_live_folder_provider_handles_special_char_in_db_path(self, tmp_path):
+    def test_live_session_id_provider_handles_special_char_in_db_path(self, tmp_path):
         """Issue #1459 code-review sweep: a naive f"file:{db_path}?mode=ro"
         string mis-parses a db_path containing a URI-special character such as
         '?' -- SQLite's URI parser reads the literal '?' as the start of the
@@ -432,7 +437,7 @@ class TestResearchCleanupScheduler:
 
         from src.code_indexer.server.storage.database_manager import DatabaseSchema
         from code_indexer.server.services.research_cleanup_service import (
-            make_db_live_folder_provider,
+            make_db_live_session_id_provider,
         )
 
         special_dir = tmp_path / "server?weird"
@@ -449,8 +454,8 @@ class TestResearchCleanupScheduler:
         conn.commit()
         conn.close()
 
-        provider = make_db_live_folder_provider(db_path)
-        assert provider() == {"/x/research/s1"}
+        provider = make_db_live_session_id_provider(db_path)
+        assert provider() == {"s1"}
 
 
 class TestDefaultDirLogLevel:
@@ -477,7 +482,7 @@ class TestDefaultDirLogLevel:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
 
         with caplog.at_level(
@@ -525,7 +530,7 @@ class TestDefaultDirLogLevel:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
 
         with caplog.at_level(
@@ -568,7 +573,7 @@ class TestDefaultDirLogLevel:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),  # orphan — no live row
+            live_session_id_provider=lambda: set(),  # orphan — no live row
         )
         result = svc.cleanup()
 

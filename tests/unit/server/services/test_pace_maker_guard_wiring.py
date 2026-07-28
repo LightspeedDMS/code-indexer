@@ -5,6 +5,7 @@ Tests that enforce_pace_maker_config() is called by:
 2. ResearchAssistantService._run_claude_background()
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -76,6 +77,11 @@ class TestResearchAssistantCallsGuard:
         mock_db.get_connection.return_value = mock_ctx
 
         service = ResearchAssistantService.__new__(ResearchAssistantService)
+        # Bug #1485: _run_claude_background() now legitimately reads
+        # self._research_base_dir (via _resolve_node_local_session_folder).
+        # Every real, __init__-constructed service has this attribute; this
+        # partial __new__-built test double must provide it too.
+        service._research_base_dir = Path("/tmp")
         service._db = mock_db
         service._sessions = {}
         service._default_session = {
