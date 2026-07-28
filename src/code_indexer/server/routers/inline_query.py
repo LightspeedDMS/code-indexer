@@ -225,6 +225,17 @@ def _execute_temporal_via_live_dispatch_rest(
         handler_deadline_monotonic=handler_deadline_monotonic,
         response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
         config_service=config_service,
+        # Bug #1482 (REOPENED): thread the real QueryTracker into the live
+        # worker so it can construct a resolution-scope-safe
+        # TemporalShardResolver and consult the golden-owned sister
+        # location Story #1457's relocation trigger may have moved shard
+        # data to. Mirrors mcp/handlers/search.py's
+        # _execute_temporal_via_live_dispatch (the MCP door, already fixed
+        # by commit 7ae9b9bb) -- REST's sibling call site here was the
+        # confirmed gap: omitting this kwarg silently forced every REST
+        # temporal query back onto the legacy in-repo scan, which is empty
+        # once relocation succeeds.
+        query_tracker=getattr(app.state, "query_tracker", None),
     )
 
     status_field = dispatch_result.get("status")
