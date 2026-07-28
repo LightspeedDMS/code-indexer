@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.84.0] - 2026-07-27
+
+### Fixed
+
+- **#1479 (Research Assistant cluster-aware poll)**: RA job state lived only in a per-process class-level `_jobs` dict, so a poll HAProxy-routed to a non-owning cluster node missed it and returned a spurious "not found in memory" error for an in-progress job. `poll_job` now consults the cluster-shared `JobTracker` on a local miss (running→running, failed/cancelled→error, completed→response from DB messages), keeping the in-memory dict as the same-node fast path.
+- **#1484 (e2e admin-auth resilience)**: the e2e `AdminTokenProvider` renewed the admin JWT via a full username/password re-login, which intermittently 401'd late in the long auth-heavy Phase 3 (erroring test_19's forced-deferral tests at fixture setup). It now prefers the refresh-token grant (`POST /api/auth/refresh`) and only falls back to full re-login when the grant is unavailable. Test-infrastructure only.
+
 ## [11.83.0] - 2026-07-27
 
 ### Fixed

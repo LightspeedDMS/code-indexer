@@ -1063,11 +1063,15 @@ class ResearchAssistantService:
         # Keep existing _jobs dict as primary for poll_job() compatibility.
         if self._job_tracker is not None:
             try:
+                # Bug #1479: stash session_id in tracker metadata so a
+                # cross-node poll_job() can resolve the session even when
+                # the poll request itself doesn't carry session_id.
                 self._job_tracker.register_job(
                     job_id,
                     "research_assistant_chat",
                     username="system",
                     repo_alias="server",
+                    metadata={"session_id": session_id},
                 )
                 self._job_tracker.update_status(job_id, status="running")
             except Exception as e:
@@ -1087,6 +1091,83 @@ class ResearchAssistantService:
 
         return job_id
 
+    # Bug #1479: JobTracker status buckets, matching the exact strings its
+    # own update_status()/complete_job()/fail_job()/cancel_job() write.
+    _TRACKER_RUNNING_STATUSES = ("pending", "running", "resolving_prerequisites")
+    _TRACKER_COMPLETE_STATUSES = ("completed", "completed_partial")
+    _TRACKER_ERROR_STATUSES = ("failed", "cancelled")
+
+    def _poll_via_job_tracker(
+        self, job_id: str, session_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bug #1479: Resolve poll_job() status via the cluster-shared JobTracker.
+
+        The local ``_jobs`` dict is per-process state — a poll routed by
+        HAProxy to a different node/worker than the one running the job
+        always misses it. JobTracker (PostgreSQL-backed in cluster mode) is
+        genuinely cross-node, and ``execute_prompt``/``_run_claude_background``
+        already dual-register/update it, so it is authoritative here.
+
+        Returns None when the tracker has no usable record for job_id, in
+        which case the caller falls through to the pre-existing DB-message
+        fallback.
+        """
+        if self._job_tracker is None:
+            return None
+
+        try:
+            tracked_job = self._job_tracker.get_job(job_id)
+        except Exception as e:
+            logger.warning(
+                "JobTracker lookup failed during poll_job for %s: %s",
+                job_id,
+                e,
+                exc_info=True,
+            )
+            return None
+
+        if tracked_job is None:
+            return None
+
+        tracker_session_id = None
+        if tracked_job.metadata:
+            tracker_session_id = tracked_job.metadata.get("session_id")
+        resolved_session_id = tracker_session_id or session_id
+
+        if tracked_job.status in self._TRACKER_RUNNING_STATUSES:
+            return {
+                "status": "running",
+                "response": None,
+                "error": None,
+                "session_id": resolved_session_id,
+            }
+
+        if tracked_job.status in self._TRACKER_ERROR_STATUSES:
+            return {
+                "status": "error",
+                "error": tracked_job.error or "Job failed",
+                "session_id": resolved_session_id,
+            }
+
+        if tracked_job.status in self._TRACKER_COMPLETE_STATUSES:
+            if resolved_session_id:
+                messages = self.get_messages(resolved_session_id)
+                assistant_messages = [m for m in messages if m["role"] == "assistant"]
+                if assistant_messages:
+                    return {
+                        "status": "complete",
+                        "response": assistant_messages[-1]["content"],
+                        "session_id": resolved_session_id,
+                        "fallback": True,
+                    }
+            # Tracker says complete but no response recoverable yet (rare
+            # race) - fall through to the pre-existing fallback below.
+            return None
+
+        # Unknown/unhandled tracker status - fall through rather than guess.
+        return None
+
     def poll_job(self, job_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Poll status of a Claude execution job (AC4).
@@ -1094,6 +1175,11 @@ class ResearchAssistantService:
         Bug #151 Fix: When job not found in memory (server restart, job expiry),
         falls back to checking database for messages. If messages exist,
         returns complete status to recover lost job state.
+
+        Bug #1479 Fix: Before that DB-message fallback, consults the
+        cluster-shared JobTracker so a poll routed to a different node/worker
+        than the one running the job sees the real status (running/complete/
+        error) instead of a spurious "Job not found".
 
         Args:
             job_id: Job ID returned by execute_prompt
@@ -1113,6 +1199,12 @@ class ResearchAssistantService:
                     "error": job.get("error"),
                     "session_id": job.get("session_id"),
                 }
+
+        # Job not found in local memory - consult the cluster-shared
+        # JobTracker before falling back to the message-only DB check.
+        tracker_result = self._poll_via_job_tracker(job_id, session_id)
+        if tracker_result is not None:
+            return tracker_result
 
         # Job not found in memory - try database fallback (Bug #151 fix)
         if session_id:

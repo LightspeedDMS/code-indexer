@@ -57,11 +57,26 @@ class AdminTokenProvider:
 
     Args:
         login_fn:              Callable that returns ``(access_token, refresh_token)``.
-                               Called during construction and whenever the cached
-                               token is within ``REFRESH_THRESHOLD_SECONDS`` of expiry.
+                               Called during construction and as the FALLBACK renewal
+                               path whenever the cached token is within
+                               ``REFRESH_THRESHOLD_SECONDS`` of expiry and the
+                               refresh-token grant is unavailable or fails.
         initial_access_token:  First access token, obtained by the caller before
                                constructing the provider.
         initial_refresh_token: Corresponding refresh token (may be ``None``).
+        refresh_fn:            Optional callable that renews the token via the
+                               refresh-token grant (e.g. POST /api/auth/refresh)
+                               instead of a full username/password re-login.
+                               Called with the cached refresh token; must return
+                               ``(access_token, refresh_token)`` on success or
+                               ``None`` on failure (an exception is also treated
+                               as failure). Preferred over ``login_fn`` on
+                               near-expiry renewal -- renewing via a refresh
+                               token never resubmits credentials, so it cannot
+                               trip a credential-based login lockout (Bug #1484).
+                               ``login_fn`` is used when ``refresh_fn`` is
+                               ``None``, no refresh token is cached, or the
+                               grant itself fails.
     """
 
     REFRESH_THRESHOLD_SECONDS: int = 60
@@ -71,10 +86,14 @@ class AdminTokenProvider:
         login_fn: Callable[[], Tuple[str, Optional[str]]],
         initial_access_token: str,
         initial_refresh_token: Optional[str],
+        refresh_fn: Optional[
+            Callable[[str], Optional[Tuple[str, Optional[str]]]]
+        ] = None,
     ) -> None:
         self._login_fn = login_fn
         self._access_token = initial_access_token
         self._refresh_token = initial_refresh_token
+        self._refresh_fn = refresh_fn
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -107,13 +126,37 @@ class AdminTokenProvider:
     # ------------------------------------------------------------------
 
     def get_token(self) -> str:
-        """Return a valid access token, refreshing via ``login_fn`` if near-expiry.
+        """Return a valid access token, renewing on near-expiry.
+
+        Renewal prefers the refresh-token grant (``refresh_fn``) over a full
+        ``login_fn`` re-login: a routine renewal must never resubmit
+        credentials, since a credential-based login lockout accumulated
+        earlier in a long test phase would otherwise 401 the renewal itself
+        (Bug #1484). ``login_fn`` is used when ``refresh_fn`` is absent, no
+        refresh token is cached, or the grant fails (returns ``None`` or
+        raises).
 
         Thread-safe note: concurrent calls may both refresh; the last write wins.
         This is safe for E2E test usage where a single test drives requests.
         """
         if self._is_near_expiry(self._access_token):
-            new_access, new_refresh = self._login_fn()
+            renewed = None
+            if self._refresh_fn is not None and self._refresh_token:
+                try:
+                    renewed = self._refresh_fn(self._refresh_token)
+                except Exception as exc:  # noqa: BLE001 -- deliberate bounded fallback
+                    logger.warning(
+                        "AdminTokenProvider: refresh-token grant raised %r; "
+                        "falling back to full re-login",
+                        exc,
+                    )
+                    renewed = None
+
+            if renewed is not None:
+                new_access, new_refresh = renewed
+            else:
+                new_access, new_refresh = self._login_fn()
+
             self._access_token = new_access
             self._refresh_token = new_refresh
         return self._access_token
@@ -250,11 +293,37 @@ def admin_token_provider(test_client: TestClient) -> AdminTokenProvider:
         body = resp.json()
         return str(body["access_token"]), body.get("refresh_token")
 
+    def _refresh_via_grant(refresh_token: str) -> tuple[str, str | None] | None:
+        """Renew via POST /api/auth/refresh instead of resubmitting credentials.
+
+        Bug #1484: a full username/password re-login late in a long,
+        auth-heavy phase can 401 due to account state/rate-limiting
+        accumulated across the phase (the login endpoint's own lockout,
+        independent of the refresh-token grant). Renewing via the refresh
+        token never resubmits credentials, so it cannot trip that lockout.
+        Returns None on any failure so the caller falls back to _relogin.
+        """
+        resp = test_client.post(
+            "/api/auth/refresh",
+            json={"refresh_token": refresh_token},
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "admin_token_provider refresh-token grant failed (%s), "
+                "falling back to full re-login: %s",
+                resp.status_code,
+                resp.text[:300],
+            )
+            return None
+        body = resp.json()
+        return str(body["access_token"]), body.get("refresh_token")
+
     initial_access, initial_refresh = _relogin()
     return AdminTokenProvider(
         login_fn=_relogin,
         initial_access_token=initial_access,
         initial_refresh_token=initial_refresh,
+        refresh_fn=_refresh_via_grant,
     )
 
 
