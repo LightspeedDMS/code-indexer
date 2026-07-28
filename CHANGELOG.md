@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.85.0] - 2026-07-28
+
+### Fixed
+
+- **#1482 (temporal `-global` read path on solo/cluster)**: the REST `/api/query` temporal path did not thread `query_tracker` into the live dispatch worker, so the `TemporalShardResolver` was never constructed and shard discovery fell back to the (now-empty) in-repo scan -- temporal queries against a golden repo whose shards had been relocated to the sister location (Story #1457) returned 0 results. Fixed by passing `query_tracker` from `app.state` in `_execute_temporal_via_live_dispatch_rest`, mirroring the MCP door.
+- **#1485 (Research Assistant broken on cluster)**: RA session `folder_path` was persisted as an absolute local path in shared PostgreSQL; paths written by a prior deployment (different service-account home) could not be created by the current service user, so `_ensure_session_folder_setup` raised `PermissionError` and RA failed on every chat. All filesystem operations now recompute the session folder from this node's own `research_base_dir + session_id` and never trust the stored path. The cleanup GC now proves session liveness by session id (the on-disk directory name), not by the stored `folder_path`, so it can no longer delete a live session whose stored path diverged.
+
 ## [11.84.0] - 2026-07-27
 
 ### Fixed
