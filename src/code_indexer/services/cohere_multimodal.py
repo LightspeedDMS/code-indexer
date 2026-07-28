@@ -473,6 +473,33 @@ class CohereMultimodalClient:
 
         return all_embeddings
 
+    def get_embeddings_batch(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
+        retry: bool = True,
+    ) -> List[List[float]]:
+        """Standard EmbeddingProvider batch contract (Bug #1480 follow-up).
+
+        The server-side embedding path (EmbeddingCoalescer) calls this method;
+        without it a server-side multimodal query raised AttributeError and
+        zeroed the whole result set. Embeds TEXT-ONLY queries (no images) in
+        the multimodal vector space by delegating to
+        get_multimodal_embeddings_batch, so the returned vectors match this
+        client's multimodal collection dimension (embed-v4.0-multimodal = 1536).
+
+        ``model`` and ``retry`` are accepted for signature-compatibility with
+        the base contract; the multimodal batch path manages its own model and
+        retries.
+        """
+        if not texts:
+            return []
+        input_type = "query" if embedding_purpose == "query" else "document"
+        items: List[Dict[str, Any]] = [{"text": t, "image_paths": []} for t in texts]
+        return self.get_multimodal_embeddings_batch(items, input_type=input_type)
+
     def get_provider_name(self) -> str:
         """Get the name of this embedding provider.
 

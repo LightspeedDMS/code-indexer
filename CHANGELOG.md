@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.83.0] - 2026-07-27
+
+### Fixed
+
+- **#1480 (multimodal query completeness)**: two follow-ups found via live front-door E2E on a dual-provider repo. (1) The multimodal fan-out only fired on the `primary_only` query strategy; a default query on a repo with both providers configured resolves to `parallel`, which bypassed it -- multimodal now folds into the parallel/failover strategies too (gated to semantic), so dual-provider `/api/query` returns multimodal hits. (2) The multimodal clients (`VoyageMultimodalClient`/`CohereMultimodalClient`) lacked the standard `EmbeddingProvider.get_embeddings_batch` the server coalescer calls, so a server-side multimodal query raised `AttributeError` and -- because the supplement error propagated -- ZEROED the whole result set; added `get_embeddings_batch` (text-only query embedding in the multimodal space, correct 1024/1536 dims) and wrapped the supplement call so a multimodal failure degrades to code-only results instead of killing the query. Proven live: dual-provider "database schema" query returns 6 results including the image-referencing doc (was 0).
+
 ## [11.82.0] - 2026-07-27
 
 ### Fixed
