@@ -1413,17 +1413,32 @@ class SemanticQueryManager:
         from ..services.search_service import SemanticSearchService
 
         search_service = SemanticSearchService()
-        multimodal_items = search_service.query_multimodal_only(
-            repo_path=repo_path,
-            query=query_text,
-            limit=limit,
-            path_filter=path_filter,
-            language=language,
-            exclude_language=exclude_language,
-            exclude_path=exclude_path,
-            accuracy=accuracy,
-            activation_id=activation_id,
-        )
+        try:
+            multimodal_items = search_service.query_multimodal_only(
+                repo_path=repo_path,
+                query=query_text,
+                limit=limit,
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                accuracy=accuracy,
+                activation_id=activation_id,
+            )
+        except Exception as e:
+            # Bug #1480 follow-up: multimodal is a best-effort SUPPLEMENT to the
+            # already-fused code results. A multimodal-side failure (a provider
+            # missing a contract method, provider down, missing key, etc.) must
+            # NEVER zero the whole query -- log loudly and degrade to the code
+            # results. The primary code query already failed loud on its own.
+            logger.warning(
+                "Multimodal supplement failed for repo %s (degrading to "
+                "code-only results): %s",
+                repo_path,
+                e,
+                extra=get_log_extra("QUERY-MM-SUPPLEMENT-001"),
+            )
+            return results
         if not multimodal_items:
             return results
 
