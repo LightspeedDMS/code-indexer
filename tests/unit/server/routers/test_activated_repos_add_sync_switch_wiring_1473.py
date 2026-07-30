@@ -192,11 +192,27 @@ def test_add_index_type_job_actually_invokes_real_indexing_subprocess(
     )
     assert final_status["result"]["success"] is True, final_status["result"]
 
-    joined_commands = [" ".join(cmd) for cmd in captured_commands]
-    assert "cidx index" in joined_commands, (
+    # Story #1488: server-context `cidx index` spawns now correctly append
+    # --new-collection-layout=chunks_db. Match on the argv-list PREFIX
+    # (tolerant of that trailing flag) and positively assert its presence,
+    # strengthening the original assertion rather than just tolerating it.
+    semantic_commands = [
+        cmd
+        for cmd in captured_commands
+        if cmd[:2] == ["cidx", "index"] and "--fts" not in cmd
+    ]
+    assert semantic_commands, (
         "Bug #1473: add_index_type('semantic') must trigger a real 'cidx "
         f"index' subprocess call. Captured commands: {captured_commands}"
     )
+    assert any(
+        "--new-collection-layout=chunks_db" in cmd for cmd in semantic_commands
+    ), (
+        "Story #1488: server-context 'cidx index' spawns must stamp "
+        f"--new-collection-layout=chunks_db. Captured commands: {captured_commands}"
+    )
+
+    joined_commands = [" ".join(cmd) for cmd in captured_commands]
     assert not any("--fts" in cmd for cmd in joined_commands), (
         "add_index_type('semantic') must NOT also index fts. "
         f"Captured commands: {captured_commands}"
@@ -415,13 +431,41 @@ def test_sync_job_with_reindex_flag_triggers_real_followup_reindex_job(
         "result"
     ]
 
-    joined_commands = [" ".join(cmd) for cmd in captured_commands]
-    assert "cidx index" in joined_commands, (
+    # Story #1488: server-context `cidx index`/`cidx index --fts` spawns now
+    # correctly append --new-collection-layout=chunks_db. Match on the
+    # argv-list PREFIX (tolerant of that trailing flag) and positively
+    # assert its presence, strengthening the original assertions.
+    semantic_commands = [
+        cmd
+        for cmd in captured_commands
+        if cmd[:2] == ["cidx", "index"] and "--fts" not in cmd
+    ]
+    assert semantic_commands, (
         "Bug #1473: sync's reindex=True must trigger real per-index-type "
         f"indexing subprocess calls. Captured commands: {captured_commands}"
     )
-    assert "cidx index --fts" in joined_commands
-    assert any(cmd.startswith("cidx scip generate") for cmd in joined_commands)
+    assert any(
+        "--new-collection-layout=chunks_db" in cmd for cmd in semantic_commands
+    ), (
+        "Story #1488: server-context 'cidx index' spawns must stamp "
+        f"--new-collection-layout=chunks_db. Captured commands: {captured_commands}"
+    )
+
+    fts_commands = [
+        cmd
+        for cmd in captured_commands
+        if cmd[:2] == ["cidx", "index"] and "--fts" in cmd
+    ]
+    assert fts_commands, (
+        "Bug #1473: sync's reindex=True must trigger a real 'cidx index "
+        f"--fts' subprocess call. Captured commands: {captured_commands}"
+    )
+    assert any("--new-collection-layout=chunks_db" in cmd for cmd in fts_commands), (
+        "Story #1488: server-context 'cidx index --fts' spawns must stamp "
+        f"--new-collection-layout=chunks_db. Captured commands: {captured_commands}"
+    )
+
+    assert any(cmd[:3] == ["cidx", "scip", "generate"] for cmd in captured_commands)
 
 
 # ---------------------------------------------------------------------------

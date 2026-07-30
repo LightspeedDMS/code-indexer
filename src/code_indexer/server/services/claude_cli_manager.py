@@ -567,9 +567,14 @@ class ClaudeCliManager:
             from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
                 build_embedding_stats_child_env,
             )
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
 
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             _result = subprocess.run(
-                ["cidx", "index"],
+                append_server_layout_args(["cidx", "index"]),
                 cwd=str(self._meta_dir),
                 capture_output=True,
                 env=build_cidx_subprocess_env(

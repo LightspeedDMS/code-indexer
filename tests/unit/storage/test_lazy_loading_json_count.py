@@ -54,7 +54,9 @@ def store_with_many_vectors():
     """Create a store with 100 indexed vectors for testing lazy loading."""
     with tempfile.TemporaryDirectory() as tmpdir:
         base_path = Path(tmpdir)
-        store = FilesystemVectorStore(base_path=base_path)
+        store = FilesystemVectorStore(
+            base_path=base_path, use_chunks_db_for_new_collections=False
+        )
 
         collection_name = "test_collection"
         store.create_collection(collection_name=collection_name, vector_size=768)

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.86.0] - 2026-07-29
+
+### Fixed
+
+- **#1486 (CRITICAL):** Fleet migration NFS data-loss hardening — `consolidate_collection_in_place` now forces durable persistence of `chunks.db` (`PRAGMA synchronous=FULL` + `nfs_safe_fsync` of file and directory) and verifies integrity on a fresh, cache-bypassing connection BEFORE committing the discriminator and BEFORE deleting legacy sharded files. Legacy data is never deleted until the replacement is provably durable. `FleetMigrationScheduler` now auto-stops once all repos are migrated and surfaces unrecoverable corruption as a DEGRADED health signal instead of retrying forever. Server write path defaults to CHUNKS_DB.
+- **#1488:** `cidx index --migrate-chunks-to-sqlite` performs a full in-place JSON→SQLite chunk-store migration; CLI otherwise preserves the existing on-disk layout (new collections default SHARDED_JSON in CLI; server enforces CHUNKS_DB).
+- **#1495:** `cancel_job` no longer crashes with `AttributeError` when a tracked child is a `subprocess.Popen` (X-Ray Rust dynlib path); child-process termination is now polymorphic over `multiprocessing.Process` and `subprocess.Popen`.
+- **#1496:** Multi-index CLI query now fails loud when a present collection's index fails to load, instead of silently returning partial results from other collections (genuinely-absent collections are still skipped).
+- **#1497:** `cidx query --fts --regex` now matches identifiers containing underscores (raw-tokenizer field queried via Tantivy's DFA-safe regex engine); match-snippet extraction is ReDoS-safe (literal fast-path + bounded fallback) and wrapped patterns that exceed Tantivy's regex state limit fall back gracefully.
+- **#1498:** `cidx scip references`/`definition` now surface a clear "index incomplete" warning when SCIP generation is partial (LIMBO), instead of a silent false-negative.
+
 ## [11.85.0] - 2026-07-28
 
 ### Fixed

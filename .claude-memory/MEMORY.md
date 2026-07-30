@@ -12,6 +12,7 @@
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - When N agents edit the same uncommitted tree in parallel, each prompt must explicitly forbid git checkout/restore/reset/clean/stash outside its own file list
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
+- [feedback_sole_developer_own_all_code.md](feedback_sole_developer_own_all_code.md) - I am the SOLE developer of this repo across all sessions — never call any code/bug/failing test "not ours"; own it all, distinguish only "this-diff vs earlier-session"
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - When install-footprint purity conflicts with reliability (e.g. an "unneeded" extra dependency), default to installing it — recurrence-of-bug-class elimination beats minimal footprint
@@ -20,9 +21,11 @@
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
 - [feedback_fix_every_issue_found_no_deferral.md](feedback_fix_every_issue_found_no_deferral.md) - During active implementation work, fix every issue found (even out-of-scope pre-existing ones) in the same session — filing a bug is for ordering work, never for deferring the fix; parallelize independent fixes
+- [feedback_epic_fix_all_bugs_found.md](feedback_epic_fix_all_bugs_found.md) - On a large epic/effort, fix ALL bugs found while snorkeling the code — pre-existing red/flaky tests included; clean green suite is the bar, nothing is "out of scope"
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
+- [feedback_no_half_wired_features.md](feedback_no_half_wired_features.md) - Never ship a data-relocation write-path without its read-path (and status-path); verify BOTH halves round-trip end-to-end (root cause of temporal #1482)
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
 - [feedback_no_artificial_work_budgets.md](feedback_no_artificial_work_budgets.md) - NEVER cap legitimate analysis/indexing work with hardcoded search-call ceilings, agent-turn caps, or per-file/job timeouts — correctness over bounded cost (same disease as Bug #1218); the dep-map "AT MOST 5 search calls" ceiling is a repeat offender
 - [feedback_storage_backend_dual.md](feedback_storage_backend_dual.md) - NEVER say "SQLite" as if PG doesn't exist — cover both backends or use agnostic language
@@ -35,6 +38,7 @@
 - [feedback_run_tests_with_timeout_and_monitor.md](feedback_run_tests_with_timeout_and_monitor.md) - NEVER launch tests without --timeout and active monitoring; know expected duration before running; fast-automation ≤10min, server-fast ≤15min, unit files ≤30s
 - [feedback_faithful_db_mocks.md](feedback_faithful_db_mocks.md) - DB mocks must mirror the real driver; psycopg3 executemany is on the cursor NOT the connection; unfaithful FakeConn certified silent-no-op writes — verify storage writes against real PG
 - [feedback_review_local_and_staging_logs_after_testing.md](feedback_review_local_and_staging_logs_after_testing.md) - After testing, ALWAYS audit BOTH local and staging logs; if a pattern points to a bug, file AND fix it (don't just report)
+- [feedback_holistic_anomaly_scan_every_loop.md](feedback_holistic_anomaly_scan_every_loop.md) - Every loop, don't just verify the narrow change — holistically scan jobs table + logs + health/admin UI + on-disk artifacts for patterns of oddities (how the fleet-migration data-loss and RA stale-path bugs were actually found)
 
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously (no triage questions); every defect found = file + fix + iterate until staging logs are clean; clean logs is the bar
@@ -63,6 +67,8 @@
 - [feedback_never_stop_never_blame_env.md](feedback_never_stop_never_blame_env.md) - NEVER self-abort a mission or blame the environment for slow tests; a stalled subagent is a RETRY not a blocker; do NOT kill a working subagent on a frozen output-file or "no git changes yet" — those are not stall signals
 - [feedback_agent_stall_detection_needs_reply_not_just_mtime.md](feedback_agent_stall_detection_needs_reply_not_just_mtime.md) - Output-file mtime staleness triggers a PING, not a kill; wait for an actual reply (not just "queued for delivery") before concluding a real stall
 
+- [feedback_tdd_red_must_be_discriminating.md](feedback_tdd_red_must_be_discriminating.md) - TDD RED must genuinely fail on the buggy code — test the discriminating/boundary input (mixed match/non-match under limit, exact malformed shape), never the uniform happy case that passes on both correct and broken impls
+
 ## Architectural Invariants
 - [project_verify_both_staging_environments.md](project_verify_both_staging_environments.md) - Standing rule: every release verification must check BOTH the clustered (postgres/HAProxy) AND solo (SQLite) staging environments, always — production is solo, so solo-only bugs (e.g. #1444) are invisible on the cluster
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
@@ -75,8 +81,10 @@
 - [project_local_server_solo_sqlite.md](project_local_server_solo_sqlite.md) - Local dev cidx-server (:8000) is solo/SQLite (storage_mode=sqlite, no postgres_dsn) — local E2E validates ONLY solo/SQLite branches; PG/cluster paths (#1313 temporal, cluster-aware state, PG advisory locks) need staging; local temporal subprocess runs the env=None branch
 
 - [project_backup_scope_dev_staging_only.md](project_backup_scope_dev_staging_only.md) - Epic #1454 backup-before-migration is a manual dev/staging-only precaution, NOT baked into migration code — production has no room for old-style backups
+- [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - chunk-storage write mode is context-dependent: server enforces sqlite, CLI/daemon default json, json->sqlite conversion is ALWAYS explicit (server auto / CLI `--migrate-chunks-to-sqlite` #1488); existing layout always wins; never re-flip the global default to True
 
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA auth: `.local-testing` stores TOTP as a shell `$(...)` command (NOT a static seed) — eval it for a live code, then two-step /auth/login -> /auth/mfa/verify; do these staging tests ALWAYS, never ask the user
+- [reference_staging_nfs_wedge_recovery.md](reference_staging_nfs_wedge_recovery.md) - Recover a wedged cow-storage NFS mount on a staging node: reboot hangs on unmount, nfsd per-client force-expire, vers=4.1 fstab pin works when 4.2 hangs; avoid multi-GB manual copies on the NFS (staging-only, production is solo)
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access

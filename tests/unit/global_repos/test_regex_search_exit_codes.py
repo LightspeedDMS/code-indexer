@@ -8,6 +8,7 @@ GOAL: Test ripgrep/grep exit code differentiation (Bug #173)
 """
 
 import logging
+import threading
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,39 @@ from code_indexer.server.services.subprocess_executor import (
     ExecutionStatus,
     SearchExecutionResult,
 )
+
+# Logger these exit-code tests assert against — the regex_search module logger.
+REGEX_SEARCH_LOGGER = "code_indexer.global_repos.regex_search"
+
+
+def _call_records(caplog, thread_id):
+    """Return only the caplog records emitted by the code path under test.
+
+    Flake root cause (fails under fast-automation full-suite load, passes in
+    isolation): pytest's ``caplog`` attaches a capture handler to the ROOT
+    logger, so ``caplog.records`` collects EVERY record that propagates to root
+    during the test -- from any logger and any thread. Under the full suite,
+    concurrent background daemon threads inject records into this window and
+    pollute a bare ``[r for r in caplog.records if r.levelname == "WARNING"]``
+    assertion. The worst offender shares this very logger: regex_search's own
+    one-shot ``trigram-lazy-build`` daemon thread emits
+    ``logger.warning("lazy trigram index build failed ...")`` (regex_search.py)
+    when a background build fails; other schedulers/metrics writers emit on
+    other loggers. Reproduced deterministically with a background WARNING
+    hammer thread.
+
+    The ``_search_ripgrep`` / ``_search_grep`` call under test runs
+    synchronously on the test's own (event-loop) thread -- ``SubprocessExecutor``
+    is mocked, so no real subprocess and no threads are spawned by the call.
+    Restricting to this module's logger AND the calling thread id therefore
+    isolates exactly the records the call emitted, deterministically excluding
+    background-thread noise, without weakening what each assertion verifies.
+    """
+    return [
+        r
+        for r in caplog.records
+        if r.name == REGEX_SEARCH_LOGGER and r.thread == thread_id
+    ]
 
 
 @pytest.fixture
@@ -78,6 +112,7 @@ class TestRipgrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
+                call_thread_id = threading.get_ident()
                 with caplog.at_level(logging.DEBUG):
                     await ripgrep_service._search_ripgrep(
                         pattern="test",
@@ -90,8 +125,11 @@ class TestRipgrepExitCodeHandling:
                         timeout_seconds=10,
                     )
 
-        # No WARNING logs should be present
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
+        # No WARNING logs should be present (scoped to this call's records —
+        # see _call_records for why a bare caplog.records scan is flaky).
+        warning_logs = [
+            r for r in _call_records(caplog, call_thread_id) if r.levelname == "WARNING"
+        ]
         assert len(warning_logs) == 0, "Exit code 0 should not log warnings"
 
     @pytest.mark.asyncio
@@ -124,6 +162,7 @@ class TestRipgrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
+                call_thread_id = threading.get_ident()
                 with caplog.at_level(logging.DEBUG):
                     result = await ripgrep_service._search_ripgrep(
                         pattern="nonexistent_pattern",
@@ -139,9 +178,11 @@ class TestRipgrepExitCodeHandling:
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"
 
-        # Should log at DEBUG level, NOT WARNING
-        debug_logs = [r for r in caplog.records if r.levelname == "DEBUG"]
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
+        # Should log at DEBUG level, NOT WARNING (scoped to this call's records
+        # — see _call_records for why a bare caplog.records scan is flaky).
+        call_records = _call_records(caplog, call_thread_id)
+        debug_logs = [r for r in call_records if r.levelname == "DEBUG"]
+        warning_logs = [r for r in call_records if r.levelname == "WARNING"]
 
         assert len(warning_logs) == 0, "Exit code 1 (no stderr) should NOT log WARNING"
         assert len(debug_logs) > 0, "Exit code 1 (no stderr) should log at DEBUG"
@@ -268,6 +309,7 @@ class TestRipgrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
+                call_thread_id = threading.get_ident()
                 with caplog.at_level(logging.DEBUG):
                     result = await ripgrep_service._search_ripgrep(
                         pattern="nonexistent",
@@ -283,8 +325,11 @@ class TestRipgrepExitCodeHandling:
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"
 
-        # Should log at DEBUG level, NOT WARNING
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
+        # Should log at DEBUG level, NOT WARNING (scoped to this call's records
+        # — see _call_records for why a bare caplog.records scan is flaky).
+        warning_logs = [
+            r for r in _call_records(caplog, call_thread_id) if r.levelname == "WARNING"
+        ]
 
         assert len(warning_logs) == 0, (
             "Exit code 1 (empty stderr) should NOT log WARNING"
@@ -317,6 +362,7 @@ class TestGrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
+                call_thread_id = threading.get_ident()
                 with caplog.at_level(logging.DEBUG):
                     await grep_service._search_grep(
                         pattern="test",
@@ -329,8 +375,11 @@ class TestGrepExitCodeHandling:
                         timeout_seconds=10,
                     )
 
-        # No WARNING logs should be present
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
+        # No WARNING logs should be present (scoped to this call's records —
+        # see _call_records for why a bare caplog.records scan is flaky).
+        warning_logs = [
+            r for r in _call_records(caplog, call_thread_id) if r.levelname == "WARNING"
+        ]
         assert len(warning_logs) == 0, "Exit code 0 should not log warnings"
 
     @pytest.mark.asyncio
@@ -363,6 +412,7 @@ class TestGrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
+                call_thread_id = threading.get_ident()
                 with caplog.at_level(logging.DEBUG):
                     result = await grep_service._search_grep(
                         pattern="nonexistent_pattern",
@@ -378,9 +428,11 @@ class TestGrepExitCodeHandling:
         # Should return empty results
         assert result == ([], 0), "Exit code 1 should return empty results"
 
-        # Should log at DEBUG level, NOT WARNING
-        debug_logs = [r for r in caplog.records if r.levelname == "DEBUG"]
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
+        # Should log at DEBUG level, NOT WARNING (scoped to this call's records
+        # — see _call_records for why a bare caplog.records scan is flaky).
+        call_records = _call_records(caplog, call_thread_id)
+        debug_logs = [r for r in call_records if r.levelname == "DEBUG"]
+        warning_logs = [r for r in call_records if r.levelname == "WARNING"]
 
         assert len(warning_logs) == 0, "Exit code 1 (no stderr) should NOT log WARNING"
         assert len(debug_logs) > 0, "Exit code 1 (no stderr) should log at DEBUG"

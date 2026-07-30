@@ -30,6 +30,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL, VoyageAIConfig
+from ..storage.filesystem_vector_store import LocalIndexNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -500,6 +501,16 @@ class MultiIndexQueryService:
                     else:
                         timing_dict["multimodal_timed_out"] = True
                 except Exception as e:
+                    if isinstance(e, LocalIndexNotFoundError):
+                        # Bug #1496: this collection EXISTS on disk but its
+                        # index failed to load (e.g. missing/corrupt HNSW
+                        # file) -- a real failure, not a genuinely-absent
+                        # collection (that case is already handled earlier
+                        # by never submitting a future for it at all). Fail
+                        # loud instead of silently aggregating a partial
+                        # result set from the other index type as if it
+                        # were an authoritative, complete answer.
+                        raise
                     logger.warning(f"{index_type}_index query failed: {e}")
                     # Treat exceptions as timeouts for timing purposes
                     if index_type == "code":

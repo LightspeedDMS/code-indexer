@@ -27,7 +27,9 @@ class TestIsChunksDbCollectionHelper:
         assert fresh_store._is_chunks_db_collection("coll", collection_path) is True
 
     def test_false_for_ordinary_sharded_collection(self, tmp_path):
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("coll", vector_size=32)
         collection_path = store._get_collection_path("coll")
 

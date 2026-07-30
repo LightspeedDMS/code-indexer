@@ -92,7 +92,9 @@ class TestScrollPointsFastPath:
     def test_scroll_points_path_only_filter_does_not_call_rglob(self, tmp_path):
         """Given 1000 points across 100 files, scroll_points with {path==X}
         must return the correct points and never call Path.rglob."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         file_to_ids = _populate_store(store, "col", num_files=100, chunks_per_file=10)
@@ -119,7 +121,9 @@ class TestScrollPointsFastPath:
     def test_scroll_points_path_plus_type_filter_does_not_call_rglob(self, tmp_path):
         """scroll_points with {path==X, type==content} must also use fast path
         and not call rglob."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         file_to_ids = _populate_store(store, "col", num_files=50, chunks_per_file=10)
@@ -156,7 +160,9 @@ class TestDeleteByFilterFastPath:
     def test_delete_by_filter_path_filter_does_not_call_rglob(self, tmp_path):
         """Given 1000 points across 100 files, delete_by_filter({path==X})
         must not call rglob and must actually delete the right points."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         file_to_ids = _populate_store(store, "col", num_files=100, chunks_per_file=10)
@@ -198,7 +204,9 @@ class TestScrollPointsFallbackPath:
     def test_non_path_filter_still_returns_correct_results(self, tmp_path):
         """filter={type==content} (no path key) must still work via rglob
         and return all content-type points."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         file_to_ids = _populate_store(store, "col", num_files=5, chunks_per_file=3)
@@ -231,7 +239,9 @@ class TestPathIndexPersistence:
         """After upsert, save, and reopen, scroll_points with path filter
         must still use the fast path (not rglob)."""
         # First instance — upsert points
-        store1 = FilesystemVectorStore(base_path=tmp_path)
+        store1 = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store1.create_collection("col", vector_size=VECTOR_SIZE)
         file_to_ids = _populate_store(store1, "col", num_files=20, chunks_per_file=5)
         # Persist path index explicitly (as end_indexing would)
@@ -239,7 +249,9 @@ class TestPathIndexPersistence:
         del store1
 
         # Second instance — cold start, index loaded from disk
-        store2 = FilesystemVectorStore(base_path=tmp_path)
+        store2 = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         target_file = "src/module_0010/file.py"
         expected_ids = set(file_to_ids[target_file])
 
@@ -273,7 +285,9 @@ class TestLazyRebuildWhenPathIndexAbsent:
         once during the rebuild), persist it, and return correct results.
         The second call must not call rglob again."""
         # Build a store and upsert points
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
         file_to_ids = _populate_store(store, "col", num_files=10, chunks_per_file=5)
 
@@ -357,7 +371,9 @@ class TestConcurrentUpsertCorrectness:
         Internal state (_path_indexes) is inspected as a behavioral probe;
         scroll_points is also used to verify the public-API view is consistent.
         """
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         num_threads = 8
@@ -443,7 +459,9 @@ class TestPathIndexConsistencyUnderDelete:
         """After delete_points, scroll_points with path filter must return
         only the surviving points; deleted ones must not appear.
         Verified exclusively via get_point() and scroll_points()."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
 
         file_to_ids = _populate_store(store, "col", num_files=10, chunks_per_file=10)
@@ -494,7 +512,9 @@ class TestFastPathNotTakenWithExtraFilterKeys:
 
     def test_fast_path_not_taken_when_filter_has_must_not(self, tmp_path) -> None:
         """must_not clause must exclude matching points; fast path must not discard it."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
         store.upsert_points(
             "col",
@@ -532,7 +552,9 @@ class TestFastPathNotTakenWithExtraFilterKeys:
 
     def test_fast_path_not_taken_when_filter_has_should(self, tmp_path) -> None:
         """should clause must restrict results; fast path must not discard it."""
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("col", vector_size=VECTOR_SIZE)
         store.upsert_points(
             "col",
@@ -585,7 +607,9 @@ _M2_UPSERT_OVERLAP_DELAY_S = 0.001
 
 def _m2_setup_legacy_store(iter_path: Path) -> FilesystemVectorStore:
     """Create a store, populate it, persist path index, then delete path_index.bin."""
-    store = FilesystemVectorStore(base_path=iter_path)
+    store = FilesystemVectorStore(
+        base_path=iter_path, use_chunks_db_for_new_collections=False
+    )
     store.create_collection("col", vector_size=VECTOR_SIZE)
     _populate_store(store, "col", _M2_INITIAL_FILES, _M2_INITIAL_CHUNKS)
     store._save_path_index("col", store._path_indexes["col"])

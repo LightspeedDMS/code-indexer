@@ -66,12 +66,18 @@ from code_indexer.server.services.fleet_migration.quarantine import (
     classify_failure_cause,
     compute_repo_state_signature,
     count_quarantined,
+    count_unrecoverable,
     get_failure_state,
+    is_permanently_unrecoverable,
     is_quarantined,
     probe_quarantine_backend_health,
     record_migration_failure,
+    record_unrecoverable_corruption,
     reset_migration_failure,
     status_counts_as_quarantine_failure,
+)
+from code_indexer.storage.shared.collection_migration import (
+    UnrecoverableConsolidationCorruptionError,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,6 +207,56 @@ class FleetMigrationScheduler:
     # Manual trigger / job submission
     # ------------------------------------------------------------------
 
+    def _fleet_has_pending_work(self) -> bool:
+        """Bug #1486 Fix C item 1 (auto-stop): True iff at least one
+        enumerated candidate is neither already-migrated NOR permanently
+        unrecoverable.
+
+        Before this fix, the scheduler submitted a no-op job on EVERY
+        tick forever once the fleet was fully migrated (a confirmed
+        production incident: 3000+ jobs/day at a 1-minute tick interval).
+        This predicate lets `trigger_now()` go dormant -- refusing to
+        submit any job at all -- once the whole fleet is either done or
+        permanently stuck, resuming automatically the moment a genuinely
+        new pending repo appears (this is a pure, side-effect-free scan,
+        never a durable "we are done" flag that could go stale).
+
+        A permanently-unrecoverable candidate counts as "resolved" for
+        this predicate (excluded from pending) -- it will never migrate
+        via automatic retry, so it must not keep the fleet "pending"
+        forever and block auto-stop. It is NOT counted as "migrated"
+        anywhere else (`is_repo_already_migrated`/`get_stats()` are
+        untouched by this method).
+
+        A quarantine-state backend read failure is treated
+        CONSERVATIVELY as "there is pending work" (never silently
+        assumed done) -- a backend outage must never cause the scheduler
+        to falsely believe the fleet is fully resolved.
+        """
+        for candidate in enumerate_fleet_migration_candidates(
+            self._golden_repo_manager
+        ):
+            if is_repo_already_migrated(candidate):
+                continue
+            try:
+                if is_permanently_unrecoverable(
+                    self._golden_repo_manager, candidate.golden_alias
+                ):
+                    continue
+            except QuarantineStateUnavailableError as exc:
+                logger.error(
+                    "FleetMigrationScheduler: _fleet_has_pending_work() "
+                    "could not read unrecoverable-corruption state for "
+                    "repo '%s' (%s) -- conservatively treating the fleet "
+                    "as having pending work rather than risking a false "
+                    "auto-stop during a backend outage",
+                    candidate.golden_alias,
+                    exc,
+                )
+                return True
+            return True
+        return False
+
     def trigger_now(self, *, confirm_canary: bool = False) -> Optional[str]:
         """Submit one per-repo migration job immediately.
 
@@ -230,6 +286,28 @@ class FleetMigrationScheduler:
                 "FleetMigrationScheduler: trigger_now() refused -- "
                 "fleet_migration_config.enabled is False"
             )
+            return None
+        if not self._fleet_has_pending_work():
+            # Bug #1486 High Finding 4: distinguish "genuinely all
+            # migrated" from "no automatically runnable work because N
+            # repos are permanently unrecoverable" -- an operator
+            # reading logs alone must not conclude the fleet is fully
+            # healthy when repos actually need manual data recovery.
+            unrecoverable_count = self.get_stats().get("unrecoverable_repos", 0)
+            if unrecoverable_count:
+                logger.info(
+                    "FleetMigrationScheduler: no automatically runnable "
+                    "work -- %d repo(s) permanently unrecoverable "
+                    "(requires manual data recovery); not submitting a "
+                    "job this tick (Bug #1486 auto-stop)",
+                    unrecoverable_count,
+                )
+            else:
+                logger.info(
+                    "FleetMigrationScheduler: fleet migration is COMPLETE "
+                    "-- every golden repo is migrated; not submitting a "
+                    "job this tick (Bug #1486 auto-stop)"
+                )
             return None
         if confirm_canary:
             self.confirm_canary()
@@ -317,6 +395,50 @@ class FleetMigrationScheduler:
                 "detail": str(bookkeeping_exc),
             }
 
+    def _record_unrecoverable_or_abort(
+        self,
+        candidate: "FleetMigrationCandidate",
+        unrecoverable_exc: "UnrecoverableConsolidationCorruptionError",
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1486 Fix C: durably record `candidate` as PERMANENTLY
+        unrecoverable (distinct from `_record_failure_or_abort`'s
+        ordinary, auto-clearing consecutive-failure bookkeeping).
+
+        Returns:
+            None on success -- the caller advances to the next candidate
+            (never re-raises `unrecoverable_exc`; this is a terminal,
+            expected-to-happen-eventually state, not a scheduling
+            error). An abort-status dict on a bookkeeping WRITE failure
+            -- the caller must return this immediately, mirroring
+            `_record_failure_or_abort`'s own contract, since without a
+            durable record this repo would be re-attempted on the very
+            next tick.
+        """
+        try:
+            record_unrecoverable_corruption(
+                self._golden_repo_manager,
+                candidate.golden_alias,
+                str(unrecoverable_exc),
+            )
+            return None
+        except QuarantineStateUnavailableError as bookkeeping_exc:
+            logger.error(
+                "FleetMigrationScheduler: repo '%s' migration failed with "
+                "UNRECOVERABLE data corruption (%s) AND recording that "
+                "terminal state ALSO failed (%s) -- aborting this "
+                "scheduling tick so the next tick retries the durable "
+                "record rather than silently re-attempting the doomed "
+                "migration.",
+                candidate.golden_alias,
+                unrecoverable_exc,
+                bookkeeping_exc,
+            )
+            return {
+                "status": "quarantine_state_unavailable",
+                "golden_alias": candidate.golden_alias,
+                "detail": str(bookkeeping_exc),
+            }
+
     def _run_next_candidate(self) -> Dict[str, Any]:
         """Enumerate candidates fresh, run the real orchestrator on the
         FIRST not-yet-migrated one found.
@@ -380,6 +502,42 @@ class FleetMigrationScheduler:
             if is_repo_already_migrated(candidate):
                 any_repo_migrated_before_this_one = True
                 continue
+
+            # Bug #1486 Fix C item 2: a repo previously recorded as
+            # PERMANENTLY unrecoverable (chunks.db corrupt AND legacy
+            # source already gone) must never be retried -- a bare
+            # retry can never succeed, and unlike the ordinary
+            # consecutive-failure quarantine below, this state never
+            # auto-clears on a directory-signature change (the lost
+            # data has no signature that could ever prove "recovered").
+            # Checked BEFORE the ordinary quarantine check and BEFORE
+            # any destructive migration attempt.
+            try:
+                if is_permanently_unrecoverable(
+                    self._golden_repo_manager, candidate.golden_alias
+                ):
+                    logger.debug(
+                        "FleetMigrationScheduler: repo '%s' is PERMANENTLY "
+                        "unrecoverable (Bug #1486) -- skipping and "
+                        "advancing to the next candidate; manual "
+                        "intervention required",
+                        candidate.golden_alias,
+                    )
+                    continue
+            except QuarantineStateUnavailableError as exc:
+                logger.error(
+                    "FleetMigrationScheduler: unrecoverable-corruption "
+                    "state for repo '%s' is UNAVAILABLE (backend read "
+                    "failed) -- aborting this scheduling tick WITHOUT "
+                    "running any migration attempt: %s",
+                    candidate.golden_alias,
+                    exc,
+                )
+                return {
+                    "status": "quarantine_state_unavailable",
+                    "golden_alias": candidate.golden_alias,
+                    "detail": str(exc),
+                }
 
             # Issue #1477: a repo that has reached the consecutive-failure
             # quarantine threshold is skipped so the fleet-wide queue can
@@ -497,6 +655,31 @@ class FleetMigrationScheduler:
                     temporal_namespaces=candidate.temporal_namespaces,
                     sister_root=candidate.sister_root,
                 )
+            except UnrecoverableConsolidationCorruptionError as unrecoverable_exc:
+                # Bug #1486 Fix C: chunks.db is genuinely corrupt AND the
+                # legacy source is already gone -- this repo can NEVER
+                # succeed via a bare retry. Record it as a PERMANENT
+                # terminal state (distinct from the ordinary consecutive-
+                # failure quarantine, which would otherwise loop this
+                # repo through the same 3-strikes-then-skip cycle
+                # forever) and advance to the NEXT candidate -- never
+                # re-raise, since this is an expected terminal outcome
+                # for a genuinely corrupt repo, not a scheduling error.
+                logger.error(
+                    "FleetMigrationScheduler: repo '%s' migration failed "
+                    "with UNRECOVERABLE data corruption -- recording as a "
+                    "permanent, non-retryable terminal state and "
+                    "advancing to the next candidate. Manual intervention "
+                    "required: %s",
+                    candidate.golden_alias,
+                    unrecoverable_exc,
+                )
+                abort_result = self._record_unrecoverable_or_abort(
+                    candidate, unrecoverable_exc
+                )
+                if abort_result is not None:
+                    return abort_result
+                continue
             except Exception as migration_exc:
                 # Issue #1477: record the failure (and the on-disk state
                 # signature at the moment of this failure) BEFORE
@@ -646,11 +829,20 @@ class FleetMigrationScheduler:
         quarantined_count = count_quarantined(
             self._golden_repo_manager, pending_aliases
         )
+        # Bug #1486 High Finding 4: a permanently-unrecoverable repo can
+        # never migrate via automatic retry -- excluded from
+        # pending_repos (it will never resolve on its own) and exposed
+        # as its own distinct dashboard count, mirroring
+        # quarantined_repos' own pending-scoped counting.
+        unrecoverable_count = count_unrecoverable(
+            self._golden_repo_manager, pending_aliases
+        )
         return {
             "total_repos": len(candidates),
             "migrated_repos": migrated_count,
-            "pending_repos": len(candidates) - migrated_count,
+            "pending_repos": len(candidates) - migrated_count - unrecoverable_count,
             "quarantined_repos": quarantined_count,
+            "unrecoverable_repos": unrecoverable_count,
         }
 
     def _is_enabled_now(self) -> bool:

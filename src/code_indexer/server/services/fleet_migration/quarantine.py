@@ -837,6 +837,19 @@ def count_quarantined(
     (persisted consecutive failure count at/above `threshold`) -- used by
     `FleetMigrationScheduler.get_stats()` for dashboard visibility.
 
+    Bug #1486 Defect D: rows whose `failure_cause` is
+    `UNRECOVERABLE_FAILURE_CAUSE` are EXCLUDED from this count -- they are
+    reported by :func:`count_unrecoverable` instead, and the two dashboard
+    categories must be mutually exclusive. Because
+    `record_unrecoverable_corruption()` reuses the SAME
+    consecutive-failure counter/table (just with a distinct failure cause),
+    a repo that quarantined FIRST and only later revealed permanent
+    corruption would otherwise satisfy BOTH the count>=threshold predicate
+    here AND the cause==UNRECOVERABLE predicate in
+    :func:`count_unrecoverable`, double-counting it and producing an
+    inconsistent dashboard (e.g. pending=0, quarantined=1, unrecoverable=1
+    for a single repo).
+
     Deliberately count-only (no state-change auto-clear side effect) --
     that only happens on an actual scheduling attempt, via
     :func:`is_quarantined`.
@@ -858,6 +871,35 @@ def count_quarantined(
         for row in rows
         if row.get("golden_alias") in alias_set
         and int(row.get("consecutive_failure_count", 0)) >= threshold
+        and row.get("failure_cause") != UNRECOVERABLE_FAILURE_CAUSE
+    )
+
+
+def count_unrecoverable(golden_repo_manager: Any, golden_aliases: Iterable[str]) -> int:
+    """Bug #1486 High Finding 4: count how many of `golden_aliases` are
+    recorded with the PERMANENT `UNRECOVERABLE_FAILURE_CAUSE` -- used by
+    `FleetMigrationScheduler.get_stats()` for dashboard visibility,
+    mirroring `count_quarantined()`'s exact fail-open pattern (a backend
+    read failure or missing backend returns 0, never raises -- this is
+    a best-effort stats surface, not a correctness-critical decision).
+    """
+    backend = _get_quarantine_backend(golden_repo_manager)
+    if backend is None or not hasattr(backend, "list_fleet_migration_failure_states"):
+        return 0
+    alias_set = set(golden_aliases)
+    try:
+        rows: List[Dict[str, Any]] = backend.list_fleet_migration_failure_states()
+    except Exception as exc:  # noqa: BLE001 -- best-effort bookkeeping
+        logger.error(
+            "Bug #1486: failed to read fleet-migration failure states for stats: %s",
+            exc,
+        )
+        return 0
+    return sum(
+        1
+        for row in rows
+        if row.get("golden_alias") in alias_set
+        and row.get("failure_cause") == UNRECOVERABLE_FAILURE_CAUSE
     )
 
 
@@ -911,6 +953,99 @@ def status_counts_as_quarantine_failure(status: str) -> bool:
 #: reinventing a parallel disk-space heuristic.
 DISK_HEADROOM_FAILURE_CAUSE = "disk_headroom"
 GENERIC_FAILURE_CAUSE = "generic"
+
+#: Bug #1486 Fix C: a distinct, PERMANENT terminal failure-cause value --
+#: chunks.db is genuinely corrupt/unopenable AND at least one previously-
+#: migrated record's legacy source is already gone (raised by
+#: collection_migration.py as UnrecoverableConsolidationCorruptionError).
+#: Unlike DISK_HEADROOM_FAILURE_CAUSE/GENERIC_FAILURE_CAUSE, a repo
+#: recorded with this cause is NEVER auto-cleared by is_quarantined()'s
+#: directory-content-signature check -- permanent data loss has no
+#: signature that could ever change back to "recoverable". It clears
+#: ONLY via an explicit reset_migration_failure() call (e.g. after a
+#: verified manual restore/reindex -- Bug #1486 Fix D, out of scope for
+#: this module).
+UNRECOVERABLE_FAILURE_CAUSE = "unrecoverable_corruption"
+
+
+def record_unrecoverable_corruption(
+    golden_repo_manager: Any, golden_alias: str, detail: str
+) -> None:
+    """Bug #1486 Fix C: durably record `golden_alias` as PERMANENTLY
+    unrecoverable -- a terminal state, distinct from the ordinary
+    consecutive-failure quarantine (which auto-clears on a genuine
+    on-disk state change). Data corruption with no remaining legacy
+    source can never be "fixed" by a bare retry or even a directory
+    content change (the lost bytes are gone forever); only explicit
+    operator action (a verified manual restore/reindex, Fix D) can clear
+    this.
+
+    Reuses the SAME backend/table `record_migration_failure()` already
+    writes to (no new storage mechanism) via the dedicated
+    `UNRECOVERABLE_FAILURE_CAUSE` value -- `detail` (the exception
+    message) is stored as the `state_signature`, purely for diagnostic
+    visibility (never compared against a recomputed directory signature,
+    since `is_permanently_unrecoverable()` never auto-clears on that
+    basis).
+
+    Raises:
+        QuarantineStateUnavailableError: Bug #1486 High Finding 5 -- the
+            backend WRITE genuinely failed, OR no quarantine backend is
+            configured/capable at all. Unlike ordinary
+            `record_migration_failure()` (which deliberately no-ops for
+            the "tracking disabled" case -- acceptable there since a
+            missed ordinary quarantine bookkeeping write just means one
+            fewer consecutive-failure count, self-correcting on the next
+            failure), THIS specific record must FAIL CLOSED: silently
+            no-op'ing here would let the scheduler believe the terminal
+            state was durably persisted and retry the exact same doomed
+            repo forever -- reproducing Bug #1486's whole incident via a
+            missing-backend path instead of a corrupt-data path.
+    """
+    backend = _get_quarantine_backend(golden_repo_manager)
+    if backend is None or not hasattr(backend, "record_fleet_migration_failure"):
+        raise QuarantineStateUnavailableError(
+            f"Bug #1486 High Finding 5: cannot durably record "
+            f"{golden_alias!r} as PERMANENTLY unrecoverable -- no "
+            f"quarantine backend is configured (or it lacks "
+            f"record_fleet_migration_failure). This must fail closed: "
+            f"the caller (FleetMigrationScheduler) must abort this "
+            f"scheduling tick rather than silently proceeding as if the "
+            f"terminal state had been persisted."
+        )
+    record_migration_failure(
+        golden_repo_manager,
+        golden_alias,
+        detail,
+        failure_cause=UNRECOVERABLE_FAILURE_CAUSE,
+    )
+
+
+def is_permanently_unrecoverable(golden_repo_manager: Any, golden_alias: str) -> bool:
+    """Bug #1486 Fix C: True iff `golden_alias` is recorded with the
+    PERMANENT `UNRECOVERABLE_FAILURE_CAUSE`.
+
+    Unlike `is_quarantined()`, this NEVER auto-clears via a directory-
+    content-signature check -- permanent data loss has no signature that
+    could ever change back to "recoverable". It clears ONLY via an
+    explicit `reset_migration_failure()` call.
+
+    Returns False when `golden_alias` has no recorded failure at all, or
+    when its recorded failure cause is anything other than
+    `UNRECOVERABLE_FAILURE_CAUSE`.
+
+    Raises:
+        QuarantineStateUnavailableError: propagated from
+            `get_failure_state()` on a genuine backend READ failure --
+            callers must treat this the SAME way they already treat
+            `is_quarantined()`'s own read failures (abort the tick,
+            never silently assume "not unrecoverable").
+    """
+    state = get_failure_state(golden_repo_manager, golden_alias)
+    if state is None:
+        return False
+    return bool(state.get("failure_cause") == UNRECOVERABLE_FAILURE_CAUSE)
+
 
 #: Substring `orchestrator.py`'s `_run_migration_sequence()` uses verbatim
 #: in `FleetMigrationRepoResult.detail` when a semantic collection was

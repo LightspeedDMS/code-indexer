@@ -66,6 +66,44 @@ def _isolate_verification_semaphore():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cli_invoker_plugin(monkeypatch):
+    """Isolate EVERY test in this file from the process-wide CLI-invoker
+    plugin cache.
+
+    Every non-injected Pass 1/Pass 3 test builds a REAL dispatcher via
+    ``build_dep_map_dispatcher()``, which consults
+    ``cli_invoker_plugin.get_invoker_factory()``. That function caches its
+    resolution in a MODULE-GLOBAL ``_cached`` and also reads the
+    ``CIDX_CLI_INVOKER`` env var. If any other test in the same pytest process
+    leaves that cache populated (or the env var set) and never calls
+    ``reset_cache()``, the dispatcher routes through the leaked PLUGIN invoker
+    instead of the built-in ``ClaudeInvoker`` -- so a test that patches
+    ``claude_invoker.subprocess.run`` sees it called 0 times and fails with
+    "Expected 'run' to have been called once. Called 0 times." The test passes
+    in isolation (clean cache) and fails under full-suite load (leaked cache):
+    a textbook order-dependent flake, proven by pre-populating ``_cached`` with
+    a fake factory and observing exactly that failure on
+    ``TestPass1Synthesis::test_run_pass_1_invokes_claude_cli``.
+
+    Forcing the cache to the ``_NO_PLUGIN`` sentinel (and clearing the env var)
+    before every test makes ``get_invoker_factory()`` return ``None``
+    unconditionally -- no env/entry-point resolution -- so the built-in
+    ``ClaudeInvoker`` is always used and the ``subprocess.run`` patch is
+    exercised. ``reset_cache()`` on teardown restores a clean, unresolved
+    cache for subsequent files. Same class of root cause and same isolation
+    pattern as ``_isolate_verification_semaphore`` above.
+    """
+    from code_indexer.server.services import cli_invoker_plugin as cip
+
+    monkeypatch.delenv(cip.ENV_VAR, raising=False)
+    cip._cached = cip._NO_PLUGIN
+    try:
+        yield
+    finally:
+        cip.reset_cache()
+
+
 class TestOrientationFilesGeneration:
     """Test orientation files generation (AC2 / Bug #995)."""
 

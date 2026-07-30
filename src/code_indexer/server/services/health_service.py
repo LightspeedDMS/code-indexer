@@ -37,6 +37,9 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 from code_indexer.server.services.golden_repo_reconciler import (
     CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD,
 )
+from code_indexer.server.services.fleet_migration.quarantine import (
+    UNRECOVERABLE_FAILURE_CAUSE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +406,91 @@ class HealthCheckService:
                 f"{CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD}/"
                 f"{CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD} confirmations -- "
                 f"needs admin review (Bug #1382)."
+            ],
+        )
+
+    def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
+        """
+        Read every golden_alias currently recorded with the PERMANENT
+        UNRECOVERABLE_FAILURE_CAUSE ("unrecoverable_corruption") in the
+        fleet_migration_quarantine_state table (Bug #1486, written by
+        quarantine.py's record_unrecoverable_corruption()).
+
+        Raises on any DB error (including "table does not exist yet") --
+        the caller is responsible for fail-open handling. Mirrors
+        _read_golden_repo_reconcile_breaker_state's storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return []
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                rows = conn.execute(
+                    "SELECT golden_alias FROM fleet_migration_quarantine_state "
+                    "WHERE failure_cause = %s",
+                    (UNRECOVERABLE_FAILURE_CAUSE,),
+                ).fetchall()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT golden_alias FROM fleet_migration_quarantine_state "
+                    "WHERE failure_cause = ?",
+                    (UNRECOVERABLE_FAILURE_CAUSE,),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [row[0] for row in rows]
+
+    def _collect_fleet_migration_unrecoverable_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Bug #1486 High Finding 4: surface a permanently-unrecoverable
+        fleet-migration repo (chunks.db corrupt, legacy source already
+        gone) as a DEGRADED health signal, mirroring
+        _collect_golden_repo_reconcile_breaker_failures() (Bug #1382) --
+        the same established pattern for "something has been wrong for a
+        while and needs an admin to notice", reusing the EXISTING
+        /health failure_reasons surface rather than inventing a new
+        alerting mechanism.
+
+        Fail-open: any error reading the table (including "table does
+        not exist yet" on a fresh install, or the DB not being ready) is
+        treated as "nothing to report" -- this is a best-effort
+        visibility aid, never a source of false health alarms.
+        """
+        try:
+            aliases = self._read_fleet_migration_unrecoverable_aliases()
+        except Exception as exc:
+            logger.debug(
+                "Fleet-migration unrecoverable-corruption health check skipped: %s",
+                exc,
+            )
+            return False, False, []
+
+        if not aliases:
+            return False, False, []
+
+        alias_list = ", ".join(sorted(aliases))
+        return (
+            True,
+            False,
+            [
+                f"Fleet migration: {len(aliases)} golden repo(s) "
+                f"permanently UNRECOVERABLE (chunks.db corrupt, legacy "
+                f"source already gone) -- requires manual data recovery: "
+                f"{alias_list} (Bug #1486)."
             ],
         )
 
@@ -1022,6 +1110,16 @@ class HealthCheckService:
         has_warning = has_warning or grb_warn
         has_error = has_error or grb_err
         failure_reasons.extend(grb_reasons)
+
+        # Bug #1486 High Finding 4: fleet-migration permanent
+        # unrecoverable-corruption escalation (see quarantine.py's
+        # record_unrecoverable_corruption()/is_permanently_unrecoverable()).
+        fmu_warn, fmu_err, fmu_reasons = (
+            self._collect_fleet_migration_unrecoverable_failures()
+        )
+        has_warning = has_warning or fmu_warn
+        has_error = has_error or fmu_err
+        failure_reasons.extend(fmu_reasons)
 
         # Bug #1433: golden-repos storage readability (bounded-timeout
         # probe) -- see _collect_golden_repos_storage_failures() docstring.

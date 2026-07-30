@@ -279,13 +279,39 @@ class TestSocketPathCalculation:
     """Test socket path calculation from config location."""
 
     def test_get_socket_path_from_config(self):
-        """Test socket path calculated from config file location."""
+        """Test socket path calculated using the hash-based /tmp/cidx/ scheme.
+
+        Commit 6cd34c03 moved daemon sockets from
+        <repo>/.code-indexer/daemon.sock (subject to the 108-char Unix
+        socket path limit) to a deterministic hash-based path under
+        /tmp/cidx/ with group permissions for multi-user daemon access.
+        This asserts the CURRENT contract: under /tmp/cidx/, .sock suffix,
+        deterministic for a given config path, and distinct across
+        different project paths -- not merely a rubber-stamped path.
+        """
         from code_indexer.cli_daemon_delegation import _get_socket_path
+        from code_indexer.daemon.socket_helper import generate_repo_hash
 
         config_path = Path("/project/.code-indexer/config.json")
         socket_path = _get_socket_path(config_path)
 
-        assert socket_path == Path("/project/.code-indexer/daemon.sock")
+        # Structural invariants of the /tmp/cidx/<hash>.sock scheme
+        assert socket_path.parent == Path("/tmp/cidx")
+        assert socket_path.suffix == ".sock"
+
+        # Hash is derived from the repo root (config_path.parent.parent),
+        # exactly as ConfigManager.get_socket_path() computes it.
+        expected_hash = generate_repo_hash(config_path.parent.parent)
+        assert socket_path.name == f"{expected_hash}.sock"
+
+        # Deterministic for the same config path
+        assert _get_socket_path(config_path) == socket_path
+
+        # Distinct for a different project path
+        other_socket_path = _get_socket_path(
+            Path("/other-project/.code-indexer/config.json")
+        )
+        assert other_socket_path != socket_path
 
     def test_find_config_file_walks_upward(self):
         """Test config file search walks up directory tree."""
@@ -649,7 +675,15 @@ class TestIndexDelegation:
     """Test index command delegation to daemon."""
 
     def test_index_delegates_to_daemon_when_enabled(self):
-        """Test index command delegates to daemon with progress callbacks."""
+        """Test index command delegates to daemon via exposed_index_blocking.
+
+        cli_daemon_delegation._index_via_daemon calls
+        conn.root.exposed_index_blocking(...) (not the retired exposed_index
+        polling RPC) and builds real RichLiveProgressManager /
+        MultiThreadedProgressManager instances for the progress callback --
+        both must be patched so the test never starts a real Rich Live
+        thread (mirrors tests/unit/cli/test_daemon_new_collection_layout_1488.py).
+        """
         from code_indexer.cli_daemon_delegation import _index_via_daemon
 
         daemon_config = {"enabled": True, "retry_delays_ms": [100, 500, 1000, 2000]}
@@ -658,35 +692,54 @@ class TestIndexDelegation:
             mock_find.return_value = Path("/project/.code-indexer/config.json")
 
             with patch(
-                "code_indexer.cli_daemon_delegation._connect_to_daemon"
-            ) as mock_connect:
-                mock_conn = Mock()
-                mock_conn.root.exposed_index.return_value = {
-                    "stats": {"files_processed": 42}
-                }
-                mock_connect.return_value = mock_conn
+                "code_indexer.cli_daemon_delegation._get_socket_path"
+            ) as mock_socket_path:
+                mock_socket_path.return_value = Path("/tmp/cidx/test.sock")
 
                 with patch(
-                    "code_indexer.cli_progress_handler.ClientProgressHandler"
-                ) as mock_progress:
-                    mock_handler = Mock()
-                    mock_callback = Mock()
-                    mock_handler.create_progress_callback.return_value = mock_callback
-                    mock_progress.return_value = mock_handler
+                    "code_indexer.cli_daemon_delegation._connect_to_daemon"
+                ) as mock_connect:
+                    mock_conn = Mock()
+                    mock_conn.root.exposed_index_blocking.return_value = {
+                        "status": "completed",
+                        "stats": {
+                            "files_processed": 42,
+                            "chunks_created": 10,
+                            "failed_files": 0,
+                            "duration_seconds": 1.0,
+                            "cancelled": False,
+                        },
+                    }
+                    mock_connect.return_value = mock_conn
 
-                    with patch("rich.console.Console.print"):
-                        result = _index_via_daemon(
-                            force_reindex=False, daemon_config=daemon_config
-                        )
+                    with patch(
+                        "code_indexer.progress.progress_display.RichLiveProgressManager"
+                    ):
+                        with patch(
+                            "code_indexer.progress.MultiThreadedProgressManager"
+                        ):
+                            with patch("rich.console.Console.print"):
+                                result = _index_via_daemon(
+                                    force_reindex=False, daemon_config=daemon_config
+                                )
 
-                        assert result == 0
-                        mock_conn.root.exposed_index.assert_called_once()
-                        # Verify callback was passed to daemon
-                        call_kwargs = mock_conn.root.exposed_index.call_args[1]
-                        assert "callback" in call_kwargs
+                                assert result == 0
+                                mock_conn.root.exposed_index_blocking.assert_called_once()
+                                # Verify callback was passed to daemon
+                                call_kwargs = (
+                                    mock_conn.root.exposed_index_blocking.call_args[1]
+                                )
+                                assert "callback" in call_kwargs
 
     def test_index_passes_force_reindex_flag(self):
-        """Test index delegation passes force_reindex flag to daemon."""
+        """Test index delegation passes force_reindex as force_full to daemon.
+
+        _index_via_daemon maps force_reindex -> daemon_kwargs["force_full"]
+        (see cli_daemon_delegation.py's daemon_kwargs dict) before calling
+        conn.root.exposed_index_blocking(...) -- the retired exposed_index
+        polling RPC never received a force_reindex kwarg either, since the
+        mapping to force_full predates this fix.
+        """
         from code_indexer.cli_daemon_delegation import _index_via_daemon
 
         daemon_config = {"enabled": True, "retry_delays_ms": [100, 500, 1000, 2000]}
@@ -695,22 +748,41 @@ class TestIndexDelegation:
             mock_find.return_value = Path("/project/.code-indexer/config.json")
 
             with patch(
-                "code_indexer.cli_daemon_delegation._connect_to_daemon"
-            ) as mock_connect:
-                mock_conn = Mock()
-                mock_conn.root.exposed_index.return_value = {
-                    "stats": {"files_processed": 42}
-                }
-                mock_connect.return_value = mock_conn
+                "code_indexer.cli_daemon_delegation._get_socket_path"
+            ) as mock_socket_path:
+                mock_socket_path.return_value = Path("/tmp/cidx/test.sock")
 
-                with patch("code_indexer.cli_progress_handler.ClientProgressHandler"):
-                    with patch("rich.console.Console.print"):
-                        _index_via_daemon(
-                            force_reindex=True, daemon_config=daemon_config
-                        )
+                with patch(
+                    "code_indexer.cli_daemon_delegation._connect_to_daemon"
+                ) as mock_connect:
+                    mock_conn = Mock()
+                    mock_conn.root.exposed_index_blocking.return_value = {
+                        "status": "completed",
+                        "stats": {
+                            "files_processed": 42,
+                            "chunks_created": 10,
+                            "failed_files": 0,
+                            "duration_seconds": 1.0,
+                            "cancelled": False,
+                        },
+                    }
+                    mock_connect.return_value = mock_conn
 
-                        call_kwargs = mock_conn.root.exposed_index.call_args[1]
-                        assert call_kwargs["force_reindex"] is True
+                    with patch(
+                        "code_indexer.progress.progress_display.RichLiveProgressManager"
+                    ):
+                        with patch(
+                            "code_indexer.progress.MultiThreadedProgressManager"
+                        ):
+                            with patch("rich.console.Console.print"):
+                                _index_via_daemon(
+                                    force_reindex=True, daemon_config=daemon_config
+                                )
+
+                                call_kwargs = (
+                                    mock_conn.root.exposed_index_blocking.call_args[1]
+                                )
+                                assert call_kwargs["force_full"] is True
 
     def test_index_falls_back_to_standalone_when_daemon_unavailable(self):
         """Test index falls back to standalone when daemon unavailable."""
@@ -744,7 +816,14 @@ class TestWatchDelegation:
     """Test watch command delegation to daemon."""
 
     def test_watch_delegates_to_daemon_when_enabled(self):
-        """Test watch command delegates to daemon with proper parameters."""
+        """Test watch command delegates to daemon with proper parameters.
+
+        _watch_via_daemon treats only status == "success" as a successful
+        start (see daemon/service.py's exposed_watch_start, which itself
+        returns {"status": "success", ...} on success); a stale
+        {"status": "watching"} return value falls into the "unexpected
+        status" branch and makes _watch_via_daemon return 1.
+        """
         from code_indexer.cli_daemon_delegation import _watch_via_daemon
 
         daemon_config = {"enabled": True, "retry_delays_ms": [100, 500, 1000, 2000]}
@@ -756,7 +835,10 @@ class TestWatchDelegation:
                 "code_indexer.cli_daemon_delegation._connect_to_daemon"
             ) as mock_connect:
                 mock_conn = Mock()
-                mock_conn.root.exposed_watch_start.return_value = {"status": "watching"}
+                mock_conn.root.exposed_watch_start.return_value = {
+                    "status": "success",
+                    "message": "Watch started",
+                }
                 mock_connect.return_value = mock_conn
 
                 with patch("rich.console.Console.print"):

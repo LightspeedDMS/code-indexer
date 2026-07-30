@@ -1980,7 +1980,15 @@ class GoldenRepoManager:
         # If temporal indexing is enabled, build temporal command
         temporal_command: Optional[List[str]] = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            temporal_command = append_server_layout_args(
+                ["cidx", "index", "--index-commits", "--progress-json"]
+            )
 
             # Story #1404: global temporal indexing floor date, composed
             # with the per-repo temporal_options["since_date"] override as
@@ -2239,8 +2247,16 @@ class GoldenRepoManager:
                     clone_path,
                 )
             logging.info(f"Executing cidx index --fts for {clone_path}")
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             _run_popen_with_telemetry(
-                ["cidx", "index", "--fts", "--progress-json"],
+                append_server_layout_args(
+                    ["cidx", "index", "--fts", "--progress-json"]
+                ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
                 env=build_cidx_subprocess_env(),
@@ -2990,8 +3006,14 @@ class GoldenRepoManager:
         the HNSW index with only visible-branch files.
         """
         try:
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             result = subprocess.run(
-                ["cidx", "index", "--fts"],
+                append_server_layout_args(["cidx", "index", "--fts"]),
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
@@ -3757,7 +3779,15 @@ class GoldenRepoManager:
                     if index_type == "semantic":
                         # Bug #468: --clear forces full rebuild for already-indexed repos
                         # Story #480: Add --progress-json for real-time progress streaming
-                        command = ["cidx", "index", "--clear", "--progress-json"]
+                        # Story #1488: server states the new-collection layout
+                        # explicitly (CHUNKS_DB), not the CLI SHARDED_JSON default.
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            ["cidx", "index", "--clear", "--progress-json"]
+                        )
                         _run_with_popen_progress(
                             command,
                             phase_name="semantic",
@@ -3773,7 +3803,15 @@ class GoldenRepoManager:
                                 phase="fts",
                                 detail="FTS: building index...",
                             )
-                        command = ["cidx", "index", "--rebuild-fts-index"]
+                        # Story #1488: uniform explicit server layout stamp
+                        # (harmless on this rebuild-only command).
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            ["cidx", "index", "--rebuild-fts-index"]
+                        )
                         result = subprocess.run(
                             command,
                             cwd=repo_path,
@@ -3814,13 +3852,24 @@ class GoldenRepoManager:
                             _index_dir
                         )
                         _clear_flags = [] if _temporal_vectors_exist else ["--clear"]
-                        command = [
-                            "cidx",
-                            "index",
-                            "--index-commits",
-                            *_clear_flags,
-                            "--progress-json",
-                        ]
+                        # Story #1488: server states the new-collection layout
+                        # explicitly (CHUNKS_DB), not the CLI SHARDED_JSON
+                        # default. This temporal reindex/add-index path can
+                        # create brand-new temporal shards, so it MUST route
+                        # through the shared stamp like the other spawn sites.
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            [
+                                "cidx",
+                                "index",
+                                "--index-commits",
+                                *_clear_flags,
+                                "--progress-json",
+                            ]
+                        )
 
                         max_commits = temporal_options.get("max_commits")
                         if max_commits is not None:

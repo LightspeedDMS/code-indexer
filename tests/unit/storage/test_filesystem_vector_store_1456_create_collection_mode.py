@@ -24,7 +24,11 @@ class TestCreateCollectionChunksDbModeRecording:
 
         assert resolve_chunk_layout(collection_path) == ChunkLayout.SHARDED_JSON
 
-    def test_default_mode_does_not_record_chunks_db_intent(self, tmp_path):
+    def test_default_mode_does_not_record_chunks_db_intent(self, tmp_path, monkeypatch):
+        # Story #1488 superseded Bug #1486 Fix B: the CLI/daemon default is
+        # SHARDED_JSON, so a default-constructed store (env unset) records
+        # no CHUNKS_DB intent.
+        monkeypatch.delenv("CIDX_CHUNKS_DB_NEW_COLLECTIONS", raising=False)
         store = FilesystemVectorStore(base_path=tmp_path)
         store.create_collection("coll", vector_size=32)
 

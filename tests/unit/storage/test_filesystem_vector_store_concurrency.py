@@ -25,7 +25,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -125,7 +127,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -175,7 +179,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")

@@ -80,12 +80,23 @@ class DaemonWatchManager:
             and self.watch_handler is not None
         )
 
-    def start_watch(self, project_path: str, config: Any, **kwargs) -> Dict[str, Any]:
+    def start_watch(
+        self,
+        project_path: str,
+        config: Any,
+        mutation_lock: Optional[Any] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Start watch mode in background thread (non-blocking).
 
         Args:
             project_path: Path to the project to watch
             config: Configuration for the watch handler
+            mutation_lock: Optional daemon-wide chunk-mutation RLock (Codex
+                Finding, Story #1488), threaded through to the constructed
+                GitAwareWatchHandler so its ongoing per-event mutation cycles
+                acquire the SAME lock a manual daemon index/clean_data does.
+                None (default) for non-daemon callers.
             **kwargs: Additional arguments for watch handler
 
         Returns:
@@ -117,7 +128,7 @@ class DaemonWatchManager:
             # Start watch in background thread
             self.watch_thread = threading.Thread(
                 target=self._watch_thread_worker,
-                args=(project_path, config),
+                args=(project_path, config, mutation_lock),
                 kwargs=kwargs,
                 name="DaemonWatchThread",
                 daemon=True,  # Daemon thread will exit when main process exits
@@ -220,7 +231,13 @@ class DaemonWatchManager:
                 **handler_stats,  # Include all handler stats
             }
 
-    def _watch_thread_worker(self, project_path: str, config: Any, **kwargs):
+    def _watch_thread_worker(
+        self,
+        project_path: str,
+        config: Any,
+        mutation_lock: Optional[Any] = None,
+        **kwargs,
+    ):
         """Worker method for watch thread.
 
         This runs in the background thread and manages the watch handler lifecycle.
@@ -228,13 +245,17 @@ class DaemonWatchManager:
         Args:
             project_path: Path to the project to watch
             config: Configuration for the watch handler
+            mutation_lock: Optional daemon-wide chunk-mutation RLock (Codex
+                Finding, Story #1488), forwarded to the constructed handler.
             **kwargs: Additional arguments for watch handler
         """
         try:
             logger.info(f"Watch thread starting for {project_path}")
 
             # Create watch handler
-            handler = self._create_watch_handler(project_path, config, **kwargs)
+            handler = self._create_watch_handler(
+                project_path, config, mutation_lock=mutation_lock, **kwargs
+            )
 
             # Store handler reference
             with self._lock:
@@ -270,12 +291,22 @@ class DaemonWatchManager:
                 self.project_path = None
                 self.start_time = None
 
-    def _create_watch_handler(self, project_path: str, config: Any, **kwargs) -> Any:
+    def _create_watch_handler(
+        self,
+        project_path: str,
+        config: Any,
+        mutation_lock: Optional[Any] = None,
+        **kwargs,
+    ) -> Any:
         """Create and configure Git-aware watch handler.
 
         Args:
             project_path: Path to the project to watch
             config: Configuration for the watch handler
+            mutation_lock: Optional daemon-wide chunk-mutation RLock (Codex
+                Finding, Story #1488), passed through to GitAwareWatchHandler
+                so each per-event mutation cycle acquires the SAME lock a
+                manual daemon index/clean_data does.
             **kwargs: Additional arguments for watch handler
 
         Returns:
@@ -330,6 +361,7 @@ class DaemonWatchManager:
                 git_topology_service=git_topology_service,
                 watch_metadata=watch_metadata,
                 debounce_seconds=debounce_seconds,
+                mutation_lock=mutation_lock,
             )
 
             logger.info(f"Git-aware watch handler created for {project_path}")

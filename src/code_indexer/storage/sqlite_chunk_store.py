@@ -52,12 +52,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Sequence, Union
 
 import numpy as np
 import zstandard
+
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,20 @@ class NonFiniteVectorError(ChunkStoreError):
 
 class ImmutableChunkStoreError(ChunkStoreError):
     """Raised when a write is attempted against an immutable-mode store."""
+
+
+class CorruptChunkDataError(ChunkStoreError):
+    """Raised when a stored chunk's opaque ``data`` blob or ``vector`` blob
+    cannot be decoded -- a data-integrity failure (Codex-15 finding).
+
+    Names the offending ``point_id`` and the failing field so callers
+    (``read``/scroll/get_point) can surface it as a data-integrity error
+    (e.g. translate to ``ScrollDataIntegrityError``) rather than let a raw
+    ``zstandard.ZstdError`` / ``json.JSONDecodeError`` / numpy ``ValueError``
+    escape. Fail loud (Messi Rule #13) -- never swallowed or silently
+    skipped. A genuinely-missing row (``read`` -> ``None``) is a SEPARATE
+    not-found contract, never this error.
+    """
 
 
 _SCHEMA_SQL = """
@@ -117,6 +134,7 @@ class ChunkStore:
         *,
         immutable: bool = False,
         expected_dim: Optional[int] = None,
+        durable_synchronous: bool = False,
     ) -> None:
         """Open (creating if needed) a chunk store at ``db_path``.
 
@@ -129,17 +147,64 @@ class ChunkStore:
             expected_dim: Optional known vector dimension. When omitted, the
                 dimension is inferred from the first vector ever written and
                 persisted so it is enforced across sessions too.
+            durable_synchronous: Bug #1486 High Finding 3 -- when True,
+                configures (and verifies) ``PRAGMA synchronous=FULL`` on
+                this connection IMMEDIATELY at open time, before
+                ``_ensure_schema()`` or any write transaction begins.
+                SQLite raises ``sqlite3.OperationalError: Safety level
+                may not be changed inside a transaction`` if this pragma
+                is set mid-transaction, and setting it after prior
+                commits does not retroactively apply to those commits --
+                so it MUST be configured here, at open time, never
+                inside :meth:`flush_durable`. Reserved EXCLUSIVELY for
+                migration write connections -- :meth:`flush_durable`
+                refuses to run unless this was set. The general
+                per-chunk indexing ``ChunkStore`` path (this parameter
+                left at its default False) is completely unaffected --
+                a per-write NFS fsync would cripple indexing throughput.
         """
         self.db_path = Path(db_path)
         self._immutable = immutable
+        self._durable_synchronous = durable_synchronous
         self._compressor = zstandard.ZstdCompressor()
         self._decompressor = zstandard.ZstdDecompressor()
         self._conn = self._open_connection()
         self._expected_dim = expected_dim
         if not immutable:
-            self._ensure_schema()
-            if self._expected_dim is None:
-                self._expected_dim = self._load_persisted_dim()
+            try:
+                if durable_synchronous:
+                    self._configure_durable_synchronous()
+                self._ensure_schema()
+                if self._expected_dim is None:
+                    self._expected_dim = self._load_persisted_dim()
+            except BaseException:
+                # Codex finding: a post-open init failure must not leak the
+                # already-opened connection (fd/handle leak; resource
+                # exhaustion on repeated failures). BaseException (not just
+                # Exception) so KeyboardInterrupt/SystemExit during init
+                # also close the connection before propagating.
+                try:
+                    self._conn.close()
+                finally:
+                    raise
+
+    def _configure_durable_synchronous(self) -> None:
+        """Bug #1486 High Finding 3: configure PRAGMA synchronous=FULL on
+        this connection BEFORE any write transaction begins (never
+        inside :meth:`flush_durable`, where a genuinely pending
+        transaction would make this raise). Configures AND VERIFIES --
+        never trusts blindly -- reading the pragma back and raising
+        loudly if it did not actually take effect.
+        """
+        self._conn.execute("PRAGMA synchronous=FULL")
+        row = self._conn.execute("PRAGMA synchronous").fetchone()
+        if row is None or int(row[0]) != 2:  # 2 == FULL
+            raise ChunkStoreError(
+                f"ChunkStore: failed to configure PRAGMA synchronous=FULL "
+                f"on the durable migration connection for {self.db_path} "
+                f"(read back {row!r}) -- refusing to proceed with a "
+                f"connection whose durability level could not be verified"
+            )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -162,7 +227,20 @@ class ChunkStore:
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(str(self.db_path))
-            conn.execute("PRAGMA journal_mode=DELETE")
+            # Codex-15 finding: the post-connect() PRAGMA runs BEFORE
+            # __init__'s post-open guard is even reached (that guard wraps
+            # _ensure_schema/_configure_durable_synchronous/_load_persisted_dim
+            # only). If this PRAGMA raises (e.g. "database is locked" when a
+            # WAL file cannot be switched out of WAL mode), the
+            # already-opened connection would leak. sqlite3.connect() itself
+            # stays OUTSIDE this guard -- nothing is open to close if it
+            # fails. BaseException so KeyboardInterrupt/SystemExit mid-PRAGMA
+            # also close the connection before propagating.
+            try:
+                conn.execute("PRAGMA journal_mode=DELETE")
+            except BaseException:
+                conn.close()
+                raise
         return conn
 
     def _ensure_schema(self) -> None:
@@ -171,6 +249,61 @@ class ChunkStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def flush_durable(self) -> None:
+        """Bug #1486 (CRITICAL, data loss): force this store's pending
+        writes to be DURABLE on the actual backing store, not merely
+        reflected in a client-side page cache.
+
+        Confirmed production root cause: fleet migration's read-back
+        verification read chunks.db through the SAME NFS client that had
+        just written it -- a fresh read through that client's page cache
+        can report "correct" even though the write has not yet reached
+        the NFS SERVER durably. Commits any pending transaction, then
+        explicitly ``nfs_safe_fsync``'s the on-disk file AND its
+        containing directory -- belt-and-suspenders against SQLite's own
+        internal fsync not being sufficient to guarantee NFS-server-side
+        durability under close-to-open cache semantics.
+
+        Bug #1486 High Finding 3: this method deliberately does NOT set
+        ``PRAGMA synchronous=FULL`` itself -- SQLite raises
+        ``sqlite3.OperationalError: Safety level may not be changed
+        inside a transaction`` if that pragma is changed mid-transaction
+        (exactly the state this method is meant to flush), and setting
+        it after prior commits would not retroactively apply to those
+        already-committed writes anyway. The pragma must already have
+        been configured at connection-OPEN time via
+        ``durable_synchronous=True`` -- this method refuses to run
+        otherwise (never silently proceeds on a connection whose
+        durability level was never verified).
+
+        Callers must invoke this AFTER the final write of a batch/pass
+        and BEFORE any fresh-connection integrity re-verification whose
+        result must be trusted to reflect genuinely durable state.
+        """
+        self._require_mutable()
+        if not self._durable_synchronous:
+            raise ChunkStoreError(
+                f"ChunkStore.flush_durable() refused for {self.db_path}: "
+                f"this store was not opened with durable_synchronous=True "
+                f"-- flush_durable() is reserved for migration write "
+                f"connections, which must configure+verify PRAGMA "
+                f"synchronous=FULL at open time (never here). The general "
+                f"per-chunk indexing path must never call this method."
+            )
+        self._conn.commit()
+
+        fd = os.open(str(self.db_path), os.O_RDONLY)
+        try:
+            nfs_safe_fsync(fd)
+        finally:
+            os.close(fd)
+
+        dir_fd = os.open(str(self.db_path.parent), os.O_RDONLY)
+        try:
+            nfs_safe_fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def __enter__(self) -> "ChunkStore":
         return self
@@ -309,9 +442,36 @@ class ChunkStore:
     def _row_to_record(
         self, point_id: str, vector_blob: bytes, data_blob: bytes
     ) -> Dict[str, Any]:
-        record = self._decode_data(data_blob)
+        # Codex-15 finding: a corrupt on-disk blob must surface as a
+        # contextual data-integrity error naming the point_id + the failing
+        # field, never a raw zstd/json/numpy exception with no context.
+        # zstandard.ZstdError -> corrupt compressed frame; json.JSONDecodeError
+        # (a ValueError subclass) -> valid zstd but non-JSON payload;
+        # UnicodeDecodeError -> non-UTF-8 payload; ValueError/TypeError ->
+        # numpy.frombuffer on a mis-sized vector blob.
+        try:
+            record = self._decode_data(data_blob)
+        except (
+            zstandard.ZstdError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise CorruptChunkDataError(
+                f"Chunk store at {self.db_path}: point {point_id!r} has a "
+                f"corrupt 'data' blob that could not be decoded "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
         record["id"] = point_id
-        record["vector"] = self._decode_vector(vector_blob)
+        try:
+            record["vector"] = self._decode_vector(vector_blob)
+        except (ValueError, TypeError) as exc:
+            raise CorruptChunkDataError(
+                f"Chunk store at {self.db_path}: point {point_id!r} has a "
+                f"corrupt 'vector' blob that could not be decoded "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
         return record
 
     def read(self, point_id: str) -> Optional[Dict[str, Any]]:

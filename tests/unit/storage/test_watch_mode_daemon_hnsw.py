@@ -16,7 +16,11 @@ def temp_store(tmp_path: Path) -> FilesystemVectorStore:
     """Create FilesystemVectorStore instance for testing."""
     store_path = tmp_path / "vector_store"
     store_path.mkdir(parents=True, exist_ok=True)
-    return FilesystemVectorStore(base_path=store_path, project_root=tmp_path)
+    return FilesystemVectorStore(
+        base_path=store_path,
+        project_root=tmp_path,
+        use_chunks_db_for_new_collections=False,
+    )
 
 
 @pytest.fixture

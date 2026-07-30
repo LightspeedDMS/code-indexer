@@ -52,6 +52,46 @@ def _extract_display_name(full_symbol: str) -> str:
     return _extract_short_symbol_name(full_symbol)
 
 
+def _scip_incompleteness_warning(
+    status, project: Optional[str] = None
+) -> Optional[str]:
+    """Build a loud incompleteness warning for an empty SCIP query result.
+
+    Bug #1498: an empty query result (no definitions/references found) is
+    ambiguous -- it could mean the symbol genuinely has none, OR it could mean
+    the SCIP index is in a partial (LIMBO) state where the project the symbol
+    actually lives in failed to generate, so its symbols were never indexed.
+
+    Returns None when the index is complete (all projects succeeded), so a
+    genuine zero-result query is never polluted with a spurious warning.
+
+    Args:
+        status: GenerationStatus loaded from StatusTracker.
+        project: The specific project path the query was scoped to (--project
+            flag), if any. When known and that exact project failed to
+            generate, this yields a more precise signal than the coarse
+            overall LIMBO state.
+    """
+    from code_indexer.scip.status import OverallStatus
+
+    if project:
+        project_status = status.projects.get(project)
+        if project_status is not None and project_status.status == OverallStatus.FAILED:
+            return (
+                f"⚠️  SCIP generation FAILED for project '{project}'; "
+                "results may be missing. Run 'cidx scip generate' to complete."
+            )
+
+    if status.is_limbo():
+        return (
+            f"⚠️  SCIP index is partial: {status.failed_projects}/"
+            f"{status.total_projects} project(s) failed to generate; results "
+            "may be missing. Run 'cidx scip generate' to complete."
+        )
+
+    return None
+
+
 def _is_remote_mode() -> bool:
     """Check if we are in remote mode."""
     from .mode_detection.command_mode_detector import (
@@ -826,6 +866,9 @@ def scip_definition(
 
     if not all_results:
         console.print(f"No definitions found for '{symbol}'", style="yellow")
+        incompleteness_warning = _scip_incompleteness_warning(status, project)
+        if incompleteness_warning:
+            console.print(incompleteness_warning, style="red bold")
         sys.exit(0)
 
     console.print(
@@ -972,6 +1015,9 @@ def scip_references(
 
     if not all_results:
         console.print(f"No references found for '{symbol}'", style="yellow")
+        incompleteness_warning = _scip_incompleteness_warning(status, project)
+        if incompleteness_warning:
+            console.print(incompleteness_warning, style="red bold")
         sys.exit(0)
 
     console.print(

@@ -45,7 +45,15 @@ def _build_temporal_index_cmd(
     repo with a per-repo since_date crashed the child process with an
     invalid-option error. Fixed here as part of this same change.
     """
-    cmd = ["cidx", "index", "--index-commits", "--progress-json"]
+    from code_indexer.server.utils.index_command_layout import (
+        append_server_layout_args,
+    )
+
+    # Story #1488: server states the new-collection layout explicitly
+    # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+    cmd: list[str] = append_server_layout_args(
+        ["cidx", "index", "--index-commits", "--progress-json"]
+    )
     if clear:
         cmd.append("--clear")
     if not temporal_options or not isinstance(temporal_options, dict):
