@@ -170,17 +170,42 @@ def test_reindex_job_actually_invokes_real_indexing_subprocess_per_index_type(
     )
     assert final_status["result"]["success"] is True, final_status["result"]
 
-    joined_commands = [" ".join(cmd) for cmd in captured_commands]
-
-    assert "cidx index" in joined_commands, (
+    # Story #1488: server-context `cidx index`/`cidx index --fts` spawns now
+    # correctly append `--new-collection-layout=chunks_db`. Match on the
+    # argv-list PREFIX (tolerant of that trailing flag) rather than exact
+    # string membership, and positively assert the flag is present -- this
+    # both fixes the stale assertion and strengthens the test.
+    semantic_commands = [
+        cmd
+        for cmd in captured_commands
+        if cmd[:2] == ["cidx", "index"] and "--fts" not in cmd
+    ]
+    assert semantic_commands, (
         "Bug #1472: semantic index type must trigger a real 'cidx index' "
         f"subprocess call. Captured commands: {captured_commands}"
     )
-    assert "cidx index --fts" in joined_commands, (
+    assert any(
+        "--new-collection-layout=chunks_db" in cmd for cmd in semantic_commands
+    ), (
+        "Story #1488: server-context 'cidx index' spawns must stamp "
+        f"--new-collection-layout=chunks_db. Captured commands: {captured_commands}"
+    )
+
+    fts_commands = [
+        cmd
+        for cmd in captured_commands
+        if cmd[:2] == ["cidx", "index"] and "--fts" in cmd
+    ]
+    assert fts_commands, (
         "Bug #1472: fts index type must trigger a real 'cidx index --fts' "
         f"subprocess call. Captured commands: {captured_commands}"
     )
-    assert any(cmd.startswith("cidx scip generate") for cmd in joined_commands), (
+    assert any("--new-collection-layout=chunks_db" in cmd for cmd in fts_commands), (
+        "Story #1488: server-context 'cidx index --fts' spawns must stamp "
+        f"--new-collection-layout=chunks_db. Captured commands: {captured_commands}"
+    )
+
+    assert any(cmd[:3] == ["cidx", "scip", "generate"] for cmd in captured_commands), (
         "Bug #1472: scip index type must trigger a real 'cidx scip generate' "
         f"subprocess call. Captured commands: {captured_commands}"
     )

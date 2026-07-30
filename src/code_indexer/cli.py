@@ -2914,6 +2914,25 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+def _resolve_new_collection_layout(choice: Optional[str]) -> Optional[bool]:
+    """Story #1488: map the `--new-collection-layout` Click choice to the
+    FilesystemVectorStore/BackendFactory `use_chunks_db_for_new_collections`
+    param.
+
+    - None (flag absent) -> None, so the store falls back to the
+      CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default SHARDED_JSON).
+    - "chunks_db" -> True (fresh collections built as consolidated chunks.db).
+    - "sharded_json" -> False (legacy per-chunk vector_*.json files).
+
+    Only governs the layout of BRAND-NEW collections; an existing
+    collection's committed on-disk discriminator always wins (resolved
+    downstream by resolve_chunk_layout / _is_chunks_db_collection).
+    """
+    if choice is None:
+        return None
+    return choice == "chunks_db"
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -3008,6 +3027,27 @@ def _install_embedding_stats_writer_for_index() -> None:
     help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
     "Used by the server's background worker to stream progress updates.",
 )
+@click.option(
+    "--new-collection-layout",
+    type=click.Choice(["sharded_json", "chunks_db"]),
+    default=None,
+    help="Chunk-storage layout for BRAND-NEW collections only (Story #1488): "
+    "'sharded_json' (legacy per-chunk vector_*.json files) or 'chunks_db' "
+    "(consolidated SQLite chunks.db). An existing collection's on-disk "
+    "layout always wins. Omit to fall back to CIDX_CHUNKS_DB_NEW_COLLECTIONS "
+    "(default: sharded_json).",
+)
+@click.option(
+    "--migrate-chunks-to-sqlite",
+    is_flag=True,
+    default=False,
+    help="Migrate ALL existing sharded (vector_*.json) collections in this "
+    "repository to the consolidated SQLite chunks.db layout, IN PLACE, then "
+    "exit (Story #1488). Runs no indexing pass and cannot be combined with "
+    "indexing-pass options. Durable-before-delete: legacy files are removed "
+    "only after a verified, crash-safe chunks.db is committed. Idempotent and "
+    "crash-resumable; exits non-zero if any collection failed/was skipped.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3028,6 +3068,8 @@ def index(
     since_date: Optional[str],
     diff_context: Optional[int],
     progress_json: bool = False,
+    new_collection_layout: Optional[str] = None,
+    migrate_chunks_to_sqlite: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -3153,6 +3195,44 @@ def index(
 
     # Check if daemon mode is enabled and delegate accordingly
     config = config_manager.load()
+
+    # Story #1488: `--migrate-chunks-to-sqlite` is a one-shot in-place storage
+    # migration that runs BEFORE any daemon delegation (it must never trigger
+    # an indexing pass) and then exits. AC11 rejects it alongside any
+    # indexing-pass option; AC7 fails closed if a live daemon/watch is active.
+    if migrate_chunks_to_sqlite:
+        from .services.chunk_migration_cli import (
+            MigrationLockError,
+            run_chunk_migration,
+            validate_migrate_flag_exclusivity,
+        )
+
+        validate_migrate_flag_exclusivity(
+            clear=clear,
+            reconcile=reconcile,
+            reconcile_embedder=reconcile_embedder,
+            detect_deletions=detect_deletions,
+            rebuild_indexes=rebuild_indexes,
+            rebuild_index=rebuild_index,
+            fts=fts,
+            rebuild_fts_index=rebuild_fts_index,
+            index_commits=index_commits,
+            all_branches=all_branches,
+            max_commits=max_commits,
+            since_date=since_date,
+            diff_context=diff_context,
+            new_collection_layout=new_collection_layout,
+            files_count_to_process=files_count_to_process,
+            progress_json=progress_json,
+            batch_size=batch_size,
+        )
+        try:
+            exit_code = run_chunk_migration(config, config_manager, console=console)
+        except MigrationLockError as exc:
+            console.print(f"❌ {exc}", style="red")
+            sys.exit(1)
+        sys.exit(exit_code)
+
     daemon_enabled = config.daemon and config.daemon.enabled
 
     # Handle --rebuild-fts-index BEFORE general daemon delegation
@@ -3193,6 +3273,15 @@ def index(
             max_commits=max_commits,
             since_date=since_date,
             diff_context=diff_context,
+            # Story #1488 (Codex Finding): resolve the new-collection layout ONCE
+            # here (same helper as the foreground path) and thread it through the
+            # daemon so an explicit --new-collection-layout is honored by the
+            # daemon's collection creation. None (flag absent) passes through so
+            # the daemon-side env/default applies -- precedence identical to the
+            # foreground path.
+            use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                new_collection_layout
+            ),
         )
         sys.exit(exit_code)
     else:
@@ -3300,6 +3389,10 @@ def index(
             # constructing any TemporalMetadataStore. Absence means today's
             # SQLite behavior (CLI/solo byte-unchanged).
             _temporal_pg_pool = None
+            # Story #1488 Codex Finding 1: the shared repo-scoped index-mutation
+            # lock held for the temporal mutation lifecycle. None until entered;
+            # released in the finally below on EVERY exit path.
+            _temporal_index_lock_ctx = None
             _temporal_pg_bootstrap_dir = os.environ.get(
                 "CIDX_TEMPORAL_PG_BOOTSTRAP_DIR"
             )
@@ -3327,6 +3420,31 @@ def index(
                     sys.exit(1)
 
             try:
+                # Story #1488 Codex Finding 1 (CRITICAL, reproduced data loss):
+                # acquire the SAME repo-scoped index-mutation lock the chunk
+                # migration uses, as the FIRST step -- BEFORE any chunk mutation
+                # (--clear temporal wipe, index_commits). A foreground temporal
+                # index previously ran UNLOCKED (it exits this branch before the
+                # semantic path's lock acquisition), letting a concurrent
+                # temporal writer overwrite an already-verified deterministic
+                # shard pathname mid-migration -> silent data loss. Non-blocking:
+                # fail CLOSED with an actionable message if another writer holds
+                # it. Released in the finally below on EVERY exit path.
+                from .services.chunk_migration_cli import (
+                    MigrationLockError as _ForegroundIndexLockError,
+                    acquire_index_mutation_lock as _acquire_foreground_index_lock,
+                )
+
+                _temporal_lock = _acquire_foreground_index_lock(
+                    config_manager.config_path.parent
+                )
+                try:
+                    _temporal_lock.__enter__()
+                except _ForegroundIndexLockError as _idx_lock_exc:
+                    console.print(f"❌ {_idx_lock_exc}", style="red")
+                    sys.exit(1)
+                _temporal_index_lock_ctx = _temporal_lock
+
                 # Lazy import temporal indexing components
                 from .services.temporal.temporal_indexer import TemporalIndexer
                 from .storage.filesystem_vector_store import FilesystemVectorStore
@@ -3688,6 +3806,15 @@ def index(
                     console.print(traceback.format_exc())
                 sys.exit(1)
             finally:
+                # Story #1488 Codex Finding 1: release the shared index-mutation
+                # lock on EVERY exit path (normal return, sys.exit -> SystemExit,
+                # or any exception). No-op if it was never entered (the lock was
+                # already held by another writer -> we fail-closed exited before
+                # setting the sentinel). Direct __exit__ mirrors the semantic
+                # foreground path; the acquire context manager's own finally
+                # handles fd close / unlock cleanup.
+                if _temporal_index_lock_ctx is not None:
+                    _temporal_index_lock_ctx.__exit__(None, None, None)
                 # Bug #1313 round-3: undo this process's PG temporal wiring
                 # regardless of success (sys.exit(0) above) or failure
                 # (sys.exit(1) above) -- SystemExit still runs finally
@@ -3833,6 +3960,30 @@ def index(
                 console.print(traceback.format_exc(), style="dim")
             sys.exit(1)
 
+    # Codex Finding 1a (Story #1488, AC7 data loss): the standalone foreground
+    # `cidx index` semantic mutation acquires the SAME repo-scoped index-
+    # mutation lock the chunk migration uses, so a foreground index and a
+    # migration are MUTUALLY EXCLUSIVE -- a migration can never delete a legacy
+    # point a concurrent foreground index just wrote. Non-blocking: fail CLOSED
+    # with an actionable message if another writer holds it. Held for the whole
+    # foreground mutation lifecycle (released in the `finally` at the end of the
+    # try below). Deliberately NOT applied to the daemon-delegation branch (a
+    # single long-lived daemon is already covered by the migration's socket-
+    # liveness probe) or to `cidx watch`.
+    from .services.chunk_migration_cli import (
+        MigrationLockError as _ForegroundIndexLockError,
+        acquire_index_mutation_lock as _acquire_foreground_index_lock,
+    )
+
+    _index_mutation_lock_ctx = _acquire_foreground_index_lock(
+        config_manager.config_path.parent
+    )
+    try:
+        _index_mutation_lock_ctx.__enter__()
+    except _ForegroundIndexLockError as _idx_lock_exc:
+        console.print(f"❌ {_idx_lock_exc}", style="red")
+        sys.exit(1)
+
     try:
         config = config_manager.load()
 
@@ -3853,8 +4004,16 @@ def index(
         from .services.smart_indexer import SmartIndexer
 
         embedding_provider = EmbeddingProviderFactory.create(config, console)
+        # Codex Finding D2: resolve the new-collection layout ONCE so the SAME
+        # value reaches every provider's backend (primary AND every secondary
+        # provider in the multi-provider loop below), never just the primary.
+        _resolved_new_collection_layout = _resolve_new_collection_layout(
+            new_collection_layout
+        )
         backend = BackendFactory.create(
-            config=config, project_root=Path(config.codebase_dir)
+            config=config,
+            project_root=Path(config.codebase_dir),
+            use_chunks_db_for_new_collections=_resolved_new_collection_layout,
         )
         vector_store_client = backend.get_vector_store_client()
 
@@ -4299,7 +4458,9 @@ def index(
                 )
                 continue
             _extra_backend = BackendFactory.create(
-                config=config, project_root=Path(config.codebase_dir)
+                config=config,
+                project_root=Path(config.codebase_dir),
+                use_chunks_db_for_new_collections=_resolved_new_collection_layout,
             )
             _extra_client = _extra_backend.get_vector_store_client()
             _extra_metadata = _get_provider_metadata_path(
@@ -4333,6 +4494,11 @@ def index(
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
         sys.exit(1)
+    finally:
+        # Codex Finding 1a: release the foreground index-mutation lock on
+        # EVERY exit path (normal return, sys.exit -> SystemExit, or any
+        # exception) so it is never leaked past the mutation lifecycle.
+        _index_mutation_lock_ctx.__exit__(None, None, None)
 
 
 @cli.command()
@@ -4408,6 +4574,26 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         sys.exit(1)
 
     console.print(f"🔍 Detected {detected_count} index(es) to watch:", style="blue")
+
+    # Story #1488 Codex Finding 1: a standalone watch session mutates chunks
+    # (initial smart_index sync + the git-aware/FTS/temporal watch handlers), so
+    # acquire the SAME repo-scoped index-mutation lock the chunk migration uses
+    # and hold it for the whole session -- mutually exclusive with a migration
+    # and a foreground index. Non-blocking: fail CLOSED with an actionable
+    # message if another writer holds it. Released in the finally below.
+    from .services.chunk_migration_cli import (
+        MigrationLockError as _ForegroundIndexLockError,
+        acquire_index_mutation_lock as _acquire_foreground_index_lock,
+    )
+
+    _watch_index_lock_ctx = _acquire_foreground_index_lock(
+        config_manager.config_path.parent
+    )
+    try:
+        _watch_index_lock_ctx.__enter__()
+    except _ForegroundIndexLockError as _idx_lock_exc:
+        console.print(f"❌ {_idx_lock_exc}", style="red")
+        sys.exit(1)
 
     try:
         from watchdog.observers import Observer
@@ -4692,6 +4878,13 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
 
         console.print(traceback.format_exc())
         sys.exit(1)
+    finally:
+        # Story #1488 Codex Finding 1: release the shared index-mutation lock
+        # when the standalone watch session ends (normal stop, sys.exit, or any
+        # exception) so a subsequent migration / foreground index / daemon can
+        # acquire it. The acquire context manager's own finally handles fd
+        # close / unlock cleanup.
+        _watch_index_lock_ctx.__exit__(None, None, None)
 
 
 # Story 2.1 Display Helper Functions

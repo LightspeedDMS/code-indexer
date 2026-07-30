@@ -395,7 +395,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
 
     def test_end_indexing_flag_defaults_to_false(self, tmp_path: Path):
         """_branch_isolation_did_filtered_rebuild defaults to False on initialization."""
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         assert hasattr(store, "_branch_isolation_did_filtered_rebuild"), (
             "FilesystemVectorStore should have _branch_isolation_did_filtered_rebuild attribute"
@@ -411,7 +413,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         then calling end_indexing() without adding any vectors, and confirming
         the HNSW metadata's vector_count was NOT changed by a new full rebuild.
         """
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_collection", vector_size=128)
 
         # Write some vector files so a rebuild would produce a non-zero count
@@ -457,7 +461,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
 
     def test_end_indexing_resets_flag_after_checking(self, tmp_path: Path):
         """end_indexing() resets _branch_isolation_did_filtered_rebuild to False after checking."""
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_collection", vector_size=128)
 
         # Directly set the flag
@@ -810,14 +816,18 @@ class TestRebuildHnswFiltered:
 
     def test_rebuild_hnsw_filtered_exists_on_store(self, tmp_path: Path):
         """FilesystemVectorStore has rebuild_hnsw_filtered() method."""
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         assert hasattr(store, "rebuild_hnsw_filtered"), (
             "FilesystemVectorStore should have rebuild_hnsw_filtered() method"
         )
 
     def test_rebuild_hnsw_filtered_produces_filtered_metadata(self, tmp_path: Path):
         """rebuild_hnsw_filtered() calls rebuild with visible_files and produces filtered metadata."""
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_collection", vector_size=128)
 
         # Write 5 vector files
@@ -844,7 +854,9 @@ class TestRebuildHnswFiltered:
 
     def test_rebuild_hnsw_filtered_sets_flag_on_store(self, tmp_path: Path):
         """rebuild_hnsw_filtered() sets _branch_isolation_did_filtered_rebuild=True."""
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_collection", vector_size=128)
 
         collection_path = tmp_path / "test_collection"
@@ -863,7 +875,10 @@ class TestRebuildHnswFiltered:
         """rebuild_hnsw_filtered() calls hnsw_index_cache.invalidate() if cache is set."""
         mock_cache = MagicMock()
         store = FilesystemVectorStore(
-            tmp_path, project_root=tmp_path, hnsw_index_cache=mock_cache
+            tmp_path,
+            project_root=tmp_path,
+            hnsw_index_cache=mock_cache,
+            use_chunks_db_for_new_collections=False,
         )
         store.create_collection("test_collection", vector_size=128)
 

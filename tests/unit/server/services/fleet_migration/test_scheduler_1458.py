@@ -360,9 +360,15 @@ class TestTriggerNowMigratesTheNextUnmigratedRepo:
         )
         assert resolve_chunk_layout(pending_collection) == ChunkLayout.CHUNKS_DB
 
-    def test_returns_nothing_to_migrate_status_when_fleet_is_fully_migrated(
+    def test_trigger_now_submits_no_job_when_fleet_is_fully_migrated(
         self, tmp_path: Path, job_tracker: JobTracker
     ) -> None:
+        """Bug #1486 Fix C item 1 (auto-stop): once every repo is
+        migrated, trigger_now() must go dormant -- refusing to submit
+        ANY job -- instead of the pre-fix behavior of submitting a
+        no-op "nothing_to_migrate" job on every single tick forever (a
+        confirmed production incident: 3000+ jobs/day at a 1-minute
+        tick interval)."""
         refresh_scheduler = _make_refresh_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
         base_clone = _build_already_migrated_repo(golden_repos_dir, "repo-a")
@@ -375,11 +381,11 @@ class TestTriggerNowMigratesTheNextUnmigratedRepo:
 
         job_id = scheduler.trigger_now()
 
-        assert job_id is not None
-        tracked_job = job_tracker.get_job(job_id)
-        assert tracked_job is not None
-        assert tracked_job.result is not None
-        assert tracked_job.result["status"] == "nothing_to_migrate"
+        assert job_id is None, (
+            "Bug: trigger_now() submitted a job even though the fleet is "
+            "fully migrated -- it must go dormant instead of creating a "
+            "no-op job every tick forever."
+        )
 
 
 class TestFleetWideSingleFlightDedup:
@@ -445,6 +451,7 @@ class TestGetStats:
             "migrated_repos": 1,
             "pending_repos": 2,
             "quarantined_repos": 0,
+            "unrecoverable_repos": 0,
         }
 
 

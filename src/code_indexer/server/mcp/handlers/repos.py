@@ -2040,7 +2040,13 @@ def _provider_index_job(
         elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
 
-    cmd = ["cidx", "index", "--progress-json"]
+    from code_indexer.server.utils.index_command_layout import (
+        append_server_layout_args,
+    )
+
+    # Story #1488: server states the new-collection layout explicitly
+    # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+    cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
     if clear:
         cmd.append("--clear")
 

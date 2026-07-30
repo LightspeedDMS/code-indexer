@@ -21,7 +21,9 @@ class TestTemporalFilenameGeneration:
 
         # When: Generating filename for temporal collection
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FilesystemVectorStore(base_path=Path(tmpdir))
+            store = FilesystemVectorStore(
+                base_path=Path(tmpdir), use_chunks_db_for_new_collections=False
+            )
 
             # Calculate expected hash prefix (16-char SHA256 prefix)
             expected_hash = hashlib.sha256(point_id.encode()).hexdigest()[:16]
@@ -70,7 +72,9 @@ class TestTemporalFilenameGeneration:
         point_id = "project:diff:abc123:path/to/file.py:0"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FilesystemVectorStore(base_path=Path(tmpdir))
+            store = FilesystemVectorStore(
+                base_path=Path(tmpdir), use_chunks_db_for_new_collections=False
+            )
             store.create_collection("code-indexer-temporal", vector_size=1024)
 
             # When: Upserting the same point twice
@@ -105,7 +109,9 @@ class TestTemporalFilenameGeneration:
         point_id = "simple_id"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FilesystemVectorStore(base_path=Path(tmpdir))
+            store = FilesystemVectorStore(
+                base_path=Path(tmpdir), use_chunks_db_for_new_collections=False
+            )
             store.create_collection("default", vector_size=1024)
 
             # When: Upserting to non-temporal collection
@@ -142,7 +148,9 @@ class TestTemporalFilenameGeneration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FilesystemVectorStore(base_path=Path(tmpdir))
+            store = FilesystemVectorStore(
+                base_path=Path(tmpdir), use_chunks_db_for_new_collections=False
+            )
             store.create_collection("code-indexer-temporal", vector_size=1024)
 
             # When: Upserting point with extremely long ID
@@ -177,7 +185,9 @@ class TestTemporalFilenameGeneration:
         point_id_2 = "project:diff:abc123:file2.py:0"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = FilesystemVectorStore(base_path=Path(tmpdir))
+            store = FilesystemVectorStore(
+                base_path=Path(tmpdir), use_chunks_db_for_new_collections=False
+            )
             store.create_collection("code-indexer-temporal", vector_size=1024)
 
             # When: Upserting both points

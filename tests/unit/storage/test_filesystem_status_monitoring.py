@@ -16,7 +16,11 @@ from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 @pytest.fixture
 def temp_store(tmp_path: Path) -> FilesystemVectorStore:
     """Create temporary filesystem vector store."""
-    store = FilesystemVectorStore(base_path=tmp_path / "index", project_root=tmp_path)
+    store = FilesystemVectorStore(
+        base_path=tmp_path / "index",
+        project_root=tmp_path,
+        use_chunks_db_for_new_collections=False,
+    )
     return store
 
 

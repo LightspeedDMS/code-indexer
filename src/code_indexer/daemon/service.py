@@ -75,6 +75,29 @@ class CIDXDaemonService(Service):
         self.indexing_project_path: Optional[str] = None
         self.indexing_lock_internal: threading.Lock = threading.Lock()
 
+        # Codex Finding (Story #1488): daemon-wide chunk-MUTATION serializer.
+        #
+        # The ThreadedServer shares ONE service instance across connection
+        # threads, and the process-level `.index-mutation.lock` (daemon/server.py)
+        # is held by the DAEMON PROCESS itself -- so neither serializes two RPC
+        # calls WITHIN this process. Without this mutex, two simultaneous
+        # daemon-delegated `cidx index` calls (or a blocking index concurrent
+        # with a background index / a watch mutation) could mutate the SAME
+        # collection concurrently, racing writes and corrupting the index.
+        #
+        # A daemon is bound to a SINGLE project (project-local `daemon.sock`),
+        # so one daemon-wide lock == per-collection here; a per-collection map
+        # would add no concurrency and would over-engineer (KISS).
+        #
+        # This is DELIBERATELY separate from `indexing_lock_internal`, which
+        # only guards short progress-state critical sections and is re-acquired
+        # inside the background progress callback -- wrapping the whole mutation
+        # in that non-reentrant Lock would self-deadlock. `mutation_lock` is an
+        # RLock (reentrant, deadlock-safe) and is always acquired OUTERMOST,
+        # never while `cache_lock`/`indexing_lock_internal` is held, so there is
+        # no lock-ordering cycle.
+        self.mutation_lock: threading.RLock = threading.RLock()
+
         # Indexing progress state (for polling)
         self.current_files_processed: int = 0
         self.total_files: int = 0
@@ -636,6 +659,14 @@ class CIDXDaemonService(Service):
         logger.info(f"exposed_index_blocking: project={project_path} [BLOCKING MODE]")
         logger.info(f"exposed_index_blocking: kwargs={kwargs}")
 
+        # Codex Finding (#1488): hold the daemon-wide chunk-mutation lock for the
+        # ENTIRE mutation (both the temporal-only and semantic paths, including
+        # their cache invalidations and returns). Acquired here as the outermost
+        # lock and released in `finally` on every exit path, this serializes
+        # concurrent blocking indexes AND a blocking index against the background
+        # index / a watch mutation. Explicit acquire/finally (rather than a
+        # `with` block) avoids re-indenting the whole method body.
+        self.mutation_lock.acquire()
         try:
             # Invalidate cache BEFORE indexing
             with self.cache_lock:
@@ -756,7 +787,18 @@ class CIDXDaemonService(Service):
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
-            backend = BackendFactory.create(config, Path(project_path))
+            # Story #1488 (Codex Finding): honor the caller's explicit
+            # `--new-collection-layout` on the daemon-delegation path, exactly
+            # like the foreground `cidx index` path. An explicit True/False wins;
+            # None (flag absent) passes through so the daemon-side
+            # CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default applies unchanged.
+            backend = BackendFactory.create(
+                config,
+                Path(project_path),
+                use_chunks_db_for_new_collections=kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
+            )
             vector_store_client = backend.get_vector_store_client()
 
             # Initialize SmartIndexer
@@ -847,6 +889,9 @@ class CIDXDaemonService(Service):
                 "status": "error",
                 "message": str(e),
             }
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_index(
         self, project_path: str, callback: Optional[Any] = None, **kwargs
@@ -954,6 +999,15 @@ class CIDXDaemonService(Service):
             project_path: Path to project root
             kwargs: Additional indexing parameters
         """
+        # Codex Finding (#1488): the background index participates in the SAME
+        # daemon-wide chunk-mutation serialization as the blocking index and the
+        # watch mutation. Acquired OUTERMOST (before cache_lock /
+        # indexing_lock_internal are ever taken inside) and released in the
+        # `finally` below, so a blocking index and a background index can never
+        # mutate the same collection concurrently. `exposed_index` already
+        # returned "started" without holding this lock, so the caller is not
+        # blocked -- only the actual mutation work queues behind an in-flight one.
+        self.mutation_lock.acquire()
         try:
             logger.info("=== BACKGROUND INDEXING THREAD STARTED ===")
             logger.info(f"Project path: {project_path}")
@@ -988,7 +1042,19 @@ class CIDXDaemonService(Service):
             )
 
             logger.info("Step 4: Creating backend and vector store...")
-            backend = BackendFactory.create(config, Path(project_path))
+            # Codex Finding (#1488): honor the caller's explicit
+            # `--new-collection-layout` on the BACKGROUND daemon-delegation
+            # path too, exactly like `exposed_index_blocking` above. An
+            # explicit True/False wins; None (flag absent) passes through so
+            # the daemon-side CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default
+            # applies unchanged.
+            backend = BackendFactory.create(
+                config,
+                Path(project_path),
+                use_chunks_db_for_new_collections=kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
+            )
             vector_store_client = backend.get_vector_store_client()
             logger.info(
                 f"Step 4 Complete: Backend created ({type(vector_store_client).__name__})"
@@ -1066,6 +1132,8 @@ class CIDXDaemonService(Service):
                 self.indexing_thread = None
                 self.indexing_project_path = None
             logger.info("=== BACKGROUND INDEXING THREAD EXITING ===")
+            # Release the daemon-wide chunk-mutation lock LAST (outermost).
+            self.mutation_lock.release()
 
     # =============================================================================
     # Watch Mode (3 methods)
@@ -1091,10 +1159,31 @@ class CIDXDaemonService(Service):
         logger.info(f"exposed_watch_start: project={project_path}")
 
         # Delegate to DaemonWatchManager for non-blocking operation
-        # Config will be loaded by the manager
-        result = cast(
-            dict[str, Any], self.watch_manager.start_watch(project_path, None, **kwargs)
-        )
+        # Config will be loaded by the manager.
+        #
+        # Codex Finding (#1488): the watch lifecycle participates in the
+        # daemon-wide chunk-mutation serialization at its daemon-controlled
+        # entry point. Holding `mutation_lock` across start_watch() ensures the
+        # watch handler's construction (which opens the collection's vector
+        # store / reads its metadata) cannot race an in-flight blocking or
+        # background index mutation. The lock is held only for the short,
+        # non-blocking start (start_watch spawns a background thread and returns
+        # immediately -- it never runs the watch loop under the lock).
+        #
+        # 16th Codex review, Finding 2: the previously-documented residual --
+        # the watch's ONGOING per-event index cycles running inside
+        # GitAwareWatchHandler in its own thread, unserialized against a
+        # manual index/clean_data -- is now closed by threading this SAME
+        # `mutation_lock` through DaemonWatchManager.start_watch() into the
+        # constructed GitAwareWatchHandler, which acquires it per mutation
+        # cycle in `_process_pending_changes` (see that module for details).
+        with self.mutation_lock:
+            result = cast(
+                dict[str, Any],
+                self.watch_manager.start_watch(
+                    project_path, None, mutation_lock=self.mutation_lock, **kwargs
+                ),
+            )
 
         # Update legacy fields for compatibility
         if result["status"] == "success":
@@ -1171,57 +1260,73 @@ class CIDXDaemonService(Service):
         """
         logger.info(f"exposed_clean: project={project_path}")
 
-        # Invalidate cache FIRST
-        with self.cache_lock:
-            if self.cache_entry:
-                logger.info("Invalidating cache before clean")
-                self.cache_entry = None
-
+        # Codex Finding (16th review, Story #1488): exposed_clean is a
+        # daemon-delegated MUTATOR (clears a collection's chunk storage) and
+        # must be serialized against exposed_index_blocking / the background
+        # index / a watch mutation cycle via the SAME daemon-wide mutation_lock,
+        # exactly mirroring exposed_index_blocking's outermost-lock pattern.
+        # Acquired here as the outermost lock and released in `finally` on
+        # every exit path. (exposed_clean_data gets the identical treatment in
+        # a separate, dedicated edit.)
+        self.mutation_lock.acquire()
         try:
-            from code_indexer.storage.filesystem_vector_store import (
-                FilesystemVectorStore,
-            )
+            # Invalidate cache FIRST
+            with self.cache_lock:
+                if self.cache_entry:
+                    logger.info("Invalidating cache before clean")
+                    self.cache_entry = None
 
-            # Clear vectors using clear_collection method
-            index_dir = Path(project_path) / ".code-indexer" / "index"
-            vector_store = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(project_path)
-            )
+            try:
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
 
-            # Get collection name from kwargs or auto-resolve
-            collection_name = kwargs.get("collection")
-            if collection_name is None:
-                collections = vector_store.list_collections()
-                if len(collections) == 1:
-                    collection_name = collections[0]
-                elif len(collections) == 0:
-                    return {"status": "success", "message": "No collections to clear"}
+                # Clear vectors using clear_collection method
+                index_dir = Path(project_path) / ".code-indexer" / "index"
+                vector_store = FilesystemVectorStore(
+                    base_path=index_dir, project_root=Path(project_path)
+                )
+
+                # Get collection name from kwargs or auto-resolve
+                collection_name = kwargs.get("collection")
+                if collection_name is None:
+                    collections = vector_store.list_collections()
+                    if len(collections) == 1:
+                        collection_name = collections[0]
+                    elif len(collections) == 0:
+                        return {
+                            "status": "success",
+                            "message": "No collections to clear",
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": "Multiple collections exist, specify collection parameter",
+                        }
+
+                # Clear collection
+                remove_projection_matrix = kwargs.get("remove_projection_matrix", False)
+                success = vector_store.clear_collection(
+                    collection_name, remove_projection_matrix
+                )
+
+                if success:
+                    return {
+                        "status": "success",
+                        "message": f"Collection '{collection_name}' cleared",
+                    }
                 else:
                     return {
                         "status": "error",
-                        "message": "Multiple collections exist, specify collection parameter",
+                        "message": f"Failed to clear collection '{collection_name}'",
                     }
 
-            # Clear collection
-            remove_projection_matrix = kwargs.get("remove_projection_matrix", False)
-            success = vector_store.clear_collection(
-                collection_name, remove_projection_matrix
-            )
-
-            if success:
-                return {
-                    "status": "success",
-                    "message": f"Collection '{collection_name}' cleared",
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Failed to clear collection '{collection_name}'",
-                }
-
-        except Exception as e:
-            logger.error(f"Clean failed: {e}")
-            return {"status": "error", "message": str(e)}
+            except Exception as e:
+                logger.error(f"Clean failed: {e}")
+                return {"status": "error", "message": str(e)}
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_clean_data(self, project_path: str, **kwargs) -> Dict[str, Any]:
         """Clear all data with cache invalidation (deletes collections).
@@ -1235,54 +1340,66 @@ class CIDXDaemonService(Service):
         """
         logger.info(f"exposed_clean_data: project={project_path}")
 
-        # Invalidate cache FIRST
-        with self.cache_lock:
-            if self.cache_entry:
-                logger.info("Invalidating cache before clean_data")
-                self.cache_entry = None
-
+        # Codex Finding (16th review, Story #1488): exposed_clean_data is a
+        # daemon-delegated MUTATOR (deletes a collection's chunk storage) and
+        # must be serialized against exposed_index_blocking / the background
+        # index / a watch mutation cycle via the SAME daemon-wide mutation_lock,
+        # exactly mirroring exposed_index_blocking's outermost-lock pattern.
+        # Acquired here as the outermost lock and released in `finally` on
+        # every exit path.
+        self.mutation_lock.acquire()
         try:
-            from code_indexer.storage.filesystem_vector_store import (
-                FilesystemVectorStore,
-            )
+            # Invalidate cache FIRST
+            with self.cache_lock:
+                if self.cache_entry:
+                    logger.info("Invalidating cache before clean_data")
+                    self.cache_entry = None
 
-            # Clear data by deleting collections
-            index_dir = Path(project_path) / ".code-indexer" / "index"
-            vector_store = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(project_path)
-            )
+            try:
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
 
-            # Get collection name from kwargs or delete all collections
-            collection_name = kwargs.get("collection")
-            if collection_name:
-                # Delete specific collection
-                success = vector_store.delete_collection(collection_name)
-                if success:
+                # Clear data by deleting collections
+                index_dir = Path(project_path) / ".code-indexer" / "index"
+                vector_store = FilesystemVectorStore(
+                    base_path=index_dir, project_root=Path(project_path)
+                )
+
+                # Get collection name from kwargs or delete all collections
+                collection_name = kwargs.get("collection")
+                if collection_name:
+                    # Delete specific collection
+                    success = vector_store.delete_collection(collection_name)
+                    if success:
+                        return {
+                            "status": "success",
+                            "message": f"Collection '{collection_name}' deleted",
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"Failed to delete collection '{collection_name}'",
+                        }
+                else:
+                    # Delete all collections
+                    collections = vector_store.list_collections()
+                    deleted_count = 0
+                    for coll in collections:
+                        if vector_store.delete_collection(coll):
+                            deleted_count += 1
+
                     return {
                         "status": "success",
-                        "message": f"Collection '{collection_name}' deleted",
+                        "message": f"Deleted {deleted_count} collection(s)",
                     }
-                else:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to delete collection '{collection_name}'",
-                    }
-            else:
-                # Delete all collections
-                collections = vector_store.list_collections()
-                deleted_count = 0
-                for coll in collections:
-                    if vector_store.delete_collection(coll):
-                        deleted_count += 1
 
-                return {
-                    "status": "success",
-                    "message": f"Deleted {deleted_count} collection(s)",
-                }
-
-        except Exception as e:
-            logger.error(f"Clean data failed: {e}")
-            return {"status": "error", "message": str(e)}
+            except Exception as e:
+                logger.error(f"Clean data failed: {e}")
+                return {"status": "error", "message": str(e)}
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_status(self, project_path: str) -> Dict[str, Any]:
         """Combined daemon + storage status.

@@ -87,12 +87,25 @@ def _write_manifest_for_records(collection_dir: Path, records: dict) -> None:
     state at that crash point -- a real manifest always covers the full
     record set."""
     from code_indexer.storage.shared.collection_migration import (
+        _MANIFEST_SCHEMA_VERSION,
         _compute_record_content_digest,
+        _empty_fold_accumulator,
+        _fold_manifest_entry,
     )
 
-    manifest = {
+    manifest_records = {
         point_id: _compute_record_content_digest(record)
         for point_id, record in records.items()
+    }
+    accumulator = _empty_fold_accumulator()
+    for point_id, digest in manifest_records.items():
+        accumulator = _fold_manifest_entry(accumulator, point_id, digest)
+
+    manifest = {
+        "version": _MANIFEST_SCHEMA_VERSION,
+        "records": manifest_records,
+        "expected_count": len(manifest_records),
+        "root_digest": accumulator.hex(),
     }
     (collection_dir / "chunks_db_content_manifest.json").write_text(
         json.dumps(manifest)
@@ -582,7 +595,16 @@ class TestConsolidateCollectionInPlaceResumeVerifiesChunksDb:
         write_chunks_db_discriminator(tmp_path)
         assert not (tmp_path / "chunks.db").exists()
 
-        with pytest.raises(ConsolidationVerificationError):
+        # Bug #1486: a missing chunks.db (caught by the unified
+        # durability/integrity gate) with no manifest present at all is
+        # UNRECOVERABLE (fail-closed) -- there is nothing to prove any
+        # OTHER record is covered, regardless of this one legacy file's
+        # presence.
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+        )
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
             consolidate_collection_in_place(tmp_path)
 
         assert vfile.exists(), (
@@ -689,17 +711,25 @@ class TestConsolidateCollectionInPlaceExactSetVerification:
     """Codex Finding #3 (CRITICAL): verification must be an EXACT-SET
     comparison (same count, same IDs, no extras) via a FRESH reopen, not
     merely 'every original ID is present' via the same in-process handle
-    that just wrote it -- otherwise a stale resurrected row from a prior
-    interrupted run can slip through undetected."""
+    that just wrote it.
 
-    def test_fails_when_chunks_db_has_extra_stale_row_not_in_legacy_source(
+    Bug #1486 Defect B: a stale extra row inherited from a prior
+    INTERRUPTED fresh-path attempt (a healthy leftover chunks.db whose id
+    set no longer matches the current authoritative legacy source) is now
+    handled BEFORE the write loop -- ``_discard_corrupt_leftover_chunks_db``
+    discards it and the collection is rebuilt cleanly, so this scenario
+    consolidates successfully rather than raising forever (the original
+    non-idempotent-retry defect). The exact-set check itself remains as
+    defense-in-depth against extras appearing DURING a single run."""
+
+    def test_stale_leftover_extra_row_is_discarded_and_rebuilt_cleanly(
         self, tmp_path: Path
     ) -> None:
         _write_collection_meta(tmp_path)
         _write_vector_json(tmp_path, "aa003333", [1.0, 2.0, 3.0, 4.0], chunk_text="x")
         # Pre-seed chunks.db with a STALE extra row that has NO corresponding
-        # legacy source file (simulating INSERT OR REPLACE resurrecting a
-        # point from a prior interrupted run).
+        # legacy source file (simulating a prior interrupted run whose
+        # leftover chunks.db no longer matches the current legacy source).
         with ChunkStore(tmp_path / "chunks.db") as store:
             store.write_batch(
                 [
@@ -713,14 +743,18 @@ class TestConsolidateCollectionInPlaceExactSetVerification:
                 ]
             )
 
-        with pytest.raises(ConsolidationVerificationError):
-            consolidate_collection_in_place(tmp_path)
+        # Bug #1486 Defect B: the stale leftover is discarded and rebuilt
+        # cleanly -- consolidation succeeds (idempotent retry), never raises.
+        result = consolidate_collection_in_place(tmp_path)
 
-        assert resolve_chunk_layout(tmp_path) == ChunkLayout.SHARDED_JSON, (
-            "Bug: the discriminator was flipped despite chunks.db holding "
-            "an extra, unexplained stale row not present in the legacy "
-            "source -- the pre-fix verify loop only checked 'every "
-            "original ID is present', never checking for extras."
+        assert result.status == "consolidated"
+        assert resolve_chunk_layout(tmp_path) == ChunkLayout.CHUNKS_DB
+        with ChunkStore(tmp_path / "chunks.db", immutable=True) as store:
+            final_ids = set(store.all_point_ids())
+        assert final_ids == {"aa003333"}, (
+            "Bug #1486 Defect B: the stale leftover row must be discarded so "
+            f"the final chunks.db equals the legacy source exactly, got "
+            f"{sorted(final_ids)}"
         )
 
 
@@ -952,7 +986,7 @@ class TestContentIntegrityManifest:
             stored_record = store.read("mm002222")
         expected_digest = _compute_record_content_digest(stored_record)
 
-        assert manifest["mm002222"] == expected_digest
+        assert manifest["records"]["mm002222"] == expected_digest
 
     def test_manifest_write_never_serializes_the_full_manifest_dict_at_once(
         self, tmp_path: Path, monkeypatch
@@ -1006,7 +1040,7 @@ class TestContentIntegrityManifest:
         manifest = _json_module.loads(
             (tmp_path / "chunks_db_content_manifest.json").read_text()
         )
-        assert len(manifest) == 50
+        assert len(manifest["records"]) == 50
 
     def test_post_cleanup_content_corruption_is_detected_and_raises(
         self, tmp_path: Path
@@ -1043,7 +1077,14 @@ class TestContentIntegrityManifest:
                 ]
             )
 
-        with pytest.raises(ConsolidationVerificationError):
+        # Bug #1486: this record has NO remaining legacy source, so a
+        # content-digest mismatch here is UNRECOVERABLE, not a bare
+        # retryable verification failure.
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+        )
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
             consolidate_collection_in_place(tmp_path)
 
     def test_digest_detects_corruption_of_a_middle_element_in_a_realistic_dimension_vector(
@@ -1083,7 +1124,14 @@ class TestContentIntegrityManifest:
                 ]
             )
 
-        with pytest.raises(ConsolidationVerificationError):
+        # Bug #1486: this record has NO remaining legacy source, so a
+        # content-digest mismatch here is UNRECOVERABLE, not a bare
+        # retryable verification failure.
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+        )
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
             consolidate_collection_in_place(tmp_path)
 
     def test_detects_a_row_silently_deleted_from_chunks_db(

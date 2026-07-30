@@ -59,7 +59,9 @@ def store_with_vectors():
     """Create a store with 50 indexed vectors for testing HNSW distance scoring."""
     with tempfile.TemporaryDirectory() as tmpdir:
         base_path = Path(tmpdir)
-        store = FilesystemVectorStore(base_path=base_path)
+        store = FilesystemVectorStore(
+            base_path=base_path, use_chunks_db_for_new_collections=False
+        )
 
         collection_name = "test_collection"
         vector_size = 64

@@ -5,16 +5,21 @@ FilesystemVectorStore instance can be told (explicitly via constructor
 param, or via the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var for the CLI/daemon
 call sites that are never individually threaded through) to build FRESH
 collections using the consolidated chunks.db layout instead of sharded
-vector_*.json files. Default is OFF everywhere (byte-identical existing
-behavior) -- this is an explicit opt-in, not a fleet-wide flip (Story #1460
-owns the rollout decision).
+vector_*.json files.
+
+Default is OFF everywhere (legacy SHARDED_JSON layout) -- this is an
+explicit opt-in, not a fleet-wide flip. Bug #1486 Fix B briefly flipped
+the default to ON; Story #1488 superseded that, keeping the CLI/daemon
+default SHARDED_JSON while the server passes the layout explicitly via
+``--new-collection-layout=chunks_db``.
 """
 
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 class TestUseChunksDbForNewCollectionsConstructorFlag:
-    def test_default_is_false(self, tmp_path):
+    def test_default_is_false(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CIDX_CHUNKS_DB_NEW_COLLECTIONS", raising=False)
         store = FilesystemVectorStore(base_path=tmp_path)
         assert store._use_chunks_db_for_new_collections is False
 

@@ -18,6 +18,22 @@ from code_indexer.server.services.config_service import (
 
 @pytest.fixture
 def isolated_config_service(tmp_path):
+    # Isolation hardening: the tests below import
+    # code_indexer.server.mcp.handlers.search, which transitively imports
+    # code_indexer.server.app. app.py runs `app = create_app()` at MODULE
+    # scope, and create_app() -> initialize_services() ->
+    # ConfigService.initialize_runtime_db() performs an atomic
+    # `self._config = new_config` reference swap on the CURRENT global config
+    # singleton. If that one-time import fires AFTER we install our isolated
+    # ConfigService and apply update_setting(...), it silently WIPES our
+    # configured values back to defaults (embedding_provider_timeout_seconds
+    # resets 30, etc.), which made these tests fail deterministically in
+    # isolation and flakily by import order under the full suite. Force the
+    # import-time side effect to happen NOW -- against the pre-existing global
+    # config, before we install ours -- so the svc we set up next is never
+    # clobbered. Once app is in sys.modules, later imports are no-ops.
+    import code_indexer.server.app  # noqa: F401  -- import-time side effect only
+
     svc = ConfigService(server_dir_path=str(tmp_path))
     set_config_service(svc)
     try:

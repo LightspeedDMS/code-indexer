@@ -55,6 +55,7 @@ class TestTemporalDiffContentBug:
             vector_store = FilesystemVectorStore(
                 base_path=tmpdir_path / ".code-indexer" / "index",
                 project_root=tmpdir_path,
+                use_chunks_db_for_new_collections=False,
             )
 
             # Create collection
@@ -172,6 +173,7 @@ class TestTemporalDiffContentBug:
             vector_store = FilesystemVectorStore(
                 base_path=tmpdir_path / ".code-indexer" / "index",
                 project_root=tmpdir_path,
+                use_chunks_db_for_new_collections=False,
             )
 
             # Create collection

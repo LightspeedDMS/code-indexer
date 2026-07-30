@@ -2529,6 +2529,14 @@ class RefreshScheduler:
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
 
+        from code_indexer.server.utils.index_command_layout import (
+            append_server_layout_args,
+        )
+
+        # Story #1488: server states the new-collection layout explicitly
+        # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+        index_command = append_server_layout_args(index_command)
+
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
         enable_temporal = (
@@ -2581,7 +2589,12 @@ class RefreshScheduler:
 
         temporal_command = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB); append_server_layout_args imported above in this
+            # method for the semantic command.
+            temporal_command = append_server_layout_args(
+                ["cidx", "index", "--index-commits", "--progress-json"]
+            )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
             # Story #1404: global temporal indexing floor date, composed

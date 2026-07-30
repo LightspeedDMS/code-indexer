@@ -32,7 +32,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         result = store.create_collection(
             "test_coll", vector_size=1024, subdirectory="multimodal_index"
@@ -71,7 +73,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection(
             "test_coll", vector_size=1024, subdirectory="multimodal_index"
         )
@@ -141,7 +145,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Create same collection name in two subdirectories
         store.create_collection(
@@ -226,7 +232,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Create collection without subdirectory (existing behavior)
         result = store.create_collection("test_coll", vector_size=1024)

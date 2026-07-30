@@ -43,6 +43,40 @@ class LocalIndexNotFoundError(RuntimeError):
     """
 
 
+class ScrollDataIntegrityError(RuntimeError):
+    """Raised by ``scroll_points()``'s legacy SHARDED_JSON id-map scan when a
+    vector file that is genuinely PRESENT is unreadable as a record -- invalid
+    JSON, a missing/invalid ``id`` field, or a duplicate stored ``id`` shared
+    with another file.
+
+    Fail loud (Messi #13): a read/pagination path must NEVER silently drop or
+    collapse a record. Silently skipping a malformed file returned a short page
+    with a terminal ``None`` cursor, falsely presenting a COMPLETE traversal
+    (silent data loss); silently overwriting a duplicate id let one arbitrary
+    file win. Both are surfaced here, naming the offending file(s).
+
+    Deliberately distinct from a mid-scan ``FileNotFoundError`` (a concurrent
+    server-mode fleet migration flipping the discriminator and deleting the
+    legacy files): a VANISHED file is the Bug #1486 Finding-5 race and is
+    absorbed + re-dispatched to the chunk store, never raised as an integrity
+    error. Only a file that is PRESENT-but-malformed is an integrity fault.
+    """
+
+
+# Bug #1488 (Codex Finding B): self-describing scroll-cursor marker. Every
+# ``scroll_points()`` next-cursor we emit is ``_SCROLL_CURSOR_PREFIX + <real
+# point-id>`` (the SAME real point-id in BOTH the SHARDED_JSON and CHUNKS_DB
+# layouts), so a cursor issued under one layout resumes correctly after a
+# concurrent flip to the other. The prefix makes a cursor VALIDATABLE: a
+# received cursor bearing it is a legitimate id-cursor we minted (honored even
+# if the point was since deleted -> resume at next-greater), a legacy
+# ``vector_<token>.json`` path cursor is translated, and anything else is
+# garbage and fails LOUD (Messi #13) rather than silently restarting at
+# offset 0. The token is deliberately not a real directory/point-id shape so a
+# genuine point-id can never be mistaken for a cursor and vice-versa.
+_SCROLL_CURSOR_PREFIX = "__cidx_scroll_v1__:"
+
+
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
@@ -151,14 +185,21 @@ GIT_TIMEOUT_SECONDS = _parse_git_timeout()
 def _parse_use_chunks_db_for_new_collections_env() -> bool:
     """Story #1456: opt-in gate for fresh semantic collections to be built
     using the consolidated chunks.db layout instead of sharded
-    vector_*.json files. Defaults to False (byte-identical existing
-    behavior) everywhere unless CIDX_CHUNKS_DB_NEW_COLLECTIONS is set to a
-    truthy value -- this is the mechanism the ~20 existing
-    FilesystemVectorStore call sites (CLI, daemon, server) automatically
-    inherit WITHOUT any of them being individually modified. Story #1460
-    owns the fleet-wide rollout decision; this is only the switch it will
-    flip. Parsed fresh (not cached) so tests can monkeypatch the env var
-    per-test.
+    vector_*.json files. Defaults to False (legacy SHARDED_JSON layout)
+    everywhere unless CIDX_CHUNKS_DB_NEW_COLLECTIONS is set to a truthy
+    value ("1"/"true"/"yes", case-insensitive) -- this is the mechanism
+    the ~20 existing FilesystemVectorStore call sites (CLI, daemon,
+    server) automatically inherit WITHOUT any of them being individually
+    modified.
+
+    Bug #1486 Fix B briefly flipped this effective default to True; Story
+    #1488 SUPERSEDED that decision. The CLI/daemon path deliberately keeps
+    the SHARDED_JSON default, and the SERVER states the layout explicitly
+    instead (it passes ``--new-collection-layout=chunks_db`` to every
+    server-side ``cidx index`` child, mapped to the constructor param) --
+    so a fresh server-provisioned collection is CHUNKS_DB by intent, while
+    a lone CLI/daemon user is never silently opted in. Parsed fresh (not
+    cached) so tests can monkeypatch the env var per-test.
     """
     return os.getenv("CIDX_CHUNKS_DB_NEW_COLLECTIONS", "").strip().lower() in (
         "1",
@@ -358,14 +399,22 @@ class FilesystemVectorStore:
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3. Server mode
                 passes get_memory_governor(); CLI leaves it None so eviction behavior is
                 byte-identical to Bug #1171.
-            use_chunks_db_for_new_collections: Story #1456 opt-in gate -- when
-                True, create_collection() marks fresh collections to be built
-                using the consolidated chunks.db layout. When explicitly
-                False, always uses the legacy sharded-JSON layout regardless
-                of environment. When None (default), falls back to the
-                CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default False),
-                so all ~20 existing call sites inherit this without any of
-                them needing individual changes.
+            use_chunks_db_for_new_collections: Story #1456 opt-in gate --
+                when True, create_collection() marks fresh collections to
+                be built using the consolidated chunks.db layout. When
+                explicitly False, always uses the legacy sharded-JSON
+                layout regardless of environment. When None (default),
+                falls back to the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var
+                (which itself defaults to False when unset), so all ~20
+                existing call sites inherit the SHARDED_JSON default
+                without any of them needing individual changes.
+                Story #1488: Bug #1486 Fix B's global default-flip was
+                superseded -- the CLI/daemon path keeps SHARDED_JSON as
+                the default, while the server passes an explicit
+                ``--new-collection-layout=chunks_db`` (mapped to this
+                param as True) at every server-side ``cidx index`` spawn
+                site, so server-provisioned collections are CHUNKS_DB by
+                explicit intent rather than a silent env default.
             temporal_shard_resolver: Story #1457 AC8 -- optional
                 TemporalShardResolver instance. When set, _get_collection_path
                 resolves TEMPORAL collection names through it (dual-mode,
@@ -530,6 +579,32 @@ class FilesystemVectorStore:
 
         return bool(resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB)
 
+    def _id_cache_key(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> str:
+        """Compose the shared bare-``collection_name``-keyed cache key
+        (``self._id_index`` / ``self._vector_size_cache``) so a top-level
+        collection (``base_path/X``) and a nested collection sharing the
+        SAME name (``base_path/multimodal_index/X``) -- two DIFFERENT
+        physical directories -- never collide in these in-memory caches.
+
+        Returns ``collection_name`` UNCHANGED when ``subdirectory`` is
+        falsy (``None`` or ``""``) -- byte-identical to every existing
+        write-path/active-session caller, none of which ever pass a
+        non-None ``subdirectory`` (confirmed: no ``begin_indexing`` /
+        ``upsert_points`` / ``end_indexing`` call site in this codebase
+        does). Returns a composed ``f"{subdirectory}::{collection_name}"``
+        key when a subdirectory is given -- the ONLY reachable-today
+        producer of a non-None ``subdirectory`` at these cache sites is
+        ``MultiIndexQueryService``'s legacy multimodal read path, which
+        always resolves the SAME (embedder-agnostic) physical directory
+        for a given ``(collection_name, subdirectory)`` pair, so a
+        composed-key read can never collide with itself.
+        """
+        if not subdirectory:
+            return collection_name
+        return f"{subdirectory}::{collection_name}"
+
     def _activation_scoped_cache_key(
         self, path_str: str, *, chunk_layout_token: Optional[str] = None
     ) -> str:
@@ -669,9 +744,16 @@ class FilesystemVectorStore:
         metadata_path = collection_path / "collection_meta.json"
         self._atomic_write_json(metadata_path, metadata, fsync=True)
 
-        # Initialize ID index for this collection
+        # Initialize ID index for this collection. Keyed via _id_cache_key
+        # using the EXPLICIT subdirectory param (not _active_subdirectories,
+        # which is only populated by begin_indexing -- create_collection can
+        # run before begin_indexing, so relying on that fallback here would
+        # incorrectly resolve to the bare/top-level key even for a nested
+        # subdirectory build) so a nested create_collection() never resets
+        # the top-level collection's in-memory _id_index entry (Codex NEW
+        # Finding 1).
         with self._id_index_lock:
-            self._id_index[collection_name] = {}
+            self._id_index[self._id_cache_key(collection_name, subdirectory)] = {}
 
         # Story #1456: record CHUNKS_DB build intent for THIS session. The
         # on-disk discriminator is committed later (end_indexing), only
@@ -770,10 +852,16 @@ class FilesystemVectorStore:
             "deleted": set(),
         }
 
-        # Story #540: Load PathIndex for duplicate prevention
+        # Story #540: Load PathIndex for duplicate prevention. Keyed via
+        # _id_cache_key using the EXPLICIT subdirectory param so a nested
+        # begin_indexing() call never reuses/collides with the top-level
+        # collection's in-memory PathIndex (Codex NEW Finding 2).
         with self._path_index_lock:
-            if collection_name not in self._path_indexes:
-                self._path_indexes[collection_name] = self._load_path_index(
+            _begin_indexing_cache_key = self._id_cache_key(
+                collection_name, subdirectory
+            )
+            if _begin_indexing_cache_key not in self._path_indexes:
+                self._path_indexes[_begin_indexing_cache_key] = self._load_path_index(
                     collection_name
                 )
 
@@ -923,6 +1011,7 @@ class FilesystemVectorStore:
                     changes=changes,
                     progress_callback=progress_callback,
                     clear_stale=clear_stale,
+                    subdirectory=subdirectory,
                 )
 
                 # Clear session changes after applying
@@ -985,30 +1074,41 @@ class FilesystemVectorStore:
             from .id_index_manager import IDIndexManager
 
             id_manager = IDIndexManager()
+            # Keyed via _id_cache_key using the EXPLICIT subdirectory
+            # parameter so finalizing a nested indexing session reads/writes
+            # its OWN _id_index entry, never the top-level collection's
+            # (Codex NEW Finding 1).
+            _end_indexing_id_cache_key = self._id_cache_key(
+                collection_name, subdirectory
+            )
             with self._id_index_lock:
                 # BUG FIX: Load ID index from disk if not in memory (reconciliation path)
                 # When reconciliation finds all commits indexed and calls end_indexing(),
                 # _id_index is empty because no new vectors were upserted.
                 if (
-                    collection_name not in self._id_index
-                    or not self._id_index[collection_name]
+                    _end_indexing_id_cache_key not in self._id_index
+                    or not self._id_index[_end_indexing_id_cache_key]
                 ):
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
+                    self._id_index[_end_indexing_id_cache_key] = self._load_id_index(
+                        collection_name, subdirectory
                     )
 
-                if collection_name in self._id_index:
+                if _end_indexing_id_cache_key in self._id_index:
                     id_manager.save_index(
-                        collection_path, self._id_index[collection_name]
+                        collection_path, self._id_index[_end_indexing_id_cache_key]
                     )
 
-            vector_count = len(self._id_index.get(collection_name, {}))
+            vector_count = len(self._id_index.get(_end_indexing_id_cache_key, {}))
 
-        # Story #540: Save path index to disk
+        # Story #540: Save path index to disk. Keyed via _id_cache_key using
+        # the EXPLICIT subdirectory parameter (Codex NEW Finding 2).
+        _end_indexing_path_cache_key = self._id_cache_key(collection_name, subdirectory)
         with self._path_index_lock:
-            if collection_name in self._path_indexes:
+            if _end_indexing_path_cache_key in self._path_indexes:
                 self._save_path_index(
-                    collection_name, self._path_indexes[collection_name]
+                    collection_name,
+                    self._path_indexes[_end_indexing_path_cache_key],
+                    subdirectory=subdirectory,
                 )
 
         # Story #1456 AC1 (mandatory FINAL step): chunks.db + HNSW +
@@ -1026,7 +1126,7 @@ class FilesystemVectorStore:
 
         # Calculate and update unique file count in metadata
         unique_file_count = self._calculate_and_save_unique_file_count(
-            collection_name, collection_path
+            collection_name, collection_path, subdirectory=subdirectory
         )
 
         self.logger.info(
@@ -1094,7 +1194,7 @@ class FilesystemVectorStore:
         from .hnsw_index_manager import HNSWIndexManager
 
         collection_path = self._get_collection_path(collection_name, subdirectory)
-        vector_size = self._get_vector_size(collection_name)
+        vector_size = self._get_vector_size(collection_name, subdirectory)
 
         # Story #1456 AC1: this runs BEFORE end_indexing() commits the
         # discriminator (branch isolation fires ahead of finalization), so
@@ -1163,7 +1263,9 @@ class FilesystemVectorStore:
 
         return count
 
-    def _get_vector_size(self, collection_name: str) -> int:
+    def _get_vector_size(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> int:
         """Get vector size for collection (cached to avoid repeated file I/O).
 
         This method implements caching to eliminate the O(n²) behavior of reading
@@ -1172,6 +1274,15 @@ class FilesystemVectorStore:
 
         Args:
             collection_name: Name of the collection
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"). When provided, wins over the
+                active-indexing-session fallback below -- required for a
+                caller (e.g. ``scroll_points``) resolving a nested
+                collection OUTSIDE an active indexing session, where
+                ``_active_subdirectories`` is empty (Codex-16 Finding 4).
+                When None, falls back to the active-indexing subdirectory
+                recorded for this collection, byte-identical to every
+                existing caller that omits this argument.
 
         Returns:
             Vector size (dimensions) for the collection
@@ -1184,9 +1295,11 @@ class FilesystemVectorStore:
             indexing operations.
         """
         with self._metadata_lock:
-            if collection_name not in self._vector_size_cache:
-                # Load metadata ONCE
+            if subdirectory is None:
                 subdirectory = self._active_subdirectories.get(collection_name)
+            cache_key = self._id_cache_key(collection_name, subdirectory)
+            if cache_key not in self._vector_size_cache:
+                # Load metadata ONCE
                 collection_path = self._get_collection_path(
                     collection_name, subdirectory
                 )
@@ -1209,7 +1322,7 @@ class FilesystemVectorStore:
                         )
 
                     # Cache for future use
-                    self._vector_size_cache[collection_name] = vector_size
+                    self._vector_size_cache[cache_key] = vector_size
                     self._collection_metadata_cache[collection_name] = metadata
 
                 except json.JSONDecodeError as e:
@@ -1222,7 +1335,7 @@ class FilesystemVectorStore:
                         f"Failed to read collection metadata: {meta_file}. Error: {e}"
                     )
 
-            return self._vector_size_cache[collection_name]
+            return self._vector_size_cache[cache_key]
 
     def _load_quantization_range(self, collection_name: str) -> tuple[float, float]:
         """Load quantization range from collection metadata (cached).
@@ -1288,6 +1401,7 @@ class FilesystemVectorStore:
         points: List[Dict[str, Any]],
         collection_path: Path,
         progress_callback: Optional[Any] = None,
+        subdirectory: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Story #1456: CHUNKS_DB write path.
 
@@ -1305,8 +1419,17 @@ class FilesystemVectorStore:
         Temporal collections never reach this method -- create_collection()
         excludes them from CHUNKS_DB mode entirely (Epic #1289 is a
         separate, untouched subsystem).
+
+        Args:
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"), threaded from upsert_points' own
+                already-resolved local ``subdirectory`` variable so this
+                method's ``self._path_indexes`` access uses the SAME cache
+                key as every other write-path site for the SAME physical
+                collection. ``None`` (every existing caller) is
+                byte-identical to the pre-fix bare-key behavior.
         """
-        expected_dims = self._get_vector_size(collection_name)
+        expected_dims = self._get_vector_size(collection_name, subdirectory)
         repo_root = self._get_repo_root()
 
         file_paths = [
@@ -1331,13 +1454,17 @@ class FilesystemVectorStore:
             if file_path:
                 points_by_file[file_path].append(point)
 
+        # Keyed via _id_cache_key using the explicit subdirectory param so
+        # this CHUNKS_DB write path never collides with a bare-name
+        # top-level/nested collection pair (Codex NEW Finding 2).
+        _upsert_cdb_path_cache_key = self._id_cache_key(collection_name, subdirectory)
         orphan_ids: List[str] = []
         with self._path_index_lock:
-            if collection_name not in self._path_indexes:
-                self._path_indexes[collection_name] = self._load_path_index(
+            if _upsert_cdb_path_cache_key not in self._path_indexes:
+                self._path_indexes[_upsert_cdb_path_cache_key] = self._load_path_index(
                     collection_name
                 )
-            path_index = self._path_indexes[collection_name]
+            path_index = self._path_indexes[_upsert_cdb_path_cache_key]
 
             for file_path, file_points in points_by_file.items():
                 new_point_ids = {p["id"] for p in file_points}
@@ -1479,7 +1606,11 @@ class FilesystemVectorStore:
         # CHUNKS_DB does not.
         if self._is_chunks_db_collection(collection_name, collection_path):
             return self._upsert_points_chunks_db(
-                collection_name, points, collection_path, progress_callback
+                collection_name,
+                points,
+                collection_path,
+                progress_callback,
+                subdirectory=subdirectory,
             )
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
@@ -1494,7 +1625,7 @@ class FilesystemVectorStore:
             # chokepoint itself instead: reuse the exact copy/regenerate logic
             # from Bug #1242 (no duplicated matrix-creation logic), then retry
             # the load once. A genuine failure to heal still propagates loudly.
-            vector_size = self._get_vector_size(collection_name)
+            vector_size = self._get_vector_size(collection_name, subdirectory)
             source_collection_path: Optional[Path] = None
             if TemporalMetadataStore.is_temporal_collection(collection_name):
                 from code_indexer.services.temporal.temporal_collection_naming import (
@@ -1555,10 +1686,18 @@ class FilesystemVectorStore:
             blob_hashes = self._get_blob_hashes_batch(file_paths, repo_root)
             uncommitted_files = self._check_uncommitted_batch(file_paths, repo_root)
 
+        # Resolved ONCE for this call: the SAME cache key used for every
+        # self._id_index / self._path_indexes access below, so a nested
+        # upsert_points() call never reads/writes a bare-name top-level
+        # collection's cache entry (Codex NEW Finding 1/2).
+        _upsert_cache_key = self._id_cache_key(collection_name, subdirectory)
+
         # Ensure ID index exists for this collection (also loads file path cache)
         with self._id_index_lock:
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            if _upsert_cache_key not in self._id_index:
+                self._id_index[_upsert_cache_key] = self._load_id_index(
+                    collection_name, subdirectory
+                )
             # Ensure file path cache exists (in case ID index was manually populated)
             if collection_name not in self._file_path_cache:
                 self._file_path_cache[collection_name] = set()
@@ -1580,12 +1719,12 @@ class FilesystemVectorStore:
         with self._path_index_lock:
             # CRITICAL FIX (Story #540 Code Review): Lazy-load path index if not already loaded
             # This handles watch mode scenario where upsert_points can be called WITHOUT begin_indexing()
-            if collection_name not in self._path_indexes:
-                self._path_indexes[collection_name] = self._load_path_index(
+            if _upsert_cache_key not in self._path_indexes:
+                self._path_indexes[_upsert_cache_key] = self._load_path_index(
                     collection_name
                 )
 
-            path_index = self._path_indexes[collection_name]
+            path_index = self._path_indexes[_upsert_cache_key]
 
             # Gather orphan point_ids for each file
             for file_path, file_points in points_by_file.items():
@@ -1615,8 +1754,10 @@ class FilesystemVectorStore:
                             if path_index.has_other_owner(orphan_id):
                                 continue
 
-                            if orphan_id in self._id_index.get(collection_name, {}):
-                                vector_file = self._id_index[collection_name][orphan_id]
+                            if orphan_id in self._id_index.get(_upsert_cache_key, {}):
+                                vector_file = self._id_index[_upsert_cache_key][
+                                    orphan_id
+                                ]
                                 orphans_to_delete.append(
                                     (file_path, orphan_id, vector_file)
                                 )
@@ -1642,14 +1783,14 @@ class FilesystemVectorStore:
                     # re-written this point_id between STEP 2 (file delete) and
                     # STEP 3. Only evict if the stored path still matches the
                     # vector_file captured in STEP 1.
-                    current_path = self._id_index.get(collection_name, {}).get(
+                    current_path = self._id_index.get(_upsert_cache_key, {}).get(
                         orphan_id
                     )
                     if current_path != vector_file:
                         # Concurrent thread re-populated — do not evict
                         continue
 
-                    del self._id_index[collection_name][orphan_id]
+                    del self._id_index[_upsert_cache_key][orphan_id]
 
                     # Track deletion for HNSW incremental updates
                     if collection_name in self._indexing_session_changes:
@@ -1775,9 +1916,9 @@ class FilesystemVectorStore:
             # Update ID index and file path cache
             with self._id_index_lock:
                 # Check if point existed before (for change tracking)
-                point_existed = point_id in self._id_index.get(collection_name, {})
+                point_existed = point_id in self._id_index.get(_upsert_cache_key, {})
 
-                self._id_index[collection_name][point_id] = vector_file
+                self._id_index[_upsert_cache_key][point_id] = vector_file
 
                 # Update file path cache.
                 # Use setdefault because delete_points may have evicted the cache
@@ -1801,8 +1942,8 @@ class FilesystemVectorStore:
 
             # Story #540: Update path index with new point_id
             with self._path_index_lock:
-                if collection_name in self._path_indexes and file_path:
-                    self._path_indexes[collection_name].add_point(file_path, point_id)
+                if _upsert_cache_key in self._path_indexes and file_path:
+                    self._path_indexes[_upsert_cache_key].add_point(file_path, point_id)
 
         # Bug #1206 Fix 1: flush the accumulated temporal metadata batch in ONE
         # transaction after all vector files have been written.  This is the
@@ -1878,11 +2019,20 @@ class FilesystemVectorStore:
             finally:
                 chunk_store.close()
 
-        # Fallback path: Load ID index (original behavior)
+        # Fallback path: Load ID index (original behavior). Resolved via
+        # _active_subdirectories (this method has no subdirectory param) so
+        # a nested collection read during an active indexing session hits
+        # its OWN cache entry, never a bare-name top-level collision.
+        _count_points_subdirectory = self._active_subdirectories.get(collection_name)
+        _count_points_cache_key = self._id_cache_key(
+            collection_name, _count_points_subdirectory
+        )
         with self._id_index_lock:
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
-            return len(self._id_index[collection_name])
+            if _count_points_cache_key not in self._id_index:
+                self._id_index[_count_points_cache_key] = self._load_id_index(
+                    collection_name, _count_points_subdirectory
+                )
+            return len(self._id_index[_count_points_cache_key])
 
     def delete_points(
         self, collection_name: str, point_ids: List[str]
@@ -1931,11 +2081,22 @@ class FilesystemVectorStore:
         # _path_index_lock inside _id_index_lock (ABBA deadlock risk — B1).
         path_index_removals = []
 
-        with self._id_index_lock:
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's delete targets its
+        # OWN _id_index/_path_indexes cache entry, never a bare-name
+        # top-level collision.
+        _delete_points_subdirectory = self._active_subdirectories.get(collection_name)
+        _delete_points_cache_key = self._id_cache_key(
+            collection_name, _delete_points_subdirectory
+        )
 
-            index = self._id_index[collection_name]
+        with self._id_index_lock:
+            if _delete_points_cache_key not in self._id_index:
+                self._id_index[_delete_points_cache_key] = self._load_id_index(
+                    collection_name, _delete_points_subdirectory
+                )
+
+            index = self._id_index[_delete_points_cache_key]
 
             for point_id in point_ids:
                 if point_id in index:
@@ -1982,8 +2143,8 @@ class FilesystemVectorStore:
         # This eliminates the nested lock acquisition that caused the ABBA deadlock.
         if path_index_removals:
             with self._path_index_lock:
-                if collection_name in self._path_indexes:
-                    path_idx = self._path_indexes[collection_name]
+                if _delete_points_cache_key in self._path_indexes:
+                    path_idx = self._path_indexes[_delete_points_cache_key]
                     for file_path, point_id in path_index_removals:
                         path_idx.remove_point(file_path, point_id)
 
@@ -2211,7 +2372,9 @@ class FilesystemVectorStore:
         id_index = self._load_id_index(collection_name)
         return set(id_index.keys())
 
-    def _load_id_index(self, collection_name: str) -> Dict[str, Path]:
+    def _load_id_index(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Dict[str, Path]:
         """Load ID index from persistent binary file for fast loading.
 
         Uses IDIndexManager to load from id_index.bin binary file.  If the
@@ -2224,13 +2387,22 @@ class FilesystemVectorStore:
 
         Args:
             collection_name: Name of the collection
+            subdirectory: Optional subdirectory (e.g. "multimodal_index") for
+                a nested collection. ``None`` (every existing write-path
+                caller) resolves via ``self.base_path / collection_name``,
+                byte-identical to the pre-fix behavior. When provided,
+                resolves via ``self._get_collection_path(collection_name,
+                subdirectory)`` instead, so a nested collection's
+                ``id_index.bin`` (and its ``vector_*.json`` rglob fallback)
+                is read from its REAL location instead of a non-existent
+                top-level directory.
 
         Returns:
             Dictionary mapping point IDs to file paths
         """
         from .id_index_manager import CorruptIDIndexError, IDIndexManager
 
-        collection_path = self.base_path / collection_name
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         index_manager = IDIndexManager()
 
         try:
@@ -2312,7 +2484,12 @@ class FilesystemVectorStore:
         # Load from disk or return empty if file doesn't exist
         return PathIndex.load(path_index_file)
 
-    def _save_path_index(self, collection_name: str, path_index: PathIndex) -> None:
+    def _save_path_index(
+        self,
+        collection_name: str,
+        path_index: PathIndex,
+        subdirectory: Optional[str] = None,
+    ) -> None:
         """Save path index to persistent binary file.
 
         Saves the reverse index mapping file_path -> Set[point_id] to
@@ -2321,11 +2498,22 @@ class FilesystemVectorStore:
         Args:
             collection_name: Name of the collection
             path_index: PathIndex instance to save
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"). When provided, wins over the
+                active-indexing-session fallback below -- required so
+                ``_rebuild_path_index_from_disk`` (Codex-16 Finding 3) can
+                persist a rebuilt index at the correct nested location when
+                called OUTSIDE an active indexing session, where
+                ``_active_subdirectories`` is empty. When None, falls back
+                to the active-indexing subdirectory recorded for this
+                collection, byte-identical to every existing caller that
+                omits this argument.
 
         Note:
             Story #540: Persists path index for duplicate prevention across sessions.
         """
-        subdirectory = self._active_subdirectories.get(collection_name)
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
         collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index_file = collection_path / "path_index.bin"
 
@@ -2347,7 +2535,8 @@ class FilesystemVectorStore:
         # scroll_points fast path does not fall back to rglob in _load_id_index.
         # Shallow copy is taken under lock to avoid concurrent mutation during I/O.
         with self._id_index_lock:
-            raw = self._id_index.get(collection_name)
+            cache_key = self._id_cache_key(collection_name, subdirectory)
+            raw = self._id_index.get(cache_key)
             id_index_copy: Optional[Dict[str, Path]] = (
                 dict(raw) if raw is not None else None
             )
@@ -2570,80 +2759,192 @@ class FilesystemVectorStore:
             # If git command fails, assume all files have changes (safe fallback)
             return set(file_paths)
 
+    def _get_point_from_chunk_store(
+        self, collection_path: Path, point_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read a single point from a CHUNKS_DB collection's chunk store.
+
+        Story #1456 AC7: point-id resolution for CHUNKS_DB collections goes
+        exclusively through the chunk store -- id_index.bin is never read.
+        Opened on the calling/main thread (sqlite3 connections are not shared
+        across threads). Shared by ``get_point()``'s primary CHUNKS_DB branch
+        and its Bug #1486 re-resolve fallback so the read logic exists once.
+        """
+        from code_indexer.storage.sqlite_chunk_store import (
+            open_chunk_store_for_path,
+        )
+
+        chunk_store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        try:
+            record = chunk_store.read(point_id)
+        finally:
+            chunk_store.close()
+
+        if record is None:
+            return None
+
+        result = {
+            "id": record["id"],
+            "vector": record["vector"],
+            "payload": record.get("payload", {}),
+        }
+        if "chunk_text" in record:
+            result["chunk_text"] = record["chunk_text"]
+        return result
+
     def get_point(
-        self, point_id: str, collection_name: str
+        self,
+        point_id: str,
+        collection_name: str,
+        subdirectory: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Get a specific point by ID.
 
         Args:
             point_id: Point ID to retrieve
             collection_name: Name of the collection
+            subdirectory: Optional subdirectory path within base_path (e.g.
+                "multimodal_index"). Threaded from the scroll fast path so a
+                nested collection hydrates from its real location; None
+                (every existing caller) is byte-identical to the pre-fix
+                top-level resolution.
 
         Returns:
             Point data with id, vector, and payload, or None if not found
+
+        Raises:
+            ScrollDataIntegrityError: If the point's on-disk record is PRESENT
+                but malformed (invalid JSON, a non-dict JSON root, or a record
+                missing its required ``id``/``vector`` field). A vanished file
+                (FileNotFoundError between the existence check and the open) is
+                NOT an error -- it is the concurrent-flip signal and returns
+                None / re-resolves to the chunk store.
         """
         # Story #1456 AC7: CHUNKS_DB collections resolve via the chunk store
         # directly -- id_index.bin is never read or written for this method.
         # Uses the combined _is_chunks_db_collection authority (not the bare
         # resolver) so this is correct even mid-build, before end_indexing()
         # commits the discriminator.
-        collection_path = self._get_collection_path(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
         if self._is_chunks_db_collection(collection_name, collection_path):
-            from code_indexer.storage.sqlite_chunk_store import (
-                open_chunk_store_for_path,
-            )
+            return self._get_point_from_chunk_store(collection_path, point_id)
 
-            chunk_store = open_chunk_store_for_path(
-                collection_path / "chunks.db", str(collection_path)
-            )
-            try:
-                record = chunk_store.read(point_id)
-            finally:
-                chunk_store.close()
-
-            if record is None:
-                return None
-
-            result = {
-                "id": record["id"],
-                "vector": record["vector"],
-                "payload": record.get("payload", {}),
-            }
-            if "chunk_text" in record:
-                result["chunk_text"] = record["chunk_text"]
-            return result
-
+        # Legacy SHARDED_JSON path. Compute the result under the id-index lock.
+        # A vanished file (FileNotFoundError) leaves both outputs None and falls
+        # through to the re-resolve below. A PRESENT-but-malformed record is
+        # captured in ``malformed`` and raised/redispatched AFTER releasing the
+        # lock (Codex-15 LOW, Messi #13) -- never a raw AttributeError from an
+        # unguarded ``data.get()`` on a non-dict root, and never a silent None
+        # that masks corruption as a plain miss.
+        legacy_result: Optional[Dict[str, Any]] = None
+        # (kind, exception_or_None) describing a present-but-malformed record.
+        malformed: Optional[Tuple[str, Optional[Exception]]] = None
         with self._id_index_lock:
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            cache_key = self._id_cache_key(collection_name, subdirectory)
+            if cache_key not in self._id_index:
+                self._id_index[cache_key] = self._load_id_index(
+                    collection_name, subdirectory
+                )
 
-            index = self._id_index[collection_name]
+            index = self._id_index[cache_key]
 
-            if point_id not in index:
-                return None
+            vector_file = index.get(point_id)
+            if vector_file is not None and vector_file.exists():
+                try:
+                    with open(vector_file) as f:
+                        data = json.load(f)
+                except FileNotFoundError:
+                    # Bug #1486 Finding 5 (TOCTOU): the legacy vector_*.json
+                    # vanished between the exists() check and this open() -- a
+                    # concurrent server-mode migration deleted it AFTER flipping
+                    # the discriminator. Treat it as a plain legacy miss: leave
+                    # everything None and fall through to the re-resolve below,
+                    # which hydrates the row from chunks.db.
+                    legacy_result = None
+                except json.JSONDecodeError as json_exc:
+                    # A PRESENT but corrupt file. Deferred: a concurrent flip
+                    # (discriminator now CHUNKS_DB) makes this a doomed migration
+                    # remnant -> redispatch; otherwise genuine corruption ->
+                    # fail loud (decided AFTER the lock, see below). Bind to a
+                    # non-except-scoped name so the reference survives past this
+                    # block (the except-bound name is deleted on exit).
+                    malformed = ("json", json_exc)
+                else:
+                    if not isinstance(data, dict):
+                        malformed = ("nondict", None)
+                    elif "id" not in data:
+                        malformed = ("noid", None)
+                    elif "vector" not in data:
+                        malformed = ("novec", None)
+                    else:
+                        legacy_result = {
+                            "id": data["id"],
+                            "vector": data["vector"],
+                            "payload": data.get("payload", {}),
+                        }
+                        if "chunk_text" in data:
+                            legacy_result["chunk_text"] = data["chunk_text"]
 
-            vector_file = index[point_id]
+        if legacy_result is not None:
+            return legacy_result
 
-            if not vector_file.exists():
-                return None
+        # Bug #1486 (Codex Finding 4): re-resolve the committed discriminator on
+        # the calling thread. A concurrent server-mode fleet migration may have
+        # flipped it to CHUNKS_DB and deleted the legacy vector_*.json /
+        # id_index.bin files. The flip is the atomic swap point (committed
+        # durably BEFORE legacy deletion). A permanently-SHARDED_JSON collection
+        # re-resolves to SHARDED_JSON (one cheap top-level JSON key read).
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
 
-            try:
-                with open(vector_file) as f:
-                    data = json.load(f)
+        flipped = resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
 
-                # Payload should always exist in new format, but provide empty fallback
-                payload = data.get("payload", {})
-                result = {
-                    "id": data["id"],
-                    "vector": data["vector"],
-                    "payload": payload,
-                }
-                # Include chunk_text if present
-                if "chunk_text" in data:
-                    result["chunk_text"] = data["chunk_text"]
-                return result
-            except (json.JSONDecodeError, KeyError):
-                return None
+        # Codex-15 LOW (JSONDecodeError redispatch decision): a discriminator
+        # flip to CHUNKS_DB is authoritative -- the discriminator flips ONLY via
+        # a migration, and the flip is committed BEFORE the legacy files are
+        # deleted. So a malformed/half-deleted legacy record observed alongside a
+        # flip is a doomed migration remnant, not genuine corruption: redispatch
+        # to the chunk store (uniformly, for every malformation kind). ABSENT a
+        # flip, a present-but-malformed record is genuine corruption on a
+        # still-SHARDED_JSON collection and fails LOUD naming the file, rather
+        # than being silently swallowed as a plain miss (which returned None and
+        # dropped the row from the caller's view).
+        if malformed is not None:
+            if flipped:
+                return self._get_point_from_chunk_store(collection_path, point_id)
+            kind, malformed_exc = malformed
+            if kind == "json":
+                raise ScrollDataIntegrityError(
+                    f"legacy vector file {str(vector_file)!r} is not valid JSON "
+                    f"({malformed_exc}); refusing to treat a corrupt present "
+                    f"record as a missing point"
+                ) from malformed_exc
+            if kind == "nondict":
+                raise ScrollDataIntegrityError(
+                    f"legacy vector file {str(vector_file)!r} has a non-dict "
+                    f"JSON root; refusing to treat a malformed present record "
+                    f"as a missing point"
+                )
+            if kind == "noid":
+                raise ScrollDataIntegrityError(
+                    f"legacy vector file {str(vector_file)!r} has no 'id' field; "
+                    f"refusing to treat a malformed present record as a missing "
+                    f"point"
+                )
+            # kind == "novec"
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(vector_file)!r} is missing the "
+                f"required 'vector' field; refusing to treat a malformed "
+                f"present record as a missing point"
+            )
+
+        if flipped:
+            return self._get_point_from_chunk_store(collection_path, point_id)
+        return None
 
     def get_existing_content_hashes(
         self, file_path: str, collection_name: str
@@ -2663,19 +2964,30 @@ class FilesystemVectorStore:
         """
         result: Dict[int, Dict[str, Any]] = {}
 
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's lookup uses its OWN
+        # _path_indexes cache entry and hydrates via the matching get_point
+        # cache key, never a bare-name top-level collision.
+        _content_hashes_subdirectory = self._active_subdirectories.get(collection_name)
+        _content_hashes_cache_key = self._id_cache_key(
+            collection_name, _content_hashes_subdirectory
+        )
+
         with self._path_index_lock:
-            if collection_name not in self._path_indexes:
-                self._path_indexes[collection_name] = self._load_path_index(
+            if _content_hashes_cache_key not in self._path_indexes:
+                self._path_indexes[_content_hashes_cache_key] = self._load_path_index(
                     collection_name
                 )
-            path_index = self._path_indexes[collection_name]
+            path_index = self._path_indexes[_content_hashes_cache_key]
 
         point_ids = path_index.get_point_ids(file_path)
         if not point_ids:
             return result
 
         for point_id in point_ids:
-            point_data = self.get_point(point_id, collection_name)
+            point_data = self.get_point(
+                point_id, collection_name, subdirectory=_content_hashes_subdirectory
+            )
             if point_data is None:
                 continue
             payload = point_data.get("payload", {})
@@ -2920,34 +3232,9 @@ class FilesystemVectorStore:
                 return str(clause["match"]["value"])
         return None
 
-    def _build_non_path_filter(
-        self, filter_conditions: Optional[Dict[str, Any]]
-    ) -> Optional[Any]:
-        """Build a payload filter function for all non-path must clauses.
-
-        When a path fast path is taken, the path clause itself is satisfied by
-        the PathIndex lookup.  Any remaining must clauses (e.g. type==content)
-        are compiled into a filter function here so they can be applied to
-        each loaded point.
-
-        Args:
-            filter_conditions: Original filter_conditions dict
-
-        Returns:
-            Callable(payload) -> bool, or None if no remaining clauses
-        """
-        if not filter_conditions:
-            return None
-        must_clauses = filter_conditions.get("must")
-        if not isinstance(must_clauses, list):
-            return None
-        remaining = [c for c in must_clauses if c.get("key") != "path"]
-        if not remaining:
-            return None
-        # Re-package as a must filter and compile via existing _parse_filter
-        return self._parse_filter({"must": remaining})
-
-    def _rebuild_path_index_from_disk(self, collection_name: str) -> PathIndex:
+    def _rebuild_path_index_from_disk(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> PathIndex:
         """Walk the collection directory and rebuild a PathIndex from on-disk JSON files.
 
         Called lazily when scroll_points detects that no path_index.bin exists for
@@ -2956,11 +3243,21 @@ class FilesystemVectorStore:
 
         Args:
             collection_name: Name of the collection to rebuild for
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"). When provided, wins over the
+                active-indexing-session fallback below -- required for
+                ``scroll_points`` to rebuild a nested collection's path
+                index correctly OUTSIDE an active indexing session, where
+                ``_active_subdirectories`` is empty (Codex-16 Finding 3).
+                When None, falls back to the active-indexing subdirectory
+                recorded for this collection, byte-identical to every
+                existing caller that omits this argument.
 
         Returns:
             Freshly built PathIndex populated from all existing vector JSON files
         """
-        subdirectory = self._active_subdirectories.get(collection_name)
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
         collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index = PathIndex()
 
@@ -2983,7 +3280,9 @@ class FilesystemVectorStore:
             finally:
                 chunk_store.close()
 
-            self._save_path_index(collection_name, path_index)
+            self._save_path_index(
+                collection_name, path_index, subdirectory=subdirectory
+            )
             return path_index
 
         for vector_file in collection_path.rglob("*.json"):
@@ -3004,8 +3303,332 @@ class FilesystemVectorStore:
                 )
                 continue
         # Persist so next call hits the fast path
-        self._save_path_index(collection_name, path_index)
+        self._save_path_index(collection_name, path_index, subdirectory=subdirectory)
         return path_index
+
+    @staticmethod
+    def _encode_scroll_cursor(point_id: str) -> str:
+        """Bug #1488: mint the next-page cursor from a REAL point-id.
+
+        Both scroll layouts iterate the SAME ``sorted(real point-id)`` order and
+        emit this self-describing cursor, so a cursor issued under one layout
+        resumes correctly after a concurrent flip to the other.
+        """
+        return _SCROLL_CURSOR_PREFIX + point_id
+
+    @staticmethod
+    def _resolve_legacy_scroll_token(token: str, ordered_ids: List[str]) -> str:
+        """Bug #1488 (Codex Finding B): resolve a pre-#1488 ``vector_<token>.json``
+        path-format cursor's ``<token>`` to the REAL stored point-id it names.
+
+        The sharded filename token is NOT always the point-id: temporal
+        collections name files ``vector_<sha256(point_id)[:16]>.json`` while
+        non-temporal collections name them ``vector_<point_id-with-slashes-as-_>``.
+        Resolution matches the token against the actual stored ids by BOTH
+        schemes (so it is correct regardless of collection type, without needing
+        to know which). Fails LOUD (Messi #13) on zero matches or ambiguity --
+        never silently restarts pagination at offset 0.
+        """
+        from code_indexer.storage.temporal_metadata_store import (
+            generate_hash_prefix,
+        )
+
+        matches = {
+            pid
+            for pid in ordered_ids
+            if token == pid.replace("/", "_") or token == generate_hash_prefix(pid)
+        }
+        if len(matches) == 0:
+            raise ValueError(
+                f"legacy scroll cursor token {token!r} matches no stored "
+                f"point-id; refusing to silently restart pagination at offset 0"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"legacy scroll cursor token {token!r} is ambiguous: matches "
+                f"{sorted(matches)!r}; refusing to guess a resume position"
+            )
+        return next(iter(matches))
+
+    @staticmethod
+    def _resolve_scroll_cursor(
+        offset: Optional[str], ordered_ids: List[str]
+    ) -> Optional[str]:
+        """Bug #1488 (Codex Finding B): resolve a pagination cursor to the stable,
+        LAYOUT-INDEPENDENT real point-id to resume strictly AFTER (via
+        ``bisect_right``), so a cursor issued under one chunk layout is honored
+        after a concurrent flip to the other -- and a garbage cursor is refused
+        loudly rather than silently mis-bisecting to page 1.
+
+        - ``None`` -> ``None`` (a legitimate "start from the beginning").
+        - A self-describing ``_SCROLL_CURSOR_PREFIX`` cursor -> its embedded real
+          point-id, returned verbatim. Honored even if that point was deleted
+          between pages: ``bisect_right`` then lands on the first greater id
+          (correct continuation, no dup, no gap). This is the ONLY path that
+          tolerates an absent id, and it is safe precisely because the prefix
+          proves we minted it -- a "deleted-but-valid id" resumes, distinct from
+          a garbage cursor.
+        - A legacy ``vector_<token>.json`` path-format cursor -> resolved to the
+          stored point-id it names (see ``_resolve_legacy_scroll_token``); a
+          token matching no current id fails LOUD (a hex token carries no
+          ordering information, so a since-deleted legacy cursor cannot be safely
+          continued).
+        - Anything else -> ``ValueError`` (fail loud, Messi #13). NEVER silently
+          returns ``None`` / restarts at offset 0 for an unrecognized cursor.
+        """
+        if offset is None:
+            return None
+        if offset.startswith(_SCROLL_CURSOR_PREFIX):
+            embedded = offset[len(_SCROLL_CURSOR_PREFIX) :]
+            if not embedded:
+                # Codex MEDIUM (Messi #13): a prefix-ONLY cursor strips to an
+                # empty embedded point-id. bisect_right(ordered_ids, "") returns
+                # 0 -> a silent restart at page 1 (duplicating already-consumed
+                # results). Fail loud instead of ever bisecting on "".
+                raise ValueError(
+                    f"scroll cursor {offset!r} has an empty embedded point-id "
+                    f"after the {_SCROLL_CURSOR_PREFIX!r} prefix; refusing to "
+                    f"silently restart pagination at offset 0"
+                )
+            return embedded
+        name = Path(offset).name
+        if name.startswith("vector_") and name.endswith(".json"):
+            token = name[len("vector_") : -len(".json")]
+            return FilesystemVectorStore._resolve_legacy_scroll_token(
+                token, ordered_ids
+            )
+        raise ValueError(
+            f"unrecognized scroll cursor {offset!r}: not a self-describing "
+            f"{_SCROLL_CURSOR_PREFIX!r} cursor and not a legacy "
+            f"vector_<token>.json path cursor; refusing to silently restart "
+            f"pagination at offset 0"
+        )
+
+    @staticmethod
+    def _validate_scroll_vector(
+        vector: Any, expected_dim: int, vector_file: str
+    ) -> None:
+        """Bug #1488 (Codex ITEM 1 tail, Messi #13): fail LOUD when a legacy
+        SHARDED_JSON record's ``vector`` field is PRESENT but MALFORMED during
+        ``scroll_points(with_vectors=True)`` hydration -- never return a silently
+        wrong value (a ``None``, a string, an object, a NaN/Inf, a wrong-
+        dimension vector). The prior round only rejected a MISSING ``vector``;
+        a present-but-garbage vector was still returned verbatim.
+
+        Mirrors ``ChunkStore._encode_vector``'s validation exactly (non-empty
+        list -> numeric dtype -> finite -> expected dimension) so BOTH storage
+        layouts reject the same malformed shapes identically, rather than
+        introducing a divergent ad-hoc validator. Pure/in-memory (numpy only, no
+        file I/O), so it never masks the Bug #1486 mid-hydration
+        ``FileNotFoundError`` re-dispatch. Only ever called when
+        ``with_vectors=True`` -- the vector is otherwise never returned, so never
+        validated, and the ``with_vectors=False`` path is byte-identical to
+        before (no new cost, no new raises).
+        """
+        if not isinstance(vector, list):
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has a malformed 'vector' "
+                f"field during scroll hydration: expected a non-empty list, got "
+                f"{type(vector).__name__}; refusing to return a silently wrong "
+                f"value"
+            )
+        if not vector:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has an empty 'vector' field "
+                f"during scroll hydration; refusing to return a silently wrong "
+                f"value"
+            )
+        try:
+            arr = np.asarray(vector)
+        except (ValueError, TypeError) as exc:
+            # A ragged nested list (e.g. [[0.1, 0.2], [0.3]] or [0.1, [0.2]])
+            # makes np.asarray itself raise -- translate into the contextual
+            # integrity error instead of leaking a raw ValueError/TypeError.
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has a malformed (ragged) "
+                f"'vector' field during scroll hydration ({exc}); refusing to "
+                f"return a silently wrong value"
+            ) from exc
+        if arr.ndim != 1:
+            # A 2-D nested vector (e.g. [[0.1, 0.2]] * expected_dim -> shape
+            # (expected_dim, 2)) is numeric, finite, and passes a shape[0]-only
+            # check -- reject it here before any dimension comparison.
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has a non-1-dimensional "
+                f"'vector' field during scroll hydration (ndim={arr.ndim}, "
+                f"shape={arr.shape}); refusing to return a silently wrong value"
+            )
+        if arr.dtype.kind not in ("i", "u", "f"):
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has a non-numeric 'vector' "
+                f"field during scroll hydration (dtype={arr.dtype}); refusing to "
+                f"return a silently wrong value"
+            )
+        if not np.isfinite(arr).all():
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has a non-finite 'vector' "
+                f"field during scroll hydration (NaN or inf); refusing to return "
+                f"a silently wrong value"
+            )
+        if arr.shape[0] != expected_dim:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {vector_file!r} has 'vector' dimension "
+                f"{arr.shape[0]} during scroll hydration, expected "
+                f"{expected_dim}; refusing to return a silently wrong value"
+            )
+
+    def _scroll_points_chunks_db(
+        self,
+        collection_name: str,
+        collection_path: Path,
+        limit: int,
+        with_payload: bool,
+        with_vectors: bool,
+        offset: Optional[str],
+        filter_conditions: Optional[Dict[str, Any]],
+        subdirectory: Optional[str] = None,
+    ) -> tuple:
+        """Story #1456 AC3: paginate a CHUNKS_DB collection over chunks.db,
+        using sorted point_ids as the opaque offset cursor (never rglob).
+
+        Extracted from ``scroll_points()`` so both its primary
+        ``_is_chunks_db_collection`` gate and its Bug #1486 re-resolve gate
+        share one implementation. Opened on the calling/main thread (sqlite3
+        connections are not shared across threads).
+
+        Bug #1488 (Codex Medium, Messi #13): this CHUNKS_DB branch is now
+        EXHAUSTIVELY fail-loud, at parity with the SHARDED_JSON hydration path.
+        (1) An id returned by ``all_point_ids()`` whose row cannot be hydrated
+        (``read`` -> ``None``) is a chunks.db primary-key/row INCONSISTENCY
+        (corruption) -- ``all_point_ids()`` and ``read()`` share ONE main-thread
+        connection with no delete between them, so this is never a normal
+        concurrent-delete state (and CHUNKS_DB is terminal -- there is no flip
+        AWAY from it, so no legitimate migration-vanish story exists here) -- it
+        RAISES rather than silently omitting the id (which would drop a row AND
+        can emit a terminal ``None`` cursor falsely presenting a complete
+        traversal). (2) Under ``with_vectors=True`` a structurally-valid row whose
+        stored vector decodes to a wrong-dimension, 1-element, empty, or
+        non-finite array is validated through the SAME ``_validate_scroll_vector``
+        the SHARDED_JSON path uses (never a divergent validator) and RAISES naming
+        the point-id + ``vector``. The ``with_vectors=False`` path is
+        byte-identical to before -- no ``expected_dim`` lookup, no vector access,
+        no new raises.
+        """
+        from code_indexer.storage.sqlite_chunk_store import (
+            open_chunk_store_for_path,
+        )
+
+        filter_func_cdb = None
+        if filter_conditions:
+            filter_func_cdb = self._parse_filter(filter_conditions)
+
+        # Bug #1488: the expected vector dimension, read ONLY when vectors are
+        # actually returned so the ``with_vectors=False`` path stays
+        # byte-identical (no new I/O). ``_get_vector_size`` is cached and is the
+        # SAME dimension the write path validated the stored vector against.
+        expected_dim_cdb: Optional[int] = (
+            self._get_vector_size(collection_name, subdirectory)
+            if with_vectors
+            else None
+        )
+
+        chunk_store = open_chunk_store_for_path(
+            collection_path / "chunks.db", str(collection_path)
+        )
+        try:
+            all_ids = sorted(chunk_store.all_point_ids())
+
+            # Bug #1488 (Codex Finding B): resume strictly AFTER a stable,
+            # layout-independent REAL point-id cursor via bisect (never the old
+            # "offset in all_ids else restart-at-0" which silently re-emitted
+            # page 1 for a path/token cursor issued under SHARDED_JSON). The
+            # resolver honors a self-describing cursor verbatim (a since-deleted
+            # id then resolves to the first greater id -- correct continuation,
+            # no dup, no gap), translates a legacy path cursor, and fails LOUD on
+            # garbage rather than mis-bisecting to page 1.
+            import bisect
+
+            cursor = self._resolve_scroll_cursor(offset, all_ids)
+            start_idx_cdb = (
+                0 if cursor is None else bisect.bisect_right(all_ids, cursor)
+            )
+
+            # Codex-15 MEDIUM (regression): iterate ids in sorted order until
+            # either ``limit`` MATCHING rows are collected OR ids are exhausted
+            # -- NEVER slice ``all_ids[start:start+limit]`` before filtering,
+            # which returned an EMPTY page with a NON-null cursor when a page's
+            # sliced ids all failed the filter while later ids still matched;
+            # callers treat an empty page as TERMINAL, permanently DROPPING those
+            # matches. The cursor is based on the LAST EXAMINED id, so a
+            # genuinely-empty page always carries a terminal None cursor.
+            cdb_points: List[Dict[str, Any]] = []
+            last_examined_idx_cdb = -1
+            _scan_idx_cdb = start_idx_cdb
+            while _scan_idx_cdb < len(all_ids) and len(cdb_points) < limit:
+                point_id = all_ids[_scan_idx_cdb]
+                last_examined_idx_cdb = _scan_idx_cdb
+                _scan_idx_cdb += 1
+                record = chunk_store.read(point_id)
+                if record is None:
+                    # Bug #1488 (Codex ITEM 2, Messi #13): the id was just
+                    # enumerated by ``all_point_ids()`` on this SAME connection,
+                    # so a ``None`` hydration is a chunks.db primary-key/row
+                    # inconsistency (corruption), never a normal state -- fail
+                    # LOUD naming the id rather than silently omitting it (which
+                    # drops a row AND can emit a terminal ``None`` cursor falsely
+                    # presenting a complete traversal).
+                    raise ScrollDataIntegrityError(
+                        f"chunks.db enumerated point-id {point_id!r} has no "
+                        f"hydratable row (read returned None) in collection "
+                        f"{str(collection_path)!r}; refusing to silently drop an "
+                        f"enumerated primary key from a paginated scroll"
+                    )
+
+                point = {"id": record["id"]}
+                if with_payload:
+                    point["payload"] = record.get("payload", {})
+                if with_vectors:
+                    vector_value = record.get("vector", [])
+                    if hasattr(vector_value, "tolist"):
+                        vector_value = vector_value.tolist()
+                    # Bug #1488 (Codex ITEM 1 parity): validate the decoded vector
+                    # with the SAME gate the SHARDED_JSON path uses so both
+                    # layouts reject an identical malformed shape
+                    # (wrong-dimension, 1-element, empty, non-numeric, NaN/Inf)
+                    # -- never return a silently wrong value. Only reached when
+                    # ``with_vectors=True``, so ``expected_dim_cdb`` is set.
+                    assert expected_dim_cdb is not None
+                    self._validate_scroll_vector(
+                        vector_value,
+                        expected_dim_cdb,
+                        f"{point_id} (chunks.db)",
+                    )
+                    point["vector"] = vector_value
+
+                # Bug #1488 (Codex Medium, Messi #13): evaluate the filter
+                # against the REAL hydrated payload (``record``), never
+                # ``point``'s payload which is OMITTED ({}) when
+                # with_payload=False -- with_payload controls only what is
+                # RETURNED, never what the filter sees. A record whose real
+                # payload matches must not be dropped just because the caller
+                # asked not to return the payload.
+                if filter_func_cdb is not None:
+                    if not filter_func_cdb(record.get("payload", {})):
+                        continue
+
+                cdb_points.append(point)
+
+            # Codex-15 MEDIUM: cursor on the LAST EXAMINED id; only emitted when
+            # a full page of matches was collected AND unexamined ids remain.
+            next_offset_cdb = None
+            if len(cdb_points) == limit and last_examined_idx_cdb + 1 < len(all_ids):
+                next_offset_cdb = self._encode_scroll_cursor(
+                    all_ids[last_examined_idx_cdb]
+                )
+
+            return cdb_points, next_offset_cdb
+        finally:
+            chunk_store.close()
 
     def scroll_points(
         self,
@@ -3015,6 +3638,7 @@ class FilesystemVectorStore:
         with_vectors: bool = False,
         offset: Optional[str] = None,
         filter_conditions: Optional[Dict[str, Any]] = None,
+        subdirectory: Optional[str] = None,
     ) -> tuple:
         """Scroll through points in collection with pagination.
 
@@ -3023,10 +3647,24 @@ class FilesystemVectorStore:
             limit: Maximum number of points to return
             with_payload: Include payload in results
             with_vectors: Include vectors in results
-            offset: Pagination offset (file path from previous page, used by
-                    the rglob fallback path only; the path-index fast path
-                    always returns all matching points without pagination since
-                    per-file point counts are small, typically 1-10)
+            subdirectory: Optional subdirectory path within base_path (e.g.
+                    "multimodal_index"). When None, falls back to the
+                    active-indexing subdirectory recorded for this collection
+                    (``_active_subdirectories``) so an in-flight indexing
+                    session resolves the same nested path. Threaded through the
+                    existence check, PathIndex lookup, metadata read, and BOTH
+                    layout branches so a nested ``<subdirectory>/<collection>``
+                    collection is scrollable (Codex-15 MEDIUM).
+            offset: Pagination cursor from a previous page's next_offset. Bug
+                    #1488: this is a stable, layout-INDEPENDENT point-id (both
+                    the SHARDED_JSON and CHUNKS_DB branches iterate the same
+                    sorted point-id order), so a cursor issued under one layout
+                    resumes correctly after a concurrent flip to the other. A
+                    legacy path-format cursor is translated, never silently
+                    reset to offset 0. Used by the rglob/chunks.db fallback path
+                    only; the path-index fast path always returns all matching
+                    points without pagination since per-file point counts are
+                    small, typically 1-10.
             filter_conditions: Optional filter conditions
 
         Returns:
@@ -3039,37 +3677,65 @@ class FilesystemVectorStore:
             of walking the entire collection tree via rglob.  Other filter
             shapes fall through to the original rglob path (safety valve).
         """
-        if not self.collection_exists(collection_name):
+        # Bug #1488 (Codex Low, Messi #13): a non-positive limit has no valid
+        # continuation math (an empty page would index page_ids[-1]) and no
+        # existing caller/test relies on limit<=0 -- reject it loudly rather
+        # than silently returning a malformed/empty page.
+        if limit <= 0:
+            raise ValueError(
+                f"scroll_points limit must be a positive integer, got {limit!r}"
+            )
+
+        # Codex-15 MEDIUM: resolve the subdirectory ONCE. An explicit caller arg
+        # wins (mirrors search()'s explicit ``subdirectory`` param, the only
+        # convention that survives ``end_indexing`` clearing the active-session
+        # map); otherwise fall back to the active-indexing subdirectory so an
+        # in-flight session resolves the same nested path. Threaded through the
+        # existence check, PathIndex lookup, metadata read, and BOTH layout
+        # branches so a nested ``<subdirectory>/<collection>`` collection (e.g.
+        # ``multimodal_index/<coll>``) is scrollable instead of returning
+        # ``([], None)`` from a top-level-only existence check.
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
+
+        if not self.collection_exists(collection_name, subdirectory):
             return [], None
 
         # --- Fast path: path equality filter via PathIndex ---
         target_path = self._extract_path_filter(filter_conditions)
         if target_path is not None:
+            # Keyed via _id_cache_key using the already-resolved subdirectory
+            # so a nested-subdirectory scroll never reuses/collides with a
+            # bare-name top-level collection's cached PathIndex (Codex NEW
+            # Finding 2).
+            _scroll_path_cache_key = self._id_cache_key(collection_name, subdirectory)
             # Ensure path index is loaded (or lazily rebuilt if absent)
             with self._path_index_lock:
-                if collection_name not in self._path_indexes:
+                if _scroll_path_cache_key not in self._path_indexes:
                     loaded = PathIndex.load(
                         self._get_collection_path(
                             collection_name,
-                            self._active_subdirectories.get(collection_name),
+                            subdirectory,
                         )
                         / "path_index.bin"
                     )
-                    self._path_indexes[collection_name] = loaded
-                path_index = self._path_indexes[collection_name]
+                    self._path_indexes[_scroll_path_cache_key] = loaded
+                path_index = self._path_indexes[_scroll_path_cache_key]
                 # Detect legacy collection: PathIndex empty but collection may have files
                 needs_rebuild = not path_index._path_index
 
             # Release lock before any I/O; rebuild walks disk only on first call
             if needs_rebuild:
-                rebuilt = self._rebuild_path_index_from_disk(collection_name)
+                rebuilt = self._rebuild_path_index_from_disk(
+                    collection_name, subdirectory
+                )
                 # M2 fix: merge rebuilt entries INTO the live index instead of
                 # replacing it.  Any upsert_points calls that ran concurrently
                 # during the rglob walk added to the live PathIndex; a swap
                 # would discard those additions.  merge_from uses add_point
                 # (set semantics) so re-adding existing entries is a no-op.
                 with self._path_index_lock:
-                    live_index = self._path_indexes[collection_name]
+                    live_index = self._path_indexes[_scroll_path_cache_key]
                     live_index.merge_from(rebuilt)
                     path_index = live_index
 
@@ -3077,123 +3743,338 @@ class FilesystemVectorStore:
             with self._path_index_lock:
                 target_ids = path_index.get_point_ids(target_path)
 
-            # Build filter for any non-path must clauses (e.g. type==content)
-            extra_filter = self._build_non_path_filter(filter_conditions)
+            # MEDIUM fix (Codex, Messi #13): the PathIndex is used ONLY to
+            # obtain candidate ids. Evaluate the COMPLETE ORIGINAL filter (every
+            # clause, INCLUDING the path clauses) against each candidate's REAL
+            # hydrated payload -- the SAME predicate the general rglob path uses
+            # (``_parse_filter``). A reduced, path-STRIPPED filter produced two
+            # wrong-row bugs: (a) a CONTRADICTORY {"must":[path==a.py,
+            # path==b.py]} filter matched nothing yet the stripped variant
+            # returned the a.py candidate; (b) a STALE PathIndex entry (indexed
+            # path no longer equals the file's real on-disk path) returned a row
+            # whose real path differs from the requested path. Evaluating the
+            # full filter against the real payload drops both and self-heals
+            # stale PathIndex entries (a candidate whose hydrated path no longer
+            # matches is correctly excluded). This changes ONLY which filter is
+            # evaluated, never the O(1) PathIndex candidate-discovery mechanism.
+            full_filter = self._parse_filter(filter_conditions)
 
-            # Load each matching point, applying any extra filter
+            # Bug #1488 (Codex, Messi #13): the fast path must obey the SAME
+            # contract as the general paginated path -- paginate with the stable
+            # sorted-id continuation cursor, FAIL LOUD on an enumerated-but-
+            # unhydratable id, and validate returned vectors. The prior
+            # ``result_points[:limit], None`` truncation emitted NO continuation
+            # cursor, so with more matching ids than ``limit`` the remainder was
+            # PERMANENTLY unreachable. The id-based cursor is layout-independent
+            # (same sorted real-id order as both general branches), so a cursor
+            # issued here resumes correctly even after a concurrent layout flip.
+            import bisect
+
+            sorted_ids = sorted(target_ids)  # deterministic, layout-independent
+            cursor = self._resolve_scroll_cursor(offset, sorted_ids)
+            start_idx = 0 if cursor is None else bisect.bisect_right(sorted_ids, cursor)
+
+            # Read the expected dimension ONLY when vectors are returned so the
+            # with_vectors=False path stays byte-identical (no new I/O). Pass
+            # the already-resolved ``subdirectory`` explicitly (Codex-16
+            # Finding 4) so a nested collection's dimension resolves
+            # correctly outside an active indexing session.
+            expected_dim_fp: Optional[int] = (
+                self._get_vector_size(collection_name, subdirectory)
+                if with_vectors
+                else None
+            )
+
+            # Codex-15 MEDIUM (regression): iterate candidates in sorted order
+            # until either ``limit`` MATCHING rows are collected OR candidates
+            # are exhausted -- NEVER slice ``candidates[start:start+limit]``
+            # before filtering. Slicing-then-filtering returned an EMPTY page
+            # with a NON-null cursor whenever a page's sliced candidates all
+            # failed the filter while later candidates still matched; real
+            # callers treat an empty page as TERMINAL, so those later matches
+            # were permanently DROPPED (Messi #13). The continuation cursor is
+            # based on the LAST EXAMINED candidate, so a page is empty ONLY when
+            # no further matches exist (then the cursor is None / terminal).
             result_points: List[Dict[str, Any]] = []
-            for pid in sorted(target_ids):  # sorted for deterministic order
-                point_data = self.get_point(pid, collection_name)
+            last_examined_idx_fp = -1
+            idx_fp = start_idx
+            while idx_fp < len(sorted_ids) and len(result_points) < limit:
+                pid = sorted_ids[idx_fp]
+                last_examined_idx_fp = idx_fp
+                idx_fp += 1
+                point_data = self.get_point(
+                    pid, collection_name, subdirectory=subdirectory
+                )
                 if point_data is None:
+                    # The id was enumerated by the PathIndex but cannot be
+                    # hydrated from either layout (get_point already re-resolves
+                    # a concurrent CHUNKS_DB flip on a legacy miss). Silently
+                    # dropping it would lose a row AND could emit a terminal
+                    # None cursor falsely presenting a complete traversal --
+                    # fail LOUD instead (Messi #13).
+                    raise ScrollDataIntegrityError(
+                        f"path-index enumerated point-id {pid!r} has no "
+                        f"hydratable row in collection {collection_name!r}; "
+                        f"refusing to silently drop an enumerated id from a "
+                        f"paginated scroll"
+                    )
+                # Evaluate the COMPLETE original filter against the REAL
+                # hydrated payload, independent of with_payload (which controls
+                # only what is RETURNED, never what the filter sees).
+                if not full_filter(point_data.get("payload", {})):
                     continue
-                if extra_filter is not None:
-                    payload = point_data.get("payload", {})
-                    if not extra_filter(payload):
-                        continue
                 point: Dict[str, Any] = {"id": point_data["id"]}
                 if with_payload:
                     point["payload"] = point_data.get("payload", {})
                 if with_vectors:
-                    point["vector"] = point_data.get("vector", [])
+                    vector_value = point_data.get("vector", [])
+                    if hasattr(vector_value, "tolist"):
+                        vector_value = vector_value.tolist()
+                    # Validate with the SAME gate both general branches use so
+                    # every scroll path rejects an identical malformed shape.
+                    assert expected_dim_fp is not None
+                    self._validate_scroll_vector(
+                        vector_value,
+                        expected_dim_fp,
+                        f"{pid} (path-index fast path)",
+                    )
+                    point["vector"] = vector_value
                 result_points.append(point)
 
-            # Respect limit; next_offset is always None because all matching
-            # points for a single file fit within a single page in practice
-            return result_points[:limit], None
+            # Continuation cursor on the LAST EXAMINED candidate: only emit one
+            # when a full page of matches was collected AND unexamined candidates
+            # remain. When candidates are exhausted the cursor is None (terminal)
+            # even if fewer than ``limit`` rows matched -- a genuinely-empty page
+            # therefore always carries a terminal None cursor.
+            next_offset_fp: Optional[str] = None
+            if len(result_points) == limit and last_examined_idx_fp + 1 < len(
+                sorted_ids
+            ):
+                next_offset_fp = self._encode_scroll_cursor(
+                    sorted_ids[last_examined_idx_fp]
+                )
+            return result_points, next_offset_fp
 
         # --- Safety valve: fall through to original rglob path ---
-        collection_path = self.base_path / collection_name
+        # Codex-15 MEDIUM: resolve via _get_collection_path with the resolved
+        # subdirectory (not a hardcoded base_path/collection_name) so a nested
+        # multimodal collection is scanned at its real ``<subdirectory>/<coll>``
+        # location instead of a non-existent top-level path.
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
 
         # Story #1456 AC3: CHUNKS_DB collections paginate over chunks.db
         # (sorted point_ids as the opaque offset cursor) instead of
         # rglob-scanning vector_*.json files.
         if self._is_chunks_db_collection(collection_name, collection_path):
-            from code_indexer.storage.sqlite_chunk_store import (
-                open_chunk_store_for_path,
+            return self._scroll_points_chunks_db(
+                collection_name,
+                collection_path,
+                limit,
+                with_payload,
+                with_vectors,
+                offset,
+                filter_conditions,
+                subdirectory=subdirectory,
             )
 
-            filter_func_cdb = None
-            if filter_conditions:
-                filter_func_cdb = self._parse_filter(filter_conditions)
-
-            chunk_store = open_chunk_store_for_path(
-                collection_path / "chunks.db", str(collection_path)
+        # Bug #1486 (Codex Finding 4): re-resolve the committed discriminator
+        # HERE, before the legacy rglob scan. A concurrent server-mode fleet
+        # migration may have flipped the discriminator to CHUNKS_DB and deleted
+        # the legacy vector_*.json files in the window between the gate above
+        # and this scan -- which would otherwise walk an empty tree and return
+        # []. The flip is the atomic swap point (committed durably BEFORE legacy
+        # deletion), so re-resolving here observes a consistent CHUNKS_DB
+        # collection. A permanently-SHARDED_JSON collection re-resolves to
+        # SHARDED_JSON (one cheap top-level JSON key read) and falls through to
+        # the unchanged rglob path below.
+        if resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB:
+            return self._scroll_points_chunks_db(
+                collection_name,
+                collection_path,
+                limit,
+                with_payload,
+                with_vectors,
+                offset,
+                filter_conditions,
+                subdirectory=subdirectory,
             )
-            try:
-                all_ids = sorted(chunk_store.all_point_ids())
 
-                start_idx_cdb = 0
-                if offset and offset in all_ids:
-                    start_idx_cdb = all_ids.index(offset) + 1
-
-                page_ids = all_ids[start_idx_cdb : start_idx_cdb + limit]
-
-                cdb_points: List[Dict[str, Any]] = []
-                for point_id in page_ids:
-                    record = chunk_store.read(point_id)
-                    if record is None:
-                        continue
-
-                    point = {"id": record["id"]}
-                    if with_payload:
-                        point["payload"] = record.get("payload", {})
-                    if with_vectors:
-                        point["vector"] = record.get("vector", [])
-                        if hasattr(point["vector"], "tolist"):
-                            point["vector"] = point["vector"].tolist()
-
-                    if filter_func_cdb is not None:
-                        payload = point.get("payload", {})
-                        if not filter_func_cdb(payload):
-                            continue
-
-                    cdb_points.append(point)
-
-                next_offset_cdb = None
-                if len(page_ids) == limit and start_idx_cdb + limit < len(all_ids):
-                    next_offset_cdb = page_ids[-1]
-
-                return cdb_points, next_offset_cdb
-            finally:
-                chunk_store.close()
-
-        # Get all vector files sorted by path
-        all_files = sorted(
-            [
-                f
-                for f in collection_path.rglob("*.json")
-                if "collection_meta" not in f.name
-            ]
-        )
-
-        # Apply offset for pagination
-        start_idx = 0
-        if offset:
-            try:
-                offset_path = Path(offset)
-                for i, f in enumerate(all_files):
-                    if f == offset_path:
-                        start_idx = i + 1
-                        break
-            except (ValueError, TypeError, OSError):
-                pass
-
-        # Get page of files
-        page_files = all_files[start_idx : start_idx + limit]
-
-        # Fix C: Parse filter ONCE before the loop (was inside per-file loop).
-        # Avoids O(N) repeated filter compilation for collections with thousands of files.
-        filter_func = None
-        if filter_conditions:
-            filter_func = self._parse_filter(filter_conditions)
-
-        # Load points
+        # Legacy SHARDED_JSON scan. Bug #1486 Finding 5 (TOCTOU): the pre-scan
+        # re-resolve above read SHARDED_JSON, but a concurrent server-mode
+        # migration may flip the discriminator and delete the legacy
+        # vector_*.json files DURING the rglob walk / per-file open below. A
+        # per-file open() (or the rglob walk itself) then raises
+        # FileNotFoundError, and even without one the rglob may find zero
+        # (already-deleted) files and produce an empty/partial page. Both are
+        # absorbed: on a FileNotFoundError, or when the discriminator now reads
+        # CHUNKS_DB after the scan, re-resolve and dispatch to the chunk-store
+        # scroll so the page is never silently empty/partial. A genuinely
+        # missing file on a still-SHARDED_JSON collection is a real error and is
+        # re-raised (fail loud, Messi #13).
         points: List[Dict[str, Any]] = []
-        for vector_file in page_files:
-            try:
-                with open(str(vector_file), "r") as file_handle:
-                    data: Dict[str, Any] = json.load(file_handle)
+        next_offset: Optional[str] = None
+        try:
+            # Bug #1488 (Codex Finding B): paginate by a stable, layout-
+            # INDEPENDENT REAL point-id cursor rather than the filesystem
+            # filename token. The token is NOT the point-id for temporal
+            # collections (the write path names files
+            # ``vector_<sha256(point_id)[:16]>.json``), so ordering/cursoring by
+            # the token diverged from the CHUNKS_DB branch's real-id ordering and
+            # produced duplicate-and-drop pages across a mid-pagination flip.
+            # Build the id -> file map from each file's STORED ``data["id"]`` (the
+            # real point-id in BOTH layouts) so both branches iterate the SAME
+            # sorted real-id order and a cursor is honored verbatim across a flip
+            # in either direction. Opening every file here is the price of
+            # correctness on this legacy fallback path; a FileNotFoundError
+            # (mid-scan vanish) still propagates to the Finding 5 re-dispatch
+            # below, and a malformed/id-less file is skipped (it cannot be
+            # paginated), mirroring the per-file page-load loop.
+            id_to_file: Dict[str, Path] = {}
+            for f in collection_path.rglob("*.json"):
+                if "collection_meta" in f.name:
+                    continue
+                fname = f.name
+                if not (fname.startswith("vector_") and fname.endswith(".json")):
+                    continue
+                # FileNotFoundError (a subclass of OSError) from a mid-scan
+                # vanish is deliberately NOT caught here -- it must propagate to
+                # the outer ``except FileNotFoundError`` (Bug #1486 Finding 5
+                # re-dispatch). A file that is genuinely PRESENT but unreadable
+                # as a record (bad JSON, missing/invalid ``id``, duplicate id)
+                # is a data-integrity fault and fails LOUD (Messi #13) -- never
+                # silently skipped, which would drop rows AND emit a terminal
+                # ``None`` cursor, falsely presenting a complete traversal.
+                try:
+                    with open(str(f), "r") as _fh:
+                        _data: Dict[str, Any] = json.load(_fh)
+                except json.JSONDecodeError as exc:
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(f)!r} is not valid JSON "
+                        f"({exc}); refusing to silently drop it from a "
+                        f"paginated scroll"
+                    ) from exc
+                # A VALID-JSON but non-dict root (``null``, a list, a number, a
+                # string) is a present-but-malformed record. Fail LOUD naming the
+                # file (Messi #13) rather than letting ``"id" not in _data`` raise
+                # a raw ``TypeError`` on a non-container root. Checked AFTER the
+                # narrow JSONDecodeError try so a mid-scan vanish still surfaces
+                # as FileNotFoundError for the Finding-5 re-dispatch.
+                if not isinstance(_data, dict):
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(f)!r} has a non-dict JSON root "
+                        f"({type(_data).__name__}); refusing to silently drop it "
+                        f"from a paginated scroll"
+                    )
+                if "id" not in _data:
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(f)!r} has no 'id' field; "
+                        f"refusing to silently drop it from a paginated scroll"
+                    )
+                _pid = _data["id"]
+                if not isinstance(_pid, str) or not _pid:
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(f)!r} has an invalid 'id' "
+                        f"({_pid!r}); expected a non-empty string point-id"
+                    )
+                if _pid in id_to_file:
+                    raise ScrollDataIntegrityError(
+                        f"duplicate stored point-id {_pid!r} across legacy "
+                        f"vector files {str(id_to_file[_pid])!r} and "
+                        f"{str(f)!r}; refusing to silently collapse them"
+                    )
+                id_to_file[_pid] = f
+            sorted_ids = sorted(id_to_file)
 
+            # Resume strictly AFTER the resolved real-id cursor via bisect (a
+            # legacy path/token cursor is translated first, garbage fails loud,
+            # and a self-describing cursor whose point was deleted resolves to
+            # the first id greater than it -- correct continuation, no dup, no
+            # gap).
+            import bisect
+
+            cursor = self._resolve_scroll_cursor(offset, sorted_ids)
+            start_idx = 0 if cursor is None else bisect.bisect_right(sorted_ids, cursor)
+
+            # Fix C: Parse filter ONCE before the loop (was inside per-file loop).
+            # Avoids O(N) repeated filter compilation for collections with thousands of files.
+            filter_func = None
+            if filter_conditions:
+                filter_func = self._parse_filter(filter_conditions)
+
+            # Bug #1488 (Codex ITEM 1 tail): the expected vector dimension for
+            # this collection, read ONLY when vectors are actually returned so
+            # the ``with_vectors=False`` path stays byte-identical (no new I/O).
+            # ``_get_vector_size`` is cached and is the SAME dimension the write
+            # path (upsert_points) validated the stored vector against. The
+            # already-resolved ``subdirectory`` is passed explicitly
+            # (Codex-16 Finding 4) so a nested collection's dimension
+            # resolves correctly outside an active indexing session.
+            expected_dim: Optional[int] = (
+                self._get_vector_size(collection_name, subdirectory)
+                if with_vectors
+                else None
+            )
+
+            # Codex-15 MEDIUM (regression): iterate candidates in sorted-id order
+            # until either ``limit`` MATCHING rows are collected OR candidates are
+            # exhausted -- NEVER slice ``sorted_ids[start:start+limit]`` before
+            # filtering. The prior slice-then-filter returned an EMPTY page with a
+            # NON-null cursor when a page's sliced candidates all failed the
+            # filter while later candidates still matched; callers treat an empty
+            # page as TERMINAL, so those matches were permanently DROPPED. Files
+            # are still opened by their real path, preserving the Finding 5
+            # mid-scan-vanish FileNotFoundError re-dispatch below.
+            last_examined_idx = -1
+            _scan_idx = start_idx
+            # Load points
+            while _scan_idx < len(sorted_ids) and len(points) < limit:
+                vector_file = id_to_file[sorted_ids[_scan_idx]]
+                last_examined_idx = _scan_idx
+                _scan_idx += 1
+                # FileNotFoundError (a subclass of OSError) from a mid-HYDRATION
+                # vanish is deliberately NOT caught here -- it signals the Bug
+                # #1486 Finding-5 concurrent flip+delete and must propagate to
+                # the outer ``except FileNotFoundError`` for the CHUNKS_DB
+                # re-dispatch. A file that is genuinely PRESENT but malformed
+                # (bad JSON) or missing a REQUIRED field (``id`` always;
+                # ``vector`` when ``with_vectors=True``) is a data-integrity
+                # fault and fails LOUD (Messi #13) -- never silently ``continue``,
+                # which would drop the row AND emit a terminal ``None`` cursor,
+                # falsely presenting a complete traversal (Codex HIGH).
+                try:
+                    with open(str(vector_file), "r") as file_handle:
+                        data: Dict[str, Any] = json.load(file_handle)
+                except json.JSONDecodeError as exc:
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(vector_file)!r} is not valid "
+                        f"JSON during scroll hydration ({exc}); refusing to "
+                        f"silently drop it from a paginated scroll"
+                    ) from exc
+
+                # Non-dict JSON root fails LOUD here too (a file valid during the
+                # inventory scan can become non-dict before this re-read). Checked
+                # AFTER the narrow JSONDecodeError try so a mid-hydration vanish
+                # still surfaces as FileNotFoundError for the Finding-5
+                # re-dispatch, never a raw TypeError from ``"id" not in data``.
+                if not isinstance(data, dict):
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(vector_file)!r} has a non-dict "
+                        f"JSON root ({type(data).__name__}) during scroll "
+                        f"hydration; refusing to silently drop it from a "
+                        f"paginated scroll"
+                    )
+
+                if "id" not in data:
+                    raise ScrollDataIntegrityError(
+                        f"legacy vector file {str(vector_file)!r} has no 'id' "
+                        f"field during scroll hydration; refusing to silently "
+                        f"drop it from a paginated scroll"
+                    )
                 point = {"id": data["id"]}
 
                 if with_payload:
@@ -3201,23 +4082,76 @@ class FilesystemVectorStore:
                     point["payload"] = data.get("payload", {})
 
                 if with_vectors:
+                    if "vector" not in data:
+                        raise ScrollDataIntegrityError(
+                            f"legacy vector file {str(vector_file)!r} is missing "
+                            f"the required 'vector' field during scroll "
+                            f"hydration (with_vectors=True); refusing to "
+                            f"silently drop it from a paginated scroll"
+                        )
+                    # Bug #1488 (Codex ITEM 1 tail): the field is PRESENT, but a
+                    # present-but-malformed vector (null/string/object/empty,
+                    # non-numeric element, NaN/Inf, or wrong dimension) must fail
+                    # LOUD too -- never be returned as a silently wrong value.
+                    assert expected_dim is not None  # set whenever with_vectors
+                    self._validate_scroll_vector(
+                        data["vector"], expected_dim, str(vector_file)
+                    )
                     point["vector"] = data["vector"]
 
-                # Apply pre-parsed filter (compiled once above)
+                # Apply pre-parsed filter (compiled once above). Bug #1488
+                # (Codex Medium, Messi #13): evaluate against the REAL hydrated
+                # payload (``data``), never ``point``'s payload which is OMITTED
+                # ({}) when with_payload=False -- with_payload controls only what
+                # is RETURNED, never what the filter sees.
                 if filter_func is not None:
-                    payload = point.get("payload", {})
-                    if not filter_func(payload):
+                    if not filter_func(data.get("payload", {})):
                         continue
 
                 points.append(point)
 
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-        # Calculate next offset
-        next_offset = None
-        if len(page_files) == limit and start_idx + limit < len(all_files):
-            next_offset = str(page_files[-1])
+            # Calculate next offset: a self-describing REAL point-id cursor (Bug
+            # #1488), never a filesystem path or filename token, so the next page
+            # resumes correctly even if the collection flips to CHUNKS_DB before
+            # it is requested. Codex-15 MEDIUM: the cursor is based on the LAST
+            # EXAMINED candidate (not a pre-filter slice end) and is only emitted
+            # when a full page of matches was collected AND unexamined candidates
+            # remain -- so a genuinely-empty page always carries a terminal None
+            # cursor.
+            if len(points) == limit and last_examined_idx + 1 < len(sorted_ids):
+                next_offset = self._encode_scroll_cursor(sorted_ids[last_examined_idx])
+        except FileNotFoundError:
+            # A legacy vector_*.json (or a shard subdir walked by rglob) vanished
+            # mid-scan. Re-resolve: if the flip has landed, dispatch to the chunk
+            # store; otherwise it is a genuine missing file -> fail loud.
+            if resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB:
+                return self._scroll_points_chunks_db(
+                    collection_name,
+                    collection_path,
+                    limit,
+                    with_payload,
+                    with_vectors,
+                    offset,
+                    filter_conditions,
+                    subdirectory=subdirectory,
+                )
+            raise
+        else:
+            # Scan completed without a vanish, but the flip may have landed just
+            # after the pre-scan resolve, so rglob found zero (deleted) legacy
+            # files -> an empty/partial page. Re-check the discriminator; on a
+            # detected flip, dispatch to the chunk store instead of returning it.
+            if resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB:
+                return self._scroll_points_chunks_db(
+                    collection_name,
+                    collection_path,
+                    limit,
+                    with_payload,
+                    with_vectors,
+                    offset,
+                    filter_conditions,
+                    subdirectory=subdirectory,
+                )
 
         return points, next_offset
 
@@ -3438,15 +4372,16 @@ class FilesystemVectorStore:
                         str(collection_path.resolve()),
                         chunk_layout_token=_search_chunk_layout.value,
                     ),
-                    lambda: self._load_id_index(collection_name),
+                    lambda: self._load_id_index(collection_name, subdirectory),
                 )
             else:
                 with self._id_index_lock:
-                    if collection_name not in self._id_index:
-                        self._id_index[collection_name] = self._load_id_index(
-                            collection_name
+                    cache_key = self._id_cache_key(collection_name, subdirectory)
+                    if cache_key not in self._id_index:
+                        self._id_index[cache_key] = self._load_id_index(
+                            collection_name, subdirectory
                         )
-                    id_index = self._id_index[collection_name]
+                    id_index = self._id_index[cache_key]
             id_load_ms = (time.time() - t_id) * 1000
 
             return hnsw_index, id_index, hnsw_load_ms, id_load_ms
@@ -3555,12 +4490,43 @@ class FilesystemVectorStore:
                 _embed_meta, embedding_provider.get_provider_name()
             )
 
+        # Bug #1486 (Codex Finding 4): re-resolve the committed chunk-layout
+        # discriminator HERE, on the MAIN/calling thread, AFTER the parallel
+        # .result() returns and BEFORE hydration branches. The entry snapshot
+        # (_search_chunk_layout, taken before the parallel section) can go
+        # stale: a concurrent server-mode fleet migration may have flipped the
+        # discriminator to CHUNKS_DB and deleted the legacy vector_*.json /
+        # id_index.bin files in the window between that snapshot and this point.
+        # The flip is the atomic swap point and is committed durably BEFORE the
+        # legacy files are deleted (collection_migration.py), so re-resolving
+        # here observes a consistent, fully-valid CHUNKS_DB collection and
+        # avoids returning empty/partial results down the stale SHARDED_JSON
+        # branch. resolve_chunk_layout() is fail-closed and cheap (one top-level
+        # JSON key read); a permanently-SHARDED_JSON collection re-resolves to
+        # SHARDED_JSON with zero extra chunks.db probing.
+        #
+        # Claude Finding 3 (perf gate): the ONLY dangerous transition is
+        # SHARDED_JSON -> CHUNKS_DB (migration only ADDS chunks.db and deletes
+        # legacy AFTER the flip). A collection already CHUNKS_DB at the entry
+        # snapshot can therefore NEVER transition back, so re-resolving it is
+        # pure waste -- an extra open()+json.load() on the server query hot path.
+        # Gate the re-resolve on the entry snapshot: reuse CHUNKS_DB directly
+        # when it was already CHUNKS_DB at entry; only pay the re-resolve for a
+        # SHARDED_JSON entry snapshot, which is the exact case the race fix must
+        # still cover. Story #1456 AC7 is preserved: this re-resolve and the
+        # ChunkStore open both run on the calling thread, never inside
+        # load_index()'s worker closure.
+        if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+            _hydration_chunk_layout = ChunkLayout.CHUNKS_DB
+        else:
+            _hydration_chunk_layout = resolve_chunk_layout(collection_path)
+
         # Story #1456 AC4/AC7: open the chunk store for hydration ONLY here,
         # on the MAIN thread -- NEVER inside load_index()'s worker closure.
         # sqlite3 connections are not safely shared across threads, which is
         # exactly why AC7 mandates this be resolved post-.result().
         chunk_store_for_hydration: Optional[Any] = None
-        if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+        if _hydration_chunk_layout == ChunkLayout.CHUNKS_DB:
             from code_indexer.storage.sqlite_chunk_store import (
                 open_chunk_store_for_path,
             )
@@ -3650,87 +4616,106 @@ class FilesystemVectorStore:
         candidate_similarities = [1.0 - d for d in distances]
 
         t0 = time.time()
-        results = []
+
+        def _hydrate_from_chunk_store(chunk_store: Any) -> List[Dict[str, Any]]:
+            """CHUNKS_DB Case-A/Case-B hydration, on the MAIN thread. Reused by
+            the normal CHUNKS_DB path AND Bug #1486 Finding 5's re-hydrate retry
+            (a concurrent migration that deleted the legacy JSON mid-hydration),
+            so the read logic exists once and always returns a FRESH list."""
+            _res: List[Dict[str, Any]] = []
+            if not filter_conditions:
+                # Case A (CHUNKS_DB): Story #1456 AC4 -- apply score_threshold on
+                # HNSW similarities BEFORE any reads, take the top `limit`
+                # candidates FIRST (no existence pre-check across the full
+                # candidate set), then hydrate ONLY those.
+                candidates = [
+                    (point_id, float(sim))
+                    for point_id, sim in zip(candidate_ids, candidate_similarities)
+                    if score_threshold is None or sim >= score_threshold
+                ]
+                for point_id, similarity in candidates[:limit]:
+                    record = chunk_store.read(point_id)
+                    if record is None:
+                        continue
+                    _res.append(
+                        {
+                            "id": record["id"],
+                            "score": similarity,
+                            "payload": record.get("payload", {}),
+                            "_vector_data": record,
+                        }
+                    )
+            else:
+                # Case B (CHUNKS_DB): payload filter per HNSW candidate via a
+                # single indexed point_id lookup. Early-exit is CONDITIONAL on
+                # lazy_load -- identical semantics to the legacy path below.
+                filter_func = self._parse_filter(filter_conditions)
+                for point_id, similarity in zip(candidate_ids, candidate_similarities):
+                    if score_threshold is not None and similarity < score_threshold:
+                        continue
+                    record = chunk_store.read(point_id)
+                    if record is None:
+                        continue
+                    payload = record.get("payload", {})
+                    if not filter_func(payload):
+                        continue
+                    _res.append(
+                        {
+                            "id": record["id"],
+                            "score": float(similarity),
+                            "payload": payload,
+                            "_vector_data": record,
+                        }
+                    )
+                    if lazy_load and len(_res) >= limit:
+                        break
+            return _res
+
+        results: List[Dict[str, Any]] = []
+
+        # Bug #1486 Codex Finding 5 (STILL-OPEN): set True when a legacy
+        # hydration branch SKIPS a candidate because its vector_*.json file did
+        # not exist (Path.exists() -> False). A concurrent server-mode migration
+        # that flips the discriminator to CHUNKS_DB AND deletes the legacy files
+        # in the window between the hydration re-resolve above and the exists()
+        # filter raises NO exception -- the file is silently skipped -- so the
+        # existing ``except FileNotFoundError`` handler never fires. This flag is
+        # the precise, perf-conservative trigger for the post-hydration
+        # re-resolve in the ``else`` clause below: a masked flip can ONLY surface
+        # as a skipped legacy file, so a happy-path legacy read (no skips) pays
+        # no extra resolve.
+        _legacy_file_skipped = False
 
         try:
-            if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
+            if _hydration_chunk_layout == ChunkLayout.CHUNKS_DB:
                 # Invariant: chunk_store_for_hydration is always opened above
                 # when the layout resolves to CHUNKS_DB. Asserted for mypy's
                 # benefit (Optional[Any] narrowing) -- not a runtime guard.
                 assert chunk_store_for_hydration is not None
-                if not filter_conditions:
-                    # Case A (CHUNKS_DB): Story #1456 AC4 -- apply score_threshold
-                    # on HNSW similarities BEFORE any reads, take the top `limit`
-                    # candidates FIRST (no existence pre-check across the full
-                    # candidate set -- a deliberate perf/correctness tradeoff),
-                    # then hydrate ONLY those: at most `limit` chunk-store reads.
-                    candidates = [
-                        (point_id, float(sim))
-                        for point_id, sim in zip(candidate_ids, candidate_similarities)
-                        if score_threshold is None or sim >= score_threshold
-                    ]
-                    top_candidates = candidates[:limit]
-
-                    for point_id, similarity in top_candidates:
-                        record = chunk_store_for_hydration.read(point_id)
-                        if record is None:
-                            continue
-                        results.append(
-                            {
-                                "id": record["id"],
-                                "score": similarity,
-                                "payload": record.get("payload", {}),
-                                "_vector_data": record,
-                            }
-                        )
-                else:
-                    # Case B (CHUNKS_DB): payload filter evaluated per HNSW
-                    # candidate via a single indexed point_id lookup. Early-exit
-                    # is CONDITIONAL on lazy_load -- identical semantics to the
-                    # legacy sharded-JSON path below.
-                    filter_func = self._parse_filter(filter_conditions)
-
-                    for point_id, similarity in zip(
-                        candidate_ids, candidate_similarities
-                    ):
-                        if score_threshold is not None and similarity < score_threshold:
-                            continue
-
-                        record = chunk_store_for_hydration.read(point_id)
-                        if record is None:
-                            continue
-
-                        payload = record.get("payload", {})
-                        if not filter_func(payload):
-                            continue
-
-                        results.append(
-                            {
-                                "id": record["id"],
-                                "score": float(similarity),
-                                "payload": payload,
-                                "_vector_data": record,
-                            }
-                        )
-
-                        # EARLY EXIT: If lazy loading enabled, stop when we have enough results
-                        if lazy_load and len(results) >= limit:
-                            break
+                results = _hydrate_from_chunk_store(chunk_store_for_hydration)
 
             elif not filter_conditions:
-                # Case A (legacy sharded-JSON, UNCHANGED): No filter_conditions -
-                # maximum optimization path. Apply score_threshold on HNSW
-                # similarities before any JSON reads, then read JSON only for
-                # the top `limit` results.
-
-                # Pair candidate IDs with their HNSW-derived similarities
-                candidates = [
-                    (point_id, float(sim))
-                    for point_id, sim in zip(candidate_ids, candidate_similarities)
-                    if point_id in existing_id_index
-                    and existing_id_index[point_id].exists()
-                    and (score_threshold is None or sim >= score_threshold)
-                ]
+                # Case A (legacy sharded-JSON): No filter_conditions - maximum
+                # optimization path. Apply score_threshold on HNSW similarities
+                # before any JSON reads, then read JSON only for the top `limit`
+                # results.
+                #
+                # Result set is byte-identical to the prior comprehension; the
+                # only addition is Bug #1486 Finding 5's skip tracking. Evaluation
+                # order is preserved exactly (in-index -> exists() -> threshold),
+                # so the exists() call pattern is unchanged; when exists() reports
+                # a legacy file absent, record the skip so the ``else`` clause can
+                # detect an exists()-masked concurrent flip to CHUNKS_DB.
+                candidates = []
+                for point_id, sim in zip(candidate_ids, candidate_similarities):
+                    if point_id not in existing_id_index:
+                        continue
+                    if not existing_id_index[point_id].exists():
+                        _legacy_file_skipped = True
+                        continue
+                    if score_threshold is not None and sim < score_threshold:
+                        continue
+                    candidates.append((point_id, float(sim)))
 
                 # HNSW already returns candidates sorted by distance (closest first),
                 # so candidates are already in descending similarity order.
@@ -3769,6 +4754,10 @@ class FilesystemVectorStore:
 
                     vector_file = existing_id_index[point_id]
                     if not vector_file.exists():
+                        # Bug #1486 Finding 5: a legacy file skipped here (rather
+                        # than raising FileNotFoundError at open()) is the silent
+                        # signal of an exists()-masked concurrent flip+delete.
+                        _legacy_file_skipped = True
                         continue
 
                     # Apply score threshold before reading JSON when possible
@@ -3799,6 +4788,62 @@ class FilesystemVectorStore:
 
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
+        except FileNotFoundError:
+            # Bug #1486 Finding 5 (TOCTOU): a legacy vector_*.json vanished
+            # between the hydration resolve above and its open() -- a concurrent
+            # server-mode migration deleted it AFTER flipping the discriminator.
+            # Re-resolve on the MAIN thread; if the flip has landed, open the
+            # ChunkStore here (Story #1456 AC7 -- main-thread only) and re-hydrate
+            # from chunks.db into a FRESH results list (any partially-built
+            # legacy result is discarded). A still-SHARDED_JSON collection is a
+            # genuine missing file -> fail loud (re-raise).
+            if resolve_chunk_layout(collection_path) != ChunkLayout.CHUNKS_DB:
+                raise
+            if chunk_store_for_hydration is None:
+                from code_indexer.storage.sqlite_chunk_store import (
+                    open_chunk_store_for_path,
+                )
+
+                chunk_store_for_hydration = open_chunk_store_for_path(
+                    collection_path / "chunks.db", str(collection_path)
+                )
+            results = _hydrate_from_chunk_store(chunk_store_for_hydration)
+        else:
+            # Bug #1486 Codex Finding 5 (STILL-OPEN): the legacy hydration
+            # branches gate reads on Path.exists(). If a concurrent server-mode
+            # migration flips the discriminator to CHUNKS_DB AND deletes the
+            # legacy vector_*.json files in the window between the hydration
+            # re-resolve above and the exists() filter, exists() returns False --
+            # the file is SILENTLY SKIPPED, so NO FileNotFoundError is raised and
+            # the ``except`` handler above never runs. search() would then return
+            # empty/partial results despite a fully-valid chunks.db (Codex repro:
+            # SEARCH_FALSE_EXISTS layout chunks_db result_count 0).
+            #
+            # Path.exists() can NEVER be the race discriminator: a skipped file
+            # is indistinguishable from a genuinely-absent one. The only
+            # meaningful transition is SHARDED_JSON -> CHUNKS_DB (migration only
+            # ADDS chunks.db and deletes legacy AFTER the durable flip), so
+            # detect it by RE-RESOLVING the committed discriminator once a legacy
+            # file was actually skipped. ``_legacy_file_skipped`` is True only
+            # inside a legacy branch (the CHUNKS_DB entry path never sets it), so
+            # a happy-path legacy read with no skips pays no extra resolve --
+            # preserving the Finding 3 perf gate. If the flip has landed, discard
+            # the stale legacy result and re-hydrate from chunks.db into a FRESH
+            # list, byte-identical to the permanently-CHUNKS_DB path.
+            if _legacy_file_skipped and (
+                resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+            ):
+                if chunk_store_for_hydration is None:
+                    from code_indexer.storage.sqlite_chunk_store import (
+                        open_chunk_store_for_path,
+                    )
+
+                    # Story #1456 AC7: ChunkStore open on the MAIN/calling thread
+                    # only; finally closes it.
+                    chunk_store_for_hydration = open_chunk_store_for_path(
+                        collection_path / "chunks.db", str(collection_path)
+                    )
+                results = _hydrate_from_chunk_store(chunk_store_for_hydration)
         finally:
             if chunk_store_for_hydration is not None:
                 chunk_store_for_hydration.close()
@@ -4374,13 +5419,22 @@ class FilesystemVectorStore:
                 return False
 
         try:
-            # Ensure id_index is loaded for O(1) file resolution
+            # Ensure id_index is loaded for O(1) file resolution. Resolved
+            # via _active_subdirectories (this method has no subdirectory
+            # param) so a nested collection's batch update targets its OWN
+            # cache entry, never a bare-name top-level collision.
+            _batch_update_subdirectory = self._active_subdirectories.get(
+                collection_name
+            )
+            _batch_update_cache_key = self._id_cache_key(
+                collection_name, _batch_update_subdirectory
+            )
             with self._id_index_lock:
-                if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
+                if _batch_update_cache_key not in self._id_index:
+                    self._id_index[_batch_update_cache_key] = self._load_id_index(
+                        collection_name, _batch_update_subdirectory
                     )
-                index = self._id_index[collection_name]
+                index = self._id_index[_batch_update_cache_key]
 
             for point in points:
                 point_id = point["id"]
@@ -4474,14 +5528,24 @@ class FilesystemVectorStore:
 
             return sorted(list(file_paths))
 
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's file listing reads
+        # its OWN _id_index cache entry, never a bare-name top-level
+        # collision.
+        _list_files_subdirectory = self._active_subdirectories.get(collection_name)
+        _list_files_cache_key = self._id_cache_key(
+            collection_name, _list_files_subdirectory
+        )
         with self._id_index_lock:
             # Ensure ID index is loaded (fast - from filenames only)
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            if _list_files_cache_key not in self._id_index:
+                self._id_index[_list_files_cache_key] = self._load_id_index(
+                    collection_name, _list_files_subdirectory
+                )
 
             # Lazily load file paths if not cached
             if collection_name not in self._file_path_cache:
-                id_index = self._id_index[collection_name]
+                id_index = self._id_index[_list_files_cache_key]
                 self._file_path_cache[collection_name] = self._load_file_paths(
                     collection_name, id_index
                 )
@@ -4543,7 +5607,14 @@ class FilesystemVectorStore:
             finally:
                 chunk_store.close()
 
-        # Fallback: estimation for old indexes or if metadata read fails
+        # Fallback: estimation for old indexes or if metadata read fails.
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's estimate reads its
+        # OWN _id_index cache entry, never a bare-name top-level collision.
+        _file_count_subdirectory = self._active_subdirectories.get(collection_name)
+        _file_count_cache_key = self._id_cache_key(
+            collection_name, _file_count_subdirectory
+        )
         with self._id_index_lock:
             # If file paths already cached, return count from cache (instant)
             if collection_name in self._file_path_cache:
@@ -4551,17 +5622,22 @@ class FilesystemVectorStore:
 
             # Otherwise estimate: vectors / average chunks per file (~2)
             # This is fast but approximate - acceptable for status display
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            if _file_count_cache_key not in self._id_index:
+                self._id_index[_file_count_cache_key] = self._load_id_index(
+                    collection_name, _file_count_subdirectory
+                )
 
-            vector_count = len(self._id_index[collection_name])
+            vector_count = len(self._id_index[_file_count_cache_key])
             # Estimate: most files have 1-3 chunks, average ~2
             estimated_files = max(1, vector_count // 2)
 
             return estimated_files
 
     def _calculate_and_save_unique_file_count(
-        self, collection_name: str, collection_path: Path
+        self,
+        collection_name: str,
+        collection_path: Path,
+        subdirectory: Optional[str] = None,
     ) -> int:
         """Calculate unique file count from all vectors and save to collection metadata.
 
@@ -4574,6 +5650,12 @@ class FilesystemVectorStore:
         Args:
             collection_name: Name of the collection
             collection_path: Path to collection directory
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"). When None, falls back to the
+                active-indexing subdirectory recorded for this collection
+                (byte-identical to the pre-fix bare-key behavior for every
+                existing caller, which always omits this argument and calls
+                while the active-indexing session is still open).
 
         Returns:
             Number of unique files indexed
@@ -4581,6 +5663,9 @@ class FilesystemVectorStore:
         Note:
             Thread-safe: Uses file locking to prevent race conditions with daemon indexing
         """
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
+        _unique_count_cache_key = self._id_cache_key(collection_name, subdirectory)
         import json
 
         from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
@@ -4608,12 +5693,12 @@ class FilesystemVectorStore:
 
             # Use cached id_index for speed (already loaded during indexing)
             with self._id_index_lock:
-                if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
+                if _unique_count_cache_key not in self._id_index:
+                    self._id_index[_unique_count_cache_key] = self._load_id_index(
+                        collection_name, subdirectory
                     )
 
-                id_index = self._id_index[collection_name]
+                id_index = self._id_index[_unique_count_cache_key]
 
             # Parse each vector to extract source file path
             for point_id, vector_file in id_index.items():
@@ -4872,12 +5957,21 @@ class FilesystemVectorStore:
             finally:
                 chunk_store.close()
 
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so validating a nested collection samples its
+        # OWN _id_index cache entry, never a bare-name top-level collision.
+        _validate_dims_subdirectory = self._active_subdirectories.get(collection_name)
+        _validate_dims_cache_key = self._id_cache_key(
+            collection_name, _validate_dims_subdirectory
+        )
         with self._id_index_lock:
             # Ensure ID index is loaded (cached after first call)
-            if collection_name not in self._id_index:
-                self._id_index[collection_name] = self._load_id_index(collection_name)
+            if _validate_dims_cache_key not in self._id_index:
+                self._id_index[_validate_dims_cache_key] = self._load_id_index(
+                    collection_name, _validate_dims_subdirectory
+                )
 
-            index = self._id_index[collection_name]
+            index = self._id_index[_validate_dims_cache_key]
 
             if not index:
                 return True  # Empty collection is vacuously valid
@@ -5119,6 +6213,7 @@ class FilesystemVectorStore:
         changes: Dict[str, set],
         progress_callback: Optional[Any] = None,
         clear_stale: bool = True,
+        subdirectory: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Apply incremental HNSW update for batch of changes.
 
@@ -5129,6 +6224,11 @@ class FilesystemVectorStore:
             clear_stale: Bug #1407 Amendment 1/2 -- forwarded to
                          save_incremental_update(); True (default) preserves
                          today's behavior for the whole fleet.
+            subdirectory: Optional explicit subdirectory (e.g.
+                "multimodal_index"), threaded from end_indexing()'s own
+                explicit subdirectory parameter. ``None`` (every existing
+                caller) is byte-identical to the pre-fix bare
+                ``self.base_path / collection_name`` resolution.
 
         Returns:
             Dictionary with update results, or None if no existing index (fallback to full rebuild)
@@ -5138,8 +6238,12 @@ class FilesystemVectorStore:
             Applies all accumulated changes in one batch operation,
             significantly faster than full rebuild.
         """
-        collection_path = self.base_path / collection_name
-        vector_size = self._get_vector_size(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        vector_size = self._get_vector_size(collection_name, subdirectory)
+        # Keyed via _id_cache_key so this method reads the SAME _id_index
+        # entry upsert_points() wrote to for the SAME physical collection
+        # (Codex NEW Finding 1).
+        _incremental_cache_key = self._id_cache_key(collection_name, subdirectory)
 
         from .hnsw_index_manager import HNSWIndexManager
 
@@ -5201,7 +6305,9 @@ class FilesystemVectorStore:
                             continue
                         vector = np.array(record["vector"], dtype=np.float32)
                     else:
-                        vector_file = self._id_index[collection_name].get(point_id)
+                        vector_file = self._id_index[_incremental_cache_key].get(
+                            point_id
+                        )
                         if not vector_file or not Path(vector_file).exists():
                             self.logger.warning(
                                 f"Vector file not found for point '{point_id}', skipping"

@@ -707,8 +707,14 @@ class ActivatedRepoIndexManager:
                 )
                 shutil.rmtree(index_dir)
 
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             result = self._run_subprocess_with_telemetry(
-                ["cidx", "index"],
+                append_server_layout_args(["cidx", "index"]),
                 repo_path,
                 cancel_check=cancel_check,
             )
@@ -778,7 +784,13 @@ class ActivatedRepoIndexManager:
             if not (repo_path_obj / ".code-indexer" / "config.json").exists():
                 return self._uninitialized_repo_error(repo_path, "FTS")
 
-            args = ["cidx", "index", "--fts"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = append_server_layout_args(["cidx", "index", "--fts"])
             if clear:
                 args.append("--clear")
 
@@ -812,7 +824,13 @@ class ActivatedRepoIndexManager:
                 build_temporal_child_env,
             )
 
-            args = ["cidx", "index", "--index-commits"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = append_server_layout_args(["cidx", "index", "--index-commits"])
             if clear:
                 args.append("--clear")
 

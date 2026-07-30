@@ -7,7 +7,7 @@ Suitable for environments where Docker/Podman containers are not available.
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .vector_store_backend import VectorStoreBackend
 
@@ -33,6 +33,7 @@ class FilesystemBackend(VectorStoreBackend):
         hnsw_index_cache: Any = None,
         memory_governor: Any = None,
         activation_id: Any = None,
+        use_chunks_db_for_new_collections: Optional[bool] = None,
     ):
         """Initialize FilesystemBackend.
 
@@ -46,6 +47,15 @@ class FilesystemBackend(VectorStoreBackend):
                 identity token for an ACTIVATED repo, threaded into the
                 FilesystemVectorStore this backend constructs. None
                 (default) preserves today's pure path-derived cache key.
+            use_chunks_db_for_new_collections: Story #1488 -- optional
+                explicit new-collection chunk-storage layout choice
+                (True=CHUNKS_DB, False=SHARDED_JSON) forwarded verbatim to
+                the FilesystemVectorStore. None (default) leaves the store
+                to fall back to the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var
+                (default SHARDED_JSON), so every existing call site is
+                unchanged. The CLI's `--new-collection-layout` flag and the
+                server's explicit `--new-collection-layout=chunks_db` child
+                arg both resolve to this param.
         """
         super().__init__(project_root)
         self.vectors_dir = self.project_root / ".code-indexer" / "index"
@@ -57,6 +67,8 @@ class FilesystemBackend(VectorStoreBackend):
         # Story #1458 AC11: server passes this for an activated-repo query;
         # None everywhere else (CLI, golden-repo/-global queries).
         self.activation_id = activation_id
+        # Story #1488: explicit new-collection layout (None -> env fallback).
+        self.use_chunks_db_for_new_collections = use_chunks_db_for_new_collections
         # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
         # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
         # constructed once per server query, so this fired on every hot-path call.
@@ -176,6 +188,7 @@ class FilesystemBackend(VectorStoreBackend):
             skip_staleness_check=skip_staleness,
             memory_governor=self.memory_governor,
             activation_id=self.activation_id,
+            use_chunks_db_for_new_collections=self.use_chunks_db_for_new_collections,
         )
 
     def health_check(self) -> bool:

@@ -8,6 +8,7 @@ but with continuous watching capabilities.
 import logging
 import time
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Set, Dict, Any, Optional
 from watchdog.events import FileSystemEventHandler
@@ -29,6 +30,7 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         git_topology_service: GitTopologyService,
         watch_metadata: WatchMetadata,
         debounce_seconds: float = 2.0,
+        mutation_lock: Optional[threading.RLock] = None,
     ):
         """Initialize git-aware watch handler.
 
@@ -38,6 +40,15 @@ class GitAwareWatchHandler(FileSystemEventHandler):
             git_topology_service: Git topology service for branch monitoring
             watch_metadata: Persistent metadata manager
             debounce_seconds: Time to wait before processing accumulated changes
+            mutation_lock: Optional daemon-wide chunk-mutation RLock (Codex
+                Finding, Story #1488). When injected by the daemon
+                (DaemonWatchManager -> here), each per-event mutation cycle in
+                `_process_pending_changes` acquires this SAME lock so an
+                ongoing watch re-index cannot race a concurrent manual
+                `cidx index` / `clean_data` on the same collection. Defaults
+                to None for standalone (non-daemon) `cidx watch`, which then
+                runs unaffected/unlocked -- byte-identical to before this
+                parameter existed.
         """
         super().__init__()
         self.config = config
@@ -45,6 +56,7 @@ class GitAwareWatchHandler(FileSystemEventHandler):
         self.git_topology_service = git_topology_service
         self.watch_metadata = watch_metadata
         self.debounce_seconds = debounce_seconds
+        self._mutation_lock = mutation_lock
 
         # Thread-safe change tracking
         self.pending_changes: Set[Path] = set()
@@ -288,12 +300,27 @@ class GitAwareWatchHandler(FileSystemEventHandler):
 
                 if relative_paths:
                     # Use SmartIndexer for git-aware processing (same as index command)
-                    stats = self.smart_indexer.process_files_incrementally(
-                        relative_paths,
-                        force_reprocess=False,  # Use normal timestamp-based change detection
-                        quiet=False,  # Show processing output for debugging
-                        watch_mode=True,  # Enable verified deletion for reliability
+                    #
+                    # Codex Finding (16th review, Story #1488): when the daemon
+                    # injects its mutation_lock, this per-event mutation cycle
+                    # must hold the SAME lock a manual daemon `cidx index` /
+                    # `clean_data` acquires, so the two cannot race on the
+                    # same collection. Held only for this one mutation call,
+                    # not the whole watch lifetime. `nullcontext()` makes
+                    # standalone (non-daemon) `cidx watch` -- which never
+                    # injects a lock -- byte-identical to before.
+                    lock_ctx = (
+                        self._mutation_lock
+                        if self._mutation_lock is not None
+                        else nullcontext()
                     )
+                    with lock_ctx:
+                        stats = self.smart_indexer.process_files_incrementally(
+                            relative_paths,
+                            force_reprocess=False,  # Use normal timestamp-based change detection
+                            quiet=False,  # Show processing output for debugging
+                            watch_mode=True,  # Enable verified deletion for reliability
+                        )
 
                     self.files_processed_count += stats.files_processed
                     self.indexing_cycles_count += 1

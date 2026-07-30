@@ -23,6 +23,7 @@ class BackendFactory:
         hnsw_cache: Optional[Any] = None,
         memory_governor: Optional[Any] = None,
         activation_id: Optional[str] = None,
+        use_chunks_db_for_new_collections: Optional[bool] = None,
     ) -> VectorStoreBackend:
         """Create appropriate backend from configuration.
 
@@ -37,6 +38,14 @@ class BackendFactory:
                 FilesystemVectorStore's cache-key construction. None
                 (default) for the CLI/solo/golden-repo path, preserving
                 today's pure path-derived cache key byte-for-byte.
+            use_chunks_db_for_new_collections: Story #1488 -- optional
+                explicit new-collection chunk-storage layout choice
+                (True=CHUNKS_DB, False=SHARDED_JSON) forwarded to the
+                FilesystemBackend/FilesystemVectorStore. None (default)
+                falls back to the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var
+                (default SHARDED_JSON), so every existing call site is
+                byte-identical. Set by the CLI `--new-collection-layout`
+                flag and the server's explicit spawn-site child arg.
 
         Returns:
             FilesystemBackend instance
@@ -52,6 +61,7 @@ class BackendFactory:
                 hnsw_index_cache=hnsw_cache,
                 memory_governor=memory_governor,
                 activation_id=activation_id,
+                use_chunks_db_for_new_collections=use_chunks_db_for_new_collections,
             )
 
         provider = config.vector_store.provider
@@ -63,6 +73,7 @@ class BackendFactory:
                 hnsw_index_cache=hnsw_cache,
                 memory_governor=memory_governor,
                 activation_id=activation_id,
+                use_chunks_db_for_new_collections=use_chunks_db_for_new_collections,
             )
         else:
             raise ValueError(f"Unsupported vector store provider: {provider}")

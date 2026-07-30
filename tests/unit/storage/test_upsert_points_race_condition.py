@@ -38,7 +38,9 @@ VECTOR_C = [0.3] * VECTOR_SIZE
 
 def make_store(tmp_path: Path) -> FilesystemVectorStore:
     """Create a fresh FilesystemVectorStore in tmp_path."""
-    store = FilesystemVectorStore(base_path=tmp_path)
+    store = FilesystemVectorStore(
+        base_path=tmp_path, use_chunks_db_for_new_collections=False
+    )
     store.create_collection(COLLECTION, vector_size=VECTOR_SIZE)
     store.begin_indexing(COLLECTION)
     return store

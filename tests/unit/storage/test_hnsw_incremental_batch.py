@@ -43,7 +43,9 @@ class TestHNSWIncrementalBatch:
     def test_track_added_vectors_during_session(self, tmp_path):
         """Test that new vectors are tracked as 'added' during indexing session."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -72,7 +74,9 @@ class TestHNSWIncrementalBatch:
     def test_track_updated_vectors_during_session(self, tmp_path):
         """Test that existing vectors are tracked as 'updated' during indexing session."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -100,7 +104,9 @@ class TestHNSWIncrementalBatch:
     def test_track_deleted_vectors_during_session(self, tmp_path):
         """Test that deleted vectors are tracked during indexing session."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -129,7 +135,9 @@ class TestHNSWIncrementalBatch:
     def test_tracking_cleared_after_end_indexing(self, tmp_path):
         """Test that change tracking is cleared after end_indexing completes."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -150,7 +158,9 @@ class TestHNSWIncrementalBatch:
     def test_temporal_collection_change_tracking(self, tmp_path):
         """Test that temporal_default collection tracks changes correctly."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "temporal_default"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -184,7 +194,9 @@ class TestHNSWIncrementalBatch:
     def test_incremental_hnsw_update_vs_full_rebuild(self, tmp_path):
         """Test incremental update is faster than full rebuild."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -226,7 +238,9 @@ class TestHNSWIncrementalBatch:
     def test_temporal_collection_incremental_hnsw(self, tmp_path):
         """Test that temporal collection uses incremental HNSW updates."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "temporal_default"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -282,7 +296,9 @@ class TestHNSWIncrementalBatch:
     def test_auto_detection_full_rebuild_on_first_index(self, tmp_path):
         """Test full rebuild on first index (no session changes)."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -303,7 +319,9 @@ class TestHNSWIncrementalBatch:
     def test_auto_detection_incremental_with_changes(self, tmp_path):
         """Test auto-detection chooses incremental when session has changes."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -327,7 +345,9 @@ class TestHNSWIncrementalBatch:
     def test_auto_detection_full_rebuild_when_forced(self, tmp_path):
         """Test that full rebuild can be forced when needed."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -350,7 +370,9 @@ class TestHNSWIncrementalBatch:
     def test_deletion_soft_deletes_in_hnsw(self, tmp_path):
         """Test that deleted vectors are soft-deleted in HNSW index."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 
@@ -381,7 +403,9 @@ class TestHNSWIncrementalBatch:
     def test_mixed_operations_tracking(self, tmp_path):
         """Test tracking of mixed add/update/delete operations in single session."""
         # Setup
-        store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "test_collection"
         store.create_collection(collection_name, vector_size=1536)
 

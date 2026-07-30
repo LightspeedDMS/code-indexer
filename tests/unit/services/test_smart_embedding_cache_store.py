@@ -26,7 +26,9 @@ class TestGetExistingContentHashes:
 
     def test_returns_empty_dict_for_unknown_file(self, tmp_path):
         """Returns empty dict when file has no stored vectors."""
-        store = FilesystemVectorStore(base_path=tmp_path / "index")
+        store = FilesystemVectorStore(
+            base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
+        )
         result = store.get_existing_content_hashes(
             "nonexistent/file.py", "voyage-code-3"
         )
@@ -35,7 +37,9 @@ class TestGetExistingContentHashes:
     def test_returns_hash_data_for_stored_vector(self, tmp_path):
         """Returns chunk_index -> {content_hash, vector, point_id} for a stored vector."""
         index_path = tmp_path / "index"
-        store = FilesystemVectorStore(base_path=index_path)
+        store = FilesystemVectorStore(
+            base_path=index_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "voyage-code-3"
         store.create_collection(collection_name=collection_name, vector_size=16)
 
@@ -69,7 +73,9 @@ class TestGetExistingContentHashes:
     def test_skips_vectors_without_content_hash(self, tmp_path):
         """Graceful degradation: vectors without content_hash are excluded from result."""
         index_path = tmp_path / "index"
-        store = FilesystemVectorStore(base_path=index_path)
+        store = FilesystemVectorStore(
+            base_path=index_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "voyage-code-3"
         store.create_collection(collection_name=collection_name, vector_size=16)
 
@@ -103,7 +109,9 @@ class TestGetExistingContentHashes:
         removing previous points for that file path as orphans.
         """
         index_path = tmp_path / "index"
-        store = FilesystemVectorStore(base_path=index_path)
+        store = FilesystemVectorStore(
+            base_path=index_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "voyage-code-3"
         store.create_collection(collection_name=collection_name, vector_size=16)
 
@@ -140,7 +148,9 @@ class TestGetExistingContentHashes:
     def test_returns_correct_vector_values(self, tmp_path):
         """The vector stored in the result must match what was originally upserted."""
         index_path = tmp_path / "index"
-        store = FilesystemVectorStore(base_path=index_path)
+        store = FilesystemVectorStore(
+            base_path=index_path, use_chunks_db_for_new_collections=False
+        )
         collection_name = "voyage-code-3"
         store.create_collection(collection_name=collection_name, vector_size=16)
 

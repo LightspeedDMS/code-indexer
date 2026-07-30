@@ -910,6 +910,14 @@ def _index_via_daemon(
                 "all_branches": kwargs.get("all_branches", False),
                 "max_commits": kwargs.get("max_commits"),
                 "since_date": kwargs.get("since_date"),
+                # Story #1488 (Codex Finding): carry the resolved
+                # `--new-collection-layout` choice across the RPC boundary so the
+                # daemon builds NEW collections in the requested layout. A bool
+                # (explicit) or None (flag absent -> daemon-side env/default) --
+                # both trivially serializable over rpyc.
+                "use_chunks_db_for_new_collections": kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
                 # rebuild_* flags not supported in daemon mode yet (early-exit paths in local mode)
             }
 

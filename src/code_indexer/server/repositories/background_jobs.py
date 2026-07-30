@@ -9,6 +9,7 @@ import json
 import logging
 import multiprocessing
 import queue
+import subprocess
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ import inspect
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
+from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List, Union
 from dataclasses import dataclass, asdict, fields
 
 # Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
@@ -1050,7 +1051,9 @@ class BackgroundJobManager:
     _SIGKILL_JOIN_SECONDS: float = 1.0
 
     def register_child_process(
-        self, job_id: str, process: "multiprocessing.Process"
+        self,
+        job_id: str,
+        process: Union["multiprocessing.Process", "subprocess.Popen[Any]"],
     ) -> None:
         """Register a child process for a job so it can be terminated on cancel.
 
@@ -1059,7 +1062,9 @@ class BackgroundJobManager:
 
         Args:
             job_id: The job that owns this process.
-            process: A multiprocessing.Process instance to track.
+            process: A multiprocessing.Process (X-Ray sandbox spawn path) or a
+                subprocess.Popen (X-Ray Rust dynlib spawn path, Bug #1495) to
+                track. _terminate_child_processes handles both polymorphically.
         """
         with self._child_processes_lock:
             if job_id not in self._child_processes:
@@ -1082,11 +1087,50 @@ class BackgroundJobManager:
         with self._child_processes_lock:
             self._child_processes.pop(job_id, None)
 
+    @staticmethod
+    def _process_is_alive(proc: Any) -> bool:
+        """Liveness check, polymorphic over multiprocessing.Process and
+        subprocess.Popen (Bug #1495).
+
+        multiprocessing.Process (X-Ray sandbox spawn path) exposes
+        is_alive(). subprocess.Popen (X-Ray Rust dynlib spawn path,
+        xray/rust_backend.py) has no is_alive()/join() at all -- it exposes
+        poll() instead, which returns None while the process is still
+        running.
+        """
+        if hasattr(proc, "is_alive"):
+            return bool(proc.is_alive())
+        return proc.poll() is None
+
+    @staticmethod
+    def _process_join(proc: Any, timeout: float) -> None:
+        """Bounded wait, polymorphic over multiprocessing.Process and
+        subprocess.Popen (Bug #1495).
+
+        multiprocessing.Process.join(timeout=...) returns (without raising)
+        whether or not the process exited in time. subprocess.Popen.wait(
+        timeout=...) instead RAISES subprocess.TimeoutExpired when the
+        timeout elapses -- that is not an error here, it means "still
+        alive", exactly like a join() that returns with the process still
+        running.
+        """
+        if hasattr(proc, "join"):
+            proc.join(timeout=timeout)
+        else:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
     def _terminate_child_processes(self, job_id: str) -> None:
         """Send SIGTERM then SIGKILL (after grace period) to all child processes.
 
         Implements the AC6 two-phase termination: SIGTERM first, then
         escalate to SIGKILL for processes that survive the grace period.
+        Handles both multiprocessing.Process and subprocess.Popen (Bug
+        #1495) registered handles -- terminate()/kill() exist natively on
+        both, only the liveness/wait APIs differ (see _process_is_alive /
+        _process_join above).
 
         Args:
             job_id: The job whose child processes should be terminated.
@@ -1096,15 +1140,15 @@ class BackgroundJobManager:
 
         # Phase 1: SIGTERM all alive processes
         for proc in processes:
-            if proc.is_alive():
+            if self._process_is_alive(proc):
                 proc.terminate()
 
         # Phase 2: wait grace period then SIGKILL survivors
         for proc in processes:
-            proc.join(timeout=self._SIGTERM_GRACE_SECONDS)
-            if proc.is_alive():
+            self._process_join(proc, self._SIGTERM_GRACE_SECONDS)
+            if self._process_is_alive(proc):
                 proc.kill()
-                proc.join(timeout=self._SIGKILL_JOIN_SECONDS)
+                self._process_join(proc, self._SIGKILL_JOIN_SECONDS)
 
     def cancel_job(
         self, job_id: str, username: str, is_admin: bool = False
