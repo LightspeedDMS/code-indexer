@@ -40,6 +40,7 @@ exact phase boundaries, per Codex's test-quality finding).
 
 import hashlib
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,10 @@ from code_indexer.storage.shared.collection_dedup_repair import (
     parse_unique_key,
     repair_duplicate_and_shifted_points,
 )
+from code_indexer.storage.shared.collection_migration import (
+    consolidate_collection_in_place,
+)
+from code_indexer.storage.sqlite_chunk_store import ChunkStore
 
 
 def _point_id(project_id: str, file_hash: str, index: int) -> str:
@@ -602,14 +607,26 @@ class TestRepairFailLoudDedupAmbiguity:
 
 
 class TestRepairGapContinuity:
-    """Claude F1: a genuine LINE GAP between consecutive chunks in a file
-    group (exceeding the real-chunker-derived tolerance proven above)
-    must fail loud rather than silently renumbering around missing
-    content."""
+    """Claude F1, AMENDED per live-staging E2E on the real evolution repo
+    (Bug #1502 follow-up): a genuine LINE GAP between consecutive chunks
+    in a file group (exceeding the real-chunker-derived tolerance proven
+    above), or two distinct records sharing an identical line range, no
+    longer refuses the WHOLE collection. Census across the real
+    evolution-repo collection found 586 of 10,579 file groups (5.5%)
+    carry genuine historical line gaps (chunks silently dropped by the
+    pre-fix code) -- whole-collection refusal on ANY such group would
+    make migration permanently impossible for that repo, and realistically
+    every long-lived production repo. Instead, the offending group alone
+    is EXCLUDED from the renumber plan (its records keep their existing
+    point_ids/labels, byte-identical) while the rest of the collection
+    (dedup, and renumbering of every OTHER, non-violating group) proceeds
+    normally, with a single summary WARNING documenting the skip."""
 
-    def test_genuine_line_gap_raises_and_leaves_untouched(self, tmp_path: Path) -> None:
+    def test_genuine_line_gap_skips_group_but_leaves_it_byte_identical(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         _write_collection_meta(tmp_path)
-        _write_record(
+        rec0 = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:gap",
@@ -620,7 +637,7 @@ class TestRepairGapContinuity:
         )
         # A real gap: chunk 2 starts at line 500, far beyond chunk 1's
         # line_end(10) + 1 -- no real chunker overlap could produce this.
-        _write_record(
+        rec1 = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:gap",
@@ -629,23 +646,33 @@ class TestRepairGapContinuity:
             line_start=500,
             line_end=510,
         )
-        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        before = {rec0: rec0.read_bytes(), rec1: rec1.read_bytes()}
 
-        with pytest.raises(DedupRepairAmbiguousError):
-            repair_duplicate_and_shifted_points(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=repair_mod.__name__):
+            result = repair_duplicate_and_shifted_points(tmp_path)
 
-        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
-        assert before == after
+        assert result.groups_skipped_renumber == 1
+        assert result.skipped_renumber_file_hashes == ["sha256:gap"]
+        assert result.records_renumbered == 0
+        # The gapped group's records are byte-identical -- untouched.
+        assert rec0.read_bytes() == before[rec0]
+        assert rec1.read_bytes() == before[rec1]
+        # Nothing else changed anywhere else in the collection either --
+        # no mutation at all was required, so no marker was ever written.
         assert not _marker_path(tmp_path).exists()
+        assert any("skipped renumbering" in r.message for r in caplog.records), (
+            "must emit exactly one WARNING summarizing the skipped group(s)"
+        )
 
-    def test_non_contiguous_duplicate_line_range_raises_and_leaves_untouched(
-        self, tmp_path: Path
+    def test_non_contiguous_duplicate_line_range_skips_group_but_leaves_it_byte_identical(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Two DISTINCT (non-duplicate-id) records in the same file group
-        sharing the exact same (line_start, line_end) range is a genuine
-        anomaly -- cannot be reliably ordered for canonical renumbering."""
+        sharing the exact same (line_start, line_end) range get the SAME
+        per-group graceful degradation as a genuine line gap -- not
+        whole-collection refusal."""
         _write_collection_meta(tmp_path)
-        _write_record(
+        rec0 = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:hhh",
@@ -654,7 +681,7 @@ class TestRepairGapContinuity:
             line_start=1,
             line_end=10,
         )
-        _write_record(
+        rec1 = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:hhh",
@@ -663,14 +690,207 @@ class TestRepairGapContinuity:
             line_start=1,
             line_end=10,
         )
-        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        before = {rec0: rec0.read_bytes(), rec1: rec1.read_bytes()}
 
-        with pytest.raises(DedupRepairAmbiguousError):
-            repair_duplicate_and_shifted_points(tmp_path)
+        with caplog.at_level(logging.WARNING, logger=repair_mod.__name__):
+            result = repair_duplicate_and_shifted_points(tmp_path)
 
-        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
-        assert before == after
+        assert result.groups_skipped_renumber == 1
+        assert result.skipped_renumber_file_hashes == ["sha256:hhh"]
+        assert result.records_renumbered == 0
+        assert rec0.read_bytes() == before[rec0]
+        assert rec1.read_bytes() == before[rec1]
         assert not _marker_path(tmp_path).exists()
+        assert any("skipped renumbering" in r.message for r in caplog.records)
+
+
+class TestPerGroupRenumberGracefulDegradation:
+    """Bug #1502 live-staging amendment, end-to-end: a collection with a
+    MIX of a genuinely-gapped group, a clean shifted-label group, and a
+    dedup-needing group must repair the clean/dedup groups normally,
+    leave the gapped group byte-identical, and still consolidate
+    end-to-end -- every group's content correctly present in chunks.db
+    afterward."""
+
+    def test_mixed_collection_dedups_and_renumbers_clean_groups_skips_gapped_group(
+        self, tmp_path: Path
+    ) -> None:
+        _write_collection_meta(tmp_path)
+
+        # Group A ("gapA"): genuine line gap -- must be skipped entirely,
+        # byte-identical, keeping its OLD (non-canonical) point_ids.
+        gap0 = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gapA",
+            index=0,
+            vector=[0.1, 0.1, 0.1, 0.1],
+            line_start=1,
+            line_end=10,
+        )
+        gap1 = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gapA",
+            index=1,
+            vector=[0.2, 0.2, 0.2, 0.2],
+            line_start=500,
+            line_end=510,
+        )
+        gap_before = {gap0: gap0.read_bytes(), gap1: gap1.read_bytes()}
+
+        # Group B ("cleanB"): shifted labels, no gap, no duplicate --
+        # must be renumbered canonically (5,6 -> 0,1).
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:cleanB",
+            index=5,
+            vector=[0.3, 0.3, 0.3, 0.3],
+            line_start=1,
+            line_end=10,
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:cleanB",
+            index=6,
+            vector=[0.4, 0.4, 0.4, 0.4],
+            line_start=11,
+            line_end=20,
+        )
+
+        # Group C ("dupC"): one duplicate point_id -- winner resolved via
+        # id_index.bin, loser quarantined; the surviving winner (the
+        # file's ONLY chunk) is then renumbered to its canonical index 0.
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:dupC",
+            index=7,
+            vector=[0.5, 0.5, 0.5, 0.5],
+            line_start=100,
+            line_end=110,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:dupC",
+            index=7,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=100,
+            line_end=110,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:dupC", 7)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        # ---- Repair-level assertions (direct call, before consolidation
+        # deletes the legacy JSON files) ----
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.duplicates_found == 1
+        assert result.duplicates_quarantined == 1
+        assert result.groups_skipped_renumber == 1
+        assert result.skipped_renumber_file_hashes == ["sha256:gapA"]
+        # cleanB's 2 records + dupC's 1 surviving winner all get a new
+        # canonical id (5->0, 6->1, 7->0 respectively).
+        assert result.records_renumbered == 3
+        assert gap0.read_bytes() == gap_before[gap0]
+        assert gap1.read_bytes() == gap_before[gap1]
+
+        # ---- Consolidation-level assertion: end-to-end success, every
+        # group's content correctly present in chunks.db ----
+        consolidation_result = consolidate_collection_in_place(tmp_path)
+        assert consolidation_result.status == "consolidated"
+
+        expected_gap_id_0 = _point_id("proj", "sha256:gapA", 0)
+        expected_gap_id_1 = _point_id("proj", "sha256:gapA", 1)
+        expected_clean_id_0 = _point_id("proj", "sha256:cleanB", 0)
+        expected_clean_id_1 = _point_id("proj", "sha256:cleanB", 1)
+        expected_dup_winner_id = _point_id("proj", "sha256:dupC", 0)
+
+        with ChunkStore(tmp_path / "chunks.db") as store:
+            all_ids = set(store.all_point_ids())
+            assert all_ids == {
+                expected_gap_id_0,
+                expected_gap_id_1,
+                expected_clean_id_0,
+                expected_clean_id_1,
+                expected_dup_winner_id,
+            }
+            # The dedup winner's content (vector [0.5,...]) survives --
+            # never the quarantined loser's [0.9,...].
+            winner_record = store.read(expected_dup_winner_id)
+            assert list(winner_record["vector"]) == [0.5, 0.5, 0.5, 0.5]
+
+    def test_second_repair_run_on_mixed_collection_is_a_clean_no_op(
+        self, tmp_path: Path
+    ) -> None:
+        """Idempotency: after a first run has resolved dedup/renumbered
+        the clean group, a SECOND run must be a pure identity transform
+        -- the gapped group is skipped again (still non-canonical), and
+        NOTHING else changes (no churn, no rebuild)."""
+        _write_collection_meta(tmp_path)
+        gap0 = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gapIdem",
+            index=0,
+            vector=[0.1, 0.1, 0.1, 0.1],
+            line_start=1,
+            line_end=10,
+        )
+        gap1 = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gapIdem",
+            index=1,
+            vector=[0.2, 0.2, 0.2, 0.2],
+            line_start=500,
+            line_end=510,
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:cleanIdem",
+            index=5,
+            vector=[0.3, 0.3, 0.3, 0.3],
+            line_start=1,
+            line_end=10,
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:cleanIdem",
+            index=6,
+            vector=[0.4, 0.4, 0.4, 0.4],
+            line_start=11,
+            line_end=20,
+        )
+
+        first = repair_duplicate_and_shifted_points(tmp_path)
+        assert first.groups_skipped_renumber == 1
+        assert first.records_renumbered == 2
+        assert gap0.exists() and gap1.exists()
+
+        before_second = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+
+        second = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert second.duplicates_found == 0
+        assert second.records_renumbered == 0
+        assert second.groups_skipped_renumber == 1
+        assert second.skipped_renumber_file_hashes == ["sha256:gapIdem"]
+        # Fully clean identity pass: no marker existed, nothing changed,
+        # so the fast path never touched id_index.bin/HNSW again either.
+        assert second.id_index_rebuilt is False
+        assert second.hnsw_rebuilt is False
+        assert not _marker_path(tmp_path).exists()
+
+        after_second = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        assert before_second == after_second, "second run must produce zero churn"
 
 
 class TestMalformedRecordPreCheck:

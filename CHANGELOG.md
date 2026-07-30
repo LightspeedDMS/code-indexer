@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.88.0] - 2026-07-30
+
+### Fixed
+
+- Bug #1502 amendment (live-staging finding): the dedup/renumber repair's per-file-group safety checks (genuine line gap between consecutive chunks; identical line-range ambiguity) no longer refuse the ENTIRE collection -- the offending group is excluded from renumbering (its records stay byte-identical, with stable post-dedup point_ids) and migration proceeds, with a summary WARNING reporting the skipped-group count and sample. Evidence from the real staging fleet: 5.5% of one large repo's file groups (586 of 10,579) carry genuine historical content gaps from chunks silently dropped by the pre-#1502 indexing bug, so whole-collection refusal made migration permanently impossible for long-lived repos. Whole-collection fail-loud is unchanged for genuine ambiguity: malformed or invalid-UTF-8 records, foreign identity formats, duplicate point_ids with no id_index winner, missing HNSW dimension/space metadata, and an empty tree under a stale repair marker.
+
 ## [11.87.0] - 2026-07-30
 
 ### Fixed
