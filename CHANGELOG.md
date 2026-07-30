@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.87.0] - 2026-07-30
+
+### Fixed
+
+- Bug #1502 (CRITICAL indexing-identity defect): a chunk's identity label (`chunk_index`, which feeds `point_id`) was assigned by position among the chunks that received a fresh embedding in that particular run, instead of the chunk's fixed position in the file. Cache-hit and skip patterns differ between runs, so re-processing an UNCHANGED file forged the same point_id onto different chunk content, accumulating duplicate point_ids in the legacy sharded layout (a real staging repo carried 969) and blocking the JSON-to-SQLite fleet migration (the consolidation scan correctly refuses duplicates and quarantines the repo). The chunker's positional index is now carried through to point creation on both the fresh and cached paths, and a failed embedding fails the whole file loudly instead of silently skipping and renumbering.
+- Fleet migration now runs a metadata-only dedup/renumber repair as step 0 of per-collection consolidation: duplicate point_ids are resolved by keeping the copy the live id_index already serves (losers are quarantined to a sidecar, never deleted); every file's surviving records are canonically renumbered by line order (identity transform for healthy collections); derived artifacts (`id_index.bin`, HNSW index + id_mapping) are rebuilt from the repaired records under a durable crash-recovery marker; hidden-branch filtering is preserved across the rebuild. All ambiguity (foreign identity formats, malformed or invalid-UTF-8 records, line-range gaps, missing HNSW metadata) fails loud pre-mutation, leaving the collection untouched -- foreign-format collections pass through with pre-existing behavior.
+- Multimodal file processing is now atomic with regular-chunk validation: multimodal points are no longer persisted before regular embeddings validate, and a multimodal-only file whose embeddings all fail reports failure instead of silent success.
+- Repaired 12 long-broken tests in `test_file_chunking_manager.py` (unfaithful mock chunker signature and broken test setup) and re-enabled the file in `fast-automation.sh`, where it had been excluded since September 2025.
+
 ## [11.86.0] - 2026-07-29
 
 ### Fixed
