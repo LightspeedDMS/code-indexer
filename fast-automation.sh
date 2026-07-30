@@ -189,7 +189,6 @@ python3 -m pytest \
     --ignore=tests/unit/test_codebase_audit_story9.py \
     --ignore=tests/unit/daemon/test_display_timing_fix.py \
     --ignore=tests/unit/services/test_clean_file_chunking_manager.py \
-    --ignore=tests/unit/services/test_file_chunking_manager.py \
     --ignore=tests/unit/services/test_file_chunk_batching_optimization.py \
     --ignore=tests/unit/services/test_daemon_fts_cache_performance.py \
     --ignore=tests/unit/services/test_rpyc_daemon.py \

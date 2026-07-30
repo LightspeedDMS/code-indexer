@@ -50,6 +50,11 @@ from code_indexer.storage.shared.chunk_layout import (
     resolve_chunk_layout,
     write_chunks_db_discriminator,
 )
+from code_indexer.storage.shared.collection_dedup_repair import (
+    DedupRepairAmbiguousError,
+    clear_stale_repair_marker,
+    repair_duplicate_and_shifted_points,
+)
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStore,
     InvalidVectorError,
@@ -2264,6 +2269,18 @@ def consolidate_collection_in_place(
             still_present_id_map,
             deletion_authorized=deletion_authorized,
         )
+        # Codex cleanup finding 6: a stale Bug #1502 repair marker can
+        # only ever survive from an OLDER, pre-remediation partial run --
+        # repair_duplicate_and_shifted_points itself never runs on this
+        # resume path. Clear it now that the resumed CHUNKS_DB state has
+        # been verified consolidated, so it can never linger unmanaged
+        # and confuse a future pass.
+        if clear_stale_repair_marker(collection_dir):
+            logger.info(
+                "consolidate_collection_in_place: cleared a stale Bug "
+                "#1502 repair marker for %s on the verified resume path",
+                collection_dir,
+            )
         if not deletion_authorized:
             # Physical-truth principle (Codex review finding): a REAL
             # deletion target must actually exist for this to count as
@@ -2288,6 +2305,52 @@ def consolidate_collection_in_place(
         )
         return ConsolidationResult(
             status="already_consolidated", old_files_deleted=deleted
+        )
+
+    # Step 0 (Bug #1502): metadata-only dedup + canonical renumber repair,
+    # BEFORE the scan below -- which would otherwise raise
+    # DuplicateSourceIdError on any duplicate point_id left behind by the
+    # (now-fixed) enumerate()-over-survivors chunk_index bug, or silently
+    # consolidate stale, line-order-shifted labels. A collection with zero
+    # duplicates and already-canonical labels is an identity transform
+    # (no-op) here. Never run on the resume path above -- duplicates were
+    # already resolved during the ORIGINAL fresh run that set the
+    # discriminator, so the still-present legacy files being scanned
+    # there are already dedup-clean by construction.
+    try:
+        repair_result = repair_duplicate_and_shifted_points(collection_dir)
+    except DedupRepairAmbiguousError as exc:
+        # Unify with this module's own pre-existing, general-purpose
+        # "refuse to flip, collection stays SHARDED_JSON" exception type
+        # -- preserves the contract other callers (e.g. the malformed-
+        # legacy-record test) already depend on. DuplicateSourceIdError
+        # is deliberately left UNWRAPPED (its own, separately-preserved
+        # contract -- see collection_dedup_repair.py's _plan_dedup).
+        raise ConsolidationVerificationError(
+            f"Migration refused for {collection_dir}: the Bug #1502 "
+            f"dedup/renumber repair step could not safely proceed "
+            f"({exc})"
+        ) from exc
+    if not repair_result.gate_passed:
+        logger.info(
+            "consolidate_collection_in_place: Bug #1502 repair passed "
+            "%s through UNTOUCHED -- whole-collection identity gate "
+            "rejected it (foreign/missing/self-inconsistent unique_key "
+            "found on at least one record); migration proceeds exactly "
+            "as it did before this repair existed.",
+            collection_dir,
+        )
+    elif repair_result.duplicates_found or repair_result.records_renumbered:
+        logger.info(
+            "consolidate_collection_in_place: Bug #1502 repair for %s -- "
+            "%d duplicate(s) found, %d quarantined, %d record(s) "
+            "renumbered, id_index_rebuilt=%s, hnsw_rebuilt=%s",
+            collection_dir,
+            repair_result.duplicates_found,
+            repair_result.duplicates_quarantined,
+            repair_result.records_renumbered,
+            repair_result.id_index_rebuilt,
+            repair_result.hnsw_rebuilt,
         )
 
     # Step 1: side-effect-free scan -- trustworthy point_id -> json_path
