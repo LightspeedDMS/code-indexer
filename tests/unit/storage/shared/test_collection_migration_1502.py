@@ -218,6 +218,15 @@ class TestConsolidateCollectionInPlaceWrapsRepairAmbiguity:
     def test_repair_ambiguous_error_wrapped_as_consolidation_verification_error(
         self, tmp_path: Path
     ) -> None:
+        """Bug #1502 live-staging amendment: a genuine line GAP no longer
+        raises (it is now a per-group graceful-degradation skip -- see
+        test_collection_dedup_repair_1502.py's
+        TestRepairGapContinuity/TestPerGroupRenumberGracefulDegradation).
+        This test's fixture uses a MIX of records with and without
+        line_start within one file group instead -- a genuinely
+        whole-collection-scope anomaly the amendment explicitly leaves
+        unchanged -- to keep exercising the wrap-into-
+        ConsolidationVerificationError contract."""
         _write_collection_meta(tmp_path)
         _write_record(
             tmp_path,
@@ -228,16 +237,18 @@ class TestConsolidateCollectionInPlaceWrapsRepairAmbiguity:
             line_start=1,
             line_end=10,
         )
-        # A real gap -- repair_duplicate_and_shifted_points raises
-        # DedupRepairAmbiguousError for this.
+        # A mix of records with and without line_start in the SAME file
+        # group -- repair_duplicate_and_shifted_points still raises
+        # DedupRepairAmbiguousError for this (whole-collection scope,
+        # unaffected by the per-group amendment).
         _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:gapwrap",
             index=1,
             vector=[0.5, 0.6, 0.7, 0.8],
-            line_start=500,
-            line_end=510,
+            line_start=None,
+            line_end=None,
         )
 
         with pytest.raises(ConsolidationVerificationError):

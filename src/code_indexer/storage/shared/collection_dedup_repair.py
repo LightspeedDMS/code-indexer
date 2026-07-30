@@ -121,7 +121,7 @@ import os
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -165,6 +165,12 @@ _TEMPORAL_BOOKKEEPING_FILENAMES = frozenset(
 
 _MAX_MALFORMED_SAMPLE_SIZE = 5
 
+# Bug #1502 live-staging amendment: cap on how many skipped-group
+# file_hash values are carried in DedupRepairResult / logged in the
+# single summary WARNING -- mirrors _MAX_MALFORMED_SAMPLE_SIZE's role
+# for the malformed-record pre-check.
+_MAX_SKIPPED_GROUP_SAMPLE_SIZE = 5
+
 
 class DedupRepairAmbiguousError(Exception):
     """Raised when a shifted-label file group cannot be safely,
@@ -198,6 +204,17 @@ class DedupRepairResult:
     id_index_rebuilt: bool = False
     #: True iff the HNSW index + id_mapping were rebuilt this call.
     hnsw_rebuilt: bool = False
+    #: Bug #1502 live-staging amendment: count of file groups EXCLUDED
+    #: from the renumber plan because they failed a per-group renumber-
+    #: safety check (a genuine line gap, or two distinct records sharing
+    #: an identical line range). Their existing point_ids/labels are
+    #: left untouched -- dedup still applies to them normally, since
+    #: dedup is id-keyed and independent of renumbering. This is no
+    #: longer a whole-collection failure (see module docstring).
+    groups_skipped_renumber: int = 0
+    #: Sample of skipped groups' file_hash values (capped at
+    #: _MAX_SKIPPED_GROUP_SAMPLE_SIZE), for logging/diagnostics.
+    skipped_renumber_file_hashes: List[str] = field(default_factory=list)
 
 
 def parse_unique_key(unique_key: Any) -> Tuple[str, str, int]:
@@ -555,18 +572,42 @@ def _plan_renumber(
     collection_dir: Path,
     survivors: Dict[str, Path],
     loaded_by_path: Dict[Path, Dict[str, Any]],
-) -> Dict[str, Tuple[str, str, int, int]]:
+) -> Tuple[Dict[str, Tuple[str, str, int, int]], List[Tuple[str, str, str]]]:
     """Pure planning: parse every survivor record's identity (guaranteed
     present/parseable/self-consistent by the whole-collection identity
     gate, which always runs before this function), group by
     (project_id, file_hash), sort by line order with a real gap-
     continuity check (Claude F1), and compute the canonical renumber
-    plan. Raises DedupRepairAmbiguousError on a genuine line gap or an
-    ambiguous duplicate line range; performs ZERO disk mutation.
+    plan.
+
+    Bug #1502 live-staging amendment: a per-GROUP renumber-safety
+    violation (a genuine line gap exceeding the real-chunker-derived
+    overlap tolerance, or two distinct records sharing an identical
+    (line_start, line_end) range) no longer fails the WHOLE collection.
+    Confirmed against a real evolution-repo census: 586 of 10,579 file
+    groups (5.5%) carry genuine historical line gaps -- chunks silently
+    dropped by the pre-#1502-fix code -- so refusing the whole
+    collection over ANY such group would make migration permanently
+    impossible for that repo, and realistically every long-lived
+    production repo. Instead, that ONE group is EXCLUDED from the
+    renumber plan (its records keep their existing point_ids/labels;
+    dedup, which is id-keyed and independent of renumbering, still
+    applies to it normally) and reported back to the caller as a
+    skipped-group entry, for a single summary WARNING. Renumbering
+    proceeds normally for every OTHER group. Raises
+    DedupRepairAmbiguousError ONLY for the genuinely whole-collection-
+    scope anomaly of a MIX of records with and without line_start
+    within one group (an internal-invariant-violation-level case,
+    unrelated to the two per-group checks above -- left unchanged by
+    this amendment). Performs ZERO disk mutation.
 
     Returns:
-        renumber_plan mapping old point_id -> (new_point_id,
-        new_unique_key, new_index, total_chunks).
+        A 2-tuple of:
+          - renumber_plan: old point_id -> (new_point_id,
+            new_unique_key, new_index, total_chunks), covering every
+            record in every group that passed BOTH per-group checks.
+          - skipped_groups: (project_id, file_hash, reason) for every
+            group excluded from the plan above.
     """
     groups: Dict[Tuple[str, str], List[_SurvivorRecord]] = {}
 
@@ -605,6 +646,7 @@ def _plan_renumber(
         )
 
     renumber_plan: Dict[str, Tuple[str, str, int, int]] = {}
+    skipped_groups: List[Tuple[str, str, str]] = []
 
     for (project_id, file_hash), items in groups.items():
         has_line_start = [it.line_start is not None for it in items]
@@ -626,25 +668,39 @@ def _plan_renumber(
                 )
             )
 
+            # Bug #1502 live-staging amendment: an identical-line-range
+            # ambiguity now excludes ONLY this group from the renumber
+            # plan (per-group graceful degradation), never the whole
+            # collection.
             seen_ranges = set()
+            identical_range_found: Optional[Tuple[Optional[int], Optional[int]]] = None
             for it in items:
                 line_range = (it.line_start, it.line_end)
                 if line_range in seen_ranges:
-                    raise DedupRepairAmbiguousError(
-                        f"Dedup repair refused for {collection_dir}: file "
-                        f"group {project_id!r}/{file_hash!r} has two "
-                        f"distinct (non-duplicate-id) records sharing the "
-                        f"identical line range {line_range} -- a "
-                        f"non-contiguous/ambiguous sequence that cannot be "
-                        f"reliably renumbered. Collection left untouched; "
-                        f"requires manual review."
-                    )
+                    identical_range_found = line_range
+                    break
                 seen_ranges.add(line_range)
+
+            if identical_range_found is not None:
+                skipped_groups.append(
+                    (
+                        project_id,
+                        file_hash,
+                        f"two distinct records share an identical line "
+                        f"range {identical_range_found} -- cannot be "
+                        f"reliably ordered for canonical renumbering",
+                    )
+                )
+                continue
 
             # Claude F1: real gap-continuity check, tolerance PROVEN
             # against genuine FixedSizeChunker output (see module-level
             # _GAP_CONTINUITY_SLACK docstring and
-            # TestFixedSizeChunkerOverlapDerivesRenumberTolerance).
+            # TestFixedSizeChunkerOverlapDerivesRenumberTolerance). Bug
+            # #1502 live-staging amendment: a genuine gap now excludes
+            # ONLY this group from the renumber plan, never the whole
+            # collection (see this function's docstring).
+            gap_reason: Optional[str] = None
             for i in range(len(items) - 1):
                 current_item = items[i]
                 next_item = items[i + 1]
@@ -654,17 +710,19 @@ def _plan_renumber(
                 assert current_item.line_end is not None
                 assert next_item.line_start is not None
                 if next_item.line_start > current_item.line_end + _GAP_CONTINUITY_SLACK:
-                    raise DedupRepairAmbiguousError(
-                        f"Dedup repair refused for {collection_dir}: file "
-                        f"group {project_id!r}/{file_hash!r} has a genuine "
-                        f"line gap between old_index={current_item.old_index} "
-                        f"(ends line {current_item.line_end}) and "
-                        f"old_index={next_item.old_index} (starts line "
+                    gap_reason = (
+                        f"genuine line gap between old_index="
+                        f"{current_item.old_index} (ends line "
+                        f"{current_item.line_end}) and old_index="
+                        f"{next_item.old_index} (starts line "
                         f"{next_item.line_start}) -- exceeds the real "
-                        f"chunker overlap tolerance, cannot reliably "
-                        f"renumber around missing content. Collection "
-                        f"left untouched; requires manual review."
+                        f"chunker overlap tolerance"
                     )
+                    break
+
+            if gap_reason is not None:
+                skipped_groups.append((project_id, file_hash, gap_reason))
+                continue
         else:
             items.sort(key=lambda it: it.old_index)
 
@@ -679,7 +737,7 @@ def _plan_renumber(
                 total,
             )
 
-    return renumber_plan
+    return renumber_plan, skipped_groups
 
 
 def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
@@ -937,7 +995,30 @@ def repair_duplicate_and_shifted_points(
         for point_id, paths in id_to_paths.items()
     }
 
-    renumber_plan = _plan_renumber(collection_dir, survivors, loaded_by_path)
+    renumber_plan, skipped_groups = _plan_renumber(
+        collection_dir, survivors, loaded_by_path
+    )
+
+    skipped_sample = [
+        file_hash for _, file_hash, _ in skipped_groups[:_MAX_SKIPPED_GROUP_SAMPLE_SIZE]
+    ]
+    if skipped_groups:
+        # Bug #1502 live-staging amendment: ONE summary WARNING for every
+        # group excluded from renumbering this call -- their labels
+        # remain non-canonical, but the collection as a whole still
+        # repairs and consolidates normally.
+        logger.warning(
+            "repair_duplicate_and_shifted_points: %d file group(s) in %s "
+            "skipped renumbering due to a genuine line gap or an "
+            "identical-line-range ambiguity (sample file_hash(es): %s) -- "
+            "their labels remain non-canonical; consequence: those files "
+            "will re-identify (receive new point_ids) on their next real "
+            "re-index, handled by the existing per-file orphan cleanup "
+            "mechanism.",
+            len(skipped_groups),
+            collection_dir,
+            skipped_sample,
+        )
 
     records_would_renumber = sum(
         1 for pid, plan in renumber_plan.items() if plan[0] != pid
@@ -948,7 +1029,12 @@ def repair_duplicate_and_shifted_points(
     if not rebuild_required:
         # Identity fast path: nothing to do, no marker existed -- zero
         # mutation, zero rebuild cost for an already-clean collection.
-        return DedupRepairResult(records_scanned=len(id_to_paths), gate_passed=True)
+        return DedupRepairResult(
+            records_scanned=len(id_to_paths),
+            gate_passed=True,
+            groups_skipped_renumber=len(skipped_groups),
+            skipped_renumber_file_hashes=skipped_sample,
+        )
 
     # Codex LOW finding 5: resolve the authoritative HNSW build
     # parameters BEFORE the marker is written -- an undeterminable value
@@ -969,6 +1055,11 @@ def repair_duplicate_and_shifted_points(
 
     records_renumbered = 0
     for old_point_id, path in survivors.items():
+        if old_point_id not in renumber_plan:
+            # Bug #1502 live-staging amendment: this record belongs to a
+            # group excluded from the renumber plan (genuine line gap or
+            # identical-line-range ambiguity) -- left byte-identical.
+            continue
         new_point_id, new_unique_key, new_index, total = renumber_plan[old_point_id]
         record = loaded_by_path[path]
         record["id"] = new_point_id
@@ -982,6 +1073,9 @@ def repair_duplicate_and_shifted_points(
         _atomic_write_json_record(path, record)
 
     # ---- PHASE 3: rebuild id_index.bin + HNSW from repaired truth ----
+    # (skipped groups' unchanged records are naturally included -- the
+    # rebuild scans the CURRENT JSON tree, which still contains them
+    # under their existing point_ids.)
     _rebuild_derived_artifacts(collection_dir, vector_dim, space)
 
     # ---- Marker deleted only after BOTH rebuilds complete ----
@@ -995,4 +1089,6 @@ def repair_duplicate_and_shifted_points(
         gate_passed=True,
         id_index_rebuilt=True,
         hnsw_rebuilt=True,
+        groups_skipped_renumber=len(skipped_groups),
+        skipped_renumber_file_hashes=skipped_sample,
     )
