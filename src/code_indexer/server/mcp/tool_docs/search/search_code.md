@@ -120,7 +120,7 @@ inputSchema:
     regex:
       type: boolean
       default: false
-      description: Interpret query as regex pattern. Only for fts/hybrid. Incompatible with fuzzy=true.
+      description: Interpret query as regex pattern. Only for fts/hybrid. Incompatible with fuzzy=true. FTS regex is term-level and case-INSENSITIVE (matches lowercased single tokens); anchors (^ $) and word boundaries (\b) are not supported and it cannot match across whitespace. Use lowercase token patterns; an unsupported construct returns HTTP 400.
     diff_type:
       type: string
       description: Filter temporal results by diff type (added/modified/deleted/renamed/binary). Comma-separate multiple.

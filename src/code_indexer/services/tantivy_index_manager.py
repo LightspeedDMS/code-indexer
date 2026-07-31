@@ -144,6 +144,95 @@ def _contains_valid_boolean_ops(query_text: str) -> bool:
     return False
 
 
+# Hex-escape widths for the non-braced forms (\xHH, \uHHHH, \UHHHHHHHH).
+_HEX_ESCAPE_WIDTHS: Dict[str, int] = {"x": 2, "u": 4, "U": 8}
+_HEX_DIGITS: frozenset = frozenset("0123456789abcdefABCDEF")
+
+
+def lowercase_regex_literals(pattern: str) -> str:
+    """Lowercase the literal characters of a regex pattern, escape-awarely.
+
+    The Tantivy FTS ``content`` field is lowercased at index time, so an
+    uppercase regex pattern (``Config``, ``[A-Z][a-z]+``, ``TODO|FIXME``)
+    can never match it. Case-sensitive regex is therefore impossible against
+    that field; FTS regex is treated as case-insensitive by lowercasing the
+    pattern's literals before it is handed to Tantivy's ``regex_query``.
+
+    A blind ``pattern.lower()`` would corrupt regex escapes -- flipping
+    ``\\W`` (non-word) into ``\\w`` (word), ``\\D`` into ``\\d``, ``\\B`` into
+    ``\\b``, etc. -- inverting the pattern's meaning. This helper preserves
+    every backslash escape verbatim and only lowercases genuine literal
+    characters (including the endpoints of character-class ranges such as
+    ``[A-Z]`` -> ``[a-z]``).
+
+    Preserved verbatim:
+      - single-char class escapes: ``\\w \\d \\s \\b \\W \\D \\S \\B`` (and any
+        other ``\\<char>``)
+      - Unicode property escapes: ``\\p{Lu}``, ``\\P{Nd}``, single-letter
+        ``\\pL``
+      - numeric escapes: ``\\xHH``, ``\\uHHHH``, ``\\UHHHHHHHH`` and their
+        braced forms ``\\x{...}`` / ``\\u{...}``
+
+    Args:
+        pattern: The regex pattern as supplied by the caller.
+
+    Returns:
+        The pattern with literal characters lowercased and all escapes intact.
+    """
+    result: List[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch != "\\":
+            # Literal character. ``str.lower()`` is a no-op on regex
+            # metacharacters (( ) | + * . { } [ ] ^ $ ?) and digits, so this
+            # is safe to apply unconditionally to non-escaped characters.
+            result.append(ch.lower())
+            i += 1
+            continue
+
+        # Backslash escape: copy the backslash and the following token
+        # verbatim so its meaning is never altered.
+        if i + 1 >= n:
+            # Dangling trailing backslash -- copy as-is.
+            result.append(ch)
+            i += 1
+            continue
+
+        nxt = pattern[i + 1]
+        result.append("\\")
+        result.append(nxt)
+        i += 2
+
+        if nxt in ("p", "P"):
+            # Unicode property: braced ``\p{...}`` or single-letter ``\pL``.
+            if i < n and pattern[i] == "{":
+                close = pattern.find("}", i)
+                end = (close + 1) if close != -1 else n
+                result.append(pattern[i:end])
+                i = end
+            elif i < n:
+                result.append(pattern[i])
+                i += 1
+        elif nxt in _HEX_ESCAPE_WIDTHS:
+            # Numeric escape: braced ``\x{...}`` or fixed-width hex digits.
+            if i < n and pattern[i] == "{":
+                close = pattern.find("}", i)
+                end = (close + 1) if close != -1 else n
+                result.append(pattern[i:end])
+                i = end
+            else:
+                width = _HEX_ESCAPE_WIDTHS[nxt]
+                consumed = 0
+                while consumed < width and i < n and pattern[i] in _HEX_DIGITS:
+                    result.append(pattern[i])
+                    i += 1
+                    consumed += 1
+
+    return "".join(result)
+
+
 class TantivyIndexManager:
     """
     Manages Tantivy full-text search index for CIDX.
@@ -687,7 +776,12 @@ class TantivyIndexManager:
             exclude_languages: Exclude programming languages (e.g., ["javascript", "typescript"]) - OR logic, takes precedence over languages
             path_filter: Filter by single path pattern (deprecated, use path_filters)
             query: Backwards compatibility parameter (deprecated, use query_text)
-            use_regex: Interpret query_text as regex pattern (incompatible with edit_distance > 0)
+            use_regex: Interpret query_text as regex pattern (incompatible with edit_distance > 0).
+                FTS regex is term-level: it matches within lowercased single tokens
+                and does NOT support anchors (^ $), word boundaries (\\b), or matching
+                across whitespace. It is case-INSENSITIVE by default -- the pattern's
+                literals are lowercased to match the lowercased index (pass
+                case_sensitive=True to match against the case-preserving field instead).
 
         Returns:
             List of dictionaries with keys:
@@ -756,11 +850,23 @@ class TantivyIndexManager:
             if use_regex:
                 # Build regex query using Tantivy's regex_query
                 assert self._schema is not None  # For mypy
+                # The default (case-insensitive) FTS field "content" is
+                # lowercased at index time, so an uppercase regex pattern can
+                # never match it. Lowercase the pattern's literals -- escape-
+                # awarely so class escapes like \W \D \b are preserved -- to
+                # make FTS regex case-insensitive against that field. When
+                # case_sensitive=True we search "content_raw" (case preserved),
+                # so the pattern is used verbatim.
+                effective_pattern = (
+                    query_text
+                    if case_sensitive
+                    else lowercase_regex_literals(query_text)
+                )
                 try:
                     text_query = TantivyQuery.regex_query(
                         self._schema,
                         search_field,
-                        query_text,  # The regex pattern
+                        effective_pattern,  # The regex pattern
                     )
                 except Exception as e:
                     # Wrap any regex compilation errors with clear message
