@@ -519,6 +519,18 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]: ...
 
+    # Bug #1506: ordinary-refresh integrity-gate per-repo failure
+    # quarantine state (see global_repos/refresh_integrity_gate.py).
+    def record_refresh_integrity_failure(
+        self, golden_alias: str, detail: str
+    ) -> int: ...
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None: ...
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 

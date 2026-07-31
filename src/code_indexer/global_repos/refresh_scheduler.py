@@ -40,6 +40,10 @@ from .snapshot_retention import (
     discover_and_enforce_temporal_retention,
     enforce_snapshot_retention,
 )
+from .refresh_integrity_gate import (
+    RefreshIntegrityGateResult,
+    run_refresh_integrity_gate,
+)
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import (
@@ -74,6 +78,27 @@ logger = logging.getLogger(__name__)
 # a local repo and is completely excluded from the scheduled auto-refresh cycle.
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
+
+# Bug #1506: N consecutive ordinary-refresh integrity-gate failures for the
+# same golden_alias are QUARANTINED (loudly logged for operator attention)
+# -- mirrors description_refresh_scheduler.py's
+# PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
+# FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
+_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+
+# Bug #1506 4th-pass review Item 1: WriteLockManager.acquire()'s default TTL
+# is 3600s (1 hour). _held_write_lock_for_publish() holds this lock for the
+# ENTIRE index -> integrity-gate -> snapshot -> swap-alias publish sequence,
+# which -- per CLAUDE.md's "Indexing Path Has No Job/Subprocess/Per-File
+# Timeouts" invariant (Bug #1218) -- can legitimately run for hours on a
+# large golden repo (e.g. evolution-scale). A short TTL would let another
+# writer (DependencyMapService, LangfuseTraceSyncService, etc) evict the
+# lock as "stale" and acquire it while indexing is still genuinely
+# in-progress, defeating the exclusivity guarantee the lock exists to
+# provide. Mirrors the fleet migration orchestrator's own
+# MIGRATION_LOCK_TTL_SECONDS precedent (server/services/fleet_migration/
+# orchestrator.py) for the identical class of problem.
+_REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
 
 
 def has_files_with_extensions(
@@ -1796,6 +1821,27 @@ class RefreshScheduler:
                 try:
                     logger.info(f"Starting refresh for {alias_name}")
 
+                    # Bug #1506 third-pass review Item 1 (Codex Finding 2,
+                    # confirmed by independent code reading): this check
+                    # MUST run before ANYTHING else in this function --
+                    # before current_target/repo_info are read, before
+                    # GitPullUpdater is ever constructed, before the
+                    # branch-verification subprocess calls (including a
+                    # real `git checkout` branch reset), and before
+                    # updater.has_changes()/update(). It previously ran
+                    # much later (right before the write-lock/publish
+                    # sequence), so a quarantined repo -- one that should
+                    # be fully skipped -- still performed real git-pull
+                    # mutation work on the actual golden repo clone before
+                    # being skipped. See
+                    # _refresh_integrity_quarantine_skip_result()
+                    # docstring.
+                    _quarantine_skip = self._refresh_integrity_quarantine_skip_result(
+                        alias_name
+                    )
+                    if _quarantine_skip is not None:
+                        return _quarantine_skip
+
                     # Get current alias target
                     current_target = self.alias_manager.read_alias(alias_name)
                     if not current_target:
@@ -2299,37 +2345,92 @@ class RefreshScheduler:
                             source_path, alias_name
                         )
 
-                    # Index source first, then create versioned snapshot (Story #229)
-                    # Story #482 PATH C: Forward progress_callback into _index_source
-                    # Bug #1388: pass an alias-bound orphan_event_callback
-                    # (see _make_hnsw_orphan_event_logger docstring in
-                    # golden_repo_manager.py) so a marker line scraped from
-                    # the child's stderr is re-logged tagged with this
-                    # repo's alias -- a channel entirely separate from
-                    # progress_callback, which is forwarded unwrapped.
-                    # Reuses the SAME factory the golden-repo
-                    # add/registration path already applies -- never a
-                    # second, duplicated copy.
-                    self._index_source(
-                        alias_name=alias_name,
-                        source_path=source_path,
-                        progress_callback=progress_callback,
-                        orphan_event_callback=_make_hnsw_orphan_event_logger(
-                            alias_name
-                        ),
-                        force_reconcile=force_reconcile,
-                    )
-                    new_index_path = self._create_snapshot(
-                        alias_name=alias_name, source_path=source_path
-                    )
+                    # Bug #1506 third-pass review Item 1: the quarantine
+                    # check used to run HERE, but has been moved to the
+                    # very top of this function (right after "Starting
+                    # refresh") so a quarantined repo is skipped before
+                    # any git-pull/branch-verification work runs -- see
+                    # the comment there and
+                    # _refresh_integrity_quarantine_skip_result()'s
+                    # docstring. Do not re-add a second check here.
 
-                    # Swap alias to new index
-                    logger.info(f"Swapping alias {alias_name} to new index")
-                    self.alias_manager.swap_alias(
-                        alias_name=alias_name,
-                        new_target=new_index_path,
-                        old_target=current_target,
-                    )
+                    # Bug #1506 Codex review Finding 1: hold the SAME
+                    # per-repo write lock external writers use for the
+                    # ENTIRE sequence below (index -> gate -> snapshot ->
+                    # swap), not just the earlier non-blocking
+                    # is_write_locked() pre-check -- see
+                    # _held_write_lock_for_publish() docstring.
+                    with self._held_write_lock_for_publish(
+                        repo_name
+                    ) as _write_lock_acquired:
+                        if not _write_lock_acquired:
+                            logger.info(
+                                f"Skipping refresh for {alias_name}, could "
+                                f"not acquire write lock (race with "
+                                f"external writer)"
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "Skipped, write lock held",
+                            }
+
+                        # Index source first, then create versioned snapshot (Story #229)
+                        # Story #482 PATH C: Forward progress_callback into _index_source
+                        # Bug #1388: pass an alias-bound orphan_event_callback
+                        # (see _make_hnsw_orphan_event_logger docstring in
+                        # golden_repo_manager.py) so a marker line scraped from
+                        # the child's stderr is re-logged tagged with this
+                        # repo's alias -- a channel entirely separate from
+                        # progress_callback, which is forwarded unwrapped.
+                        # Reuses the SAME factory the golden-repo
+                        # add/registration path already applies -- never a
+                        # second, duplicated copy.
+                        self._index_source(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            progress_callback=progress_callback,
+                            orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                alias_name
+                            ),
+                            force_reconcile=force_reconcile,
+                        )
+
+                        # Bug #1506: run-boundary durability-flush +
+                        # integrity gate (still under the write lock
+                        # acquired above). _run_and_publish_integrity_gate
+                        # ALSO calls reset_refresh_integrity_failure() on
+                        # a pass and record_refresh_integrity_failure() on
+                        # a failure internally -- see its docstring; no
+                        # separate reset/record call is needed here.
+                        gate_result = self._run_and_publish_integrity_gate(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            current_target=current_target,
+                        )
+                        if not gate_result.passed:
+                            detail_summary = "; ".join(
+                                f"{f.collection_dir}: {f.detail}"
+                                for f in gate_result.failures
+                            )
+                            return {
+                                "success": False,
+                                "alias": alias_name,
+                                "message": "Refresh integrity gate failed; publish skipped",
+                                "integrity_gate_detail": detail_summary,
+                            }
+
+                        new_index_path = self._create_snapshot(
+                            alias_name=alias_name, source_path=source_path
+                        )
+
+                        # Swap alias to new index
+                        logger.info(f"Swapping alias {alias_name} to new index")
+                        self.alias_manager.swap_alias(
+                            alias_name=alias_name,
+                            new_target=new_index_path,
+                            old_target=current_target,
+                        )
 
                     # Bug #881 Phase 2: Evict stale HNSW cache entries for the old snapshot
                     # immediately after swap, rather than waiting for 10-minute TTL.
@@ -2456,6 +2557,279 @@ class RefreshScheduler:
                     )
                 else:
                     _tracker.complete_job(_tracker_job_id)
+
+    def _held_write_lock_for_publish(self, repo_name: str):
+        """
+        Context manager (Bug #1506 Codex review Finding 1) that acquires
+        the SAME per-repo write lock external writers
+        (DependencyMapService, LangfuseTraceSyncService, etc) use, for
+        the ENTIRE index -> integrity-gate -> snapshot -> swap-alias
+        publish sequence in _execute_refresh() -- not just the earlier
+        non-blocking is_write_locked() pre-check.
+
+        Without this, a writer could start mutating chunks.db
+        concurrently with the gate's fresh-connection
+        ``PRAGMA integrity_check``, producing a false integrity failure
+        (reading a DB mid-write) or, worse, triggering a self-heal
+        reflink-restore over a database that was merely caught mid-write.
+
+        Yields ``True`` if the lock was acquired (caller should proceed)
+        or ``False`` if another owner already holds it (caller should
+        skip this cycle gracefully, exactly like the existing
+        ``is_write_locked()`` pre-check) -- never raises on a failed
+        acquire. Releases the lock in a ``finally`` on every exit path
+        (success, an early return, or an exception propagating through)
+        when it was actually acquired.
+
+        Bug #1506 4th-pass review Item 2: this lock's exclusivity
+        guarantee is only real if EVERY writer that acquires it also
+        skips its own real work on a failed acquisition -- a writer that
+        records the acquired-flag but proceeds regardless (as
+        ``DependencyMapService``'s three call sites did before that
+        review round) would mutate the SAME cidx-meta source files this
+        method's publish sequence is indexing/gating, defeating mutual
+        exclusion from the other direction. That defect is now fixed
+        (``run_full_analysis``/``run_delta_analysis``/
+        ``run_refinement_cycle`` in ``dependency_map_service.py`` all
+        check their own acquisition result before proceeding); any FUTURE
+        writer added to this coordination protocol must do the same.
+
+        Usage::
+
+            with self._held_write_lock_for_publish(repo_name) as acquired:
+                if not acquired:
+                    return {...skip...}
+                ...index -> gate -> snapshot -> swap...
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            # Bug #1506 4th-pass review Item 1: bypass acquire_write_lock()'s
+            # wrapper (which hardcodes WriteLockManager's short 3600s
+            # default) and pass an explicit, long TTL directly to
+            # write_lock_manager.acquire() -- mirrors the fleet migration
+            # orchestrator's MIGRATION_LOCK_TTL_SECONDS bypass of the same
+            # wrapper, for the identical reason: this lock must survive a
+            # genuinely multi-hour indexing run. Release goes through the
+            # SAME write_lock_manager API directly (not release_write_lock's
+            # wrapper) for symmetry with the acquire call.
+            acquired = self.write_lock_manager.acquire(
+                repo_name,
+                owner_name="refresh_scheduler",
+                ttl_seconds=_REFRESH_PUBLISH_LOCK_TTL_SECONDS,
+            )
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    released = self.write_lock_manager.release(
+                        repo_name, owner_name="refresh_scheduler"
+                    )
+                    if not released:
+                        logger.warning(
+                            f"_held_write_lock_for_publish: release for "
+                            f"'{repo_name}' returned False (owner mismatch) "
+                            f"-- lock file may be left behind for staleness "
+                            f"eviction to reclaim"
+                        )
+
+        return _ctx()
+
+    def _get_refresh_integrity_quarantine_state_if_active(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bug #1506 Codex review Finding 2: read persisted refresh-integrity
+        quarantine state for *alias_name* and return it ONLY when the
+        consecutive-failure count has reached
+        ``_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD`` -- ``None`` otherwise.
+
+        Previously, ``record_refresh_integrity_failure``/
+        ``reset_refresh_integrity_failure`` were called correctly on
+        every cycle, but nothing ever READ this state to make a skip
+        decision -- a repeatedly-corrupting repo just kept retrying
+        indexing (and corrupting) forever. This is the first real caller
+        of ``get_refresh_integrity_failure_state``.
+
+        Bug #1506 third-pass review Item 2 (Codex NEW HIGH): a metadata-
+        backend read failure is deliberately NOT swallowed here -- it
+        propagates to the caller. This method used to catch every
+        exception and return ``None`` ("not quarantined, proceed"),
+        which meant a genuinely-quarantined alias (3+ consecutive
+        corruption failures) whose read merely failed transiently would
+        be silently treated as healthy and re-indexed anyway -- exactly
+        backwards for a mechanism whose entire purpose is to stop
+        retrying a repeatedly-corrupting repo. See
+        ``_refresh_integrity_quarantine_skip_result`` for the fail-closed
+        handling of this exception.
+        """
+        state: Optional[Dict[str, Any]] = (
+            self.golden_repo_metadata.get_refresh_integrity_failure_state(alias_name)
+        )
+        if (
+            state is not None
+            and state.get("consecutive_failure_count", 0)
+            >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD
+        ):
+            return state
+        return None
+
+    def _refresh_integrity_quarantine_skip_result(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Returns a skip-result dict if *alias_name* must NOT be indexed
+        this cycle, else ``None`` (proceed). Extracted so
+        ``_execute_refresh`` only needs a short call.
+
+        Two distinct skip reasons, both fail-closed (Bug #1506 third-pass
+        review Item 2):
+        - ``"integrity_quarantined"``: the read succeeded and confirmed
+          *alias_name* is at/above the consecutive-failure threshold.
+        - ``"quarantine_check_failed"``: the metadata-backend read itself
+          raised. This is deliberately a DIFFERENT skip reason from
+          ``"integrity_quarantined"`` -- an operator/log reader must be
+          able to tell "we are UNCERTAIN whether this repo is
+          quarantined" apart from "we CONFIRMED this repo is
+          quarantined". Either way, indexing is skipped this cycle: a
+          transient read failure must never make a possibly-quarantined
+          repo look clean and get re-indexed.
+        """
+        try:
+            quarantine_state = self._get_refresh_integrity_quarantine_state_if_active(
+                alias_name
+            )
+        except Exception as read_exc:
+            logger.error(
+                f"Bug #1506: failed to read refresh-integrity quarantine "
+                f"state for {alias_name} -- failing this refresh cycle "
+                f"CLOSED (skipping indexing) rather than silently treating "
+                f"a possibly-quarantined repo as healthy: "
+                f"{type(read_exc).__name__}: {read_exc}"
+            )
+            return {
+                "success": False,
+                "alias": alias_name,
+                "message": (
+                    "Refresh integrity quarantine state could not be read; "
+                    "skipping indexing this cycle to fail closed"
+                ),
+                "skipped": "quarantine_check_failed",
+            }
+        if quarantine_state is None:
+            return None
+        logger.error(
+            f"Bug #1506: {alias_name} is QUARANTINED after "
+            f"{quarantine_state['consecutive_failure_count']} consecutive "
+            f"refresh-integrity gate failures -- skipping indexing this "
+            f"cycle. Manual operator intervention is required to resume "
+            f"scheduled refresh for this repo."
+        )
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": "Refresh integrity quarantine active; indexing skipped",
+            "skipped": "integrity_quarantined",
+            "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
+        }
+
+    def _record_integrity_gate_failure(
+        self, alias_name: str, gate_result: RefreshIntegrityGateResult
+    ) -> None:
+        """Log + persist a Bug #1506 integrity-gate failure (quarantine
+        bookkeeping), extracted from ``_run_and_publish_integrity_gate``
+        purely to keep that method short."""
+        detail_summary = "; ".join(
+            f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
+        )
+        logger.error(
+            f"Bug #1506: refusing to publish refresh for "
+            f"{alias_name} -- integrity gate failed for "
+            f"{len(gate_result.failures)} collection(s): "
+            f"{detail_summary}. The already-published alias "
+            f"continues serving the last verified-good snapshot."
+        )
+        try:
+            failure_count = self.golden_repo_metadata.record_refresh_integrity_failure(
+                alias_name, detail_summary
+            )
+            if failure_count >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD:
+                logger.error(
+                    f"Bug #1506: {alias_name} has failed the refresh "
+                    f"integrity gate {failure_count} consecutive times -- "
+                    f"QUARANTINED. Operator attention is required to "
+                    f"investigate the underlying corruption source."
+                )
+        except Exception as quarantine_exc:
+            logger.error(
+                f"Bug #1506: failed to record refresh-integrity "
+                f"quarantine state for {alias_name} (non-fatal): "
+                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
+            )
+
+    def _reset_integrity_gate_quarantine(self, alias_name: str) -> None:
+        """Clear any prior Bug #1506 quarantine state on a gate pass,
+        extracted from ``_run_and_publish_integrity_gate`` purely to keep
+        that method short."""
+        try:
+            self.golden_repo_metadata.reset_refresh_integrity_failure(alias_name)
+        except Exception as reset_exc:
+            # Bug #1506 4th-pass review Item 3: bumped from WARNING to
+            # ERROR -- if this bookkeeping write repeatedly fails, the
+            # consecutive-failure-count circuit breaker never gets reset
+            # either, silently confusing future quarantine decisions. This
+            # does not fail the current cycle (already correct: the gate
+            # itself already decided to publish), it only ensures the
+            # swallowed failure is loudly visible for operator diagnosis.
+            logger.error(
+                f"Bug #1506: failed to reset refresh-integrity quarantine "
+                f"state for {alias_name} (non-fatal): "
+                f"{type(reset_exc).__name__}: {reset_exc}"
+            )
+
+    def _run_and_publish_integrity_gate(
+        self,
+        alias_name: str,
+        source_path: str,
+        current_target: Optional[str],
+    ) -> RefreshIntegrityGateResult:
+        """
+        Shared Bug #1506 run-boundary durability-flush + integrity gate
+        invocation, plus quarantine bookkeeping (record-on-failure /
+        reset-on-pass). Reused by BOTH the live ``_execute_refresh``
+        publish sequence AND the legacy ``_create_new_index()``
+        delegator (Codex review Finding 5) so a repeatedly-corrupting
+        repo is quarantined identically regardless of which entry point
+        indexed it, and so the underlying gate primitives can never be
+        bypassed by a second caller.
+
+        Never raises for a data-integrity failure -- returns the
+        ``RefreshIntegrityGateResult`` (whose ``.passed`` the caller must
+        check) so each caller can apply its own failure-reporting
+        convention (an early-return dict for ``_execute_refresh``, a
+        raised ``RuntimeError`` for ``_create_new_index``).
+        """
+        healthy_index_dir = (
+            Path(current_target) / ".code-indexer" / "index"
+            if current_target and current_target != source_path
+            else None
+        )
+        clone_backend = (
+            getattr(self._snapshot_manager, "_clone_backend", None)
+            if self._snapshot_manager is not None
+            else None
+        )
+        gate_result = run_refresh_integrity_gate(
+            source_index_dir=Path(source_path) / ".code-indexer" / "index",
+            healthy_index_dir=healthy_index_dir,
+            clone_backend=clone_backend,
+        )
+        if not gate_result.passed:
+            self._record_integrity_gate_failure(alias_name, gate_result)
+            return gate_result
+
+        self._reset_integrity_gate_quarantine(alias_name)
+        return gate_result
 
     def _index_source(
         self,
@@ -3161,10 +3535,53 @@ class RefreshScheduler:
             Path to new index directory (only if validation passes)
 
         Raises:
-            RuntimeError: If any step fails (with cleanup of partial artifacts)
+            RuntimeError: If any step fails (with cleanup of partial
+                artifacts), including a Bug #1506 integrity-gate failure
+                (Codex review Finding 5): this delegator previously
+                published chunks.db unchecked. It now runs the SAME
+                gate _execute_refresh() uses, via
+                _run_and_publish_integrity_gate(), before ever calling
+                _create_snapshot(). Also raised if the Bug #1506
+                third-pass review Item 3 write lock (see below) cannot
+                be acquired.
+
+        Bug #1506 third-pass review Item 3 (Codex NEW MEDIUM,
+        defense-in-depth): the index -> gate -> snapshot sequence below
+        is wrapped in the SAME _held_write_lock_for_publish() context
+        manager _execute_refresh()'s publish sequence uses. This method
+        has no production callers today (test/docstring-only backward-
+        compat delegator), but wrapping it now closes the exact race
+        Finding 1 fixed for _execute_refresh -- a concurrent external
+        writer mutating chunks.db mid-gate -- so a future caller cannot
+        silently reintroduce it.
         """
-        self._index_source(alias_name=alias_name, source_path=source_path)
-        return self._create_snapshot(alias_name=alias_name, source_path=source_path)
+        repo_name = alias_name.removesuffix("-global")
+        with self._held_write_lock_for_publish(repo_name) as _write_lock_acquired:
+            if not _write_lock_acquired:
+                raise RuntimeError(
+                    f"Bug #1506: could not acquire write lock for "
+                    f"{alias_name} (held by another owner) -- refusing "
+                    f"to index/publish via _create_new_index()"
+                )
+
+            self._index_source(alias_name=alias_name, source_path=source_path)
+
+            current_target = self.alias_manager.read_alias(alias_name)
+            gate_result = self._run_and_publish_integrity_gate(
+                alias_name=alias_name,
+                source_path=source_path,
+                current_target=current_target,
+            )
+            if not gate_result.passed:
+                detail_summary = "; ".join(
+                    f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
+                )
+                raise RuntimeError(
+                    f"Bug #1506: refresh integrity gate failed for "
+                    f"{alias_name} via _create_new_index(): {detail_summary}"
+                )
+
+            return self._create_snapshot(alias_name=alias_name, source_path=source_path)
 
     def _is_local_config_valid(self, config_json_path: Path) -> bool:
         """
