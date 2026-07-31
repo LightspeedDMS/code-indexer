@@ -425,22 +425,29 @@ def reset_scip_metrics() -> None:
 
 
 def _result_is_success(result: Optional["GenerationResult"]) -> bool:
-    """True iff EVERY discovered project succeeded (complete success).
+    """True iff the build reached its expected terminal outcome — safe to mark fresh.
 
-    EVO-65021 MAJOR-3: PARTIAL success must NOT be treated as terminal success.
-    On a mixed-language repo the Phase-1 TS/JS-only sandbox image exits 69 for
-    every non-TS project, so ``successful_projects > 0`` would mask the failed
-    languages, poison the ``.build_commit`` freshness marker (they'd never be
-    retried at that commit), and — because backpressure is only consulted when
-    this returns False — defeat 429 retry. Use ``GenerationResult``'s real
-    ``is_complete_success()`` predicate (``total_projects > 0 and
-    failed_projects == 0``), matching every other consumer (``cli_scip.py``,
-    ``scip_self_healing.py``). Partial success falls through to
-    ``_detect_backpressure`` / fail-soft and does NOT write the freshness marker.
+    EVO-65021 freshness design (supersedes the plain ``is_complete_success``):
+    freshness is "no UNEXPECTED failures", not "every project succeeded".
+
+    * MAJOR-3 (kept intact): a PARTIAL success with a REAL failure must NOT be
+      treated as terminal success — it would mask the failed language, poison
+      the ``.build_commit`` marker, and (because backpressure is only consulted
+      when this returns False) defeat 429 retry.
+    * Freshness-thrash fix: on the Phase-1 TS/JS-only sandbox image every non-TS
+      project exits 69 ("no SCIP indexer for language"), an EXPECTED, benign
+      outcome. If that blocked the marker, a mixed-language repo could NEVER
+      write ``.build_commit`` and would re-enqueue a doomed rebuild forever.
+
+    So use ``GenerationResult.is_fresh_eligible()`` — ``total_projects > 0`` and
+    NO real (non-unsupported-language) failures. A repo whose only failures are
+    unsupported languages is fresh-eligible (``on_success`` fires, marker
+    written); a repo with a genuine build failure or HTTP 429 backpressure is
+    not, and falls through to ``_detect_backpressure`` / fail-soft.
     """
     if result is None:
         return False
-    return bool(result.is_complete_success())
+    return bool(result.is_fresh_eligible())
 
 
 def _detect_backpressure(result: Optional["GenerationResult"]) -> bool:

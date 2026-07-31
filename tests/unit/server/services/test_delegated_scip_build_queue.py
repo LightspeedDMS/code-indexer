@@ -28,15 +28,18 @@ def _gen_result(
     successful: int = 0,
     failed: int = 0,
     total: Optional[int] = None,
+    unsupported: int = 0,
     stderrs: List[str] | None = None,
 ):
     """Build a real ``GenerationResult`` so the queue exercises its real predicates.
 
-    EVO-65021 MAJOR-3: ``_result_is_success`` now calls
-    ``GenerationResult.is_complete_success()`` (``total>0 and failed==0``), so the
-    stub must carry ``total_projects``/``failed_projects``, not just
-    ``successful_projects``. ``project_results`` are lightweight namespaces the
-    backpressure scanner reads via ``getattr``.
+    EVO-65021: ``_result_is_success`` now calls
+    ``GenerationResult.is_fresh_eligible()`` (``total>0`` and no REAL failure,
+    where a real failure is ``failed - unsupported_language_projects``). The stub
+    therefore carries ``total_projects``/``failed_projects`` and, for the
+    freshness design, ``unsupported`` (benign exit-69 unsupported-language
+    skips). ``project_results`` are lightweight namespaces the backpressure
+    scanner reads via ``getattr``.
     """
     project_results = [
         SimpleNamespace(indexer_result=SimpleNamespace(stderr=se))
@@ -49,6 +52,7 @@ def _gen_result(
         successful_projects=successful,
         failed_projects=failed,
         project_results=project_results,
+        unsupported_language_projects=unsupported,
     )
 
 
@@ -206,6 +210,62 @@ class TestPartialSuccessNotTerminalSuccess:
         # No 429 marker → terminal fail-soft drop, dedupe key released.
         assert m.get("delegated_build_skipped") == 1
         assert q.get_status()["inflight_keys"] == []
+
+    def test_unsupported_language_only_partial_is_marked_fresh(self):
+        """Freshness design: a mixed repo whose ONLY failures are unsupported
+        languages (exit 69) IS fresh-eligible → on_success fires (marker written),
+        so it does not thrash. Distinct from a REAL partial failure above."""
+        q = _queue()
+        recorded: List[object] = []
+        build = DelegatedScipBuild(
+            alias="mixed",
+            dedupe_key="mixed@1",
+            # 1 TS project ok, 1 non-TS project exit-69 (unsupported) → all
+            # failures are benign unsupported-language skips.
+            run_build=lambda: _gen_result(successful=1, failed=1, unsupported=1),
+            on_success=lambda r: recorded.append(r.successful_projects),
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1
+        m = get_scip_metrics()
+        assert m.get("delegated_build_success") == 1
+        assert recorded == [1]  # on_success fired with the produced-index count
+        assert m.get("delegated_build_skipped") is None
+        assert q.get_status()["inflight_keys"] == []
+
+    def test_pure_unsupported_repo_is_marked_fresh(self):
+        """A repo with NO supported project (all exit-69, zero produced indexes)
+        is still fresh-eligible so it does not re-enqueue forever."""
+        q = _queue()
+        recorded: List[object] = []
+        build = DelegatedScipBuild(
+            alias="pure-java",
+            dedupe_key="pure-java@1",
+            run_build=lambda: _gen_result(successful=0, failed=2, unsupported=2),
+            on_success=lambda r: recorded.append(r.successful_projects),
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1
+        assert get_scip_metrics().get("delegated_build_success") == 1
+        assert recorded == [0]  # produced no index → on_success sees 0
+
+    def test_real_failure_alongside_unsupported_is_not_fresh(self):
+        """A genuine build failure next to unsupported-language skips is NOT
+        fresh-eligible (MAJOR-3 partial-masking preserved for real failures)."""
+        q = _queue()
+        recorded: List[object] = []
+        build = DelegatedScipBuild(
+            alias="mixed",
+            dedupe_key="mixed@1",
+            # 3 failed: 2 unsupported (benign) + 1 real toolchain failure.
+            run_build=lambda: _gen_result(successful=1, failed=3, unsupported=2),
+            on_success=lambda r: recorded.append(r),
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1
+        assert get_scip_metrics().get("delegated_build_success") is None
+        assert recorded == []
+        assert get_scip_metrics().get("delegated_build_skipped") == 1
 
     def test_partial_success_with_429_is_retried_not_marked_fresh(self):
         q = _queue()

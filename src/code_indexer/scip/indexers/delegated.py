@@ -248,6 +248,19 @@ class DelegatedIndexer(SCIPIndexer):
                 f"{self._repo_root}: {exc}",
             )
 
+        # EVO-65021: success is judged by the presence of ``output_dir/index.scip``
+        # AFTER this call (``_map_result``). ``output_dir`` is the bind-mounted
+        # golden-repo path REUSED across runs, so a stale ``index.scip`` from a
+        # prior successful build would otherwise satisfy that check even if the
+        # sandbox produced nothing this run (a no-op / short-circuit that still
+        # exits 0). Delete it first so the existence check can only pass on a file
+        # THIS call wrote — keeping cidx's determination consistent with the
+        # sandbox wrapper, which itself deletes stale output and gates on a fresh
+        # non-empty file.
+        stale_removed = self._remove_stale_index(output_dir)
+        if stale_removed is not None:
+            return self._failure(start_time, stale_removed)
+
         request = self._build_request(
             workspace_id=workspace_id,
             project_path=project_path,
@@ -307,6 +320,31 @@ class DelegatedIndexer(SCIPIndexer):
         return self._map_result(
             run_result, output_dir=output_dir, start_time=start_time
         )
+
+    def _remove_stale_index(self, output_dir: Path) -> Optional[str]:
+        """Delete a pre-existing ``output_dir/index.scip`` before dispatch.
+
+        Returns ``None`` on success (nothing there, or removed), or an error
+        message string when the stale file could not be removed — in which case
+        the caller fails loud rather than risk judging success against a file
+        this run did not write.
+        """
+        scip_out = output_dir / "index.scip"
+        try:
+            scip_out.unlink()
+            logger.info(
+                "DelegatedIndexer: removed stale index.scip at %s before "
+                "delegating (this-run success gating)",
+                scip_out,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return (
+                f"could not remove stale index.scip at {scip_out} before the "
+                f"delegated build: {exc}"
+            )
+        return None
 
     def _map_result(
         self,

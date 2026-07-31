@@ -489,7 +489,7 @@ class GoldenRepoMetadataPostgresBackend:
                     SELECT alias, repo_url, default_branch, clone_path, created_at,
                            enable_temporal, temporal_options,
                            category_id, category_auto_assigned,
-                           COALESCE(wiki_enabled, FALSE)
+                           COALESCE(wiki_enabled, FALSE), workspace_id
                     FROM golden_repos_metadata
                     """
                 )

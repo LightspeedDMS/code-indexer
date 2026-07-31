@@ -201,6 +201,37 @@ class TestFreshness:
         record_scip_build_commit(scip_dir, "sha1")
         assert scip_db_is_fresh(tmp_path, scip_dir) is False
 
+    def test_no_index_marker_is_fresh_without_db(self, tmp_path, monkeypatch):
+        """Freshness thrash fix: a build where every project was an unsupported
+        language produced no DB and never will. A ``no-index`` marker at HEAD is
+        fresh WITHOUT a DB so the repo does not re-enqueue forever."""
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        record_scip_build_commit(scip_dir, "sha1", produced_index=False)
+        assert (scip_dir / ".build_commit").read_text().strip() == "sha1 no-index"
+        assert scip_db_is_fresh(tmp_path, scip_dir) is True
+
+    def test_no_index_marker_not_fresh_when_commit_differs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha2")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        record_scip_build_commit(scip_dir, "sha1", produced_index=False)
+        assert scip_db_is_fresh(tmp_path, scip_dir) is False
+
+    def test_produced_index_marker_still_requires_db(self, tmp_path, monkeypatch):
+        """A produced-index build writes the bare commit and STILL requires the
+        DB on disk (so a later DB loss forces a rebuild)."""
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        record_scip_build_commit(scip_dir, "sha1", produced_index=True)
+        assert (scip_dir / ".build_commit").read_text().strip() == "sha1"
+        # DB missing → not fresh even though the marker matches HEAD.
+        assert scip_db_is_fresh(tmp_path, scip_dir) is False
+
     def test_not_fresh_when_marker_missing(self, tmp_path, monkeypatch):
         # Finding-6 (6): every repo that had a SCIP index built BEFORE EVO-65021
         # has a built .scip.db but NO .build_commit marker. On first upgrade it
@@ -240,9 +271,11 @@ class TestFreshness:
 
 
 class TestActivatedRepoNamespace:
-    """CRITICAL-2: an activated alias must NOT be resolved via the golden manager."""
+    """CRITICAL-2 / MAJOR: an activated alias is not resolved via the golden
+    manager, and it falls through to the LOCAL path (NOT_DELEGATED) rather than
+    being force-skipped (which would suppress the only path that can index it)."""
 
-    def test_activated_repo_skips_without_golden_resolution(
+    def test_activated_repo_returns_not_delegated_without_golden_resolution(
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
@@ -263,10 +296,34 @@ class TestActivatedRepoNamespace:
             build_queue=_queue(),
             generator_builder=lambda *a, **k: gen_calls.append(1),
         )
-        assert out is ScipDelegationOutcome.SKIPPED
-        assert get_scip_metrics().get("delegated_skipped_activated_repo") == 1
+        # NOT_DELEGATED → the caller runs its local subprocess path (which can
+        # index the per-user checkout and honours --clear).
+        assert out is ScipDelegationOutcome.NOT_DELEGATED
+        assert get_scip_metrics().get("delegated_not_supported_activated_repo") == 1
         # No generator built, nothing enqueued against the wrong workspace.
         assert gen_calls == []
+
+    def test_activated_repo_with_clear_returns_not_delegated(
+        self, tmp_path, monkeypatch
+    ):
+        """activated_repo=True + clear=True together → NOT_DELEGATED (the local
+        path honours --clear). Guards the reachability gap the reviewer flagged:
+        the only production caller passing clear also passes activated_repo."""
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        grm = SimpleNamespace(
+            resolve_workspace_id=lambda *_a, **_k: pytest.fail("must not resolve")
+        )
+        out = funnel_scip_generation(
+            alias="my-repo",
+            repo_root=tmp_path,
+            config=_delegated_cfg(),
+            clear=True,
+            activated_repo=True,
+            golden_repo_manager=grm,
+            build_queue=_queue(),
+            generator_builder=lambda *a, **k: pytest.fail("must not build"),
+        )
+        assert out is ScipDelegationOutcome.NOT_DELEGATED
 
 
 class TestClearRebuild:

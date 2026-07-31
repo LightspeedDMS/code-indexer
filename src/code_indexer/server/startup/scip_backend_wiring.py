@@ -41,7 +41,7 @@ def _check_scip_backend_health(endpoint: str, api_key: str) -> None:
     except Exception as exc:
         raise RuntimeError(
             f"sandbox-mcp not reachable at {endpoint} for the delegated scip "
-            f"backend. Ensure sandbox-mcp is running and CIDX_SCIP_BACKEND / "
+            f"backend. Ensure sandbox-mcp is running and the config "
             f"workspace_mcp.endpoint is correct. Error: {exc}"
         ) from exc
     logger.info("sandbox-mcp (scip backend) health check: OK")
@@ -92,6 +92,18 @@ def build_scip_generator(
     backend_type = getattr(config, "scip_backend", "local") or "local"
     logger.info("Building SCIPGenerator with scip_backend=%r", backend_type)
 
+    # EVO-65021 fail-loud: an unrecognised scip_backend value must NOT silently
+    # downgrade to a local build. A typo (e.g. "delegatd") would otherwise come
+    # up "healthy" as local and then fail every project with tool-not-found on
+    # the toolchain-less indexing pods, with nothing naming the bad value.
+    if backend_type not in ScipBackendFactory._VALID_BACKENDS:
+        raise RuntimeError(
+            f"Unsupported scip_backend={backend_type!r}. Valid options: "
+            f"{', '.join(ScipBackendFactory._VALID_BACKENDS)}. "
+            "There is NO silent fallback to a local build — fix the "
+            "scip_backend config value."
+        )
+
     if backend_type == "delegated":
         # EVO-65021: delegate the compile step to sandbox-mcp. Fail-fast on an
         # unreachable sandbox-mcp — NO silent local fallback (mirrors the
@@ -120,7 +132,7 @@ def build_scip_generator(
             workspace_id=workspace_id,
         )
 
-    # "local" or any unrecognised value — default to the local subprocess map.
+    # "local" (validated above — an unrecognised value already raised).
     logger.info("SCIPGenerator: using local subprocess indexers")
     return SCIPGenerator(
         Path(repo_root),

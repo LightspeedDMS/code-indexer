@@ -71,6 +71,75 @@ class TestWorkspaceIdPersistence:
         assert by_alias["repo-c"]["workspace_id"] == "ws-cafef00d"
         assert by_alias["repo-d"]["workspace_id"] is None
 
+    def test_list_repos_with_categories_includes_workspace_id(self, backend):
+        """Backend parity: the categories listing carries workspace_id too, so
+        it never silently omits the key the Postgres mirror returns."""
+        _add(backend, "repo-g", workspace_id="ws-1a2b3c")
+        _add(backend, "repo-h")
+        by_alias = {r["alias"]: r for r in backend.list_repos_with_categories()}
+        assert by_alias["repo-g"]["workspace_id"] == "ws-1a2b3c"
+        assert by_alias["repo-h"]["workspace_id"] is None
+
+
+def _count_top_level_columns(select_body: str) -> int:
+    """Count comma-separated SELECT columns, ignoring commas inside parens
+    (e.g. ``COALESCE(wiki_enabled, FALSE)`` is one column)."""
+    depth = 0
+    count = 1
+    for ch in select_body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            count += 1
+    return count
+
+
+class TestPostgresQueryColumnCount:
+    """CRITICAL (EVO-65021): every Postgres query feeding ``_row_to_dict_full``
+    (which reads ``row[10]``) MUST SELECT 11 columns, else the mapper raises
+    ``IndexError`` on the first row. ``list_repos_with_categories`` regressed
+    this. Static guard so it fails without a live PostgreSQL."""
+
+    def _select_body(self, method) -> str:
+        import inspect
+        import re
+
+        src = inspect.getsource(method)
+        m = re.search(
+            r"SELECT\s+(.*?)\s+FROM\s+golden_repos_metadata",
+            src,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert m is not None, f"no SELECT found in {method.__name__}"
+        return m.group(1)
+
+    def test_full_mapper_queries_select_eleven_columns(self):
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        for method in (
+            GoldenRepoMetadataPostgresBackend.get_repo,
+            GoldenRepoMetadataPostgresBackend.list_repos_with_categories,
+        ):
+            body = self._select_body(method)
+            assert "workspace_id" in body, method.__name__
+            assert _count_top_level_columns(body) == 11, (
+                f"{method.__name__} must SELECT 11 columns to feed "
+                f"_row_to_dict_full (row[10]); got {_count_top_level_columns(body)}"
+            )
+
+    def test_basic_mapper_query_selects_nine_columns(self):
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        body = self._select_body(GoldenRepoMetadataPostgresBackend.list_repos)
+        assert "workspace_id" in body
+        assert _count_top_level_columns(body) == 9
+
 
 class TestUpdateWorkspaceId:
     def test_update_workspace_id_backfills_existing_repo(self, backend):

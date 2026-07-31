@@ -105,23 +105,97 @@ class TestSetWorkspaceId:
         assert manager.set_workspace_id("nobody", "ws-0000") is False
 
 
-class TestCaptureWiring:
-    """The registration capture path accepts + forwards workspace_id.
+class TestAuthoritativeResolve:
+    """EVO-65021 (Bug #1316 shape): resolve_workspace_id must read the
+    AUTHORITATIVE shared-backend state, not a stale per-worker cache HIT — its
+    outcome decides whether a delegated SCIP build runs."""
 
-    The full execute_add_golden_repo_work workflow (clone + index + global
-    activation) is exercised elsewhere; here we assert only that the public
-    entry points expose a workspace_id parameter (so a caller that knows the
-    id can retain it) without running that heavy workflow.
+    def test_resolve_sees_cross_worker_backfill_despite_stale_cache(
+        self, manager, tmp_path
+    ):
+        # Repo registered with NO workspace_id; this worker's cache holds it.
+        _register(manager, "svc-x", tmp_path / "golden-repos" / "svc-x")
+        assert manager.get_workspace_id("svc-x") is None  # primes the cache
+        assert manager.golden_repos["svc-x"].workspace_id is None
+
+        # ANOTHER worker backfills the shared backend directly — this worker's
+        # in-memory cache is NOT refreshed (simulating cross-worker staleness;
+        # we deliberately bypass set_workspace_id's local model_copy).
+        manager._sqlite_backend.update_workspace_id("svc-x", "ws-backfilled")
+
+        # A cache-first probe still returns the stale None...
+        assert manager.get_workspace_id("svc-x") is None
+        # ...but resolve_workspace_id reads authoritatively and sees the value,
+        # so the delegated build is NOT wrongly fail-softed as "no workspace_id".
+        assert manager.resolve_workspace_id("svc-x") == "ws-backfilled"
+        # Authoritative read also refreshed the cache.
+        assert manager.golden_repos["svc-x"].workspace_id == "ws-backfilled"
+
+
+class TestCaptureWiring:
+    """The registration capture path actually FORWARDS workspace_id end-to-end.
+
+    These drive real behaviour (not a signature check): the GoldenRepo model hop
+    and the DB-layer add_repo hand-off. Dropping ``workspace_id=workspace_id``
+    from either now fails a test.
     """
 
-    def test_add_golden_repo_accepts_workspace_id_param(self):
-        import inspect
+    def test_model_hop_preserves_workspace_id(self):
+        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
-        sig = inspect.signature(GoldenRepoManager.add_golden_repo)
-        assert "workspace_id" in sig.parameters
+        repo = GoldenRepo(
+            alias="svc-x",
+            repo_url="https://example.com/r.git",
+            default_branch="main",
+            clone_path="/tmp/x",
+            created_at="2026-01-01T00:00:00+00:00",
+            workspace_id="ws-model-hop",
+        )
+        assert repo.to_dict()["workspace_id"] == "ws-model-hop"
+        # Round-trips back through the constructor (get_repo -> GoldenRepo(**row)).
+        assert GoldenRepo(**repo.to_dict()).workspace_id == "ws-model-hop"
 
-    def test_execute_add_golden_repo_work_accepts_workspace_id_param(self):
-        import inspect
+    def test_execute_add_golden_repo_work_retains_workspace_id_to_db(
+        self, manager, tmp_path, monkeypatch
+    ):
+        """Drive the real forwarding: stub the clone/index/activation seams, then
+        assert the DB row (real sqlite backend) stores the workspace_id."""
+        clone_dir = tmp_path / "golden-repos" / "svc-cap"
+        clone_dir.mkdir(parents=True, exist_ok=True)
 
-        sig = inspect.signature(GoldenRepoManager.execute_add_golden_repo_work)
-        assert "workspace_id" in sig.parameters
+        # Stub the heavy seams (clone + post-clone index) — leave add_repo real.
+        monkeypatch.setattr(manager, "_remove_orphan_clone_for_retry", lambda *a: False)
+        monkeypatch.setattr(manager, "_clone_repository", lambda *a: str(clone_dir))
+        monkeypatch.setattr(manager, "_is_in_place_registration", lambda *a: True)
+        monkeypatch.setattr(
+            manager, "_execute_post_clone_workflow", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            manager, "_register_lifecycle_after_registration", lambda *a, **k: None
+        )
+
+        # Stub global activation (writes pointer files) so it succeeds without git.
+        import code_indexer.global_repos.global_activation as ga
+
+        class _FakeActivator:
+            def __init__(self, *a, **k):
+                pass
+
+            def activate_golden_repo(self, *a, **k):
+                return None
+
+        monkeypatch.setattr(ga, "GlobalActivator", _FakeActivator)
+
+        result = manager.execute_add_golden_repo_work(
+            repo_url="https://example.com/svc-cap.git",
+            alias="svc-cap",
+            default_branch="main",
+            workspace_id="ws-retained-42",
+        )
+        assert result["success"] is True
+
+        # The real DB row carries the workspace_id (guards the add_repo hand-off).
+        row = manager._sqlite_backend.get_repo("svc-cap")
+        assert row["workspace_id"] == "ws-retained-42"
+        # And it is resolvable through the accessor stream-01 consumes.
+        assert manager.resolve_workspace_id("svc-cap") == "ws-retained-42"

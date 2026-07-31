@@ -120,3 +120,133 @@ class TestBackendSeam:
         call = recorder.calls[0]
         assert call["workspace_id"] == "W-77"
         assert call["language"] == "typescript"
+
+
+class _FixedResultIndexer(SCIPIndexer):
+    """Returns a caller-specified FAILED result (exit code / stderr)."""
+
+    def __init__(self, *, exit_code: int, stderr: str = "failed"):
+        self._exit_code = exit_code
+        self._stderr = stderr
+
+    def generate(self, project_dir, output_dir, build_system, *, workspace_id=None, language=None):  # noqa: E501
+        return IndexerResult(
+            status=IndexerStatus.FAILED,
+            duration_seconds=0.0,
+            output_file=None,
+            stdout="",
+            stderr=self._stderr,
+            exit_code=self._exit_code,
+        )
+
+    def is_available(self) -> bool:
+        return True
+
+    def get_version(self) -> Optional[str]:
+        return "test"
+
+
+class TestFreshnessClassification:
+    """EVO-65021 freshness thrash fix: exit-69 (unsupported language) is a benign
+    outcome that must NOT block freshness, while a real failure must."""
+
+    def test_unsupported_language_exit_69_is_fresh_eligible(self, tmp_path):
+        """A discovered project that exits 69 counts as unsupported (benign)."""
+        (tmp_path / "package.json").write_text("{}")
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": _FixedResultIndexer(exit_code=69)},
+        )
+        result = gen.generate()
+        assert result.total_projects == 1
+        assert result.failed_projects == 1
+        assert result.unsupported_language_projects == 1
+        assert result.real_failed_projects() == 0
+        assert result.is_fresh_eligible() is True
+
+    def test_real_failure_is_not_fresh_eligible(self, tmp_path):
+        """A genuine build failure (exit 1) is NOT counted as unsupported."""
+        (tmp_path / "package.json").write_text("{}")
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={
+                "typescript": _FixedResultIndexer(exit_code=1, stderr="toolchain boom")
+            },
+        )
+        result = gen.generate()
+        assert result.failed_projects == 1
+        assert result.unsupported_language_projects == 0
+        assert result.real_failed_projects() == 1
+        assert result.is_fresh_eligible() is False
+
+    def test_no_indexer_for_language_is_unsupported(self, tmp_path):
+        """A discovered language with no indexer in the map is a benign skip."""
+        (tmp_path / "package.json").write_text("{}")
+        gen = SCIPGenerator(tmp_path, indexer_map={})  # no typescript indexer
+        result = gen.generate()
+        assert result.total_projects == 1
+        assert result.failed_projects == 1
+        assert result.unsupported_language_projects == 1
+        assert result.is_fresh_eligible() is True
+
+
+class TestUnsupportedLanguageHelper:
+    def test_exit_69_detected(self):
+        from code_indexer.scip.generator import (
+            indexer_result_is_unsupported_language,
+        )
+
+        r = IndexerResult(
+            status=IndexerStatus.FAILED,
+            duration_seconds=0.0,
+            output_file=None,
+            stdout="",
+            stderr="whatever",
+            exit_code=69,
+        )
+        assert indexer_result_is_unsupported_language(r) is True
+
+    def test_marker_string_detected(self):
+        from code_indexer.scip.generator import (
+            indexer_result_is_unsupported_language,
+        )
+
+        r = IndexerResult(
+            status=IndexerStatus.FAILED,
+            duration_seconds=0.0,
+            output_file=None,
+            stdout="",
+            stderr="No indexer available for language: ruby",
+            exit_code=-1,
+        )
+        assert indexer_result_is_unsupported_language(r) is True
+
+    def test_real_failure_not_detected(self):
+        from code_indexer.scip.generator import (
+            indexer_result_is_unsupported_language,
+        )
+
+        r = IndexerResult(
+            status=IndexerStatus.FAILED,
+            duration_seconds=0.0,
+            output_file=None,
+            stdout="",
+            stderr="build failed: missing dependency",
+            exit_code=1,
+        )
+        assert indexer_result_is_unsupported_language(r) is False
+
+    def test_backpressure_429_not_detected(self):
+        from code_indexer.scip.generator import (
+            indexer_result_is_unsupported_language,
+        )
+
+        r = IndexerResult(
+            status=IndexerStatus.FAILED,
+            duration_seconds=0.0,
+            output_file=None,
+            stdout="",
+            stderr="sandbox_scip failed (HTTP 429): too many requests",
+            exit_code=-1,
+        )
+        assert indexer_result_is_unsupported_language(r) is False

@@ -13,6 +13,10 @@ Behaviour by backend (:func:`funnel_scip_generation`):
 * ``scip_backend='local'`` (default) → :data:`ScipDelegationOutcome.NOT_DELEGATED`;
   the caller runs its existing local subprocess path **unchanged**, and the
   Claude-Code self-heal (``scip_self_healing.py``) stays available for it.
+  Activated (per-user) repos also return ``NOT_DELEGATED`` even under the
+  ``delegated`` backend — they have no retained ``workspace_id`` and the
+  delegated backend cannot address a per-user checkout, so the local subprocess
+  path (which honours ``--clear``) is the only path that can index them.
 * ``scip_backend='delegated'`` → the delegated build is enqueued on the
   serialized :class:`DelegatedScipBuildQueue` and the caller does NOT run a local
   build. The delegated build *supersedes* the Claude-Code self-heal (the sandbox
@@ -55,6 +59,16 @@ logger = logging.getLogger(__name__)
 # were built at, for the idempotency/freshness check (task #6).
 _BUILD_COMMIT_MARKER = ".build_commit"
 
+# Token appended to the marker (``<commit> no-index``) when a fresh-eligible
+# build produced NO index DB at all — i.e. every discovered project was an
+# unsupported language (exit 69) under the Phase-1 sandbox image. Such a repo
+# has nothing to index at this commit and retrying will not change that, so the
+# freshness check must treat it as fresh WITHOUT requiring an ``index.scip.db``
+# on disk (there will never be one), otherwise it re-enqueues forever. A build
+# that DID produce an index writes the bare commit and still requires the DB to
+# be present (so a later DB loss forces a rebuild).
+_NO_INDEX_TOKEN = "no-index"
+
 
 class ScipDelegationOutcome(Enum):
     """Result of routing one repo's SCIP generation through the funnel."""
@@ -81,31 +95,52 @@ def _scip_db_exists(scip_dir: Path) -> bool:
 def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     """True iff the built SCIP DBs already match ``repo_root``'s current commit.
 
-    Requires (a) a resolvable HEAD, (b) at least one ``index.scip.db`` present,
-    and (c) the ``.build_commit`` marker equal to HEAD. Any missing piece → not
-    fresh (rebuild). Pins the build to the same workspace snapshot cidx indexes.
+    Requires (a) a resolvable HEAD and (b) the ``.build_commit`` marker's commit
+    equal to HEAD. In the normal case it ALSO requires (c) at least one
+    ``index.scip.db`` present, so a later DB loss forces a rebuild. The one
+    exception is a marker tagged ``no-index`` (a fresh-eligible build in which
+    every project was an unsupported language, so no DB was or ever will be
+    produced): that is fresh WITHOUT a DB, otherwise the repo re-enqueues a
+    doomed rebuild every cycle. Any missing piece → not fresh (rebuild).
     """
     commit = get_current_commit(repo_root)
     if not commit:
-        return False
-    if not _scip_db_exists(scip_dir):
         return False
     marker = scip_dir / _BUILD_COMMIT_MARKER
     try:
         recorded = marker.read_text(encoding="utf-8").strip()
     except OSError:
         return False
-    # bool() guards warn_return_any: get_current_commit may be seen as Any.
-    return bool(recorded == commit)
+    if not recorded:
+        return False
+    parts = recorded.split()
+    recorded_commit = parts[0]
+    if recorded_commit != commit:
+        return False
+    no_index = len(parts) > 1 and parts[1] == _NO_INDEX_TOKEN
+    if no_index:
+        # Expected-empty build already done at this commit — nothing to rebuild.
+        return True
+    # bool() guards warn_return_any: _scip_db_exists returns a plain bool.
+    return bool(_scip_db_exists(scip_dir))
 
 
-def record_scip_build_commit(scip_dir: Path, commit: Optional[str]) -> None:
-    """Persist *commit* as the freshness marker after a successful build."""
+def record_scip_build_commit(
+    scip_dir: Path, commit: Optional[str], *, produced_index: bool = True
+) -> None:
+    """Persist *commit* as the freshness marker after a fresh-eligible build.
+
+    When *produced_index* is ``False`` (the build produced no ``index.scip.db``
+    because every project was an unsupported language), the marker is tagged
+    ``no-index`` so :func:`scip_db_is_fresh` treats the repo as fresh without a
+    DB on disk (there will never be one) instead of thrashing.
+    """
     if not commit:
         return
+    content = commit if produced_index else f"{commit} {_NO_INDEX_TOKEN}"
     try:
         scip_dir.mkdir(parents=True, exist_ok=True)
-        (scip_dir / _BUILD_COMMIT_MARKER).write_text(commit, encoding="utf-8")
+        (scip_dir / _BUILD_COMMIT_MARKER).write_text(content, encoding="utf-8")
     except OSError as exc:
         logger.warning(
             "EVO-65021: could not write SCIP freshness marker at %s: %s",
@@ -186,9 +221,11 @@ def funnel_scip_generation(
         activated alias lives in a different namespace from the golden aliases
         this funnel resolves, and activated repos carry no retained
         ``workspace_id`` of their own, so there is no correct sandbox workspace
-        to build in. Under the delegated backend this fail-softs to ``SKIPPED``
-        rather than resolving through the golden manager and building the wrong
-        workspace (CRITICAL-2).
+        to build in. Under the delegated backend this returns ``NOT_DELEGATED``
+        so the caller runs its existing local subprocess path (which can index
+        the per-user checkout and honours ``--clear``) rather than resolving
+        through the golden manager and building the wrong workspace, or dropping
+        the index entirely (CRITICAL-2 / MAJOR).
     golden_repo_manager, build_queue, generator_builder:
         Injection seams for tests; default to the process singletons and to
         ``build_scip_generator_for_golden_repo`` (stream-01 seam #3).
@@ -207,25 +244,29 @@ def funnel_scip_generation(
 
         repo_root = Path(repo_root)
 
-        # EVO-65021 CRITICAL-2: an activated (per-user) alias is NOT a golden
-        # alias. Activated repos carry no retained workspace_id of their own
-        # (ActivatedRepoManager stores only user_alias/golden_repo_alias/
-        # repo_path), so resolving through the golden manager would either build
-        # the GOLDEN workspace — never indexing the user's private branch/state,
-        # while colliding on the golden repo's own alias@commit dedupe key — or,
-        # for a custom ``--as`` alias, miss and skip. Until an activated-repo
-        # workspace story exists, fail soft to SKIPPED rather than silently
-        # building the wrong workspace.
+        # EVO-65021 CRITICAL-2 / MAJOR: an activated (per-user) alias is NOT a
+        # golden alias. Activated repos carry no retained workspace_id of their
+        # own (ActivatedRepoManager stores only user_alias/golden_repo_alias/
+        # repo_path), so resolving through the golden manager would build the
+        # GOLDEN workspace — never indexing the user's private branch/state,
+        # while colliding on the golden repo's own alias@commit dedupe key. The
+        # delegated backend therefore has nothing to offer an activated repo.
+        #
+        # Return NOT_DELEGATED (not SKIPPED) so the caller runs its EXISTING
+        # local ``cidx scip generate --project <repo_path>`` subprocess — that
+        # on-disk per-user checkout is real and the local path is the only code
+        # that can index it (and it already honours ``--clear``). Returning
+        # SKIPPED here would suppress that fallback and leave the repo with no
+        # SCIP index at all while reporting ``{"success": True}``.
         if activated_repo:
-            logger.warning(
-                "EVO-65021 fail-soft: delegated SCIP is not supported for "
-                "activated repo '%s' — activated repos have no retained "
-                "workspace_id; skipping (repo stays 'skipped: No SCIP index "
-                "available')",
+            logger.info(
+                "EVO-65021: activated repo '%s' has no retained workspace_id; "
+                "using the local SCIP path (delegated backend cannot address a "
+                "per-user checkout)",
                 alias,
             )
-            record_scip_metric("delegated_skipped_activated_repo")
-            return ScipDelegationOutcome.SKIPPED
+            record_scip_metric("delegated_not_supported_activated_repo")
+            return ScipDelegationOutcome.NOT_DELEGATED
 
         if not alias:
             logger.warning(
@@ -274,8 +315,14 @@ def funnel_scip_generation(
         dedupe_key = f"{alias}@{commit}"
         queue = build_queue or get_delegated_scip_build_queue()
 
-        def _on_success(_result: Any) -> None:
-            record_scip_build_commit(scip_dir, commit)
+        def _on_success(result: Any) -> None:
+            # A fresh-eligible build with zero produced indexes (every project an
+            # unsupported language) is tagged ``no-index`` so freshness does not
+            # require an index.scip.db that will never exist.
+            produced_index = bool(getattr(result, "successful_projects", 0) > 0)
+            record_scip_build_commit(
+                scip_dir, commit, produced_index=produced_index
+            )
 
         build = DelegatedScipBuild(
             alias=alias,

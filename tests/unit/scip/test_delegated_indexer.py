@@ -57,18 +57,33 @@ def _rpc_result(**envelope):
     return {"jsonrpc": "2.0", "id": 1, "result": envelope}
 
 
+def _post_writing_index(output_dir, payload, *, status_code=200, data=b"\x00\x01"):
+    """A fake ``requests.post`` that writes a FRESH ``index.scip`` (as the sandbox
+    would this run) then returns the response.
+
+    EVO-65021: the indexer deletes any stale ``index.scip`` before dispatch, so
+    success is judged only on a file written THIS call. Success tests must have
+    the POST produce the file, not pre-create it before the call.
+    """
+    resp = _fake_response(status_code=status_code, payload=payload)
+
+    def _post(*_a, **_k):
+        (output_dir / "index.scip").write_bytes(data)
+        return resp
+
+    return _post
+
+
 class TestDelegatedIndexerSuccess:
     def test_root_project_success(self, tmp_path):
         """exit_code 0 + index.scip present at output_dir => SUCCESS."""
         output_dir = tmp_path / ".code-indexer" / "scip"
         output_dir.mkdir(parents=True)
-        (output_dir / "index.scip").write_bytes(b"\x00\x01")
 
         fake = _fake_requests(
-            post_return=_fake_response(
-                payload=_rpc_result(
-                    exit_code=0, output="indexing done", duration_ms=12345
-                )
+            post_side_effect=_post_writing_index(
+                output_dir,
+                _rpc_result(exit_code=0, output="indexing done", duration_ms=12345),
             )
         )
         indexer = _make_indexer(tmp_path, fake)
@@ -105,13 +120,13 @@ class TestDelegatedIndexerSuccess:
         """A nested project yields workspace-relative project_path/output_dir."""
         output_dir = tmp_path / ".code-indexer" / "scip" / "services" / "foo"
         output_dir.mkdir(parents=True)
-        (output_dir / "index.scip").write_bytes(b"\x00")
         project_dir = tmp_path / "services" / "foo"
         project_dir.mkdir(parents=True)
 
         fake = _fake_requests(
-            post_return=_fake_response(
-                payload=_rpc_result(exit_code=0, output="", duration_ms=1000)
+            post_side_effect=_post_writing_index(
+                output_dir,
+                _rpc_result(exit_code=0, output="", duration_ms=1000),
             )
         )
         indexer = _make_indexer(tmp_path, fake)
@@ -133,7 +148,6 @@ class TestDelegatedIndexerSuccess:
         """SandboxRunResult delivered as a JSON string in result.content[0].text."""
         output_dir = tmp_path / ".code-indexer" / "scip"
         output_dir.mkdir(parents=True)
-        (output_dir / "index.scip").write_bytes(b"\x00")
 
         envelope = {"exit_code": 0, "output": "ok", "duration_ms": 500}
         payload = {
@@ -141,7 +155,7 @@ class TestDelegatedIndexerSuccess:
             "id": 1,
             "result": {"content": [{"type": "text", "text": json.dumps(envelope)}]},
         }
-        fake = _fake_requests(post_return=_fake_response(payload=payload))
+        fake = _fake_requests(post_side_effect=_post_writing_index(output_dir, payload))
         indexer = _make_indexer(tmp_path, fake)
 
         result = indexer.generate(
@@ -197,6 +211,68 @@ class TestDelegatedIndexerFailure:
         assert result.status == IndexerStatus.FAILED
         assert result.output_file is None
         assert "no index.scip" in result.stderr
+
+    def test_stale_index_from_prior_run_is_not_this_run_success(self, tmp_path):
+        """EVO-65021: a leftover index.scip must NOT make a no-op build SUCCESS.
+
+        A prior run left index.scip on the reused bind-mounted output dir. This
+        run's sandbox exits 0 but writes NOTHING (a no-op / short-circuit). The
+        stale file is deleted before dispatch, so success cannot be judged
+        against it → FAILED, and the 'no index.scip' guard becomes reachable.
+        """
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        # Stale artifact from a previous successful build on the reused path.
+        (output_dir / "index.scip").write_bytes(b"\x00stale")
+
+        # Sandbox claims success but does NOT (re)write index.scip this run.
+        fake = _fake_requests(
+            post_return=_fake_response(
+                payload=_rpc_result(exit_code=0, output="no-op", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+
+        assert result.status == IndexerStatus.FAILED
+        assert result.output_file is None
+        assert "no index.scip" in result.stderr
+        # The stale file was removed before dispatch (not resurrected).
+        assert not (output_dir / "index.scip").exists()
+
+    def test_stale_index_unremovable_fails_loud(self, tmp_path, monkeypatch):
+        """If a stale index.scip cannot be removed, fail loud (never dispatch)."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        (output_dir / "index.scip").write_bytes(b"\x00stale")
+
+        fake = _fake_requests(
+            post_return=_fake_response(
+                payload=_rpc_result(exit_code=0, output="", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        import pathlib
+
+        real_unlink = pathlib.Path.unlink
+
+        def _boom(self, *a, **k):
+            if self.name == "index.scip":
+                raise OSError("read-only filesystem")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(pathlib.Path, "unlink", _boom)
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        assert result.status == IndexerStatus.FAILED
+        assert "could not remove stale index.scip" in result.stderr
+        fake.post.assert_not_called()
 
     def test_transport_error_is_failure_not_raise(self, tmp_path):
         """A transport error fail-softs to FAILED (never raises, no fallback)."""

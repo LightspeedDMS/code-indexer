@@ -2807,7 +2807,14 @@ class GoldenRepoManager:
         Raises:
             WorkspaceIdNotRetainedError: alias unknown, or workspace_id unset.
         """
-        repo = self._resolve_golden_repo(alias)
+        # EVO-65021 (Bug #1316 shape): workspace_id flips from NULL to a value at
+        # an arbitrary later point (backfill / registration on ANOTHER worker), so
+        # a per-worker cache HIT can serve a stale ``workspace_id=None`` forever
+        # (until process restart). Because THIS method's OUTCOME decides whether a
+        # delegated SCIP build runs, it MUST read the authoritative shared-backend
+        # state — a cache-first read here would wrongly fail-soft "no retained
+        # workspace_id" on a repo another worker has already backfilled.
+        repo = self._resolve_golden_repo_authoritative(alias)
         if repo is None:
             raise WorkspaceIdNotRetainedError(
                 f"Cannot resolve workspace_id: golden repo '{alias}' not found"

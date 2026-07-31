@@ -1,4 +1,4 @@
--- Migration 038: workspace-mcp workspace_id retention for golden repos
+-- Migration 039: workspace-mcp workspace_id retention for golden repos
 -- (EVO-65021).
 --
 -- SCIP compile builds are delegated to sandbox-mcp, which operates on a

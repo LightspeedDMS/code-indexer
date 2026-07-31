@@ -41,6 +41,37 @@ class TestLocalDefault:
         assert gen.workspace_id is None
 
 
+class TestFailLoudOnBadValue:
+    """EVO-65021: an unrecognised scip_backend must RAISE, never silently
+    downgrade to a local build (which would come up 'healthy' then fail every
+    project with tool-not-found on the toolchain-less indexing pods)."""
+
+    @pytest.mark.parametrize("bad", ["delegatd", "Delegated", "remote", "DELEGATED"])
+    def test_unknown_value_fails_loud(self, tmp_path, bad):
+        cfg = SimpleNamespace(scip_backend=bad, workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="Unsupported scip_backend"):
+            build_scip_generator(cfg, tmp_path, workspace_id="W")
+
+    def test_error_names_the_bad_value(self, tmp_path):
+        cfg = SimpleNamespace(scip_backend="delegatd", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="delegatd"):
+            build_scip_generator(cfg, tmp_path)
+
+    def test_no_longer_references_nonexistent_env_var(self, tmp_path):
+        """The old diagnostic pointed at CIDX_SCIP_BACKEND, an env var read
+        nowhere. The health-check error must not mention it."""
+        import requests
+
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            workspace_mcp=SimpleNamespace(endpoint="http://sb", api_key="k"),
+        )
+        with patch("requests.get", side_effect=requests.RequestException("down")):
+            with pytest.raises(RuntimeError) as exc:
+                build_scip_generator(cfg, tmp_path, workspace_id="W")
+        assert "CIDX_SCIP_BACKEND" not in str(exc.value)
+
+
 class TestDelegated:
     @patch("requests.get")
     def test_delegated_wires_delegated_indexer(self, mock_get, tmp_path):
