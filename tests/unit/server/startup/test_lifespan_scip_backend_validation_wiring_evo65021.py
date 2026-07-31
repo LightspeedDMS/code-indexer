@@ -41,3 +41,25 @@ class TestLifespanScipBackendValidationWiring:
             "validate_scip_backend_config(...) must run during STARTUP "
             "(before the yield)"
         )
+
+    def test_wiring_is_still_non_fatal_for_server_startup(self):
+        # lifespan.py documents this validation as "Non-fatal (ERROR-logged,
+        # never crashes startup)": scip_backend is opt-in and defaults to local,
+        # so a misconfiguration must be named LOUDLY yet must NOT abort query
+        # serving. This load-bearing property is guarded here (mirroring the
+        # non-fatal assertion in
+        # test_lifespan_temporal_metadata_backend_wiring_1313.py): the validate
+        # call must stay wrapped in try/except Exception, so a boot-crash
+        # regression cannot slip through.
+        source = _LIFESPAN_PATH.read_text()
+        call_pos = source.find("validate_scip_backend_config(get_config")
+        assert (
+            call_pos != -1
+        ), "could not locate the validate_scip_backend_config(...) call site"
+        try_pos = source.rfind("try:", 0, call_pos)
+        except_pos = source.find("except Exception", call_pos)
+        assert try_pos != -1 and except_pos != -1 and try_pos < call_pos < except_pos, (
+            "the scip_backend startup validation must stay wrapped in "
+            "try/except Exception so a misconfigured scip_backend is "
+            "ERROR-logged but never aborts server startup (non-fatal guarantee)"
+        )
