@@ -56,10 +56,35 @@ class TestLifespanScipBackendValidationWiring:
         assert (
             call_pos != -1
         ), "could not locate the validate_scip_backend_config(...) call site"
+
+        # Scope the guard to THIS block (lifespan.py has ~110 `except Exception`,
+        # so an unscoped positional search would be satisfied by an unrelated
+        # try/except and could not detect the regression it names). Two anchors:
+        # (1) the nearest `try:` before the call must actually wrap it — i.e. no
+        # `except`/`finally` may appear between that `try:` and the call (that
+        # would mean the try is already closed and the call is unwrapped); and
+        # (2) the closing handler must be this block's unique, loud, non-fatal
+        # `APP-GENERAL-65021` ERROR path. Deleting the wrapper fails both.
         try_pos = source.rfind("try:", 0, call_pos)
-        except_pos = source.find("except Exception", call_pos)
-        assert try_pos != -1 and except_pos != -1 and try_pos < call_pos < except_pos, (
-            "the scip_backend startup validation must stay wrapped in "
-            "try/except Exception so a misconfigured scip_backend is "
-            "ERROR-logged but never aborts server startup (non-fatal guarantee)"
+        assert try_pos != -1, "no `try:` precedes the scip_backend validation call"
+        between = source[try_pos:call_pos]
+        assert "except" not in between and "finally" not in between, (
+            "the scip_backend validation call is not inside the nearest `try:` "
+            "block (an intervening except/finally means that try is already "
+            "closed) — the non-fatal wrapper was removed"
+        )
+        after = source[call_pos:]
+        except_off = after.find("except Exception")
+        # The next startup section begins the PayloadCache init; the closing
+        # except must come before it (i.e. still inside this block).
+        next_section = after.find("PayloadCache")
+        assert except_off != -1 and (next_section == -1 or except_off < next_section), (
+            "no `except Exception` closes the scip_backend validation `try:` "
+            "before the next startup section — the non-fatal wrapper was removed"
+        )
+        handler = after[except_off : except_off + 800]
+        assert "APP-GENERAL-65021" in handler, (
+            "the scip_backend validation's `except Exception` must be the loud, "
+            "non-fatal APP-GENERAL-65021 ERROR handler so a misconfigured "
+            "scip_backend is named at boot but never aborts server startup"
         )
