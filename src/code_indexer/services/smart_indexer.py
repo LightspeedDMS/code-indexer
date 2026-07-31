@@ -1417,6 +1417,13 @@ class SmartIndexer(HighThroughputProcessor):
                 info=f"Checking database collection '{collection_name}' for indexed files...",
             )
 
+        # Issue #1505: defensive default so a mocked/failed snapshot never
+        # leaves this attribute missing before the main reconcile loop reads it.
+        self._reconcile_db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: same defensive default for the
+        # hidden_branches map the branch-visibility loop reads.
+        self._reconcile_hidden_branches: Dict[str, List[str]] = {}
+
         # Get indexed files using efficient snapshot approach (no infinite loops, minimal memory)
         indexed_files_with_timestamps = self._get_indexed_files_snapshot(
             collection_name, progress_callback
@@ -1433,6 +1440,23 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Bug #471: Batch-check all modified files in one subprocess call
         self._reconcile_modified_files = self._get_modified_files_set()
+
+        # Issue #1505: Batch-fetch every tracked file's committed blob hash in
+        # ONE `git ls-tree -r HEAD` subprocess call, instead of spawning a
+        # `git log -1 -- path` subprocess PER unchanged file inside the loop
+        # below. Only meaningful for git-available repos; non-git repos keep
+        # their existing mtime/size-only comparison scheme untouched.
+        if self.git_topology_service.is_git_available():
+            self._reconcile_head_blob_hashes = self._get_head_blob_hash_map()
+        else:
+            self._reconcile_head_blob_hashes = {}
+
+        # Codex #1505 review, Finding 2: track how many files fall back to
+        # the slow per-file `git log` content-id computation during this
+        # reconcile run, so a high fallback rate (map failed/mostly-empty)
+        # can be surfaced LOUDLY after the main per-file loop below instead
+        # of silently degrading to the O(N) stall Issue #1505 fixed.
+        self._reconcile_fallback_count = 0
 
         # Find files that need to be indexed using working directory aware comparison
         files_to_index = []
@@ -1465,11 +1489,13 @@ class SmartIndexer(HighThroughputProcessor):
                     files_to_index.append(file_path)
                     missing_files += 1
                 else:
-                    # File exists in database - check if content changed
-                    # Get ANY version of this file from database (not branch-filtered)
-                    db_content_id = self._get_any_content_id_for_file(
-                        relative_path, collection_name
-                    )
+                    # File exists in database - check if content changed.
+                    # Issue #1505: look up the pre-computed batched content-id
+                    # map (built once in `_get_indexed_files_snapshot` from
+                    # the same bulk scroll already used for the timestamp
+                    # snapshot) instead of issuing a per-file scroll_points
+                    # query via `_get_any_content_id_for_file`.
+                    db_content_id = self._reconcile_db_content_ids.get(relative_path)
 
                     if db_content_id and current_effective_id != db_content_id:
                         # Content changed - needs re-indexing
@@ -1485,6 +1511,33 @@ class SmartIndexer(HighThroughputProcessor):
                 # File might have issues, log and skip
                 logger.warning(f"Failed to analyze file {file_path} for reconcile: {e}")
                 continue
+
+        # Codex #1505 review, Finding 2: a degraded reconcile run (batched
+        # HEAD blob-hash map failed/mostly-empty, forcing most or all
+        # committed files onto the slow per-file `git log` fallback) must
+        # be LOUD and observable -- never a silent multi-hour O(N) stall,
+        # per this project's anti-silent-failure rule. Correctness is
+        # unaffected either way; only visibility is added here, and
+        # reconcile is never hard-aborted (a degraded-but-working reconcile
+        # beats a failed one).
+        if self.git_topology_service.is_git_available() and all_files_to_index:
+            fallback_count = getattr(self, "_reconcile_fallback_count", 0)
+            total_files = len(all_files_to_index)
+            fallback_ratio = fallback_count / total_files
+            map_entirely_empty = not self._reconcile_head_blob_hashes
+            if (map_entirely_empty and fallback_count > 0) or fallback_ratio > 0.10:
+                logger.error(
+                    "RECONCILE DEGRADED: %d/%d files (%.1f%%) fell back to "
+                    "the slow per-file `git log` content-id lookup this "
+                    "run because the batched HEAD blob-hash map "
+                    "(_get_head_blob_hash_map) was empty or missing "
+                    "entries for most files. This can reintroduce the "
+                    "O(N) per-file git-subprocess stall Issue #1505 fixed "
+                    "-- investigate git ls-tree failures.",
+                    fallback_count,
+                    total_files,
+                    fallback_ratio * 100,
+                )
 
         # NEW: For git projects, unhide files that should be visible in current branch
         files_unhidden = 0  # Initialize for all code paths
@@ -1510,30 +1563,22 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # Check if this file exists on disk in current branch (should be visible)
                 if relative_file_path in disk_files_set:
-                    # File exists on disk, check if it's hidden for current branch
-                    content_points, _ = self.vector_store_client.scroll_points(
-                        filter_conditions={
-                            "must": [
-                                {"key": "type", "match": {"value": "content"}},
-                                {"key": "path", "match": {"value": relative_file_path}},
-                            ]
-                        },
-                        limit=1,  # Just need to check one point
-                        collection_name=collection_name,
+                    # Codex #1505 review, Finding 1: derive hidden_branches
+                    # from the bulk snapshot already fetched in
+                    # `_get_indexed_files_snapshot` instead of issuing a
+                    # fresh `scroll_points` query PER indexed file -- this
+                    # loop previously defeated the O(1)-ish DB-call goal of
+                    # Issue #1505's fix by reintroducing a per-file query in
+                    # the same reconcile pass.
+                    hidden_branches = self._reconcile_hidden_branches.get(
+                        relative_file_path, []
                     )
-
-                    if content_points:
-                        hidden_branches = (
-                            content_points[0]
-                            .get("payload", {})
-                            .get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        # File exists on disk but is hidden for current branch - unhide it
+                        self._ensure_file_visible_in_branch_thread_safe(
+                            relative_file_path, current_branch, collection_name
                         )
-                        if current_branch in hidden_branches:
-                            # File exists on disk but is hidden for current branch - unhide it
-                            self._ensure_file_visible_in_branch_thread_safe(
-                                relative_file_path, current_branch, collection_name
-                            )
-                            files_unhidden += 1
+                        files_unhidden += 1
 
             if files_unhidden > 0 and progress_callback:
                 progress_callback(
@@ -2426,6 +2471,17 @@ class SmartIndexer(HighThroughputProcessor):
             Dict mapping file paths to their timestamps
         """
         indexed_files_with_timestamps: Dict[Path, float] = {}
+        # Issue #1505: derived in the SAME bulk-scroll pass as the timestamp
+        # snapshot above, so the main reconcile loop can look up each file's
+        # DB-side content id via a plain in-memory dict lookup instead of a
+        # per-file `scroll_points` query (`_get_any_content_id_for_file`).
+        db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: derived in this SAME bulk-scroll
+        # pass too, so the branch-visibility ("unhide") check in
+        # `_do_reconcile_with_database` can look up each file's
+        # `hidden_branches` via an in-memory dict lookup instead of issuing
+        # a fresh `scroll_points` query PER indexed file.
+        db_hidden_branches: Dict[str, List[str]] = {}
 
         try:
             if progress_callback:
@@ -2468,6 +2524,28 @@ class SmartIndexer(HighThroughputProcessor):
                 ):
                     indexed_files_with_timestamps[file_path] = timestamp
 
+                # Issue #1505: derive this file's DB-side content id once,
+                # first point encountered per relative path wins (mirrors
+                # the pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces).
+                try:
+                    relative_key = str(file_path.relative_to(self.config.codebase_dir))
+                except ValueError:
+                    relative_key = str(path_from_db)
+                if relative_key not in db_content_ids:
+                    db_content_ids[relative_key] = (
+                        self._derive_db_content_id_from_point(relative_key, point)
+                    )
+
+                # Codex #1505 review, Finding 1: capture hidden_branches for
+                # this path once too, first point wins -- mirrors the
+                # pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces.
+                if relative_key not in db_hidden_branches:
+                    db_hidden_branches[relative_key] = payload.get(
+                        "hidden_branches", []
+                    )
+
             if progress_callback:
                 progress_callback(
                     0,
@@ -2487,8 +2565,51 @@ class SmartIndexer(HighThroughputProcessor):
                 )
             # Return empty dict - reconcile will treat all files as new
             indexed_files_with_timestamps = {}
+            db_content_ids = {}
+            db_hidden_branches = {}
 
+        self._reconcile_db_content_ids = db_content_ids
+        self._reconcile_hidden_branches = db_hidden_branches
         return indexed_files_with_timestamps
+
+    def _derive_db_content_id_from_point(
+        self, relative_path: str, point: Dict[str, Any]
+    ) -> str:
+        """Derive the DB-side content id for a file from an already-fetched
+        content point's payload, without any additional store query.
+
+        Mirrors `_get_any_content_id_for_file`'s identity scheme: working_dir
+        (mtime/size-identified) points use the mtime/size id; committed
+        points prefer the git blob hash (Issue #1505 -- precise,
+        single-batch-derivable) and fall back to the legacy git commit hash
+        for older data that predates the blob-hash field.
+
+        Codex #1505 review, Finding 3: real point ids are deterministic
+        UUID5 strings (see `git_aware_processor.py` /
+        `high_throughput_processor.py`'s `_create_point_id`) and NEVER
+        contain a "working_dir" substring -- a previous string-match check
+        on the point id was dead code against real persisted data. The
+        authoritative signal is the payload shape itself:
+        `high_throughput_processor.py`'s `_create_vector_point` writes
+        `filesystem_mtime`/`filesystem_size` payload fields ONLY for a
+        non-git-available (mtime/size-identified) file, and never alongside
+        `git_blob_hash`/`git_commit_hash`.
+        """
+        payload = point.get("payload", {})
+
+        if "filesystem_mtime" in payload:
+            return (
+                f"{relative_path}:working_dir:"
+                f"{payload.get('filesystem_mtime', 'unknown')}:"
+                f"{payload.get('filesystem_size', 0)}"
+            )
+
+        blob_hash = payload.get("git_blob_hash")
+        if blob_hash:
+            return f"{relative_path}:blob:{blob_hash}"
+
+        git_commit = payload.get("git_commit_hash", "unknown")
+        return f"{relative_path}:{git_commit}"
 
     def _scroll_all_content_points(self, collection_name: str) -> List[Dict[str, Any]]:
         """Scroll through all content points and return them as a list.
@@ -2682,15 +2803,11 @@ class SmartIndexer(HighThroughputProcessor):
             if not points:
                 return None
 
-            # Return the content ID from database
-            payload = points[0].get("payload", {})
-            git_commit = payload.get("git_commit_hash", "unknown")
-
-            # Check if this is working_dir content
-            if "working_dir" in str(points[0].get("id", "")):
-                return f"{file_path}:working_dir:{payload.get('filesystem_mtime', 'unknown')}:{payload.get('file_size', 0)}"
-            else:
-                return f"{file_path}:{git_commit}"
+            # Issue #1505: reuse the shared derivation helper so this method
+            # stays consistent with the batched-path identity scheme
+            # (blob-hash-first, commit-hash fallback) instead of duplicating
+            # the formatting logic.
+            return self._derive_db_content_id_from_point(file_path, points[0])
 
         except Exception as e:
             logger.warning(f"Failed to get content ID for {file_path}: {e}")
@@ -3032,9 +3149,100 @@ class SmartIndexer(HighThroughputProcessor):
                 # Fallback if stat fails
                 return f"{file_path}:working_dir_error"
         else:
-            # File matches committed version - use commit-based ID
+            # File matches committed version - use blob-hash based ID.
+            # Issue #1505: prefer the O(1) batched HEAD blob-hash lookup
+            # (built once per reconcile run via `_get_head_blob_hash_map`)
+            # over the per-file `git log -1 -- path` subprocess call. Only
+            # fall back to the original per-file computation for the rare
+            # file with no entry in the committed tree (e.g. untracked via
+            # `git rm --cached` while left on disk) -- graceful degradation
+            # for just that one file, never a silent skip.
+            head_blob_hashes = getattr(self, "_reconcile_head_blob_hashes", {})
+            blob_hash = head_blob_hashes.get(file_path)
+            if blob_hash is not None:
+                return f"{file_path}:blob:{blob_hash}"
+
+            # Codex #1505 review, Finding 2: count every fallback so the
+            # main reconcile loop can detect and loudly report a
+            # degraded (map-failed/mostly-empty) run. `_reconcile_fallback_count`
+            # is initialized to 0 in `_do_reconcile_with_database` alongside
+            # `_reconcile_head_blob_hashes`; `getattr` is a defensive
+            # fallback for any direct caller of this method in isolation
+            # (e.g. unit tests) that never ran that init.
+            self._reconcile_fallback_count = (
+                getattr(self, "_reconcile_fallback_count", 0) + 1
+            )
             commit = self._get_file_commit(file_path)
             return f"{file_path}:{commit}"
+
+    def _get_head_blob_hash_map(self) -> Dict[str, str]:
+        """Batch-fetch every tracked file's committed blob hash at HEAD.
+
+        Issue #1505: a single `git ls-tree -r HEAD` invocation returns the
+        blob hash for every path in the committed tree, replacing what used
+        to be a `git log -1 -- path` subprocess spawned PER unchanged file.
+        Uses `-z` (NUL-terminated records) so paths containing unusual
+        characters (spaces, newlines) are parsed correctly.
+
+        Returns:
+            Dict mapping relative file path -> 40-character blob hash SHA.
+            Empty dict on any failure (callers gracefully fall back to the
+            original per-file `_get_file_commit` computation for any path
+            missing from the map -- never silently skip a file).
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-tree", "-r", "-z", "HEAD"],
+                cwd=self.config.codebase_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                # Codex #1505 review, Finding 2: a silent `{}` here made
+                # every committed file fall back to the per-file `git log`
+                # path with NO indication why -- log LOUDLY (return code +
+                # stderr) so this failure mode is diagnosable instead of
+                # silently reintroducing Issue #1505's O(N) stall.
+                logger.warning(
+                    "_get_head_blob_hash_map: `git ls-tree -r HEAD` failed "
+                    "(return code %s): %s; reconcile will fall back to the "
+                    "slow per-file `git log` content-id lookup for every "
+                    "committed file in this run",
+                    result.returncode,
+                    result.stderr.strip() if result.stderr else "(no stderr)",
+                )
+                return {}
+
+            mapping: Dict[str, str] = {}
+            # Codex #1505 review, Finding 5: count malformed/unparsable
+            # entries instead of silently skipping them.
+            malformed_count = 0
+            for entry in result.stdout.split("\0"):
+                if not entry:
+                    continue
+                try:
+                    meta, path = entry.split("\t", 1)
+                except ValueError:
+                    malformed_count += 1
+                    continue
+                meta_parts = meta.split(" ")
+                if len(meta_parts) < 3:
+                    malformed_count += 1
+                    continue
+                blob_sha = meta_parts[2]
+                mapping[path] = blob_sha
+            if malformed_count:
+                logger.warning(
+                    "_get_head_blob_hash_map: skipped %d malformed `git "
+                    "ls-tree` entr%s while building the HEAD blob-hash map",
+                    malformed_count,
+                    "y" if malformed_count == 1 else "ies",
+                )
+            return mapping
+        except Exception as e:
+            logger.warning(f"Failed to batch-fetch HEAD blob hashes: {e}")
+            return {}
 
     def _get_modified_files_set(self) -> set:
         """Get set of files that differ from HEAD (unstaged + staged) in one batch call.
