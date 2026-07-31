@@ -92,14 +92,26 @@ class GenerationResult:
     def is_fresh_eligible(self) -> bool:
         """EVO-65021: safe to record the ``.build_commit`` freshness marker.
 
-        True iff at least one project was discovered and NONE failed for an
-        UNEXPECTED reason. An unsupported-language exit (69) is expected and
-        benign, so a repo whose only failures are unsupported languages (a
-        mixed TS + Java/Python golden repo, or a pure non-TS repo) is still
-        fresh-eligible and will not thrash. A repo with a genuine build failure
-        is NOT fresh-eligible, so it is retried and does not poison the marker
-        (the MAJOR-3 partial-masking guarantee, kept intact for real failures).
+        True iff NONE of the discovered projects failed for an UNEXPECTED
+        reason. An unsupported-language exit (69) is expected and benign, so a
+        repo whose only failures are unsupported languages (a mixed TS +
+        Java/Python golden repo, or a pure non-TS repo) is still fresh-eligible
+        and will not thrash. A repo with a genuine build failure is NOT
+        fresh-eligible, so it is retried and does not poison the marker (the
+        MAJOR-3 partial-masking guarantee, kept intact for real failures).
+
+        Zero-project case (EVO-65021 fix): a repo where ``ProjectDiscovery``
+        found nothing to index is legitimately CONVERGED — there is nothing to
+        build. It is therefore fresh-eligible so ``on_success`` fires and the
+        ``.build_commit`` marker is written, rather than the repo re-enqueueing
+        an identical empty rebuild every refresh cycle forever. This is gated on
+        an EMPTY ``project_results`` (nothing was attempted): a genuine
+        no-discovery run produces no per-project results, whereas a FAILED build
+        always carries them — so a real failure can never be mistaken for
+        convergence and marked fresh.
         """
+        if self.total_projects == 0 and not self.project_results:
+            return self.failed_projects == 0
         return self.total_projects > 0 and self.real_failed_projects() == 0
 
 

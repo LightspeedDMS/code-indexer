@@ -47,6 +47,59 @@ def _check_scip_backend_health(endpoint: str, api_key: str) -> None:
     logger.info("sandbox-mcp (scip backend) health check: OK")
 
 
+def validate_scip_backend_config(config: Any) -> None:
+    """Eagerly validate the static ``scip_backend`` config (EVO-65021).
+
+    This is the fail-loud entry point the module's fail-loud policy needs at
+    *server startup*. The only production caller of :func:`build_scip_generator`
+    (``scip_lifecycle.funnel_scip_generation``) wraps the whole build in a
+    blanket ``except Exception -> SKIPPED``, so a *configuration* error — a
+    typo'd ``scip_backend`` value, or a ``delegated`` backend with no
+    ``workspace_mcp.endpoint`` — would otherwise be swallowed per-job as an
+    ordinary fail-soft skip, indistinguishable from a legitimate one and with
+    nothing naming the bad value. Calling this once at startup (mirroring how
+    ``clone_backend_wiring.build_snapshot_manager`` is invoked from
+    ``lifespan.py``) surfaces the misconfiguration loudly at boot.
+
+    This validates the *config only* — it does NOT health-check sandbox-mcp
+    reachability. A runtime sandbox-mcp outage remains a per-repo fail-soft
+    (``DelegatedIndexer.generate`` -> ``IndexerStatus.FAILED`` -> ``SKIPPED``);
+    only a static misconfiguration fails loud here.
+
+    Raises
+    ------
+    RuntimeError
+        If ``scip_backend`` is an unrecognised value, or is ``"delegated"``
+        with no ``workspace_mcp.endpoint`` configured.
+    """
+    from code_indexer.scip.indexers.factory import (  # noqa: PLC0415
+        ScipBackendFactory,
+    )
+
+    backend_type = getattr(config, "scip_backend", "local") or "local"
+
+    # EVO-65021 fail-loud: an unrecognised scip_backend value must NOT silently
+    # downgrade to a local build. A typo (e.g. "delegatd") would otherwise come
+    # up "healthy" as local and then fail every project with tool-not-found on
+    # the toolchain-less indexing pods, with nothing naming the bad value.
+    if backend_type not in ScipBackendFactory._VALID_BACKENDS:
+        raise RuntimeError(
+            f"Unsupported scip_backend={backend_type!r}. Valid options: "
+            f"{', '.join(ScipBackendFactory._VALID_BACKENDS)}. "
+            "There is NO silent fallback to a local build — fix the "
+            "scip_backend config value."
+        )
+
+    if backend_type == "delegated":
+        wsm_cfg = getattr(config, "workspace_mcp", None)
+        if wsm_cfg is None or not getattr(wsm_cfg, "endpoint", ""):
+            raise RuntimeError(
+                "scip_backend='delegated' requires workspace_mcp.endpoint to be "
+                "configured (pointed at the sandbox-mcp service). None was "
+                "provided."
+            )
+
+
 def build_scip_generator(
     config: Any,
     repo_root: Path,
@@ -92,29 +145,18 @@ def build_scip_generator(
     backend_type = getattr(config, "scip_backend", "local") or "local"
     logger.info("Building SCIPGenerator with scip_backend=%r", backend_type)
 
-    # EVO-65021 fail-loud: an unrecognised scip_backend value must NOT silently
-    # downgrade to a local build. A typo (e.g. "delegatd") would otherwise come
-    # up "healthy" as local and then fail every project with tool-not-found on
-    # the toolchain-less indexing pods, with nothing naming the bad value.
-    if backend_type not in ScipBackendFactory._VALID_BACKENDS:
-        raise RuntimeError(
-            f"Unsupported scip_backend={backend_type!r}. Valid options: "
-            f"{', '.join(ScipBackendFactory._VALID_BACKENDS)}. "
-            "There is NO silent fallback to a local build — fix the "
-            "scip_backend config value."
-        )
+    # EVO-65021 fail-loud: reject an unrecognised scip_backend value or a
+    # delegated backend with no workspace_mcp.endpoint BEFORE constructing
+    # anything. Shared with the eager startup call site (lifespan.py) so both
+    # paths use the identical check (DRY) — see validate_scip_backend_config.
+    validate_scip_backend_config(config)
 
     if backend_type == "delegated":
         # EVO-65021: delegate the compile step to sandbox-mcp. Fail-fast on an
         # unreachable sandbox-mcp — NO silent local fallback (mirrors the
-        # delegated clone backend, EVO-64616).
-        wsm_cfg = getattr(config, "workspace_mcp", None)
-        if wsm_cfg is None or not getattr(wsm_cfg, "endpoint", ""):
-            raise RuntimeError(
-                "scip_backend='delegated' requires workspace_mcp.endpoint to be "
-                "configured (pointed at the sandbox-mcp service). None was "
-                "provided."
-            )
+        # delegated clone backend, EVO-64616). endpoint presence is guaranteed
+        # by validate_scip_backend_config above.
+        wsm_cfg = config.workspace_mcp
         _check_scip_backend_health(wsm_cfg.endpoint, wsm_cfg.api_key)
         indexer_map = ScipBackendFactory.create_indexer_map(
             "delegated",

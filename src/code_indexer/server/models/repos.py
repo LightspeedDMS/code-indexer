@@ -89,6 +89,34 @@ class AddGoldenRepoRequest(BaseModel):
             raise ValueError("Branch name cannot be empty")
         return v
 
+    @field_validator("workspace_id")
+    @classmethod
+    def validate_workspace_id(cls, v: Optional[str]) -> Optional[str]:
+        """Validate workspace_id (EVO-65021 seam #3). None is left as-is.
+
+        When supplied it is a ``ws-<hex>`` handle that gets persisted onto the
+        golden-repo metadata and handed verbatim to sandbox-mcp by
+        ``DelegatedIndexer._build_request`` as ``sb-{workspace_id}``. It is the
+        only identifier field on this model that previously lacked a validator,
+        so a malformed value would fail late and quietly at the sandbox boundary
+        (fail-soft ``SKIPPED``) rather than at the API boundary. Mirrors
+        ``validate_alias``: non-empty after strip and restricted to a safe
+        charset (alphanumeric, hyphen, underscore), rejecting control, quote,
+        and whitespace characters.
+        """
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("workspace_id cannot be empty")
+        # Allow alphanumeric, hyphens, and underscores (a ws-<hex> handle).
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(
+                "workspace_id must contain only alphanumeric characters, "
+                "hyphens, and underscores"
+            )
+        return v
+
 
 class GoldenRepoInfo(BaseModel):
     """Model for golden repository information."""

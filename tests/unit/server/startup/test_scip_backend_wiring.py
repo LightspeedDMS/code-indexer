@@ -13,6 +13,7 @@ from code_indexer.server.repositories.golden_repo_manager import (
 from code_indexer.server.startup.scip_backend_wiring import (
     build_scip_generator,
     build_scip_generator_for_golden_repo,
+    validate_scip_backend_config,
 )
 
 
@@ -115,6 +116,51 @@ class _FakeManager:
         if self._raises:
             raise WorkspaceIdNotRetainedError(f"no workspace_id for '{alias}'")
         return self._workspace_id
+
+
+class TestValidateScipBackendConfig:
+    """EVO-65021: the eager startup config validation (fail-loud call site).
+
+    Validates the STATIC config only — no sandbox-mcp health check — so a
+    misconfiguration surfaces loudly at boot instead of being swallowed per-job
+    by ``funnel_scip_generation``'s blanket fail-soft."""
+
+    def test_local_config_passes(self):
+        # None => no raise
+        assert validate_scip_backend_config(_local_config()) is None
+
+    def test_missing_attr_defaults_local_and_passes(self):
+        assert validate_scip_backend_config(SimpleNamespace()) is None
+
+    def test_delegated_with_endpoint_passes_without_health_check(self):
+        # No requests.get patch: config validation must NOT reach out to
+        # sandbox-mcp (config-only, reachability is a runtime fail-soft).
+        with patch("requests.get", side_effect=AssertionError("must not be called")):
+            assert validate_scip_backend_config(_delegated_config()) is None
+
+    @pytest.mark.parametrize("bad", ["delegatd", "Delegated", "remote", "DELEGATED"])
+    def test_unknown_value_raises(self, bad):
+        cfg = SimpleNamespace(scip_backend=bad, workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="Unsupported scip_backend"):
+            validate_scip_backend_config(cfg)
+
+    def test_unknown_value_names_the_bad_value(self):
+        cfg = SimpleNamespace(scip_backend="delegatd", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="delegatd"):
+            validate_scip_backend_config(cfg)
+
+    def test_delegated_missing_workspace_mcp_raises(self):
+        cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            validate_scip_backend_config(cfg)
+
+    def test_delegated_empty_endpoint_raises(self):
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            workspace_mcp=SimpleNamespace(endpoint="", api_key=""),
+        )
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            validate_scip_backend_config(cfg)
 
 
 class TestGoldenRepoBridge:

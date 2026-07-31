@@ -179,6 +179,17 @@ class TestFreshnessClassification:
         assert result.real_failed_projects() == 1
         assert result.is_fresh_eligible() is False
 
+    def test_zero_discovered_projects_is_fresh_eligible(self, tmp_path):
+        """EVO-65021: a repo with no discoverable projects is legitimately
+        converged (nothing to index), so it is fresh-eligible and does not
+        thrash by re-enqueueing an identical empty rebuild forever."""
+        # Empty dir → ProjectDiscovery finds nothing.
+        gen = SCIPGenerator(tmp_path, indexer_map={})
+        result = gen.generate()
+        assert result.total_projects == 0
+        assert result.failed_projects == 0
+        assert result.is_fresh_eligible() is True
+
     def test_no_indexer_for_language_is_unsupported(self, tmp_path):
         """A discovered language with no indexer in the map is a benign skip."""
         (tmp_path / "package.json").write_text("{}")

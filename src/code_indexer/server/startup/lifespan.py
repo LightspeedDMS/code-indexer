@@ -1058,6 +1058,42 @@ def make_lifespan(
                 )
             )
 
+        # EVO-65021: eagerly validate the scip_backend config at startup so a
+        # misconfiguration (a typo'd scip_backend value, or a 'delegated'
+        # backend with no workspace_mcp.endpoint) fails LOUD here — mirroring
+        # how build_snapshot_manager surfaces a bad clone_backend just above.
+        # The only production caller of the scip wiring
+        # (scip_lifecycle.funnel_scip_generation) swallows a config RuntimeError
+        # per-job as a fail-soft SKIP, indistinguishable from a legitimate skip;
+        # this call site names the bad value ONCE at boot. Config-only — a
+        # runtime sandbox-mcp outage stays a per-repo fail-soft. Non-fatal
+        # (ERROR-logged, never crashes startup): scip_backend is opt-in and
+        # defaults to 'local', and startup must not take down query serving.
+        try:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
+            from code_indexer.server.startup.scip_backend_wiring import (
+                validate_scip_backend_config,
+            )
+
+            validate_scip_backend_config(get_config_service().get_config())
+            logger.info(
+                "EVO-65021: scip_backend config validated at startup",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            # Loud, but non-fatal: a config error is named once here at ERROR
+            # instead of vanishing into per-job fail-soft skips.
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-65021",
+                    f"Invalid scip_backend configuration at startup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
         payload_cache = None
         logger.info(

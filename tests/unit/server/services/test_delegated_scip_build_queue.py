@@ -249,6 +249,30 @@ class TestPartialSuccessNotTerminalSuccess:
         assert get_scip_metrics().get("delegated_build_success") == 1
         assert recorded == [0]  # produced no index → on_success sees 0
 
+    def test_zero_project_repo_is_marked_fresh_and_does_not_reenqueue(self):
+        """EVO-65021: a repo where discovery found NOTHING (total_projects == 0)
+        is legitimately converged — nothing to index. It must fire on_success
+        (write the .build_commit marker) and terminate, NOT re-enqueue an empty
+        rebuild every cycle forever."""
+        q = _queue()
+        recorded: List[object] = []
+        build = DelegatedScipBuild(
+            alias="empty-repo",
+            dedupe_key="empty-repo@1",
+            run_build=lambda: _gen_result(successful=0, failed=0, total=0),
+            on_success=lambda r: recorded.append(r.total_projects),
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1
+        m = get_scip_metrics()
+        # Treated as a benign success: marker written, nothing skipped.
+        assert m.get("delegated_build_success") == 1
+        assert recorded == [0]  # on_success fired for the zero-project result
+        assert m.get("delegated_build_skipped") is None
+        # Terminal: dedupe key released, queue empty → no perpetual re-enqueue.
+        assert q.get_status()["inflight_keys"] == []
+        assert q.get_status()["pending_count"] == 0
+
     def test_real_failure_alongside_unsupported_is_not_fresh(self):
         """A genuine build failure next to unsupported-language skips is NOT
         fresh-eligible (MAJOR-3 partial-masking preserved for real failures)."""
