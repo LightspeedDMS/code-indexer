@@ -13,7 +13,13 @@ class CSharpIndexer(SCIPIndexer):
     """SCIP indexer for C# projects."""
 
     def generate(
-        self, project_dir: Path, output_dir: Path, build_system: str
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        build_system: str,
+        *,
+        workspace_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> IndexerResult:
         """Generate SCIP index for C# project."""
         start_time = time.time()

@@ -1,0 +1,213 @@
+"""Unit tests for build_scip_generator (EVO-65021 scip backend wiring)."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from code_indexer.scip.indexers.delegated import DelegatedIndexer
+from code_indexer.scip.indexers.typescript import TypeScriptIndexer
+from code_indexer.server.repositories.golden_repo_manager import (
+    WorkspaceIdNotRetainedError,
+)
+from code_indexer.server.startup.scip_backend_wiring import (
+    build_scip_generator,
+    build_scip_generator_for_golden_repo,
+    validate_scip_backend_config,
+)
+
+
+def _local_config():
+    return SimpleNamespace(scip_backend="local", workspace_mcp=None)
+
+
+def _delegated_config():
+    return SimpleNamespace(
+        scip_backend="delegated",
+        workspace_mcp=SimpleNamespace(
+            endpoint="http://sandbox-mcp.internal/rpc", api_key="tok"
+        ),
+    )
+
+
+class TestLocalDefault:
+    def test_local_default_uses_local_indexers(self, tmp_path):
+        gen = build_scip_generator(_local_config(), tmp_path, workspace_id="W")
+        assert isinstance(gen._indexers["typescript"], TypeScriptIndexer)
+        assert gen.workspace_id == "W"
+
+    def test_missing_scip_backend_attr_defaults_local(self, tmp_path):
+        gen = build_scip_generator(SimpleNamespace(), tmp_path)
+        assert isinstance(gen._indexers["typescript"], TypeScriptIndexer)
+        assert gen.workspace_id is None
+
+
+class TestFailLoudOnBadValue:
+    """EVO-65021: an unrecognised scip_backend must RAISE, never silently
+    downgrade to a local build (which would come up 'healthy' then fail every
+    project with tool-not-found on the toolchain-less indexing pods)."""
+
+    @pytest.mark.parametrize("bad", ["delegatd", "Delegated", "remote", "DELEGATED"])
+    def test_unknown_value_fails_loud(self, tmp_path, bad):
+        cfg = SimpleNamespace(scip_backend=bad, workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="Unsupported scip_backend"):
+            build_scip_generator(cfg, tmp_path, workspace_id="W")
+
+    def test_error_names_the_bad_value(self, tmp_path):
+        cfg = SimpleNamespace(scip_backend="delegatd", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="delegatd"):
+            build_scip_generator(cfg, tmp_path)
+
+    def test_no_longer_references_nonexistent_env_var(self, tmp_path):
+        """The old diagnostic pointed at CIDX_SCIP_BACKEND, an env var read
+        nowhere. The health-check error must not mention it."""
+        import requests
+
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            workspace_mcp=SimpleNamespace(endpoint="http://sb", api_key="k"),
+        )
+        with patch("requests.get", side_effect=requests.RequestException("down")):
+            with pytest.raises(RuntimeError) as exc:
+                build_scip_generator(cfg, tmp_path, workspace_id="W")
+        assert "CIDX_SCIP_BACKEND" not in str(exc.value)
+
+
+class TestDelegated:
+    @patch("requests.get")
+    def test_delegated_wires_delegated_indexer(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        gen = build_scip_generator(_delegated_config(), tmp_path, workspace_id="W-9")
+        assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
+        assert gen.workspace_id == "W-9"
+        # health check hit sandbox-mcp /health
+        assert mock_get.call_args.args[0].endswith("/health")
+
+    @patch("requests.get")
+    def test_delegated_health_unreachable_fails_loud(self, mock_get, tmp_path):
+        mock_get.side_effect = RuntimeError("connection refused")
+        with pytest.raises(RuntimeError, match="sandbox-mcp not reachable"):
+            build_scip_generator(_delegated_config(), tmp_path, workspace_id="W")
+
+    def test_delegated_missing_workspace_mcp_fails_loud(self, tmp_path):
+        cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            build_scip_generator(cfg, tmp_path, workspace_id="W")
+
+    def test_delegated_empty_endpoint_fails_loud(self, tmp_path):
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            workspace_mcp=SimpleNamespace(endpoint="", api_key=""),
+        )
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            build_scip_generator(cfg, tmp_path, workspace_id="W")
+
+
+class _FakeManager:
+    """Minimal stand-in exposing only resolve_workspace_id (seam #3)."""
+
+    def __init__(self, *, workspace_id=None, raises=False):
+        self._workspace_id = workspace_id
+        self._raises = raises
+        self.calls = []
+
+    def resolve_workspace_id(self, alias):
+        self.calls.append(alias)
+        if self._raises:
+            raise WorkspaceIdNotRetainedError(f"no workspace_id for '{alias}'")
+        return self._workspace_id
+
+
+class TestValidateScipBackendConfig:
+    """EVO-65021: the eager startup config validation (fail-loud call site).
+
+    Validates the STATIC config only — no sandbox-mcp health check — so a
+    misconfiguration surfaces loudly at boot instead of being swallowed per-job
+    by ``funnel_scip_generation``'s blanket fail-soft."""
+
+    def test_local_config_passes(self):
+        # None => no raise
+        assert validate_scip_backend_config(_local_config()) is None
+
+    def test_missing_attr_defaults_local_and_passes(self):
+        assert validate_scip_backend_config(SimpleNamespace()) is None
+
+    def test_delegated_with_endpoint_passes_without_health_check(self):
+        # No requests.get patch: config validation must NOT reach out to
+        # sandbox-mcp (config-only, reachability is a runtime fail-soft).
+        with patch("requests.get", side_effect=AssertionError("must not be called")):
+            assert validate_scip_backend_config(_delegated_config()) is None
+
+    @pytest.mark.parametrize("bad", ["delegatd", "Delegated", "remote", "DELEGATED"])
+    def test_unknown_value_raises(self, bad):
+        cfg = SimpleNamespace(scip_backend=bad, workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="Unsupported scip_backend"):
+            validate_scip_backend_config(cfg)
+
+    def test_unknown_value_names_the_bad_value(self):
+        cfg = SimpleNamespace(scip_backend="delegatd", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="delegatd"):
+            validate_scip_backend_config(cfg)
+
+    def test_delegated_missing_workspace_mcp_raises(self):
+        cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            validate_scip_backend_config(cfg)
+
+    def test_delegated_empty_endpoint_raises(self):
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            workspace_mcp=SimpleNamespace(endpoint="", api_key=""),
+        )
+        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+            validate_scip_backend_config(cfg)
+
+
+class TestGoldenRepoBridge:
+    """EVO-65021 seam #3: resolve_workspace_id -> build_scip_generator."""
+
+    def test_local_backend_ignores_workspace_id_lookup(self, tmp_path):
+        mgr = _FakeManager(raises=True)  # would raise if consulted
+        gen = build_scip_generator_for_golden_repo(
+            _local_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="svc-foo",
+        )
+        assert isinstance(gen._indexers["typescript"], TypeScriptIndexer)
+        assert gen.workspace_id is None
+        # local backend never resolves a workspace_id
+        assert mgr.calls == []
+
+    @patch("requests.get")
+    def test_delegated_resolves_and_names_real_workspace(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        mgr = _FakeManager(workspace_id="ws-real-1234")
+        gen = build_scip_generator_for_golden_repo(
+            _delegated_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="svc-foo",
+        )
+        assert gen is not None
+        assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
+        # the delegated build names the REAL resolved workspace W
+        assert gen.workspace_id == "ws-real-1234"
+        assert mgr.calls == ["svc-foo"]
+
+    @patch("requests.get")
+    def test_delegated_unretained_workspace_id_fail_soft_returns_none(
+        self, mock_get, tmp_path
+    ):
+        mgr = _FakeManager(raises=True)
+        gen = build_scip_generator_for_golden_repo(
+            _delegated_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="legacy-repo",
+        )
+        # Fail-soft: skip SCIP for this repo rather than building against sb-None.
+        assert gen is None
+        assert mgr.calls == ["legacy-repo"]
+        # No build/health check is attempted once the workspace_id is missing.
+        mock_get.assert_not_called()

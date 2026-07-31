@@ -593,7 +593,7 @@ class TestSvcMigrate003Regression:
         expected_error = "Voyage AI timed out after 30s"
         expected_type = "semantic"
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             return {"success": False, "error": expected_error}
 
         captured_calls = []
@@ -650,7 +650,7 @@ class TestSvcMigrate003Regression:
         )
         Path(repo_path).mkdir(parents=True, exist_ok=True)
 
-        def _fake_single(rp, index_type, clear):
+        def _fake_single(rp, index_type, clear, repo_alias=None):
             if index_type == "semantic":
                 return {"success": False, "error": "VoyageAI connection refused"}
             return {"success": True, "message": "ok"}

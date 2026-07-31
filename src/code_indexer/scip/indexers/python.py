@@ -13,7 +13,13 @@ class PythonIndexer(SCIPIndexer):
     """SCIP indexer for Python projects."""
 
     def generate(
-        self, project_dir: Path, output_dir: Path, build_system: str
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        build_system: str,
+        *,
+        workspace_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> IndexerResult:
         """Generate SCIP index for Python project."""
         start_time = time.time()

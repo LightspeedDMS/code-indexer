@@ -149,7 +149,7 @@ class TestBug734StartSurvivesCleanupException:
 
 def _find_scip_subprocess_run_call(source: str) -> ast.Call:
     """
-    AST-parse _index_source source and return the ast.Call node for the
+    AST-parse the given method source and return the ast.Call node for the
     subprocess.run() invocation whose first positional argument is the Name
     node 'scip_command'.
 
@@ -183,7 +183,7 @@ def _find_scip_subprocess_run_call(source: str) -> ast.Call:
         return node
 
     raise AssertionError(
-        "No subprocess.run(scip_command, ...) call found in _index_source(). "
+        "No subprocess.run(scip_command, ...) call found in _run_source_scip(). "
         "The method structure may have changed — verify the SCIP subprocess block."
     )
 
@@ -202,14 +202,18 @@ class TestBug730ScipGenerateHasTimeout:
 
     def test_bug_730_scip_generate_has_no_timeout(self):
         """
-        _index_source() source must NOT have a 'timeout' keyword argument on the
-        subprocess.run(scip_command, ...) call (Bug #1218).
+        The SCIP ``subprocess.run(scip_command, ...)`` call must NOT have a
+        'timeout' keyword argument (Bug #1218).
+
+        EVO-65021 (s05) extracted the local SCIP subprocess out of
+        ``_index_source`` into ``_run_source_scip`` (the local fallback of the
+        single delegated funnel), so this guard now inspects that method.
 
         Overarching SCIP timeouts caused large-repo indexing to be killed
         mid-flight, producing a partial/corrupt index.  The only legitimate
         timeouts are per-request outbound embedding-provider HTTP calls.
         """
-        source = inspect.getsource(RefreshScheduler._index_source)
+        source = inspect.getsource(RefreshScheduler._run_source_scip)
 
         # AST-parse to find the exact subprocess.run(scip_command, ...) call
         scip_call = _find_scip_subprocess_run_call(source)
@@ -217,7 +221,7 @@ class TestBug730ScipGenerateHasTimeout:
         # Check that NO 'timeout' keyword argument is present on that call
         timeout_kwargs = [kw for kw in scip_call.keywords if kw.arg == "timeout"]
         assert not timeout_kwargs, (
-            "subprocess.run(scip_command, ...) in _index_source() still has a "
+            "subprocess.run(scip_command, ...) in _run_source_scip() still has a "
             "'timeout' keyword argument. "
             "Bug #1218 removes all overarching per-job timeouts on the indexing+SCIP path."
         )

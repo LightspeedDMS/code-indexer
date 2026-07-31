@@ -13,9 +13,19 @@ class TypeScriptIndexer(SCIPIndexer):
     """SCIP indexer for TypeScript/JavaScript projects."""
 
     def generate(
-        self, project_dir: Path, output_dir: Path, build_system: str
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        build_system: str,
+        *,
+        workspace_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> IndexerResult:
-        """Generate SCIP index for TypeScript/JavaScript project."""
+        """Generate SCIP index for TypeScript/JavaScript project.
+
+        ``workspace_id`` / ``language`` are accepted for interface parity with the
+        delegated backend (EVO-65021) and ignored by this local indexer.
+        """
         start_time = time.time()
         output_dir.mkdir(parents=True, exist_ok=True)
 

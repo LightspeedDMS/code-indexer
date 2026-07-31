@@ -391,7 +391,12 @@ class ActivatedRepoIndexManager:
                 update_progress(percent, message)
 
             results = self._execute_all_index_types(
-                repo_path, index_types, clear, phase_update, allocator
+                repo_path,
+                index_types,
+                clear,
+                phase_update,
+                allocator,
+                repo_alias=repo_alias,
             )
 
             # Determine overall success
@@ -438,6 +443,7 @@ class ActivatedRepoIndexManager:
         clear: bool,
         update_progress: Callable,
         allocator=None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Execute indexing for all requested index types.
@@ -488,7 +494,9 @@ class ActivatedRepoIndexManager:
             )
 
             try:
-                result = self._execute_single_index_type(repo_path, index_type, clear)
+                result = self._execute_single_index_type(
+                    repo_path, index_type, clear, repo_alias=repo_alias
+                )
                 results[index_type] = result
 
                 if not result.get("success", False):
@@ -513,7 +521,11 @@ class ActivatedRepoIndexManager:
         return results
 
     def _execute_single_index_type(
-        self, repo_path: str, index_type: str, clear: bool
+        self,
+        repo_path: str,
+        index_type: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute indexing for a single index type.
@@ -522,6 +534,9 @@ class ActivatedRepoIndexManager:
             repo_path: Repository path
             index_type: Index type to process
             clear: Clear flag
+            repo_alias: Repository alias (EVO-65021) — threaded so the SCIP step
+                can resolve the golden-repo workspace_id under the delegated
+                backend. Optional so existing 3-arg callers keep working.
 
         Returns:
             Result dictionary
@@ -533,7 +548,7 @@ class ActivatedRepoIndexManager:
         elif index_type == "temporal":
             return self._execute_temporal_indexing(repo_path, clear)
         elif index_type == "scip":
-            return self._execute_scip_indexing(repo_path, clear)
+            return self._execute_scip_indexing(repo_path, clear, repo_alias=repo_alias)
         else:
             return {"success": False, "error": f"Unknown index type: {index_type}"}
 
@@ -831,8 +846,42 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"Temporal indexing error: {str(e)}"}
 
-    def _execute_scip_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
-        """Execute SCIP indexing using cidx scip generate."""
+    def _execute_scip_indexing(
+        self, repo_path: str, clear: bool, repo_alias: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute SCIP indexing using cidx scip generate.
+
+        EVO-65021 single funnel: under ``scip_backend='delegated'`` the build is
+        routed to the serialized delegated queue (fail-soft, non-blocking) and
+        the local subprocess is skipped — a delegated gap returns success with a
+        "skipped" message so the enclosing reindex job is never failed. Under the
+        default ``local`` backend the existing subprocess path runs unchanged.
+        """
+        from code_indexer.server.services.scip_lifecycle import (
+            funnel_scip_generation,
+            ScipDelegationOutcome,
+        )
+
+        # EVO-65021 CRITICAL-2: ``repo_alias`` is an ACTIVATED (per-user) alias,
+        # NOT a golden alias. Flag it so the funnel does not resolve it through
+        # the golden namespace (which would build the wrong workspace or skip);
+        # activated repos have no retained workspace_id, so the delegated path
+        # fail-softs to SKIPPED. MAJOR-5: thread ``clear`` so a delegated rebuild
+        # cannot be short-circuited as FRESH (the local path below honours it via
+        # ``--clear``).
+        _scip_outcome = funnel_scip_generation(
+            alias=repo_alias,
+            repo_root=Path(repo_path),
+            config=get_config_service().get_config(),
+            clear=clear,
+            activated_repo=True,
+        )
+        if _scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
+            return {
+                "success": True,
+                "message": f"SCIP delegated backend: {_scip_outcome.value}",
+            }
+
         try:
             args = ["cidx", "scip", "generate", "--project", repo_path]
             if clear:

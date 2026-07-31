@@ -64,6 +64,15 @@ class SCIPSelfHealingService:
             job_manager: Background job manager for tracking job state
             repo_root: Repository root path for SCIP operations
             resolution_queue: Optional queue for re-queuing projects (AC4)
+
+        Note (EVO-65021): this Claude-Code self-healing path is LOCAL-ONLY. Under
+        ``scip_backend='delegated'`` the golden-repo SCIP step is routed through
+        ``scip_lifecycle.funnel_scip_generation`` to the delegated sandbox build
+        BEFORE any local generation runs, and the delegated build *supersedes*
+        self-healing (the sandbox build IS the resolution; the toolchain-less
+        indexing pod has nothing for Claude Code to fix — EVO-65020). So no
+        ``workspace_id`` is threaded here: it would be handed to a local indexer
+        that ignores it, reading as delegated support that can never exist.
         """
         self.job_manager = job_manager
         self.repo_root = repo_root
@@ -616,7 +625,10 @@ Status values:
             # Import here to avoid circular dependencies
             from code_indexer.scip.generator import SCIPGenerator
 
-            # Create SCIP generator instance
+            # LOCAL-ONLY (EVO-65021): self-healing runs the local subprocess
+            # indexer map. The delegated backend never reaches here — the funnel
+            # enqueues the delegated build and supersedes self-heal — so no
+            # workspace_id is threaded (a local indexer would only ignore it).
             generator = SCIPGenerator(self.repo_root)
 
             # Get project directory (remove trailing slash for Path operations)
@@ -647,8 +659,15 @@ Status values:
                 )
                 return False
 
-            # Generate SCIP index for this specific project
-            indexer_result = indexer.generate(project_dir, output_dir, build_system)
+            # Generate SCIP index for this specific project. Local-only path:
+            # ``language`` is passed for interface parity (local indexers ignore
+            # it); no workspace_id — the delegated backend never runs here.
+            indexer_result = indexer.generate(
+                project_dir,
+                output_dir,
+                build_system,
+                language=language,
+            )
 
             if indexer_result.is_success():
                 logger.info(

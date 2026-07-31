@@ -106,6 +106,20 @@ class GitOperationError(GoldenRepoError):
     pass
 
 
+class WorkspaceIdNotRetainedError(GoldenRepoError):
+    """Raised when a golden repo's workspace-mcp ``workspace_id`` cannot be resolved.
+
+    EVO-65021: the delegated SCIP indexer must hand sandbox-mcp the
+    workspace-mcp ``workspace_id`` (``sb-{workspace_id}``) of the golden repo's
+    workspace. This is raised by :meth:`GoldenRepoManager.resolve_workspace_id`
+    when the alias is unknown, or when the repo predates workspace_id retention
+    and has not been backfilled — the "missing-handle" path the delegated
+    backend fail-softs on (skips SCIP for that repo).
+    """
+
+    pass
+
+
 def _gather_repo_metrics(repo_path) -> tuple:
     """
     Gather file count and commit count for a repository.
@@ -143,6 +157,10 @@ class GoldenRepo(BaseModel):
     temporal_options: Optional[Dict] = None
     category_id: Optional[int] = None
     category_auto_assigned: bool = False
+    # EVO-65021: workspace-mcp workspace id (``ws-<hex>``) this golden repo was
+    # provisioned into. Consumed by the delegated SCIP indexer to address
+    # sandbox-mcp (``sb-{workspace_id}``). None when not (yet) retained.
+    workspace_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert golden repository to dictionary.
@@ -161,6 +179,7 @@ class GoldenRepo(BaseModel):
             "temporal_options": self.temporal_options,
             "category_id": self.category_id,
             "category_auto_assigned": self.category_auto_assigned,
+            "workspace_id": self.workspace_id,
         }
 
 
@@ -441,6 +460,7 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         submitter_username: str = "admin",
         skip_pre_flight_git_validation: bool = False,
+        workspace_id: Optional[str] = None,
     ) -> str:
         """
         Add a golden repository.
@@ -457,6 +477,10 @@ class GoldenRepoManager:
             enable_temporal: Enable temporal git history indexing
             temporal_options: Temporal indexing configuration options
             submitter_username: Username of the user submitting the job (default: "admin")
+            workspace_id: Optional workspace-mcp workspace id (EVO-65021) to
+                retain on the golden repo so the delegated SCIP indexer can
+                address sandbox-mcp (``sb-{workspace_id}``). None when the
+                caller does not (yet) know it.
 
         Returns:
             Job ID for tracking add operation progress
@@ -530,6 +554,7 @@ class GoldenRepoManager:
                 enable_temporal=enable_temporal,
                 temporal_options=temporal_options,
                 submitter_username=submitter_username,
+                workspace_id=workspace_id,
                 progress_callback=progress_callback,
             )
 
@@ -549,6 +574,7 @@ class GoldenRepoManager:
                 "enable_temporal": enable_temporal,
                 "temporal_options": temporal_options,
                 "submitter_username": submitter_username,
+                "workspace_id": workspace_id,
             },
         )
         return cast(str, job_id)
@@ -562,6 +588,7 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         submitter_username: str = "admin",
+        workspace_id: Optional[str] = None,
         progress_callback: Optional[Callable[..., Any]] = None,
     ) -> Dict[str, Any]:
         """EVO-64545: reusable clone + index + register + global-activate body for
@@ -670,6 +697,7 @@ class GoldenRepoManager:
                     created_at=created_at,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
+                    workspace_id=workspace_id,
                 )
 
                 # Store and persist
@@ -682,6 +710,7 @@ class GoldenRepoManager:
                     created_at=created_at,
                     enable_temporal=enable_temporal,
                     temporal_options=temporal_options,
+                    workspace_id=workspace_id,
                 )
 
                 # Auto-assign category (Story #181 AC1, Story #622 URL matching)
@@ -2742,6 +2771,83 @@ class GoldenRepoManager:
         except Exception as e:
             logger.warning("Failed to get wiki_enabled for alias '%s': %s", alias, e)
             return False
+
+    def get_workspace_id(self, alias: str) -> Optional[str]:
+        """Return the workspace-mcp ``workspace_id`` retained for *alias*, or None.
+
+        EVO-65021 read accessor. Resolves via the shared backend (source of
+        truth) so a repo registered on another worker/node is visible here.
+        Returns None both when the alias is unknown AND when the repo predates
+        workspace_id retention (has not been captured/backfilled). Callers that
+        must distinguish those cases, or that require a non-None id, should use
+        :meth:`resolve_workspace_id`.
+        """
+        repo = self._resolve_golden_repo(alias)
+        if repo is None:
+            return None
+        return repo.workspace_id
+
+    def resolve_workspace_id(self, alias: str) -> str:
+        """Resolve the workspace-mcp ``workspace_id`` for *alias* or raise.
+
+        EVO-65021: this is the accessor the delegated SCIP indexer (stream-01)
+        consumes to address sandbox-mcp (``sb-{workspace_id}``). Unlike
+        :meth:`get_workspace_id`, it never returns a falsy handle — it raises
+        :class:`WorkspaceIdNotRetainedError` when the alias is unknown or its
+        workspace_id has not been retained, so the delegated backend can
+        fail-soft (skip SCIP for that repo) on an explicit, typed signal rather
+        than silently building against ``sb-None``.
+
+        Args:
+            alias: Golden repository alias.
+
+        Returns:
+            The non-empty workspace-mcp workspace id.
+
+        Raises:
+            WorkspaceIdNotRetainedError: alias unknown, or workspace_id unset.
+        """
+        # EVO-65021 (Bug #1316 shape): workspace_id flips from NULL to a value at
+        # an arbitrary later point (backfill / registration on ANOTHER worker), so
+        # a per-worker cache HIT can serve a stale ``workspace_id=None`` forever
+        # (until process restart). Because THIS method's OUTCOME decides whether a
+        # delegated SCIP build runs, it MUST read the authoritative shared-backend
+        # state — a cache-first read here would wrongly fail-soft "no retained
+        # workspace_id" on a repo another worker has already backfilled.
+        repo = self._resolve_golden_repo_authoritative(alias)
+        if repo is None:
+            raise WorkspaceIdNotRetainedError(
+                f"Cannot resolve workspace_id: golden repo '{alias}' not found"
+            )
+        workspace_id = repo.workspace_id
+        if not workspace_id:
+            raise WorkspaceIdNotRetainedError(
+                f"Golden repo '{alias}' has no retained workspace_id "
+                "(registered before workspace_id retention, or not yet "
+                "backfilled). Re-register the repo or backfill its workspace_id "
+                "before enabling delegated SCIP."
+            )
+        return workspace_id
+
+    def set_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
+        """Persist the workspace-mcp ``workspace_id`` for *alias*.
+
+        EVO-65021 capture/backfill accessor: writes the handle to the shared
+        backend and refreshes the per-worker cache so subsequent
+        :meth:`get_workspace_id`/:meth:`resolve_workspace_id` reads on this
+        worker see it immediately. Passing None clears the handle.
+
+        Returns:
+            True if a record was updated, False if the alias does not exist.
+        """
+        updated: bool = self._sqlite_backend.update_workspace_id(alias, workspace_id)
+        if updated:
+            cached = self.golden_repos.get(alias)
+            if cached is not None:
+                self.golden_repos[alias] = cached.model_copy(
+                    update={"workspace_id": workspace_id}
+                )
+        return updated
 
     def set_wiki_enabled(self, alias: str, enabled: bool) -> None:
         """Set wiki_enabled flag for a golden repo (Story #280)."""

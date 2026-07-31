@@ -13,7 +13,13 @@ class JavaIndexer(SCIPIndexer):
     """SCIP indexer for Java/Kotlin projects using scip-java."""
 
     def generate(
-        self, project_dir: Path, output_dir: Path, build_system: str
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        build_system: str,
+        *,
+        workspace_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> IndexerResult:
         """Generate SCIP index for Java/Kotlin project."""
         start_time = time.time()

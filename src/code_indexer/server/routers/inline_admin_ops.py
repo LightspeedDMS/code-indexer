@@ -301,6 +301,13 @@ def register_admin_ops_routes(
                 "enable_temporal": repo_data.enable_temporal,
             }
 
+            # EVO-65021 (seam #3): capture the workspace-mcp workspace_id supplied
+            # by the (in-place/provisioning) caller so it is persisted on the
+            # golden-repo metadata for the delegated SCIP backend. Omitted when
+            # None so the manager's default (no retention) is unchanged.
+            if repo_data.workspace_id is not None:
+                func_kwargs["workspace_id"] = repo_data.workspace_id
+
             # Add temporal_options if provided
             if repo_data.temporal_options:
                 func_kwargs["temporal_options"] = (

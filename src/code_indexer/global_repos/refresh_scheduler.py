@@ -2838,48 +2838,99 @@ class RefreshScheduler:
 
         # Execute Step 3: SCIP indexing (coarse markers, subprocess.run stays — it has no --progress-json)
         if enable_scip:
-            scip_command = ["cidx", "scip", "generate"]
-            logger.info(f"SCIP indexing enabled for {alias_name}")
+            self._run_source_scip(alias_name, source_path, allocator, progress_callback)
+
+    def _run_source_scip(
+        self,
+        alias_name: str,
+        source_path: str,
+        allocator: Any,
+        progress_callback: Optional[Callable[..., None]],
+    ) -> None:
+        """Run the golden-repo SCIP step through the EVO-65021 single funnel.
+
+        Under ``scip_backend='delegated'`` the build is enqueued on the
+        serialized delegated queue (never blocking this index job) and the local
+        subprocess is skipped; the funnel is fail-soft and never raises, so a
+        delegated backend gap leaves the repo at "skipped: No SCIP index
+        available" instead of failing this golden-repo job. Under the default
+        ``local`` backend the existing ``cidx scip generate`` subprocess runs
+        unchanged (and can still raise, preserving prior behaviour).
+        """
+        from code_indexer.server.services.scip_lifecycle import (
+            funnel_scip_generation,
+            ScipDelegationOutcome,
+        )
+
+        # EVO-65021 CRITICAL-1: the funnel's delegated resolver
+        # (GoldenRepoManager.resolve_workspace_id) is keyed by the BARE golden
+        # alias, but this entrypoint is handed the ``-global``-suffixed registry
+        # alias. Normalize to bare before funnelling — mirroring the existing
+        # in-file pattern (Bug #1414 / #1373) — or every golden repo silently
+        # loses SCIP under scip_backend='delegated'.
+        _GLOBAL_SUFFIX = "-global"
+        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
+        scip_outcome = funnel_scip_generation(
+            alias=bare_alias,
+            repo_root=Path(source_path),
+            config=get_config_service().get_config(),
+        )
+        if scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
             logger.info(
-                f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
+                "SCIP delegated backend: %s for %s",
+                scip_outcome.value,
+                alias_name,
             )
             if progress_callback is not None:
                 progress_callback(
-                    int(allocator.phase_start("scip")),
+                    int(allocator.phase_end("scip")),
                     phase="scip",
-                    detail="SCIP: generating code intelligence index...",
+                    detail=f"SCIP: {scip_outcome.value}",
                 )
-            try:
-                subprocess.run(
-                    scip_command,
-                    cwd=str(source_path),
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    env=build_cidx_subprocess_env(),
+            return
+
+        scip_command = ["cidx", "scip", "generate"]
+        logger.info(f"SCIP indexing enabled for {alias_name}")
+        logger.info(
+            f"Running cidx scip generate on source for {alias_name}: {' '.join(scip_command)}"
+        )
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_start("scip")),
+                phase="scip",
+                detail="SCIP: generating code intelligence index...",
+            )
+        try:
+            subprocess.run(
+                scip_command,
+                cwd=str(source_path),
+                capture_output=True,
+                text=True,
+                check=True,
+                env=build_cidx_subprocess_env(),
+            )
+            logger.info("cidx scip generate on source completed successfully")
+            if progress_callback is not None:
+                progress_callback(
+                    int(allocator.phase_end("scip")),
+                    phase="scip",
+                    detail="SCIP: complete",
                 )
-                logger.info("cidx scip generate on source completed successfully")
-                if progress_callback is not None:
-                    progress_callback(
-                        int(allocator.phase_end("scip")),
-                        phase="scip",
-                        detail="SCIP: complete",
-                    )
-            except subprocess.CalledProcessError as e:
-                if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
-                    logger.warning(
-                        f"SCIP indexing on source interrupted by server shutdown for {alias_name}"
-                    )
-                    raise RuntimeError(
-                        f"Indexing interrupted by server shutdown for {alias_name}"
-                    )
-                logger.error(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
-                    exc_info=True,
+        except subprocess.CalledProcessError as e:
+            if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
+                logger.warning(
+                    f"SCIP indexing on source interrupted by server shutdown for {alias_name}"
                 )
                 raise RuntimeError(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"Indexing interrupted by server shutdown for {alias_name}"
                 )
+            logger.error(
+                f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+            )
 
     def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
         """Run a subprocess, optionally through a per-instance injection seam.

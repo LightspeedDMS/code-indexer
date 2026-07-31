@@ -21,6 +21,36 @@ from .database.builder import SCIPDatabaseBuilder
 logger = logging.getLogger(__name__)
 
 
+# EVO-65021: BSD sysexits ``EX_UNAVAILABLE`` — the exit code the delegated
+# sandbox scip wrapper returns for a language it has no indexer for. cidx itself
+# also emits an equivalent stderr marker when a discovered language is outside
+# its indexer map. Both are EXPECTED, benign outcomes (the Phase-1 sandbox image
+# indexes TS/JS only): they must NOT count as a real build failure for the SCIP
+# freshness decision, so a mixed-language golden repo can still mark ``fresh``
+# instead of thrashing (re-enqueuing a doomed rebuild every refresh cycle).
+SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE = 69
+_UNSUPPORTED_LANGUAGE_MARKERS = (
+    "no scip indexer for language",
+    "no indexer available for language",
+)
+
+
+def indexer_result_is_unsupported_language(indexer_result: IndexerResult) -> bool:
+    """True iff a FAILED project failed only because its language is unsupported.
+
+    Distinguishes an EXPECTED, benign skip (exit 69 / "no SCIP indexer for
+    language") from a genuine build failure (toolchain/deps/timeout, HTTP 429
+    backpressure, or a mandatory database-build failure). A genuine failure
+    carries neither signal, so it is NOT treated as unsupported.
+    """
+    if indexer_result is None:
+        return False
+    if getattr(indexer_result, "exit_code", None) == SCIP_UNSUPPORTED_LANGUAGE_EXIT_CODE:
+        return True
+    stderr = (getattr(indexer_result, "stderr", "") or "").lower()
+    return any(marker in stderr for marker in _UNSUPPORTED_LANGUAGE_MARKERS)
+
+
 @dataclass
 class ProjectGenerationResult:
     """Result of generating SCIP index for a single project."""
@@ -38,6 +68,10 @@ class GenerationResult:
     failed_projects: int
     project_results: List[ProjectGenerationResult] = field(default_factory=list)
     duration_seconds: float = 0.0
+    # EVO-65021: of ``failed_projects``, how many failed only because their
+    # language is unsupported by the (Phase-1) SCIP backend. These are EXPECTED,
+    # benign skips — subtracting them yields the count of *real* build failures.
+    unsupported_language_projects: int = 0
 
     def is_complete_success(self) -> bool:
         """Check if all projects succeeded."""
@@ -51,31 +85,87 @@ class GenerationResult:
         """Check if all projects failed."""
         return self.total_projects > 0 and self.successful_projects == 0
 
+    def real_failed_projects(self) -> int:
+        """Count of failures that are NOT expected unsupported-language skips."""
+        return max(0, self.failed_projects - self.unsupported_language_projects)
+
+    def is_fresh_eligible(self) -> bool:
+        """EVO-65021: safe to record the ``.build_commit`` freshness marker.
+
+        True iff NONE of the discovered projects failed for an UNEXPECTED
+        reason. An unsupported-language exit (69) is expected and benign, so a
+        repo whose only failures are unsupported languages (a mixed TS +
+        Java/Python golden repo, or a pure non-TS repo) is still fresh-eligible
+        and will not thrash. A repo with a genuine build failure is NOT
+        fresh-eligible, so it is retried and does not poison the marker (the
+        MAJOR-3 partial-masking guarantee, kept intact for real failures).
+
+        Zero-project case (EVO-65021 fix): a repo where ``ProjectDiscovery``
+        found nothing to index is legitimately CONVERGED — there is nothing to
+        build. It is therefore fresh-eligible so ``on_success`` fires and the
+        ``.build_commit`` marker is written, rather than the repo re-enqueueing
+        an identical empty rebuild every refresh cycle forever. This is gated on
+        an EMPTY ``project_results`` (nothing was attempted): a genuine
+        no-discovery run produces no per-project results, whereas a FAILED build
+        always carries them — so a real failure can never be mistaken for
+        convergence and marked fresh.
+        """
+        if self.total_projects == 0 and not self.project_results:
+            return self.failed_projects == 0
+        return self.total_projects > 0 and self.real_failed_projects() == 0
+
 
 class SCIPGenerator:
     """Orchestrates SCIP index generation for multiple projects."""
 
-    def __init__(self, repo_root: Path, max_workers: int = 4):
+    def __init__(
+        self,
+        repo_root: Path,
+        max_workers: int = 4,
+        *,
+        indexer_map: Optional[Dict[str, SCIPIndexer]] = None,
+        workspace_id: Optional[str] = None,
+    ):
         """
         Initialize SCIP generator.
 
         Args:
             repo_root: Root directory of repository
             max_workers: Maximum number of parallel indexer executions
+            indexer_map: Optional ``language -> SCIPIndexer`` map to inject
+                (EVO-65021 backend seam). Defaults to today's local subprocess
+                indexers (built inline below), so the default path is
+                byte-for-byte the previous behaviour. Prefer
+                ``build_scip_generator`` (startup wiring) to select the backend
+                from config rather than constructing a map here.
+            workspace_id: workspace-mcp id of the golden repo (EVO-65021),
+                threaded into every ``indexer.generate`` call. Only the
+                delegated backend uses it; ``None`` (default) is correct for the
+                local backend.
         """
         self.repo_root = Path(repo_root)
         self.scip_dir = self.repo_root / ".code-indexer" / "scip"
         self.max_workers = max_workers
+        self.workspace_id = workspace_id
 
-        # Initialize indexers
-        self._indexers: Dict[str, SCIPIndexer] = {
-            "java": JavaIndexer(),
-            "kotlin": JavaIndexer(),  # Kotlin uses scip-java
-            "typescript": TypeScriptIndexer(),
-            "python": PythonIndexer(),
-            "csharp": CSharpIndexer(),
-            "go": GoIndexer(),
-        }
+        # Initialize indexers. Default = today's local subprocess map (built
+        # inline so tests that patch these classes at this module keep working);
+        # injectable for the delegated backend via ``indexer_map`` (EVO-65021).
+        # NOTE: keep this default map in sync with
+        # ``ScipBackendFactory.create_local_indexer_map`` — the two cannot share
+        # one builder without a generator<->factory import cycle.
+        self._indexers: Dict[str, SCIPIndexer] = (
+            indexer_map
+            if indexer_map is not None
+            else {
+                "java": JavaIndexer(),
+                "kotlin": JavaIndexer(),  # Kotlin uses scip-java
+                "typescript": TypeScriptIndexer(),
+                "python": PythonIndexer(),
+                "csharp": CSharpIndexer(),
+                "go": GoIndexer(),
+            }
+        )
 
     def _cleanup_orphan_scip_databases(
         self, discovered_projects: List[DiscoveredProject]
@@ -182,6 +272,7 @@ class SCIPGenerator:
         project_results = []
         successful = 0
         failed = 0
+        unsupported = 0  # EVO-65021: benign unsupported-language skips (exit 69)
 
         for project in projects:
             if progress_callback:
@@ -204,6 +295,7 @@ class SCIPGenerator:
                 )
                 project_results.append(ProjectGenerationResult(project, result))
                 failed += 1
+                unsupported += 1  # cidx has no indexer for this language (benign)
                 continue
 
             # Generate index
@@ -211,7 +303,11 @@ class SCIPGenerator:
             output_dir = self.scip_dir / project.relative_path
 
             indexer_result = indexer.generate(
-                project_dir, output_dir, project.build_system
+                project_dir,
+                output_dir,
+                project.build_system,
+                workspace_id=self.workspace_id,
+                language=project.language,
             )
 
             project_results.append(ProjectGenerationResult(project, indexer_result))
@@ -250,6 +346,11 @@ class SCIPGenerator:
                         indexer_result.stderr = f"Database build failed: {e}"
             else:
                 failed += 1
+                # EVO-65021: a delegated sandbox exits 69 for a language its
+                # (Phase-1) image cannot build — an expected, benign skip that
+                # must not block freshness. A genuine failure is not counted.
+                if indexer_result_is_unsupported_language(indexer_result):
+                    unsupported += 1
                 if progress_callback:
                     progress_callback(project, f"✗ {project.relative_path} (failed)")
 
@@ -261,6 +362,7 @@ class SCIPGenerator:
             failed_projects=failed,
             project_results=project_results,
             duration_seconds=duration,
+            unsupported_language_projects=unsupported,
         )
 
     def rebuild_projects(
@@ -348,7 +450,11 @@ class SCIPGenerator:
             output_dir = self.scip_dir / project_path
 
             indexer_result = indexer.generate(
-                project_dir, output_dir, project_status.build_system
+                project_dir,
+                output_dir,
+                project_status.build_system,
+                workspace_id=self.workspace_id,
+                language=project_status.language,
             )
 
             # Build database from protobuf if successful - REQUIRED FOR SUCCESS

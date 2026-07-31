@@ -4,6 +4,8 @@ from .base import SCIPIndexer, IndexerResult, IndexerStatus
 from .java import JavaIndexer
 from .typescript import TypeScriptIndexer
 from .python import PythonIndexer
+from .delegated import DelegatedIndexer
+from .factory import ScipBackendFactory
 
 __all__ = [
     "SCIPIndexer",
@@ -12,4 +14,6 @@ __all__ = [
     "JavaIndexer",
     "TypeScriptIndexer",
     "PythonIndexer",
+    "DelegatedIndexer",
+    "ScipBackendFactory",
 ]

@@ -194,7 +194,8 @@ class DatabaseSchema:
             created_at TEXT NOT NULL,
             enable_temporal INTEGER NOT NULL DEFAULT 0,
             temporal_options TEXT,
-            wiki_enabled INTEGER DEFAULT 0
+            wiki_enabled INTEGER DEFAULT 0,
+            workspace_id TEXT
         )
     """
 
@@ -906,6 +907,8 @@ class DatabaseSchema:
             self._migrate_performance_indexes(conn)
             # Story #280/#283: Wiki feature migrations
             self._migrate_golden_repos_metadata_wiki(conn)
+            # EVO-65021: workspace-mcp workspace_id retention for golden repos
+            self._migrate_golden_repos_metadata_workspace_id(conn)
             self._migrate_wiki_cache_tables(conn)
             # Story #287 / Bug #1340: wiki_article_views must exist at
             # startup, not only after the first wiki HTTP route hit.
@@ -1355,6 +1358,33 @@ class DatabaseSchema:
             conn.commit()
             logger.info(
                 f"Wiki migration applied to golden_repos_metadata: {migrations_applied}"
+            )
+
+    def _migrate_golden_repos_metadata_workspace_id(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Migrate golden_repos_metadata for workspace_id retention (EVO-65021).
+
+        Adds the nullable ``workspace_id`` column so a golden repo can carry the
+        workspace-mcp ``workspace_id`` that the delegated SCIP indexer must hand
+        to sandbox-mcp (``sb-{workspace_id}``). Existing rows keep ``NULL`` until
+        the id is captured at (re-)registration or backfilled.
+        Safe to run multiple times - only adds the column when missing.
+        """
+        existing_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(golden_repos_metadata)"
+            ).fetchall()
+        }
+        if "workspace_id" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE golden_repos_metadata ADD COLUMN workspace_id TEXT"
+            )
+            conn.commit()
+            logger.info(
+                "EVO-65021 migration applied to golden_repos_metadata: added "
+                "workspace_id"
             )
 
     def _migrate_wiki_cache_tables(self, conn: sqlite3.Connection) -> None:
