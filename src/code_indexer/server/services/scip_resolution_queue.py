@@ -5,15 +5,22 @@ Manages serialized FIFO queue for processing SCIP project resolution attempts
 one at a time to prevent conflicts. Part of Story #645 AC4.
 """
 
+import asyncio
+import logging
+import queue as _queue_mod
+import threading
+import time
+import uuid
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+
+from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 
-import logging
-import asyncio
-import uuid
-from typing import Dict, Optional, Any
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from code_indexer.server.logging_utils import format_error_log
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from code_indexer.scip.generator import GenerationResult
 
 logger = logging.getLogger(__name__)
 
@@ -360,3 +367,307 @@ class SCIPResolutionQueue:
             logger.debug(
                 "Worker loop exited", extra={"correlation_id": get_correlation_id()}
             )
+
+
+# =============================================================================
+# EVO-65021 — Delegated SCIP build queue + fail-soft metrics
+# =============================================================================
+#
+# The delegated SCIP backend (stream-01) hands each golden-repo compile step to
+# sandbox-mcp. Because a single build can take up to 1800s, it must NOT run
+# inline in the golden-repo index job (a 30s query vs a 1800s build). This
+# section adds a *serialized* build drain that reuses the same one-at-a-time
+# FIFO shape as ``SCIPResolutionQueue`` above (serialization is itself the
+# backpressure on sandbox-mcp), plus explicit 429/backpressure re-enqueue.
+#
+# It is thread-backed rather than asyncio-backed on purpose: the two funnel
+# entrypoints (``refresh_scheduler`` and ``activated_repo_index_manager``) are
+# synchronous background-job threads, not coroutines, so a ``queue.Queue`` +
+# daemon worker is the honest fit and keeps enqueue callable straight from those
+# sync paths without bridging an event loop.
+
+# sandbox-mcp returns HTTP 429 for backpressure; ``DelegatedIndexer`` maps that
+# to a FAILED IndexerResult whose stderr carries the ``HTTP 429`` token
+# (delegated.py ``_failure`` on ``status_code >= 300``). Matched to distinguish
+# "retry later" from a genuine build failure (e.g. exit-69 unsupported-language,
+# which is a plain FAILED with no 429 token → fail-soft dropped, not retried).
+_BACKPRESSURE_MARKERS = ("http 429", "too many requests")
+
+# Backoff between backpressure re-enqueues, and the retry ceiling.
+DELEGATED_BACKPRESSURE_RETRY_SECONDS = 30.0
+DELEGATED_MAX_BACKPRESSURE_RETRIES = 5
+
+
+# --- fail-soft metrics -------------------------------------------------------
+# No project-wide metrics facility exists (grep: only per-domain counters), so
+# EVO-65021 records skip/outcome counts in a process-local counter, exposed for
+# observability and asserted in tests. Every fail-soft branch increments here.
+_scip_metrics: Dict[str, int] = defaultdict(int)
+_scip_metrics_lock = threading.Lock()
+
+
+def record_scip_metric(name: str, n: int = 1) -> None:
+    """Increment the EVO-65021 delegated-SCIP counter *name* by *n*."""
+    with _scip_metrics_lock:
+        _scip_metrics[name] += n
+
+
+def get_scip_metrics() -> Dict[str, int]:
+    """Return a snapshot copy of the delegated-SCIP counters."""
+    with _scip_metrics_lock:
+        return dict(_scip_metrics)
+
+
+def reset_scip_metrics() -> None:
+    """Clear the delegated-SCIP counters (test helper)."""
+    with _scip_metrics_lock:
+        _scip_metrics.clear()
+
+
+def _result_is_success(result: Optional["GenerationResult"]) -> bool:
+    """True iff the build produced at least one successful project index."""
+    return bool(result is not None and getattr(result, "successful_projects", 0) > 0)
+
+
+def _detect_backpressure(result: Optional["GenerationResult"]) -> bool:
+    """True iff a FAILED build looks like sandbox-mcp backpressure (HTTP 429).
+
+    Scans every per-project ``stderr`` for a backpressure marker. A genuine
+    build failure (unsupported-language exit 69, missing deps, etc.) carries no
+    such marker and is therefore NOT retried — it is fail-soft dropped.
+    """
+    if result is None:
+        return False
+    for project_result in getattr(result, "project_results", []) or []:
+        indexer_result = getattr(project_result, "indexer_result", None)
+        stderr = (getattr(indexer_result, "stderr", "") or "").lower()
+        if any(marker in stderr for marker in _BACKPRESSURE_MARKERS):
+            return True
+    return False
+
+
+@dataclass
+class DelegatedScipBuild:
+    """A queued delegated SCIP build (EVO-65021).
+
+    Carries an opaque ``run_build`` callable (a closure over the config-selected
+    ``SCIPGenerator``) so the queue stays decoupled from generator construction
+    and from ``workspace_id`` resolution. ``dedupe_key`` (``alias@commit``)
+    prevents the two golden-repo entrypoints from building the same repo+commit
+    twice.
+    """
+
+    alias: str
+    dedupe_key: str
+    run_build: Callable[[], "GenerationResult"]
+    on_success: Optional[Callable[["GenerationResult"], None]] = None
+    backpressure_attempts: int = field(default=0)
+
+
+class DelegatedScipBuildQueue:
+    """Serialized FIFO drain for delegated SCIP builds (EVO-65021).
+
+    One build runs at a time (natural backpressure on sandbox-mcp). Terminal
+    outcomes:
+
+    * success (≥1 project index produced) → ``on_success`` fires (records the
+      freshness commit), dedupe key released;
+    * backpressure (HTTP 429) → sleep + re-enqueue, up to
+      ``max_backpressure_retries`` times, dedupe key retained;
+    * any other FAILED result (incl. exit-69 unsupported-language) or a raised
+      build → **fail-soft**: logged + metered and dropped. The repo stays at the
+      existing ``"skipped: No SCIP index available"`` state. NEVER re-raised.
+    """
+
+    def __init__(
+        self,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        backpressure_retry_seconds: float = DELEGATED_BACKPRESSURE_RETRY_SECONDS,
+        max_backpressure_retries: int = DELEGATED_MAX_BACKPRESSURE_RETRIES,
+    ) -> None:
+        self._queue: "_queue_mod.Queue[Optional[DelegatedScipBuild]]" = (
+            _queue_mod.Queue()
+        )
+        self._inflight_keys: set[str] = set()
+        self._lock = threading.Lock()
+        self._worker: Optional[threading.Thread] = None
+        self._current_alias: Optional[str] = None
+        self._sleep = sleep
+        self._backpressure_retry_seconds = backpressure_retry_seconds
+        self._max_backpressure_retries = max_backpressure_retries
+
+    def enqueue(self, build: DelegatedScipBuild, *, start_worker: bool = True) -> bool:
+        """Queue *build*; return False (deduped) if its key is already in flight.
+
+        ``start_worker=False`` is used by tests to enqueue without spawning the
+        background thread, then drain deterministically via
+        :meth:`drain_pending`.
+        """
+        with self._lock:
+            if build.dedupe_key in self._inflight_keys:
+                logger.info(
+                    "EVO-65021: dedupe — delegated SCIP build '%s' already "
+                    "queued/in-flight; skipping",
+                    build.dedupe_key,
+                )
+                record_scip_metric("delegated_build_deduped")
+                return False
+            self._inflight_keys.add(build.dedupe_key)
+        self._queue.put(build)
+        if start_worker:
+            self._ensure_worker()
+        return True
+
+    def _ensure_worker(self) -> None:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="delegated-scip-build-queue",
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            build = self._queue.get()
+            try:
+                if build is None:  # stop sentinel
+                    return
+                self._run_and_maybe_requeue(build)
+            finally:
+                self._queue.task_done()
+
+    def _run_and_maybe_requeue(self, build: DelegatedScipBuild) -> None:
+        """Process one build; on backpressure sleep + re-enqueue (key retained)."""
+        terminal = self._process(build)
+        if terminal:
+            with self._lock:
+                self._inflight_keys.discard(build.dedupe_key)
+        else:
+            # Backpressure: the dedupe key stays in flight so a concurrent funnel
+            # call for the same repo+commit is still deduped while we retry.
+            self._sleep(self._backpressure_retry_seconds)
+            self._queue.put(build)
+
+    def drain_pending(self, max_items: Optional[int] = None) -> int:
+        """Synchronously process queued builds in the calling thread (tests).
+
+        Backpressure re-enqueues are honored inline (no thread, no real sleep
+        beyond the injected ``sleep``). Returns the number of items processed.
+        Stops when the queue is empty or *max_items* is reached.
+        """
+        processed = 0
+        while max_items is None or processed < max_items:
+            try:
+                build = self._queue.get_nowait()
+            except _queue_mod.Empty:
+                break
+            try:
+                if build is None:
+                    continue
+                self._run_and_maybe_requeue(build)
+            finally:
+                self._queue.task_done()
+            processed += 1
+        return processed
+
+    def _process(self, build: DelegatedScipBuild) -> bool:
+        """Run one build. Return True when terminal, False to re-enqueue.
+
+        The caller (:meth:`_run_and_maybe_requeue`) releases the dedupe key on a
+        terminal (True) outcome and retains it across a backpressure re-enqueue.
+        Fail-soft is enforced here: neither a raised build nor a FAILED result
+        propagates out of this method.
+        """
+        with self._lock:
+            self._current_alias = build.alias
+        try:
+            try:
+                result = build.run_build()
+            except Exception as exc:  # DelegatedIndexer fail-softs; belt & braces
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-169",
+                        f"EVO-65021 fail-soft: delegated SCIP build for "
+                        f"'{build.alias}' raised and was dropped: {exc}",
+                        exc_info=True,
+                    )
+                )
+                record_scip_metric("delegated_build_error")
+                return True
+
+            if _result_is_success(result):
+                record_scip_metric("delegated_build_success")
+                if build.on_success is not None:
+                    try:
+                        build.on_success(result)
+                    except Exception as exc:  # freshness bookkeeping is best-effort
+                        logger.warning(
+                            "EVO-65021: on_success hook failed for '%s' "
+                            "(non-fatal): %s",
+                            build.alias,
+                            exc,
+                        )
+                return True
+
+            if (
+                _detect_backpressure(result)
+                and build.backpressure_attempts < self._max_backpressure_retries
+            ):
+                build.backpressure_attempts += 1
+                record_scip_metric("delegated_build_backpressure_retry")
+                logger.warning(
+                    "EVO-65021: sandbox-mcp backpressure (HTTP 429) for '%s'; "
+                    "re-enqueuing (attempt %d/%d)",
+                    build.alias,
+                    build.backpressure_attempts,
+                    self._max_backpressure_retries,
+                )
+                return False
+
+            # Genuine failure (incl. exit-69 unsupported-language) → fail-soft.
+            record_scip_metric("delegated_build_skipped")
+            logger.warning(
+                "EVO-65021 fail-soft: delegated SCIP build for '%s' produced no "
+                "index (dropped); repo stays 'skipped: No SCIP index available'",
+                build.alias,
+            )
+            return True
+        finally:
+            with self._lock:
+                self._current_alias = None
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return queue depth, current build alias, and in-flight dedupe keys."""
+        with self._lock:
+            return {
+                "pending_count": self._queue.qsize(),
+                "current_alias": self._current_alias,
+                "inflight_keys": sorted(self._inflight_keys),
+            }
+
+    def stop(self) -> None:
+        """Signal the worker to exit after draining the sentinel."""
+        self._queue.put(None)
+        with self._lock:
+            worker = self._worker
+        if worker is not None:
+            worker.join(timeout=5.0)
+
+
+# Process-wide singleton so both funnel entrypoints share one serialized drain
+# (cross-entrypoint dedupe + one-build-at-a-time backpressure).
+_delegated_queue_singleton: Optional[DelegatedScipBuildQueue] = None
+_delegated_queue_singleton_lock = threading.Lock()
+
+
+def get_delegated_scip_build_queue() -> DelegatedScipBuildQueue:
+    """Return the process-wide :class:`DelegatedScipBuildQueue` singleton."""
+    global _delegated_queue_singleton
+    with _delegated_queue_singleton_lock:
+        if _delegated_queue_singleton is None:
+            _delegated_queue_singleton = DelegatedScipBuildQueue()
+        return _delegated_queue_singleton
