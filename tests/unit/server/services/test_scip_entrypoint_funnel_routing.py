@@ -75,6 +75,20 @@ class TestRefreshSchedulerEntrypoint:
         srun.assert_called_once()
         assert srun.call_args.args[0] == ["cidx", "scip", "generate"]
 
+    def test_global_suffix_normalized_to_bare_alias(self):
+        # CRITICAL-1 regression: the entrypoint is handed the -global registry
+        # alias, but the funnel's golden resolver is keyed by the BARE alias. It
+        # must be normalized before funnelling, or every golden repo silently
+        # loses SCIP under the delegated backend.
+        sched = _scheduler()
+        with (
+            patch(f"{_REFRESH_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.ENQUEUED) as funnel,
+            patch(f"{_REFRESH_MOD}.subprocess.run"),
+        ):
+            sched._run_source_scip("my-repo-global", "/src", _allocator(), None)
+        assert funnel.call_args.kwargs["alias"] == "my-repo"
+
 
 # --------------------------------------------------------------------------- #
 # activated_repo_index_manager._execute_scip_indexing (activated-repo entrypoint)
@@ -132,6 +146,25 @@ class TestActivatedRepoEntrypoint:
         srun.assert_called_once()
         assert result["success"] is True
         assert "SCIP generation completed" in result["message"]
+
+    def test_activated_alias_is_flagged_and_clear_threaded_to_funnel(self, tmp_path):
+        # CRITICAL-2 + MAJOR-5 regression: the activated entrypoint must tell the
+        # funnel this is an ACTIVATED (non-golden) alias so it is not resolved
+        # through the golden namespace, and must thread ``clear`` so a rebuild is
+        # not short-circuited as fresh.
+        mgr = _index_manager(tmp_path)
+        with (
+            patch(f"{_ACT_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.SKIPPED) as funnel,
+            patch("subprocess.run") as srun,
+        ):
+            result = mgr._execute_scip_indexing(
+                "/repo", clear=True, repo_alias="my-repo"
+            )
+        assert funnel.call_args.kwargs["activated_repo"] is True
+        assert funnel.call_args.kwargs["clear"] is True
+        srun.assert_not_called()
+        assert result["success"] is True
 
     def test_scip_lifecycle_funnel_module_importable(self):
         # Guard: the entrypoints import these symbols lazily at call time.

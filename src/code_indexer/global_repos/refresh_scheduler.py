@@ -2862,8 +2862,16 @@ class RefreshScheduler:
             ScipDelegationOutcome,
         )
 
+        # EVO-65021 CRITICAL-1: the funnel's delegated resolver
+        # (GoldenRepoManager.resolve_workspace_id) is keyed by the BARE golden
+        # alias, but this entrypoint is handed the ``-global``-suffixed registry
+        # alias. Normalize to bare before funnelling — mirroring the existing
+        # in-file pattern (Bug #1414 / #1373) — or every golden repo silently
+        # loses SCIP under scip_backend='delegated'.
+        _GLOBAL_SUFFIX = "-global"
+        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
         scip_outcome = funnel_scip_generation(
-            alias=alias_name,
+            alias=bare_alias,
             repo_root=Path(source_path),
             config=get_config_service().get_config(),
         )

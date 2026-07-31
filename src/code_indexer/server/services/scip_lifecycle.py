@@ -114,6 +114,26 @@ def record_scip_build_commit(scip_dir: Path, commit: Optional[str]) -> None:
         )
 
 
+def remove_scip_build_commit(scip_dir: Path) -> None:
+    """Delete the freshness marker (EVO-65021 MAJOR-5).
+
+    Called on a ``clear=True`` rebuild so the stale marker cannot short-circuit
+    the delegated build to ``FRESH``, and so a rebuild that then fails cannot be
+    reported fresh off the old marker.
+    """
+    marker = scip_dir / _BUILD_COMMIT_MARKER
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(
+            "EVO-65021: could not remove SCIP freshness marker at %s: %s",
+            scip_dir,
+            exc,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # The single funnel (tasks #1–#5)
 # --------------------------------------------------------------------------- #
@@ -134,6 +154,8 @@ def funnel_scip_generation(
     alias: Optional[str],
     repo_root: Path,
     config: Any,
+    clear: bool = False,
+    activated_repo: bool = False,
     golden_repo_manager: Optional[Any] = None,
     build_queue: Optional[DelegatedScipBuildQueue] = None,
     generator_builder: Optional[Callable[..., Any]] = None,
@@ -145,10 +167,28 @@ def funnel_scip_generation(
     alias:
         Golden-repo alias (needed to resolve the sandbox ``workspace_id`` under
         the delegated backend). ``None``/empty → delegated fail-soft skip.
+        This MUST be a **golden** alias (bare, no ``-global`` suffix): the
+        delegated resolver is ``GoldenRepoManager.resolve_workspace_id``, which
+        is keyed by the bare golden alias. The golden entrypoint normalizes the
+        ``-global`` registry alias to bare before calling here (CRITICAL-1).
     repo_root:
         Repo root (== the sandbox ``/workspace`` mount for golden repos).
     config:
         Server config exposing ``scip_backend`` and (delegated) ``workspace_mcp``.
+    clear:
+        When ``True`` (a rebuild-from-scratch request, e.g.
+        ``trigger_reindex(..., clear=True)``), bypass the ``.build_commit``
+        freshness short-circuit and drop the stale marker so the delegated build
+        actually re-runs and a failed rebuild cannot be reported ``FRESH``
+        (MAJOR-5).
+    activated_repo:
+        ``True`` when called from the activated-repo (per-user) entrypoint. An
+        activated alias lives in a different namespace from the golden aliases
+        this funnel resolves, and activated repos carry no retained
+        ``workspace_id`` of their own, so there is no correct sandbox workspace
+        to build in. Under the delegated backend this fail-softs to ``SKIPPED``
+        rather than resolving through the golden manager and building the wrong
+        workspace (CRITICAL-2).
     golden_repo_manager, build_queue, generator_builder:
         Injection seams for tests; default to the process singletons and to
         ``build_scip_generator_for_golden_repo`` (stream-01 seam #3).
@@ -167,6 +207,26 @@ def funnel_scip_generation(
 
         repo_root = Path(repo_root)
 
+        # EVO-65021 CRITICAL-2: an activated (per-user) alias is NOT a golden
+        # alias. Activated repos carry no retained workspace_id of their own
+        # (ActivatedRepoManager stores only user_alias/golden_repo_alias/
+        # repo_path), so resolving through the golden manager would either build
+        # the GOLDEN workspace — never indexing the user's private branch/state,
+        # while colliding on the golden repo's own alias@commit dedupe key — or,
+        # for a custom ``--as`` alias, miss and skip. Until an activated-repo
+        # workspace story exists, fail soft to SKIPPED rather than silently
+        # building the wrong workspace.
+        if activated_repo:
+            logger.warning(
+                "EVO-65021 fail-soft: delegated SCIP is not supported for "
+                "activated repo '%s' — activated repos have no retained "
+                "workspace_id; skipping (repo stays 'skipped: No SCIP index "
+                "available')",
+                alias,
+            )
+            record_scip_metric("delegated_skipped_activated_repo")
+            return ScipDelegationOutcome.SKIPPED
+
         if not alias:
             logger.warning(
                 "EVO-65021 fail-soft: delegated SCIP requested but no golden "
@@ -178,7 +238,11 @@ def funnel_scip_generation(
             return ScipDelegationOutcome.SKIPPED
 
         scip_dir = repo_root / ".code-indexer" / "scip"
-        if scip_db_is_fresh(repo_root, scip_dir):
+        if clear:
+            # MAJOR-5: a clear rebuild must never be answered FRESH. Drop the
+            # stale marker and skip the freshness short-circuit entirely.
+            remove_scip_build_commit(scip_dir)
+        elif scip_db_is_fresh(repo_root, scip_dir):
             logger.info(
                 "EVO-65021: SCIP DBs already fresh for '%s'; skipping delegated "
                 "build",

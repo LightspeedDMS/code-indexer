@@ -14,6 +14,7 @@ from code_indexer.server.services.scip_lifecycle import (
     ScipDelegationOutcome,
     funnel_scip_generation,
     record_scip_build_commit,
+    remove_scip_build_commit,
     scip_db_is_fresh,
 )
 from code_indexer.server.services.scip_resolution_queue import (
@@ -199,3 +200,105 @@ class TestFreshness:
         scip_dir.mkdir(parents=True)
         record_scip_build_commit(scip_dir, "sha1")
         assert scip_db_is_fresh(tmp_path, scip_dir) is False
+
+    def test_not_fresh_when_marker_missing(self, tmp_path, monkeypatch):
+        # Finding-6 (6): every repo that had a SCIP index built BEFORE EVO-65021
+        # has a built .scip.db but NO .build_commit marker. On first upgrade it
+        # MUST be treated as not-fresh (rebuild), never fresh — otherwise the
+        # entire existing fleet is skipped forever.
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        (scip_dir / "proj").mkdir(parents=True)
+        (scip_dir / "proj" / "index.scip.db").write_text("db")
+        # No marker written.
+        assert scip_db_is_fresh(tmp_path, scip_dir) is False
+
+    def test_funnel_enqueues_when_marker_missing(self, tmp_path, monkeypatch):
+        # The missing-marker branch drives a real rebuild through the funnel.
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        (scip_dir / "proj").mkdir(parents=True)
+        (scip_dir / "proj" / "index.scip.db").write_text("db")
+        q = _CaptureQueue()
+        out = funnel_scip_generation(
+            alias="r",
+            repo_root=tmp_path,
+            config=_delegated_cfg(),
+            golden_repo_manager=object(),
+            build_queue=q,
+            generator_builder=lambda *a, **k: _FakeGenerator(),
+        )
+        assert out is ScipDelegationOutcome.ENQUEUED
+        assert get_scip_metrics().get("delegated_fresh") is None
+
+    def test_record_build_commit_none_or_empty_is_noop(self, tmp_path):
+        # Finding-6 (7): None/empty commit must not write a bogus marker.
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        record_scip_build_commit(scip_dir, None)
+        record_scip_build_commit(scip_dir, "")
+        assert not (scip_dir / ".build_commit").exists()
+
+
+class TestActivatedRepoNamespace:
+    """CRITICAL-2: an activated alias must NOT be resolved via the golden manager."""
+
+    def test_activated_repo_skips_without_golden_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+
+        def _must_not_resolve(*_a, **_k):
+            pytest.fail(
+                "activated alias must not be resolved through the golden manager"
+            )
+
+        grm = SimpleNamespace(resolve_workspace_id=_must_not_resolve)
+        gen_calls = []
+        out = funnel_scip_generation(
+            alias="my-repo",  # == golden alias in the common case — the trap
+            repo_root=tmp_path,
+            config=_delegated_cfg(),
+            activated_repo=True,
+            golden_repo_manager=grm,
+            build_queue=_queue(),
+            generator_builder=lambda *a, **k: gen_calls.append(1),
+        )
+        assert out is ScipDelegationOutcome.SKIPPED
+        assert get_scip_metrics().get("delegated_skipped_activated_repo") == 1
+        # No generator built, nothing enqueued against the wrong workspace.
+        assert gen_calls == []
+
+
+class TestClearRebuild:
+    """MAJOR-5: clear=True bypasses the freshness short-circuit and drops the marker."""
+
+    def test_clear_bypasses_freshness_and_drops_marker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        (scip_dir / "proj").mkdir(parents=True)
+        (scip_dir / "proj" / "index.scip.db").write_text("db")
+        record_scip_build_commit(scip_dir, "sha1")  # marker == HEAD → would be FRESH
+        assert scip_db_is_fresh(tmp_path, scip_dir) is True
+
+        q = _CaptureQueue()
+        out = funnel_scip_generation(
+            alias="r",
+            repo_root=tmp_path,
+            config=_delegated_cfg(),
+            clear=True,
+            golden_repo_manager=object(),
+            build_queue=q,
+            generator_builder=lambda *a, **k: _FakeGenerator(),
+        )
+        # A rebuild-from-scratch must NOT be answered FRESH...
+        assert out is ScipDelegationOutcome.ENQUEUED
+        assert get_scip_metrics().get("delegated_fresh") is None
+        # ...and the stale marker is removed so a failed rebuild can't read fresh.
+        assert not (scip_dir / ".build_commit").exists()
+
+    def test_remove_marker_when_absent_is_safe(self, tmp_path):
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        # No marker present — must not raise.
+        remove_scip_build_commit(scip_dir)
+        assert not (scip_dir / ".build_commit").exists()

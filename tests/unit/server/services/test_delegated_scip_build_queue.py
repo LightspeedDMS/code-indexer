@@ -4,12 +4,17 @@ Covers the fail-soft / backpressure / dedupe drain that decouples the (up to
 1800s) delegated sandbox build from the golden-repo index job.
 """
 
+import threading
+import time
 from types import SimpleNamespace
-from typing import List
+from typing import List, Optional
 
 import pytest
 
+from code_indexer.scip.generator import GenerationResult
 from code_indexer.server.services.scip_resolution_queue import (
+    DELEGATED_BACKPRESSURE_RETRY_SECONDS,
+    DELEGATED_MAX_BACKPRESSURE_RETRIES,
     DelegatedScipBuild,
     DelegatedScipBuildQueue,
     get_delegated_scip_build_queue,
@@ -18,14 +23,31 @@ from code_indexer.server.services.scip_resolution_queue import (
 )
 
 
-def _gen_result(*, successful: int = 0, stderrs: List[str] | None = None):
-    """Build a GenerationResult-shaped stub the queue understands."""
+def _gen_result(
+    *,
+    successful: int = 0,
+    failed: int = 0,
+    total: Optional[int] = None,
+    stderrs: List[str] | None = None,
+):
+    """Build a real ``GenerationResult`` so the queue exercises its real predicates.
+
+    EVO-65021 MAJOR-3: ``_result_is_success`` now calls
+    ``GenerationResult.is_complete_success()`` (``total>0 and failed==0``), so the
+    stub must carry ``total_projects``/``failed_projects``, not just
+    ``successful_projects``. ``project_results`` are lightweight namespaces the
+    backpressure scanner reads via ``getattr``.
+    """
     project_results = [
         SimpleNamespace(indexer_result=SimpleNamespace(stderr=se))
         for se in (stderrs or [])
     ]
-    return SimpleNamespace(
+    if total is None:
+        total = successful + failed
+    return GenerationResult(
+        total_projects=total,
         successful_projects=successful,
+        failed_projects=failed,
         project_results=project_results,
     )
 
@@ -157,6 +179,183 @@ class TestDedupe:
         assert q.enqueue(b1, start_worker=False) is True
         assert q.enqueue(b2, start_worker=False) is True
         assert q.drain_pending() == 2
+
+
+class TestPartialSuccessNotTerminalSuccess:
+    """MAJOR-3: a partially-successful build must NOT count as full success."""
+
+    def test_partial_success_is_not_marked_success(self):
+        q = _queue()
+        recorded: List[object] = []
+        build = DelegatedScipBuild(
+            alias="mixed",
+            dedupe_key="mixed@1",
+            # 1 TS project ok, 1 non-TS project exit-69 → partial success.
+            run_build=lambda: _gen_result(
+                successful=1, failed=1, stderrs=["ts ok", "python exit 69"]
+            ),
+            on_success=lambda r: recorded.append(r),
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1
+        m = get_scip_metrics()
+        # Not a build success: on_success (freshness marker) never fires, so the
+        # failed language is retried at the next build rather than marked fresh.
+        assert m.get("delegated_build_success") is None
+        assert recorded == []
+        # No 429 marker → terminal fail-soft drop, dedupe key released.
+        assert m.get("delegated_build_skipped") == 1
+        assert q.get_status()["inflight_keys"] == []
+
+    def test_partial_success_with_429_is_retried_not_marked_fresh(self):
+        q = _queue()
+        build = DelegatedScipBuild(
+            alias="mixed",
+            dedupe_key="mixed@1",
+            run_build=lambda: _gen_result(
+                successful=1, failed=1, stderrs=["ts ok", "sandbox (HTTP 429) busy"]
+            ),
+        )
+        q.enqueue(build, start_worker=False)
+        # Partial + 429 must be retried (was silently treated as success before).
+        assert q.drain_pending(max_items=1) == 1
+        assert get_scip_metrics().get("delegated_build_backpressure_retry") == 1
+        assert q.get_status()["inflight_keys"] == ["mixed@1"]
+
+
+class TestBackpressureBackoffAndDefaults:
+    """MAJOR-4 / Finding-6: the backoff value and shipped defaults are asserted."""
+
+    def test_sleep_called_with_configured_backoff(self):
+        slept: List[float] = []
+        q = DelegatedScipBuildQueue(sleep=lambda s: slept.append(s))
+        build = DelegatedScipBuild(
+            alias="ts",
+            dedupe_key="ts@1",
+            run_build=lambda: _gen_result(successful=0, failed=1, stderrs=["HTTP 429"]),
+        )
+        q.enqueue(build, start_worker=False)
+        q.drain_pending(max_items=1)
+        # Deleting the sleep call would now break this test.
+        assert slept == [DELEGATED_BACKPRESSURE_RETRY_SECONDS]
+
+    def test_shipped_constant_defaults(self):
+        # A regression in either constant is now visible.
+        assert DELEGATED_BACKPRESSURE_RETRY_SECONDS == 30.0
+        assert DELEGATED_MAX_BACKPRESSURE_RETRIES == 5
+        q = DelegatedScipBuildQueue()
+        assert q._backpressure_retry_seconds == 30.0
+        assert q._max_backpressure_retries == 5
+
+
+class TestDedupeKeyReleaseAndHooks:
+    """MAJOR-4 / Finding-6: key release on the raise path; on_success is guarded."""
+
+    def test_dedupe_key_released_on_raised_build(self):
+        q = _queue()
+
+        def _boom():
+            raise RuntimeError("transport exploded")
+
+        build = DelegatedScipBuild(alias="r", dedupe_key="r@1", run_build=_boom)
+        q.enqueue(build, start_worker=False)
+        q.drain_pending()
+        # The key must not stick in flight, or the repo could never retry.
+        assert q.get_status()["inflight_keys"] == []
+
+    def test_on_success_raising_is_swallowed(self):
+        q = _queue()
+
+        def _boom(_r):
+            raise RuntimeError("freshness marker write failed")
+
+        build = DelegatedScipBuild(
+            alias="r",
+            dedupe_key="r@1",
+            run_build=lambda: _gen_result(successful=1),
+            on_success=_boom,
+        )
+        q.enqueue(build, start_worker=False)
+        assert q.drain_pending() == 1  # best-effort hook, no propagation
+        assert get_scip_metrics().get("delegated_build_success") == 1
+        assert q.get_status()["inflight_keys"] == []
+
+    def test_key_released_when_sleep_raises_on_backpressure(self):
+        # MAJOR-4: a raise from _sleep on the backpressure branch must still
+        # release the dedupe key (it is released in a finally on every non-requeue
+        # exit path).
+        def _explode(_s):
+            raise RuntimeError("sleep exploded")
+
+        q = DelegatedScipBuildQueue(sleep=_explode)
+        build = DelegatedScipBuild(
+            alias="a",
+            dedupe_key="a@1",
+            run_build=lambda: _gen_result(successful=0, failed=1, stderrs=["HTTP 429"]),
+        )
+        q.enqueue(build, start_worker=False)
+        with pytest.raises(RuntimeError):
+            q.drain_pending(max_items=1)  # drain has no guard; the worker loop does
+        assert q.get_status()["inflight_keys"] == []
+
+
+class TestProductionWorkerPath:
+    """Finding-6 (1): the REAL daemon-thread ``_worker_loop`` drains, not the seam."""
+
+    def _wait_until(self, predicate, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        assert predicate(), "condition not met within timeout"
+
+    def test_real_worker_thread_drains_and_releases(self):
+        q = _queue()
+        done = threading.Event()
+        build = DelegatedScipBuild(
+            alias="ts",
+            dedupe_key="ts@1",
+            run_build=lambda: _gen_result(successful=1),
+            on_success=lambda _r: done.set(),
+        )
+        # start_worker defaults to True → spawns the real daemon thread.
+        assert q.enqueue(build) is True
+        assert done.wait(timeout=5.0)
+        self._wait_until(lambda: q.get_status()["inflight_keys"] == [])
+        assert get_scip_metrics().get("delegated_build_success") == 1
+        q.stop()
+
+    def test_worker_loop_survives_unhandled_error_and_keeps_draining(self):
+        # A sleep that raises turns the backpressure branch into an unhandled
+        # error inside _run_and_maybe_requeue. The singleton worker (no
+        # supervisor) MUST survive it and keep draining subsequent builds
+        # (MAJOR-4).
+        def _explode(_s):
+            raise RuntimeError("sleep exploded")
+
+        q = DelegatedScipBuildQueue(sleep=_explode)
+        second_done = threading.Event()
+        b1 = DelegatedScipBuild(
+            alias="a",
+            dedupe_key="a@1",
+            run_build=lambda: _gen_result(successful=0, failed=1, stderrs=["HTTP 429"]),
+        )
+        b2 = DelegatedScipBuild(
+            alias="b",
+            dedupe_key="b@1",
+            run_build=lambda: _gen_result(successful=1),
+            on_success=lambda _r: second_done.set(),
+        )
+        q.enqueue(b1)
+        q.enqueue(b2)
+        # b2 only runs if the worker survived b1's raise.
+        assert second_done.wait(timeout=5.0)
+        m = get_scip_metrics()
+        assert m.get("delegated_worker_loop_error", 0) >= 1
+        assert m.get("delegated_build_success") == 1
+        self._wait_until(lambda: "a@1" not in q.get_status()["inflight_keys"])
+        q.stop()
 
 
 class TestSingleton:

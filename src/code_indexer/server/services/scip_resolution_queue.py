@@ -425,8 +425,22 @@ def reset_scip_metrics() -> None:
 
 
 def _result_is_success(result: Optional["GenerationResult"]) -> bool:
-    """True iff the build produced at least one successful project index."""
-    return bool(result is not None and getattr(result, "successful_projects", 0) > 0)
+    """True iff EVERY discovered project succeeded (complete success).
+
+    EVO-65021 MAJOR-3: PARTIAL success must NOT be treated as terminal success.
+    On a mixed-language repo the Phase-1 TS/JS-only sandbox image exits 69 for
+    every non-TS project, so ``successful_projects > 0`` would mask the failed
+    languages, poison the ``.build_commit`` freshness marker (they'd never be
+    retried at that commit), and — because backpressure is only consulted when
+    this returns False — defeat 429 retry. Use ``GenerationResult``'s real
+    ``is_complete_success()`` predicate (``total_projects > 0 and
+    failed_projects == 0``), matching every other consumer (``cli_scip.py``,
+    ``scip_self_healing.py``). Partial success falls through to
+    ``_detect_backpressure`` / fail-soft and does NOT write the freshness marker.
+    """
+    if result is None:
+        return False
+    return bool(result.is_complete_success())
 
 
 def _detect_backpressure(result: Optional["GenerationResult"]) -> bool:
@@ -537,20 +551,55 @@ class DelegatedScipBuildQueue:
                 if build is None:  # stop sentinel
                     return
                 self._run_and_maybe_requeue(build)
+            except Exception:
+                # EVO-65021 MAJOR-4: this is the process-wide singleton's ONLY
+                # daemon worker, with no supervisor and no restart. An unhandled
+                # exception escaping here would end SCIP delegation for the rest
+                # of the process — silently, since the thread just dies with no
+                # metric or log, while ``funnel_scip_generation`` keeps returning
+                # ENQUEUED and nothing ever drains the queue. Log + meter and
+                # keep the loop alive so the queue keeps draining. The dedupe key
+                # is released by ``_run_and_maybe_requeue``'s ``finally`` on every
+                # non-requeue exit path, so a raise here does not leak it either.
+                logger.error(
+                    format_error_log(
+                        "MCP-GENERAL-170",
+                        "EVO-65021: delegated SCIP worker loop caught an "
+                        f"unexpected error for "
+                        f"'{getattr(build, 'alias', '?')}'; worker survives and "
+                        "continues draining",
+                        exc_info=True,
+                    )
+                )
+                record_scip_metric("delegated_worker_loop_error")
             finally:
                 self._queue.task_done()
 
     def _run_and_maybe_requeue(self, build: DelegatedScipBuild) -> None:
-        """Process one build; on backpressure sleep + re-enqueue (key retained)."""
-        terminal = self._process(build)
-        if terminal:
-            with self._lock:
-                self._inflight_keys.discard(build.dedupe_key)
-        else:
-            # Backpressure: the dedupe key stays in flight so a concurrent funnel
-            # call for the same repo+commit is still deduped while we retry.
-            self._sleep(self._backpressure_retry_seconds)
-            self._queue.put(build)
+        """Process one build; on backpressure sleep + re-enqueue (key retained).
+
+        The dedupe key is released in a ``finally`` on every exit path EXCEPT a
+        successful backpressure re-enqueue (EVO-65021 MAJOR-4): a raise from
+        ``_process`` (belt & braces — it is itself fail-soft), from ``_sleep``,
+        or from the re-enqueue ``put`` must not leave the ``alias@commit`` key
+        stuck in flight, which would make ``funnel_scip_generation`` return
+        DEDUPED forever and permanently block that repo from retrying.
+        """
+        requeued = False
+        try:
+            terminal = self._process(build)
+            if not terminal:
+                # Backpressure: the dedupe key stays in flight so a concurrent
+                # funnel call for the same repo+commit is still deduped while we
+                # retry. Only mark ``requeued`` once the re-enqueue has actually
+                # succeeded, so a failure before then releases the key.
+                self._sleep(self._backpressure_retry_seconds)
+                self._queue.put(build)
+                requeued = True
+        finally:
+            if not requeued:
+                with self._lock:
+                    self._inflight_keys.discard(build.dedupe_key)
 
     def drain_pending(self, max_items: Optional[int] = None) -> int:
         """Synchronously process queued builds in the calling thread (tests).

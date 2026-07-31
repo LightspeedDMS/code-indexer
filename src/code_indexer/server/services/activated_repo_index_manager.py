@@ -862,10 +862,19 @@ class ActivatedRepoIndexManager:
             ScipDelegationOutcome,
         )
 
+        # EVO-65021 CRITICAL-2: ``repo_alias`` is an ACTIVATED (per-user) alias,
+        # NOT a golden alias. Flag it so the funnel does not resolve it through
+        # the golden namespace (which would build the wrong workspace or skip);
+        # activated repos have no retained workspace_id, so the delegated path
+        # fail-softs to SKIPPED. MAJOR-5: thread ``clear`` so a delegated rebuild
+        # cannot be short-circuited as FRESH (the local path below honours it via
+        # ``--clear``).
         _scip_outcome = funnel_scip_generation(
             alias=repo_alias,
             repo_root=Path(repo_path),
             config=get_config_service().get_config(),
+            clear=clear,
+            activated_repo=True,
         )
         if _scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
             return {
