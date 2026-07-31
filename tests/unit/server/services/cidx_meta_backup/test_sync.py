@@ -256,3 +256,82 @@ def test_genuine_conflict_still_resolves_via_continue(tmp_path):
     verify = tmp_path / "verify"
     _clone_repo(remote, verify)
     assert (verify / "shared.txt").read_text() == "resolved\n"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1500: "Terminal is dumb, but EDITOR unset" during rebase --continue
+# ---------------------------------------------------------------------------
+
+
+def test_rebase_continue_fails_without_editor_env_bug1500(tmp_path, monkeypatch):
+    """Bug #1500: a real mid-rebase conflict, resolved, then `rebase
+    --continue` must succeed non-interactively even when the PROCESS
+    environment (not just the subprocess env dict) has no EDITOR/GIT_EDITOR/
+    VISUAL configured -- the exact systemd job context that produced
+    "Terminal is dumb, but EDITOR unset" / "could not commit" in production.
+
+    `build_non_interactive_git_env()` copies `os.environ` verbatim, so this
+    test must remove these vars from `os.environ` itself (monkeypatch.delenv)
+    -- merely unsetting them in the calling shell is not sufficient, since a
+    developer's shell may have GIT_EDITOR=true set globally, masking the bug.
+
+    Before the fix: git conflict-resolution commits open an editor (because
+    the conflict appended a "# Conflicts:" section to COMMIT_EDITMSG,
+    forcing msg_needs_editing) with no configured editor and no real tty --
+    the commit fails and `_git("rebase", "--continue")` returns non-zero,
+    causing `sync()` to raise RuntimeError("conflict resolution failed: ...").
+    """
+    from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
+
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("GIT_EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("GIT_SEQUENCE_EDITOR", raising=False)
+    # Force git's own "no controlling terminal" detection (rather than
+    # actually spawning a real interactive `vi` against this test process's
+    # tty, which would hang waiting for keystrokes) -- this is exactly the
+    # code path that prints the literal "Terminal is dumb, but EDITOR
+    # unset" error quoted in the production incident.
+    monkeypatch.setenv("TERM", "dumb")
+    # Code review hardening (non-blocking nit on Bug #1500): the delenv
+    # calls above only remove EDITOR/GIT_EDITOR/VISUAL/GIT_SEQUENCE_EDITOR
+    # from the process env, but build_non_interactive_git_env() copies
+    # os.environ verbatim -- a host with a global `core.editor` set in
+    # ~/.gitconfig (or a system-wide /etc/gitconfig) would still supply an
+    # editor via git config precedence, silently passing this test on a
+    # broken fix. Isolate git config entirely so the test is deterministic
+    # regardless of host git config.
+    empty_gitconfig = tmp_path / "empty-gitconfig"
+    empty_gitconfig.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty_gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+    repo, remote = _bootstrap_repo(tmp_path)
+
+    # Both sides modify the same line in the same file to force a genuine
+    # merge conflict (mirrors test_genuine_conflict_still_resolves_via_continue).
+    divergent = tmp_path / "divergent"
+    _clone_repo(remote, divergent)
+    _commit_file(divergent, "shared.txt", "remote version\n", "remote: shared")
+    _git(["push", "origin", "master"], divergent)
+
+    _commit_file(repo, "shared.txt", "local version\n", "local: shared")
+
+    def _resolving_resolver(cidx_meta_path, conflict_files, branch):
+        shared = Path(cidx_meta_path) / "shared.txt"
+        shared.write_text("resolved\n")
+        _git(["add", "shared.txt"], Path(cidx_meta_path))
+        return SimpleNamespace(success=True, error=None)
+
+    resolver = SimpleNamespace(resolve=_resolving_resolver)
+
+    # Must succeed non-interactively regardless of the ambient process
+    # environment's EDITOR/GIT_EDITOR/VISUAL configuration.
+    result = CidxMetaBackupSync(str(repo), "master", resolver).sync()
+
+    assert result.skipped is False
+    assert result.sync_failure is None
+
+    verify = tmp_path / "verify-bug1500"
+    _clone_repo(remote, verify)
+    assert (verify / "shared.txt").read_text() == "resolved\n"
