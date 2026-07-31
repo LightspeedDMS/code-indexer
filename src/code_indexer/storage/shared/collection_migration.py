@@ -596,41 +596,125 @@ def _is_legacy_flat_manifest(raw: Any) -> bool:
     return all(isinstance(value, str) for value in raw.values())
 
 
-def _attempt_legacy_flat_manifest_upgrade(
+def _extract_manifest_flat_view(raw: Any) -> Optional[Dict[str, str]]:
+    """Issue #1503: normalize EITHER manifest shape into a plain
+    ``{point_id: digest}`` view, for the subset-upgrade check below.
+
+    Two cases:
+      1. A legacy ROUND-1 flat manifest (:func:`_is_legacy_flat_manifest`)
+         -- returned as-is.
+      2. An already-ENVELOPE-shaped manifest whose ``records`` field is a
+         non-empty ``dict`` of ``str -> str`` -- returned as that
+         ``records`` dict, WITHOUT requiring the other envelope keys
+         (``version``/``expected_count``/``root_digest``) to be
+         internally self-consistent yet. That is deliberately not
+         checked here: the whole point of the subset-upgrade path is to
+         independently re-derive everything from live chunks.db rather
+         than trust the envelope's own say-so.
+
+    Returns ``None`` if ``raw`` matches neither shape (e.g. a malformed
+    envelope missing ``records`` entirely, or a genuinely empty ``{}``)
+    -- the caller falls through to the strict envelope pipeline.
+    """
+    if _is_legacy_flat_manifest(raw):
+        return {str(k): str(v) for k, v in raw.items()}
+    if isinstance(raw, dict):
+        records = raw.get("records")
+        if (
+            isinstance(records, dict)
+            # Deliberate: an EMPTY manifest ({} / empty records) is
+            # NEVER treated as a vacuously-true subset here, even though
+            # set() <= anything holds mathematically. An empty manifest
+            # was the exact shape of a prior real data-loss incident
+            # (Bug #1486's own motivating case) -- auto-trusting it would
+            # reopen that vulnerability. This exclusion is intentional,
+            # confirmed by independent dual review (Issue #1503) -- do
+            # not "fix" it into accepting an empty manifest.
+            and records
+            and all(isinstance(v, str) for v in records.values())
+        ):
+            return {str(k): str(v) for k, v in records.items()}
+    return None
+
+
+def _attempt_manifest_subset_upgrade(
     collection_dir: Path,
     chunks_db_path: Path,
-    raw: Dict[str, Any],
+    flat_records: Dict[str, str],
     *,
     allow_write: bool = True,
     read_only: bool = False,
 ) -> Optional[Dict[str, str]]:
-    """Bug #1486 Finding D: validate a legacy flat manifest against a
-    HEALTHY chunks.db and, only if it matches EXACTLY, upgrade it in
-    place to the versioned self-validating envelope.
+    """Issue #1503: validate a flat-view manifest (legacy flat, or an
+    already-envelope-shaped-but-STALE manifest normalized via
+    :func:`_extract_manifest_flat_view`) against a HEALTHY chunks.db as
+    a SUBSET -- not the pre-#1503 exact bijection -- and, only if every
+    covered entry checks out, upgrade/regenerate it to cover the FULL
+    current live id set.
 
-    Validation is against the actual stored data -- never the flat
-    manifest's own say-so: (1) the flat manifest's key set must equal
-    chunks.db's real ``all_point_ids()`` (no missing/extra rows), and
-    (2) every record's freshly-recomputed content digest
-    (:func:`_compute_record_content_digest` over the STORED form) must
-    equal the flat manifest's recorded digest. On ANY mismatch, or if
-    chunks.db cannot be opened/read (corrupt), returns ``None`` -- the
-    caller then falls through to the envelope validator, which rejects
-    the un-upgraded flat manifest as malformed (UNRECOVERABLE). This
-    call site is only ever reached AFTER chunks.db has passed the
-    durability/integrity gate, so a read error here means genuine
-    corruption, not a transient.
+    A manifest's digest values are independently recomputable from the
+    live chunks.db row (:func:`_compute_record_content_digest`), so
+    there is nothing to trust blindly. Accepted iff:
+      (a) EVERY manifest key has a matching point_id in chunks.db's real
+          ``all_point_ids()`` (the manifest's key set is a SUBSET of the
+          live id set -- never the reverse: a manifest key with no live
+          backing at all is a phantom key and is ALWAYS a hard refusal);
+      (b) EVERY one of those covered entries' stored digest EXACTLY
+          matches the digest freshly recomputed from the live row.
 
-    On success, rewrites the manifest as the envelope via
-    :func:`_write_content_manifest` (which re-derives digests from the
-    same healthy chunks.db) and records the independent authoritative
-    ``vector_count`` via :func:`_write_authoritative_vector_count` --
-    so a subsequent corrupt-resume of the SAME collection now has a
-    cross-check field it previously lacked (self-healing). Returns the
-    validated ``point_id -> digest`` records dict. Write failures
-    propagate (a real, retryable problem), never silently downgrade.
+    Ids in chunks.db that have NO manifest entry (the routine "an
+    ordinary refresh added rows since the manifest was last written"
+    case) are trusted by definition once every manifested entry checks
+    out -- there is no other source of truth to check them against, and
+    that is the intended design (Issue #1503).
+
+    On ANY violation of (a) or (b), or if chunks.db cannot be opened/
+    read (corrupt), returns ``None`` -- the caller falls through to the
+    strict envelope validator, which stays fail-closed exactly as
+    before. This call site is only ever reached AFTER chunks.db has
+    passed the durability/integrity gate, so a read error here means
+    genuine corruption, not a transient.
+
+    On success, rewrites the manifest via :func:`_write_content_manifest`
+    to cover the FULL current live id set (not merely the old manifest's
+    keys) -- closing the staleness permanently -- and records the
+    independent authoritative ``vector_count`` via
+    :func:`_write_authoritative_vector_count`, ONLY when ``allow_write``
+    is True AND ``read_only`` is NOT True (the genuine migration path,
+    which holds the cluster-wide repo write lock; the read-only
+    completeness oracle passes ``allow_write=False``/``read_only=True``
+    so it can validate without mutating anything -- closing both the
+    read-only-contract violation and a cross-node TOCTOU). Requiring
+    BOTH conditions (rather than ``allow_write`` alone) is defense-in-
+    depth against a hypothetical future caller passing the contradictory
+    ``read_only=True`` + ``allow_write=True`` combination -- the primary
+    guard against that contradiction lives in
+    :func:`_load_verified_manifest`, which raises immediately rather
+    than reaching this function at all (Issue #1503 dual-review
+    Finding 1). Returns the FULL per-live-id digest dict either way, so
+    downstream exact-set-equality logic keeps working unmodified once
+    the staleness has been closed.
+
+    Raises:
+        ConsolidationVerificationError: propagated unchanged when the
+            manifest-rewrite write step itself raises one (e.g. a
+            missing live row on a fresh reopen -- see
+            :func:`_write_content_manifest`).
+        UnrecoverableConsolidationCorruptionError: propagated unchanged
+            for the same reason.
+        ConsolidationDurabilityError: raised (chained from the
+            original) when the write step raises any OTHER exception
+            (e.g. a real ``OSError``/``PermissionError`` from disk-full
+            or a read-only filesystem). Issue #1503 dual-review
+            Finding 2: this is DELIBERATELY distinct from this
+            function's own ``None`` return (a validation DECLINE) -- a
+            write failure after validation already passed must never be
+            conflated with "not upgradable", since
+            :func:`_load_verified_manifest` treats only a ``None``
+            return as license to fall back to the original
+            strict-pipeline failure. A write failure must instead
+            propagate as its own retryable error.
     """
-    flat_records = {str(k): str(v) for k, v in raw.items()}
     try:
         # Bug #1486 Defect A: the read-only completeness oracle passes
         # read_only=True so this inspection opens the store IMMUTABLE
@@ -638,37 +722,64 @@ def _attempt_legacy_flat_manifest_upgrade(
         # a side effect of a pure predicate).
         with ChunkStore(chunks_db_path, immutable=read_only) as store:
             actual_ids = set(store.all_point_ids())
-            if actual_ids != set(flat_records.keys()):
+            if not set(flat_records.keys()) <= actual_ids:
+                # A manifest key with NO live backing at all -- either the
+                # manifest is lying, or a row was silently deleted. Always
+                # a hard refusal, never acceptable (Issue #1503).
                 return None
-            for point_id, expected_digest in flat_records.items():
+            result: Dict[str, str] = {}
+            for point_id in actual_ids:
                 stored = store.read(point_id)
                 if stored is None:
                     return None
-                if _compute_record_content_digest(stored) != expected_digest:
+                digest = _compute_record_content_digest(stored)
+                if point_id in flat_records and digest != flat_records[point_id]:
+                    # Genuine corruption/tampering of an already-covered
+                    # entry -- never tolerated, distinct from mere
+                    # staleness.
                     return None
+                result[point_id] = digest
     except (sqlite3.Error, OSError):
         return None
 
-    # Validation passed against a healthy chunks.db.
-    #
-    # Bug #1486 Codex Finding #3 (HIGH): the manifest/vector_count REWRITE
-    # is a side effect and is performed ONLY when ``allow_write`` is True --
-    # i.e. exclusively on the genuine migration path
-    # (``consolidate_collection_in_place``), which holds the cluster-wide
-    # repo write lock. The read-only completeness oracle
-    # (``verify_collection_fully_migrated``, called lock-free by
-    # ``get_stats``/``is_repo_already_migrated``/scheduler done-detection)
-    # passes ``allow_write=False`` so it can VALIDATE the flat manifest
-    # (returning the same validated records) without mutating anything --
-    # closing both the read-only-contract violation and the cross-node
-    # TOCTOU where a concurrent writer between this validate and the rewrite
-    # would enshrine an undercounted-but-self-consistent envelope.
-    if allow_write:
-        _write_content_manifest(
-            collection_dir, chunks_db_path, set(flat_records.keys())
-        )
-        _write_authoritative_vector_count(collection_dir, len(flat_records))
-    return flat_records
+    # Validation passed against a healthy chunks.db -- see
+    # _attempt_manifest_subset_upgrade's docstring for the allow_write/
+    # read_only read-only-oracle-vs-migration-path rationale (identical
+    # to Bug #1486 Codex Finding #3's existing contract). Issue #1503
+    # dual-review Finding 1: requires BOTH conditions, never allow_write
+    # alone -- defense-in-depth against a contradictory caller (the
+    # primary guard is in _load_verified_manifest, which never reaches
+    # this function at all with a contradictory combination).
+    if allow_write and not read_only:
+        try:
+            _write_content_manifest(collection_dir, chunks_db_path, actual_ids)
+            _write_authoritative_vector_count(collection_dir, len(actual_ids))
+        except (
+            ConsolidationVerificationError,
+            UnrecoverableConsolidationCorruptionError,
+        ):
+            # Already a typed, accurate failure signal -- re-raise as-is
+            # (mirrors _write_manifest_and_count_or_clean's exact
+            # convention).
+            raise
+        except Exception as exc:
+            # Issue #1503 dual-review Finding 2 (Codex HIGH #7 + Claude
+            # MEDIUM): a genuine write/IO failure (e.g. disk-full,
+            # read-only filesystem) after validation already succeeded
+            # must propagate as its OWN distinct, retryable error --
+            # never returned as None (which _load_verified_manifest
+            # would misinterpret as "not upgradable" and silently fall
+            # back to re-raising the ORIGINAL strict-pipeline failure,
+            # permanently branding a perfectly-recoverable collection
+            # unrecoverable).
+            raise ConsolidationDurabilityError(
+                f"Manifest subset-upgrade write failed for {collection_dir} "
+                f"after validation against a healthy {CHUNKS_DB_FILENAME} "
+                f"already succeeded ({type(exc).__name__}: {exc}) -- this "
+                f"is a transient write/IO failure, not a corruption "
+                f"verdict; safe to retry."
+            ) from exc
+    return result
 
 
 def _load_verified_manifest(
@@ -691,13 +802,23 @@ def _load_verified_manifest(
     failure mode; this function never swallows or downgrades any of
     them.
 
-    Bug #1486 Finding D: before the envelope pipeline, a legacy ROUND-1
-    flat manifest is offered to :func:`_attempt_legacy_flat_manifest_upgrade`
-    -- if it matches the chunks.db exactly it is upgraded to the
-    envelope and its validated records returned directly; if it does not
-    match (or is not flat at all) it falls through to the envelope
-    validator, which rejects a bare flat manifest as malformed
-    (UNRECOVERABLE), preserving fail-closed semantics.
+    Issue #1503: the STRICT envelope pipeline is tried FIRST (cheap --
+    self-validation against the manifest's own persisted fields, no
+    chunks.db row reads) so the common already-consistent case (Story
+    #1488's O(N) perf gate) never touches chunks.db content at all. ONLY
+    when that raises :class:`UnrecoverableConsolidationCorruptionError`
+    is EITHER manifest shape (legacy ROUND-1 flat, or an already-
+    envelope-shaped-but-STALE manifest) normalized via
+    :func:`_extract_manifest_flat_view` and offered to
+    :func:`_attempt_manifest_subset_upgrade` (which DOES read every live
+    chunks.db row -- an O(N) cost, but only paid when the cheap strict
+    path has already proven a rewrite is actually needed) -- if its key
+    set is a SUBSET of chunks.db's real ids and every covered digest
+    matches, it is accepted and REGENERATED to cover the full live id
+    set, and its validated records returned directly. If it does not
+    match (a phantom key, a digest mismatch, or the raw manifest matches
+    neither normalizable shape at all), the ORIGINAL strict-pipeline
+    failure is re-raised unchanged -- fail-closed exactly as before.
 
     Bug #1486 Finding B: ``require_authoritative_count`` is threaded to
     :func:`_cross_check_manifest_count` -- ``True`` on the corrupt-
@@ -707,28 +828,85 @@ def _load_verified_manifest(
 
     Returns the validated ``point_id -> digest`` records dict on
     success.
+
+    Raises:
+        ValueError: Issue #1503 dual-review Finding 1 (Codex CRITICAL):
+            ``read_only=True`` and ``allow_manifest_upgrade=True`` is a
+            contradictory combination -- a caller declaring a read-only
+            contract must never simultaneously request write permission
+            for the manifest-upgrade path. Raised immediately, before any
+            manifest read/validation is attempted, rather than silently
+            resolving the contradiction either way.
     """
-    raw = _parse_manifest_json(collection_dir)
-    if _is_legacy_flat_manifest(raw):
-        upgraded = _attempt_legacy_flat_manifest_upgrade(
-            collection_dir,
-            chunks_db_path,
-            raw,
-            allow_write=allow_manifest_upgrade,
-            read_only=read_only,
+    if read_only and allow_manifest_upgrade:
+        raise ValueError(
+            f"_load_verified_manifest: contradictory flags for "
+            f"{collection_dir} -- read_only=True and "
+            f"allow_manifest_upgrade=True were both passed. A read-only "
+            f"caller must never also request manifest-upgrade write "
+            f"permission; pass allow_manifest_upgrade=False for a "
+            f"read-only call, or read_only=False for a write-permitted "
+            f"call."
         )
+    raw = _parse_manifest_json(collection_dir)
+    try:
+        records, expected_count, root_digest = _validate_manifest_envelope(
+            collection_dir, raw
+        )
+        _verify_manifest_root_digest(collection_dir, records, root_digest)
+        _cross_check_manifest_count(
+            collection_dir, expected_count, require_authoritative_count
+        )
+        return {str(k): str(v) for k, v in records.items()}
+    except UnrecoverableConsolidationCorruptionError as strict_error:
+        flat_view = _extract_manifest_flat_view(raw)
+        upgraded: Optional[Dict[str, str]] = None
+        if flat_view is not None:
+            try:
+                upgraded = _attempt_manifest_subset_upgrade(
+                    collection_dir,
+                    chunks_db_path,
+                    flat_view,
+                    allow_write=allow_manifest_upgrade,
+                    read_only=read_only,
+                )
+            except (
+                ConsolidationVerificationError,
+                UnrecoverableConsolidationCorruptionError,
+            ):
+                # Issue #1503 dual-review Finding 2: validation already
+                # succeeded -- this is a genuine failure of the
+                # manifest-rewrite WRITE step itself (e.g. a real
+                # OSError/PermissionError translated to
+                # ConsolidationDurabilityError, or an already-typed
+                # failure re-raised as-is by
+                # _attempt_manifest_subset_upgrade). This is a DISTINCT,
+                # retryable failure -- it must propagate directly, never
+                # be swallowed here and replaced with the ORIGINAL
+                # strict-pipeline failure below, which would misdiagnose
+                # a transient write failure as permanent unrecoverable
+                # corruption.
+                raise
+            except Exception:
+                # A genuinely unexpected failure attempting the subset
+                # upgrade VALIDATION (never the write step -- that is
+                # handled by the dedicated clause above) is logged
+                # loudly, but the ORIGINAL strict-pipeline failure below
+                # is what the caller sees -- this manifest is not
+                # upgradable, and the original error already correctly
+                # diagnoses why.
+                logger.exception(
+                    "_load_verified_manifest: subset-upgrade attempt "
+                    "raised unexpectedly for %s -- treating the manifest "
+                    "as not upgradable",
+                    collection_dir,
+                )
+                upgraded = None
         if upgraded is not None:
             return upgraded
-        # Flat manifest that does NOT match chunks.db -> fall through to
-        # the envelope validator, which rejects it (UNRECOVERABLE).
-    records, expected_count, root_digest = _validate_manifest_envelope(
-        collection_dir, raw
-    )
-    _verify_manifest_root_digest(collection_dir, records, root_digest)
-    _cross_check_manifest_count(
-        collection_dir, expected_count, require_authoritative_count
-    )
-    return {str(k): str(v) for k, v in records.items()}
+        # Does NOT match chunks.db as a subset (or is not normalizable at
+        # all) -- re-raise the ORIGINAL strict-pipeline failure unchanged.
+        raise strict_error
 
 
 def _batched(items: Iterable[Any], size: int) -> Iterable[list]:

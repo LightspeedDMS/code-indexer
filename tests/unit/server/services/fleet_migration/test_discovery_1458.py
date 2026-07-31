@@ -75,6 +75,45 @@ def _write_fully_migrated_collection(collection_dir: Path) -> None:
     assert result.status == "consolidated"
 
 
+def _downgrade_manifest_to_legacy_flat_shape(collection_dir: Path) -> None:
+    """Rewrite a genuine envelope manifest (already proven correct by a
+    real consolidate_collection_in_place() run) back into the pre-#1486
+    ROUND-1 flat ``{point_id: digest}`` shape -- and strip the Bug #1486
+    Finding 2 ``vector_count`` cross-check field from
+    collection_meta.json -- reproducing the EXACT 11.86-era on-disk shape
+    issue #1503 confirmed live on staging (chunks.db integrity=ok, all
+    rows present, 0 legacy files, valid discriminator, flat manifest with
+    64-hex digest values)."""
+    manifest_path = collection_dir / "chunks_db_content_manifest.json"
+    envelope = json.loads(manifest_path.read_text())
+    flat_manifest = dict(envelope["records"])
+    manifest_path.write_text(json.dumps(flat_manifest))
+
+    meta_path = collection_dir / "collection_meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta.pop("vector_count", None)
+    meta_path.write_text(json.dumps(meta))
+
+
+def _add_untracked_rows_to_chunks_db(collection_dir: Path, records: list) -> None:
+    """Issue #1503: simulate "an ordinary refresh added rows after the
+    manifest was last written" -- writes ``records`` directly into
+    ``chunks.db`` via the real ``ChunkStore.write_batch`` (never
+    regenerating the content manifest, which is the whole point of this
+    scenario) and updates collection_meta.json's ``vector_count`` to the
+    new total, mirroring the real refresh path's behavior of keeping
+    that independent field in sync with the live store."""
+    chunks_db_path = collection_dir / "chunks.db"
+    with ChunkStore(chunks_db_path) as store:
+        store.write_batch(records)
+        new_total = store.count()
+
+    meta_path = collection_dir / "collection_meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["vector_count"] = new_total
+    meta_path.write_text(json.dumps(meta))
+
+
 def _golden_repo_manager(entries, path_by_alias):
     mock = MagicMock()
     mock.list_golden_repos.return_value = entries
@@ -468,6 +507,30 @@ class TestIsRepoAlreadyMigrated:
 
         assert is_repo_already_migrated(candidate) is False
 
+    def test_repo_with_legacy_flat_manifest_collection_is_migrated_1503(self, tmp_path):
+        """Issue #1503: a collection migrated by 11.86-era code wrote the
+        content-integrity manifest in the pre-envelope FLAT
+        `{point_id: digest}` shape. Reproduces the confirmed live-staging
+        shape end-to-end (a genuine consolidation, then downgraded to the
+        legacy flat manifest with no `vector_count` cross-check field) and
+        proves the real production entry point the fleet scheduler uses --
+        is_repo_already_migrated() -- recognizes it as fully migrated
+        rather than permanently branding it unrecoverable."""
+        repo_root = tmp_path / "golden-repos" / "repo-a"
+        index_path = repo_root / ".code-indexer" / "index"
+        coll_dir = index_path / "coll_one"
+        _write_fully_migrated_collection(coll_dir)
+        _downgrade_manifest_to_legacy_flat_shape(coll_dir)
+        mark_post_consolidation_snapshot_published(index_path)
+        golden_repo_manager = _golden_repo_manager(
+            [{"alias": "repo-a"}], path_by_alias={"repo-a": str(repo_root)}
+        )
+        candidate = next(
+            iter(enumerate_fleet_migration_candidates(golden_repo_manager))
+        )
+
+        assert is_repo_already_migrated(candidate) is True
+
     def test_repo_fully_consolidated_but_snapshot_marker_missing_is_not_migrated(
         self, tmp_path
     ):
@@ -489,3 +552,53 @@ class TestIsRepoAlreadyMigrated:
         )
 
         assert is_repo_already_migrated(candidate) is False
+
+    def test_repo_with_ordinary_refresh_added_rows_after_manifest_is_migrated_1503(
+        self, tmp_path
+    ):
+        """Issue #1503: the REAL confirmed cidx-meta incident shape,
+        reproduced end-to-end through the actual production entry point
+        is_repo_already_migrated(). A collection is fully migrated and
+        cleaned up (real consolidate_collection_in_place() run, manifest
+        written, snapshot marker published) -- genuinely healthy. Then an
+        ORDINARY REFRESH adds 2 new rows DIRECTLY into chunks.db via
+        ChunkStore.write_batch, WITHOUT ever regenerating the manifest --
+        exactly what a routine cidx index refresh does; the manifest is
+        never touched by that path. The manifest is now a STALE SUBSET of
+        chunks.db's real row set, not corruption. This must still be
+        recognized as fully migrated, not permanently branded
+        unrecoverable."""
+        repo_root = tmp_path / "golden-repos" / "repo-a"
+        index_path = repo_root / ".code-indexer" / "index"
+        coll_dir = index_path / "coll_one"
+        _write_fully_migrated_collection(coll_dir)
+        mark_post_consolidation_snapshot_published(index_path)
+
+        _add_untracked_rows_to_chunks_db(
+            coll_dir,
+            [
+                {
+                    "id": "refreshed1",
+                    "vector": [0.3, 0.4],
+                    "metadata": {},
+                    "payload": {"path": "src/b.py"},
+                    "chunk_text": "added by an ordinary refresh",
+                },
+                {
+                    "id": "refreshed2",
+                    "vector": [0.5, 0.6],
+                    "metadata": {},
+                    "payload": {"path": "src/c.py"},
+                    "chunk_text": "also added by an ordinary refresh",
+                },
+            ],
+        )
+
+        golden_repo_manager = _golden_repo_manager(
+            [{"alias": "repo-a"}], path_by_alias={"repo-a": str(repo_root)}
+        )
+        candidate = next(
+            iter(enumerate_fleet_migration_candidates(golden_repo_manager))
+        )
+
+        assert is_repo_already_migrated(candidate) is True
