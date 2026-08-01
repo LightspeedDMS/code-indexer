@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.91.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1510: the cluster's shared cow-storage NFS mount is downgraded from NFSv4.1 to NFSv3 with `nolock`, fixing the chronic server-side lock-manager state loss (`dmesg`: `NFS: <server>: lost N locks`) that directly caused SQLite `disk I/O error`s during golden-repo refresh. An initial attempt added `nolock` to the NFSv4.1 mount alone and was empirically proven ineffective -- NFSv4 integrates locking into its own OPEN/LOCK state machine, bypassing the separate NLM protocol `nolock` controls. NFSv3 is where `nolock` genuinely disables server-side lock negotiation, matching this project's existing golden-repos mount precedent. Live-validated against a real evolution golden-repo refresh on the 3-node staging cluster: zero lock-loss messages and zero disk I/O errors during indexing (previously a near-continuous failure pattern).
+
 ## [11.90.0] - 2026-08-01
 
 ### Fixed

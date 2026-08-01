@@ -456,7 +456,7 @@ add_fstab_entry() {
     local mount_source="$1"
     local mount_point="$2"
     local fstab_file="${3:-/etc/fstab}"
-    local entry="${mount_source} ${mount_point} nfs4 _netdev,soft,timeo=30,retrans=3 0 0"
+    local entry="${mount_source} ${mount_point} nfs _netdev,vers=3,nolock,soft,timeo=30,retrans=3 0 0"
 
     if grep -qF "${mount_source} ${mount_point}" "${fstab_file}" 2>/dev/null; then
         info "fstab entry already exists for ${mount_source} -> ${mount_point}. Skipping."
@@ -492,9 +492,9 @@ setup_nfs_mount() {
         info "NFS already mounted at ${NFS_MOUNT}. Skipping mount."
     else
         if [[ "${DRY_RUN}" == "true" ]]; then
-            echo "  [dry-run] sudo mount -t nfs4 -o _netdev,soft,timeo=30,retrans=3 ${mount_source} ${NFS_MOUNT}"
+            echo "  [dry-run] sudo mount -t nfs -o _netdev,vers=3,nolock,soft,timeo=30,retrans=3 ${mount_source} ${NFS_MOUNT}"
         else
-            if ! sudo mount -t nfs4 -o "_netdev,soft,timeo=30,retrans=3" "${mount_source}" "${NFS_MOUNT}"; then
+            if ! sudo mount -t nfs -o "_netdev,vers=3,nolock,soft,timeo=30,retrans=3" "${mount_source}" "${NFS_MOUNT}"; then
                 die "NFS mount command failed for ${mount_source} -> ${NFS_MOUNT}. Check connectivity/export and re-run."
             fi
         fi
