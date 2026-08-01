@@ -125,6 +125,7 @@ class SCIPGenerator:
         *,
         indexer_map: Optional[Dict[str, SCIPIndexer]] = None,
         workspace_id: Optional[str] = None,
+        golden_alias: Optional[str] = None,
     ):
         """
         Initialize SCIP generator.
@@ -142,11 +143,18 @@ class SCIPGenerator:
                 threaded into every ``indexer.generate`` call. Only the
                 delegated backend uses it; ``None`` (default) is correct for the
                 local backend.
+            golden_alias: Golden-repo alias (EVO-65365 Option C), threaded into
+                every ``indexer.generate`` call. The delegated backend addresses
+                the sandbox build by this alias when the golden repo has no
+                workspace_id (the common case — cidx-owned golden repos have
+                none). Only the delegated backend uses it; ``None`` (default) is
+                correct for the local backend.
         """
         self.repo_root = Path(repo_root)
         self.scip_dir = self.repo_root / ".code-indexer" / "scip"
         self.max_workers = max_workers
         self.workspace_id = workspace_id
+        self.golden_alias = golden_alias
 
         # Initialize indexers. Default = today's local subprocess map (built
         # inline so tests that patch these classes at this module keep working);
@@ -307,6 +315,7 @@ class SCIPGenerator:
                 output_dir,
                 project.build_system,
                 workspace_id=self.workspace_id,
+                golden_alias=self.golden_alias,
                 language=project.language,
             )
 
@@ -454,6 +463,7 @@ class SCIPGenerator:
                 output_dir,
                 project_status.build_system,
                 workspace_id=self.workspace_id,
+                golden_alias=self.golden_alias,
                 language=project_status.language,
             )
 

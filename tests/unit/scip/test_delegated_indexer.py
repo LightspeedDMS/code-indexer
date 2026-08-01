@@ -164,6 +164,45 @@ class TestDelegatedIndexerSuccess:
         assert result.status == IndexerStatus.SUCCESS
 
 
+class TestDelegatedIndexerGoldenAlias:
+    """EVO-65365 Option C: address the build by golden_alias, not workspace_id."""
+
+    def test_golden_alias_builds_arguments_without_workspace_id(self, tmp_path):
+        """golden_alias => arguments carry golden_alias and NO workspace_id."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir,
+                _rpc_result(exit_code=0, output="indexing done", duration_ms=999),
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+        )
+
+        assert result.status == IndexerStatus.SUCCESS
+        assert result.output_file == output_dir / "index.scip"
+
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        # The bare alias is sent verbatim (cidx never builds a path).
+        assert args == {
+            "golden_alias": "svc-foo",
+            "project_path": ".",
+            "build_system": "npm",
+            "language": "typescript",
+            "output_dir": ".code-indexer/scip",
+        }
+        assert "workspace_id" not in args
+
+
 class TestDelegatedIndexerFailure:
     def test_nonzero_exit_is_failure(self, tmp_path):
         """exit_code != 0 => FAILED, no output_file, stderr from errors."""
@@ -318,7 +357,8 @@ class TestDelegatedIndexerFailure:
         assert result.status == IndexerStatus.FAILED
         assert "no SandboxRunResult" in result.stderr
 
-    def test_missing_workspace_id_is_failure_and_no_call(self, tmp_path):
+    def test_missing_both_targets_is_failure_and_no_call(self, tmp_path):
+        """Neither workspace_id nor golden_alias => XOR violation, no dispatch."""
         fake = _fake_requests(
             post_return=_fake_response(payload=_rpc_result(exit_code=0))
         )
@@ -326,10 +366,37 @@ class TestDelegatedIndexerFailure:
         output_dir = tmp_path / ".code-indexer" / "scip"
 
         result = indexer.generate(
-            tmp_path, output_dir, "npm", workspace_id=None, language="typescript"
+            tmp_path,
+            output_dir,
+            "npm",
+            workspace_id=None,
+            golden_alias=None,
+            language="typescript",
         )
         assert result.status == IndexerStatus.FAILED
+        assert "EXACTLY ONE" in result.stderr
         assert "workspace_id" in result.stderr
+        assert "golden_alias" in result.stderr
+        fake.post.assert_not_called()
+
+    def test_both_targets_is_failure_and_no_call(self, tmp_path):
+        """Both workspace_id AND golden_alias => XOR violation, no dispatch."""
+        fake = _fake_requests(
+            post_return=_fake_response(payload=_rpc_result(exit_code=0))
+        )
+        indexer = _make_indexer(tmp_path, fake)
+        output_dir = tmp_path / ".code-indexer" / "scip"
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            workspace_id="W",
+            golden_alias="svc-foo",
+            language="typescript",
+        )
+        assert result.status == IndexerStatus.FAILED
+        assert "EXACTLY ONE" in result.stderr
         fake.post.assert_not_called()
 
     def test_missing_language_is_failure(self, tmp_path):

@@ -47,6 +47,7 @@ class SCIPIndexer(ABC):
         build_system: str,
         *,
         workspace_id: Optional[str] = None,
+        golden_alias: Optional[str] = None,
         language: Optional[str] = None,
     ) -> IndexerResult:
         """
@@ -59,6 +60,10 @@ class SCIPIndexer(ABC):
             workspace_id: workspace-mcp id of the golden repo (EVO-65021). Only the
                 delegated backend needs it to address the sandbox; local indexers
                 ignore it. Keyword-only so existing 3-arg callers are unaffected.
+            golden_alias: Golden-repo alias (EVO-65365 Option C). The delegated
+                backend addresses the sandbox build by this alias when no
+                workspace_id exists (cidx-owned golden repos have none); exactly
+                one of workspace_id/golden_alias is set. Local indexers ignore it.
             language: Discovered project language (EVO-65021). Used by the delegated
                 backend to select the remote indexer; local indexers ignore it.
 

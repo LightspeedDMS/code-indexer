@@ -11,6 +11,14 @@ Contract (FROZEN — ``EVO-65021 FROZEN-CONTRACT.md``):
 
 * The sandbox exposes a fixed named MCP tool ``sandbox_scip`` (never an
   agent-chosen exec string). cidx calls it via JSON-RPC ``tools/call``.
+* The build target is addressed by EITHER a workspace-mcp ``workspace_id`` OR
+  (EVO-65365 Option C) a golden-repo ``golden_alias`` — exactly one, never both
+  and never neither. cidx's golden repos are cidx-owned dirs at
+  ``/data/data/golden-repos/<alias>`` with NO workspace_id, so a standing
+  sandbox-mcp mounts the golden FlexVol and cidx sends the bare ``golden_alias``;
+  the sandbox resolves it to ``<GOLDEN_REPOS_ROOT>/<alias>`` and owns the
+  confinement — cidx sends the alias verbatim and NEVER builds a path.
+  ``project_path`` / ``output_dir`` stay repo-root-relative in both modes.
 * Because the golden repo *is* a workspace-mcp workspace bind-mounted at
   ``/workspace`` inside the sandbox container, the ``index.scip`` lands in a
   directory cidx already reads — there is NO artifact transfer. cidx therefore
@@ -141,26 +149,38 @@ class DelegatedIndexer(SCIPIndexer):
     def _build_request(
         self,
         *,
-        workspace_id: str,
+        workspace_id: Optional[str],
+        golden_alias: Optional[str],
         project_path: str,
         build_system: str,
         language: str,
         output_dir: str,
     ) -> Dict[str, Any]:
+        """Build the ``tools/call`` request for ``sandbox_scip``.
+
+        Puts EXACTLY ONE of ``workspace_id`` / ``golden_alias`` into
+        ``arguments`` (never both, never neither — ``generate`` enforces the XOR
+        before calling here). Everything else is repo-root-relative and
+        unchanged across both addressing modes.
+        """
         self._request_id += 1
+        arguments: Dict[str, Any] = {
+            "project_path": project_path,
+            "build_system": build_system,
+            "language": language,
+            "output_dir": output_dir,
+        }
+        if golden_alias:
+            arguments["golden_alias"] = golden_alias
+        else:
+            arguments["workspace_id"] = workspace_id
         return {
             "jsonrpc": "2.0",
             "id": self._request_id,
             "method": "tools/call",
             "params": {
                 "name": self._tool_name,
-                "arguments": {
-                    "workspace_id": workspace_id,
-                    "project_path": project_path,
-                    "build_system": build_system,
-                    "language": language,
-                    "output_dir": output_dir,
-                },
+                "arguments": arguments,
             },
         }
 
@@ -207,9 +227,15 @@ class DelegatedIndexer(SCIPIndexer):
         build_system: str,
         *,
         workspace_id: Optional[str] = None,
+        golden_alias: Optional[str] = None,
         language: Optional[str] = None,
     ) -> IndexerResult:
         """Delegate SCIP generation for one project to sandbox-mcp.
+
+        The build target is addressed by EXACTLY ONE of ``workspace_id`` (a
+        workspace-mcp id) or ``golden_alias`` (EVO-65365 Option C — a bare
+        golden-repo alias the sandbox resolves under its golden-repos root).
+        Passing neither or both is a contract violation and fails loud.
 
         Returns an :class:`IndexerResult`. On any error (missing wiring,
         transport failure, non-zero exit, or missing output file) the status is
@@ -218,12 +244,14 @@ class DelegatedIndexer(SCIPIndexer):
         """
         start_time = time.time()
 
-        if not workspace_id:
+        if bool(workspace_id) == bool(golden_alias):
             return self._failure(
                 start_time,
-                "DelegatedIndexer requires a workspace_id (golden-repo "
-                "workspace-mcp id); none was provided. Is scip_backend wiring "
-                "passing workspace_id through?",
+                "DelegatedIndexer requires EXACTLY ONE of {workspace_id, "
+                "golden_alias} to address the build target; got "
+                f"workspace_id={'set' if workspace_id else 'unset'}, "
+                f"golden_alias={'set' if golden_alias else 'unset'}. Is "
+                "scip_backend wiring passing exactly one through?",
             )
         if not language:
             return self._failure(
@@ -263,6 +291,7 @@ class DelegatedIndexer(SCIPIndexer):
 
         request = self._build_request(
             workspace_id=workspace_id,
+            golden_alias=golden_alias,
             project_path=project_path,
             build_system=build_system,
             language=language,
@@ -270,13 +299,18 @@ class DelegatedIndexer(SCIPIndexer):
         )
 
         requests = self._requests()
+        target = (
+            f"golden_alias={golden_alias}"
+            if golden_alias
+            else f"workspace_id={workspace_id}"
+        )
         logger.info(
             "DelegatedIndexer: requesting sandbox_scip for project '%s' "
-            "(build_system=%s, language=%s, workspace_id=%s)",
+            "(build_system=%s, language=%s, %s)",
             project_path,
             build_system,
             language,
-            workspace_id,
+            target,
         )
         try:
             response = requests.post(

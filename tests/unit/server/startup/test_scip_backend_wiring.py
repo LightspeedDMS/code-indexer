@@ -84,6 +84,16 @@ class TestDelegated:
         assert mock_get.call_args.args[0].endswith("/health")
 
     @patch("requests.get")
+    def test_delegated_threads_golden_alias_to_generator(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        gen = build_scip_generator(
+            _delegated_config(), tmp_path, golden_alias="svc-bar"
+        )
+        assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
+        assert gen.golden_alias == "svc-bar"
+        assert gen.workspace_id is None
+
+    @patch("requests.get")
     def test_delegated_health_unreachable_fails_loud(self, mock_get, tmp_path):
         mock_get.side_effect = RuntimeError("connection refused")
         with pytest.raises(RuntimeError, match="sandbox-mcp not reachable"):
@@ -164,9 +174,14 @@ class TestValidateScipBackendConfig:
 
 
 class TestGoldenRepoBridge:
-    """EVO-65021 seam #3: resolve_workspace_id -> build_scip_generator."""
+    """EVO-65365 Option C (seam #3): delegated golden repos are addressed BY ALIAS.
 
-    def test_local_backend_ignores_workspace_id_lookup(self, tmp_path):
+    The old workspace_id resolution (and its fail-soft None-skip) is gone — a
+    golden repo now has no workspace_id to resolve, so the manager is never
+    consulted for addressing and every delegated golden repo is addressable.
+    """
+
+    def test_local_backend_addresses_neither(self, tmp_path):
         mgr = _FakeManager(raises=True)  # would raise if consulted
         gen = build_scip_generator_for_golden_repo(
             _local_config(),
@@ -176,11 +191,12 @@ class TestGoldenRepoBridge:
         )
         assert isinstance(gen._indexers["typescript"], TypeScriptIndexer)
         assert gen.workspace_id is None
-        # local backend never resolves a workspace_id
+        assert gen.golden_alias is None
+        # local backend never consults the manager
         assert mgr.calls == []
 
     @patch("requests.get")
-    def test_delegated_resolves_and_names_real_workspace(self, mock_get, tmp_path):
+    def test_delegated_addresses_by_golden_alias(self, mock_get, tmp_path):
         mock_get.return_value = MagicMock(status_code=200)
         mgr = _FakeManager(workspace_id="ws-real-1234")
         gen = build_scip_generator_for_golden_repo(
@@ -191,23 +207,33 @@ class TestGoldenRepoBridge:
         )
         assert gen is not None
         assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
-        # the delegated build names the REAL resolved workspace W
-        assert gen.workspace_id == "ws-real-1234"
-        assert mgr.calls == ["svc-foo"]
+        # The delegated build is addressed by the bare golden alias, NOT a
+        # workspace_id — and the manager is NOT consulted for one.
+        assert gen.golden_alias == "svc-foo"
+        assert gen.workspace_id is None
+        assert mgr.calls == []
 
     @patch("requests.get")
-    def test_delegated_unretained_workspace_id_fail_soft_returns_none(
-        self, mock_get, tmp_path
-    ):
-        mgr = _FakeManager(raises=True)
+    def test_delegated_no_workspace_id_no_longer_skips(self, mock_get, tmp_path):
+        """Option C: a golden repo with no workspace_id is STILL built (by alias).
+
+        Under the old seam #3 a manager that raised WorkspaceIdNotRetainedError
+        made this return None (skip SCIP). That fail-soft dead-end is removed —
+        the repo is addressed by alias and a real generator comes back.
+        """
+        mock_get.return_value = MagicMock(status_code=200)
+        mgr = _FakeManager(raises=True)  # would raise if it were still consulted
         gen = build_scip_generator_for_golden_repo(
             _delegated_config(),
             tmp_path,
             golden_repo_manager=mgr,
             alias="legacy-repo",
         )
-        # Fail-soft: skip SCIP for this repo rather than building against sb-None.
-        assert gen is None
-        assert mgr.calls == ["legacy-repo"]
-        # No build/health check is attempted once the workspace_id is missing.
-        mock_get.assert_not_called()
+        assert gen is not None
+        assert isinstance(gen._indexers["typescript"], DelegatedIndexer)
+        assert gen.golden_alias == "legacy-repo"
+        assert gen.workspace_id is None
+        # No workspace_id resolution is attempted at all.
+        assert mgr.calls == []
+        # The delegated backend is wired, so the health check DID run.
+        assert mock_get.call_args.args[0].endswith("/health")

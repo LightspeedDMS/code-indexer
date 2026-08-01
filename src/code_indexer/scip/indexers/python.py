@@ -19,6 +19,7 @@ class PythonIndexer(SCIPIndexer):
         build_system: str,
         *,
         workspace_id: Optional[str] = None,
+        golden_alias: Optional[str] = None,
         language: Optional[str] = None,
     ) -> IndexerResult:
         """Generate SCIP index for Python project."""

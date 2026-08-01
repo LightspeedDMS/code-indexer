@@ -25,6 +25,7 @@ class _RecordingIndexer(SCIPIndexer):
         build_system: str,
         *,
         workspace_id: Optional[str] = None,
+        golden_alias: Optional[str] = None,
         language: Optional[str] = None,
     ) -> IndexerResult:
         self.calls.append(
@@ -33,6 +34,7 @@ class _RecordingIndexer(SCIPIndexer):
                 "output_dir": output_dir,
                 "build_system": build_system,
                 "workspace_id": workspace_id,
+                "golden_alias": golden_alias,
                 "language": language,
             }
         )
@@ -75,8 +77,27 @@ class TestBackendSeam:
         assert len(recorder.calls) == 1
         call = recorder.calls[0]
         assert call["workspace_id"] == "W-42"
+        assert call["golden_alias"] is None
         assert call["language"] == "typescript"
         assert call["build_system"] == "npm"
+
+    def test_injected_map_and_golden_alias_threaded(self, tmp_path):
+        """EVO-65365: generate() threads golden_alias into the indexer."""
+        (tmp_path / "package.json").write_text("{}")
+        recorder = _RecordingIndexer()
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": recorder},
+            golden_alias="svc-foo",
+        )
+
+        gen.generate()
+
+        assert len(recorder.calls) == 1
+        call = recorder.calls[0]
+        assert call["golden_alias"] == "svc-foo"
+        assert call["workspace_id"] is None
+        assert call["language"] == "typescript"
 
     def test_rebuild_threads_workspace_id(self, tmp_path):
         """rebuild_projects() also threads workspace_id + language."""
@@ -129,7 +150,16 @@ class _FixedResultIndexer(SCIPIndexer):
         self._exit_code = exit_code
         self._stderr = stderr
 
-    def generate(self, project_dir, output_dir, build_system, *, workspace_id=None, language=None):  # noqa: E501
+    def generate(
+        self,
+        project_dir,
+        output_dir,
+        build_system,
+        *,
+        workspace_id=None,
+        golden_alias=None,
+        language=None,
+    ):
         return IndexerResult(
             status=IndexerStatus.FAILED,
             duration_seconds=0.0,
