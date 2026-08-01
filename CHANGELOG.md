@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.89.0] - 2026-07-31
+
+### Fixed
+
+- Bug #1499: `poll_temporal_job_status` now discriminates non-temporal job results (xray_search/xray_search_batch) from temporal search jobs via `operation_type` rather than the shape of the persisted result, fixing a regression where a genuine temporal job's `{"result_ready": True}` completion sentinel was misclassified as a persisted result, making the AC10 TTL-expiry path unreachable.
+- Bug #1500: cidx-meta-backup's git helpers now default `GIT_EDITOR=true` (preserving any operator-configured value) before rebase operations, fixing a production incident where a mid-rebase conflict hung/failed due to no interactive editor being available in the service-user's environment.
+- Bug #1503: a stale-but-valid-subset content-integrity manifest (legacy flat format, or an envelope whose records are a proper subset of live chunks.db rows because an ordinary refresh added rows after the manifest was last written) is now safely accepted and upgraded instead of permanently branding a healthy collection UNRECOVERABLE. Every covered digest is re-verified fresh before acceptance; a phantom manifest key is still a hard refusal. Hardened against a contradictory read-only/write-permission caller combination and against a transient write failure during the upgrade being silently converted into a permanent quarantine.
+- Bug #1504: `SSHKeyManager.assign_key_to_host` now mirrors the host mapping to the PostgreSQL backend in cluster mode (matching `create_key`/`delete_key`'s existing behavior), fixing a bug where a key registered via the MCP front door in cluster mode was present on disk but never offered for authentication, and a subsequent sync could silently remove a previously-working Host block.
+- Bug #1505: `cidx --reconcile` no longer spawns one `git log` subprocess per file (a multi-hour stall on large repos); a single `git ls-tree -r -z HEAD` call now produces the full repo's blob-hash map in one subprocess call. Also fixes a pre-existing correctness bug where the clean-file comparison used a memoized per-run HEAD commit hash instead of the stored per-file blob hash, causing reconcile to re-embed nearly everything.
+- Bug #1506: ordinary golden-repo refresh now runs a durability-flush + integrity-check gate against `chunks.db` before publishing (snapshot + alias swap), with reflink self-heal on failure and a persisted per-repo quarantine for repeated failures -- closing the gap that allowed a real, confirmed SQLite corruption on staging to go undetected and require a manual backup restore. The per-repo write lock coordinating this gate now uses an explicit 24h TTL (was silently inheriting a 1h default) and is now correctly respected by all four writers of the shared "cidx-meta" lock (`DependencyMapService`'s three analysis methods and `atomic_write_description`), each of which previously performed real work before or without checking lock acquisition.
+
 ## [11.88.0] - 2026-07-30
 
 ### Fixed
