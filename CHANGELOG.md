@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.90.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1509: the Bug #1506 refresh-integrity gate's reflink self-heal now also restores the sibling `metadata-{provider}.json` file(s) on `master_path` from the last-known-good snapshot, alongside the already-existing `chunks.db` self-heal. Previously, a self-healed `chunks.db` (reflecting the OLDER, restored commit) was left paired with a `metadata-{provider}.json` still claiming the NEWER commit was fully indexed -- a self-contradictory state that permanently masked staleness on every subsequent refresh cycle (the same failure class as Bug #1508, triggered via the integrity gate's own self-heal path instead of an interrupted refresh).
+
 ## [11.89.0] - 2026-07-31
 
 ### Fixed
