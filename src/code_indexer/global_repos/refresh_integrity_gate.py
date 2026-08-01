@@ -89,6 +89,11 @@ class CollectionIntegrityFailure:
     # current write AND the last-known-good snapshot are corrupt: a more
     # severe condition than an ordinary single-sided failure.
     source_snapshot_also_corrupt: bool = False
+    # Bug #1509: metadata-{provider}.json file(s) restored alongside a
+    # successful chunks.db self-heal, so master_path's metadata never
+    # claims a NEW commit that chunks.db does not actually contain.
+    metadata_restored_files: List[Path] = field(default_factory=list)
+    metadata_restore_error: Optional[str] = None
 
 
 @dataclass
@@ -182,6 +187,55 @@ def restore_chunks_db_via_reflink(
     )
 
 
+def restore_metadata_files_via_reflink(
+    clone_backend: Any,
+    healthy_metadata_dir: Path,
+    target_metadata_dir: Path,
+) -> List[Path]:
+    """Bug #1509: reflink-restore every ``metadata*.json`` file (e.g.
+    ``metadata-voyage-ai.json``, one per embedding provider -- see
+    ``cli.py``'s ``_get_provider_metadata_path``) found directly under
+    *healthy_metadata_dir* into *target_metadata_dir*, using the SAME
+    ``cp --reflink=auto`` CoW primitive as
+    :func:`restore_chunks_db_via_reflink` (``clone_backend: Any`` mirrors
+    that sibling function's own signature -- both accept any object
+    exposing ``create_clone_at_path``, e.g.
+    ``CloneBackend``/``LocalCloneBackend``).
+
+    A self-healed ``chunks.db`` (restored from the last-known-good
+    snapshot) must never be left paired with a sibling metadata file that
+    still claims the NEW commit was fully indexed -- ``_index_source()``
+    already wrote that stale claim to ``master_path``'s ``.code-indexer/``
+    dir earlier in the SAME refresh cycle, before the integrity gate ever
+    runs. Restoring metadata from the same healthy snapshot keeps
+    ``master_path`` self-consistent: metadata now accurately reflects the
+    OLD, restored commit that ``chunks.db`` actually contains.
+
+    Returns the list of destination paths actually restored (possibly
+    empty, if the healthy snapshot has no metadata files of its own --
+    e.g. its very first-ever refresh). Raises whatever the underlying
+    *clone_backend* raises on failure, or ``RuntimeError`` if no
+    *clone_backend* is available -- callers must not swallow this.
+    """
+    if clone_backend is None:
+        raise RuntimeError(
+            "restore_metadata_files_via_reflink: no clone_backend "
+            "available -- cannot self-heal without the CoW clone primitive"
+        )
+
+    restored: List[Path] = []
+    if not healthy_metadata_dir.is_dir():
+        return restored
+
+    for healthy_metadata_path in sorted(healthy_metadata_dir.glob("metadata*.json")):
+        target_metadata_path = target_metadata_dir / healthy_metadata_path.name
+        clone_backend.create_clone_at_path(
+            str(healthy_metadata_path), str(target_metadata_path)
+        )
+        restored.append(target_metadata_path)
+    return restored
+
+
 def run_refresh_integrity_gate(
     *,
     source_index_dir: Path,
@@ -211,6 +265,16 @@ def run_refresh_integrity_gate(
     completes, the destination is re-verified the same way; only a restore
     whose destination passes this post-check is reported as
     ``self_heal_succeeded=True``.
+
+    Bug #1509: immediately after a successful chunks.db self-heal, the
+    sibling ``metadata-{provider}.json`` file(s) are ALSO restored from
+    the same healthy snapshot (``healthy_index_dir.parent`` ->
+    ``source_index_dir.parent`` -- the ``.code-indexer/`` dir, sibling of
+    ``.code-indexer/index/``), so ``master_path`` never claims a NEW
+    commit that chunks.db does not actually contain. This is best-effort:
+    a metadata-restore failure is logged loudly and recorded on
+    ``metadata_restore_error`` but does not flip ``self_heal_succeeded``
+    back to False, since the chunks.db repair itself already succeeded.
 
     Never raises for a data-integrity failure -- returns ``passed=False``
     instead so the caller can skip ``_create_snapshot``/``swap_alias`` for
@@ -245,6 +309,11 @@ def run_refresh_integrity_gate(
             else None
         )
         if healthy_chunks_db_path is not None and healthy_chunks_db_path.exists():
+            # healthy_chunks_db_path is only ever non-None when
+            # healthy_index_dir is also non-None (see its construction
+            # above) -- assert narrows this for mypy across the
+            # intermediate variable.
+            assert healthy_index_dir is not None
             # Codex review Finding 3: verify the SOURCE is actually healthy
             # before trusting it -- its mere existence is not proof.
             source_ok, source_detail = _check_integrity_fresh_connection(
@@ -284,6 +353,46 @@ def run_refresh_integrity_gate(
                             chunks_db_path,
                             healthy_chunks_db_path,
                         )
+                        # Bug #1509: also restore the sibling
+                        # metadata-{provider}.json file(s) from the same
+                        # healthy snapshot -- _index_source() already
+                        # wrote a metadata file to master_path claiming
+                        # the NEW commit is fully indexed, earlier in
+                        # this SAME refresh cycle, before this gate ever
+                        # ran. Left unrestored, that stale claim would
+                        # permanently fool the next refresh cycle's
+                        # git-ref-only change detection.
+                        try:
+                            failure.metadata_restored_files = (
+                                restore_metadata_files_via_reflink(
+                                    clone_backend,
+                                    Path(healthy_index_dir).parent,
+                                    Path(source_index_dir).parent,
+                                )
+                            )
+                            if failure.metadata_restored_files:
+                                logger.error(
+                                    "Bug #1509: restored %d metadata "
+                                    "file(s) for %s alongside the "
+                                    "chunks.db self-heal: %s",
+                                    len(failure.metadata_restored_files),
+                                    collection_dir,
+                                    failure.metadata_restored_files,
+                                )
+                        except Exception as metadata_exc:
+                            failure.metadata_restore_error = (
+                                f"{type(metadata_exc).__name__}: {metadata_exc}"
+                            )
+                            logger.error(
+                                "Bug #1509: failed to restore metadata "
+                                "file(s) for %s alongside a successful "
+                                "chunks.db self-heal (%s) -- "
+                                "master_path's metadata may still claim "
+                                "a newer commit than chunks.db actually "
+                                "contains.",
+                                collection_dir,
+                                metadata_exc,
+                            )
                     else:
                         failure.self_heal_error = (
                             f"post-restore integrity re-check failed: {post_detail}"

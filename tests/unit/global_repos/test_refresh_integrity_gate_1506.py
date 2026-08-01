@@ -387,3 +387,63 @@ class TestRunRefreshIntegrityGate:
         assert failure.self_heal_succeeded is False
         assert failure.self_heal_error is not None
         assert "post-restore" in failure.self_heal_error.lower()
+
+
+class TestMetadataRestoreAfterSelfHeal:
+    """Bug #1509: a self-healed chunks.db (restored from the last-known-good
+    snapshot) must NOT be left paired with a sibling metadata-{provider}.json
+    that still claims the NEW commit was fully indexed -- _index_source()
+    already wrote that stale claim to master_path's .code-indexer/ dir
+    earlier in the SAME refresh cycle, before the integrity gate ever runs.
+    Without also restoring metadata from the same healthy snapshot, the
+    next scheduled refresh's git-ref-only has_changes() check is permanently
+    fooled into believing chunks.db is already caught up."""
+
+    def test_self_heal_also_restores_metadata_json_files(self, tmp_path: Path) -> None:
+        from code_indexer.server.storage.shared.clone_backend import (
+            LocalCloneBackend,
+        )
+
+        # Healthy last-known-good snapshot: chunks.db reflects the OLD
+        # commit, and its sibling metadata file (one level up from
+        # .code-indexer/index/) records that same OLD commit.
+        healthy_root = tmp_path / "healthy_snapshot" / ".code-indexer"
+        healthy_index_dir = healthy_root / "index"
+        _make_chunks_db_collection(healthy_index_dir / "coll", _real_records(50))
+        healthy_metadata = healthy_root / "metadata-voyage-ai.json"
+        healthy_metadata.write_text(
+            json.dumps({"status": "completed", "current_commit": "old_sha"})
+        )
+
+        # master_path (source): chunks.db is corrupt, but _index_source()
+        # already wrote a metadata file claiming the NEW commit is fully
+        # indexed -- this is the pre-existing drift the gate must fix up.
+        source_root = tmp_path / "master" / ".code-indexer"
+        source_index_dir = source_root / "index"
+        source_chunks_db = _make_chunks_db_collection(
+            source_index_dir / "coll", _real_records(50)
+        )
+        _flip_bytes_at_midpoint(source_chunks_db)
+        source_metadata = source_root / "metadata-voyage-ai.json"
+        source_metadata.write_text(
+            json.dumps({"status": "completed", "current_commit": "new_sha"})
+        )
+
+        result = run_refresh_integrity_gate(
+            source_index_dir=source_index_dir,
+            healthy_index_dir=healthy_index_dir,
+            clone_backend=LocalCloneBackend(),
+        )
+
+        assert result.passed is False
+        assert len(result.failures) == 1
+        assert result.failures[0].self_heal_succeeded is True
+
+        # The chunks.db self-heal succeeded (already covered by other
+        # tests) -- the NEW assertion for Bug #1509 is that the sibling
+        # metadata file was ALSO restored from the healthy snapshot, so
+        # master_path's metadata now honestly reflects what chunks.db
+        # actually contains (the OLD, restored commit) rather than the
+        # stale "new commit fully indexed" claim.
+        restored_metadata = json.loads(source_metadata.read_text())
+        assert restored_metadata["current_commit"] == "old_sha"
