@@ -4506,15 +4506,19 @@ class DeploymentExecutor:
                 )
             )
 
-        # Step 14.8: Issue #1510 - Ensure the cow-storage NFS mount's fstab
-        # entry has the `nolock` option (non-fatal). Self-heals already-
-        # deployed nodes whose fstab entry predates this fix; fresh installs
-        # already get it from scripts/install-cidx-server.sh.
+        # Step 14.8: Issue #1510 - Ensure the cow-storage NFS mount is
+        # NFSv3 with `nolock` (non-fatal). NFSv4's own OPEN/LOCK state
+        # machine bypasses nolock entirely (empirically confirmed
+        # ineffective on the live staging mount), so the whole mount is
+        # upgraded to NFSv3, matching the golden-repos mount precedent.
+        # Self-heals already-deployed nodes whose fstab entry predates
+        # this fix; fresh installs already get it from
+        # scripts/install-cidx-server.sh.
         if not self._ensure_cow_storage_mount_options():
             logger.warning(
                 format_error_log(
                     "DEPLOY-GENERAL-221",
-                    "cow-storage nolock mount option self-heal failed - "
+                    "cow-storage NFSv3+nolock mount upgrade self-heal failed - "
                     "NFSv4 lock-manager state loss may still cause SQLite "
                     "disk I/O errors on this node",
                     extra={"correlation_id": get_correlation_id()},
@@ -6031,43 +6035,53 @@ class DeploymentExecutor:
     def _ensure_cow_storage_mount_options(
         self, *, fstab_path: str = "/etc/fstab"
     ) -> bool:
-        """Issue #1510: idempotently ensure the cow-storage NFS mount's
-        /etc/fstab entry includes the `nolock` option, and best-effort
-        applies it to the live mount.
+        """Issue #1510 follow-up: idempotently upgrade the cow-storage NFS
+        mount's /etc/fstab entry to NFSv3 with `nolock` (fstype=nfs,
+        vers=3,nolock in options), and best-effort applies it to the live
+        mount via a full umount/mount cycle.
 
-        Root cause: this cluster's shared NFS mount was observed suffering
-        chronic NFSv4 server-side lock-manager state loss (dmesg
-        "NFS: <server>: lost N locks" bursts), which directly caused a
-        SQLite `disk I/O error` during a golden-repo refresh -- SQLite's
-        chunks.db writes depend on real OS-level byte-range locks, and
-        NFSv4's lock-manager state for those locks is what periodically
-        breaks down here. `nolock` makes locking client-side-only, so a
-        transient server-side lock-manager hiccup can no longer interrupt
-        an in-progress write. Safe specifically because this project's own
-        WriteLockManager already serializes writers per-repo at the
-        application layer -- nolock's only real risk (genuine concurrent
-        writers with no external coordination) does not apply here.
+        Root cause: this cluster's shared NFS mount was originally NFSv4.1
+        and observed suffering chronic server-side lock-manager state loss
+        (dmesg "NFS: <server>: lost N locks" bursts), which directly caused
+        a SQLite `disk I/O error` during a golden-repo refresh -- SQLite's
+        chunks.db writes depend on real OS-level byte-range locks. A prior
+        fix added `nolock` to the NFSv4.1 mount alone and empirically
+        confirmed it has ZERO effect there: NFSv4 integrates locking into
+        the protocol's own OPEN/LOCK state machine, bypassing the separate
+        NLM protocol `nolock` actually controls (an NFSv3-only mechanism).
+        This method instead upgrades the whole mount to NFSv3, where
+        `nolock` genuinely disables server-side lock negotiation --
+        matching this project's existing golden-repos mount precedent
+        (`vers=3,nolock,hard`). Safe for the same reason as before: this
+        project's own WriteLockManager already serializes writers per-repo
+        at the application layer, so nolock's only real risk (genuine
+        concurrent writers with no external coordination) does not apply.
 
-        scripts/install-cidx-server.sh already writes `nolock` into fresh
-        fstab entries and the live mount command for NEW installs. This
-        method is the idempotent self-heal for ALREADY-DEPLOYED nodes whose
-        fstab entry predates that fix, per this project's Auto-Updater
-        Idempotent Deployment mandate (a template/installer-only fix would
-        leave already-running nodes permanently broken).
+        scripts/install-cidx-server.sh already writes fstype=nfs with
+        `vers=3,nolock` into fresh fstab entries and the live mount command
+        for NEW installs. This method is the idempotent self-heal for
+        ALREADY-DEPLOYED nodes whose fstab entry predates this fix, per
+        this project's Auto-Updater Idempotent Deployment mandate (a
+        template/installer-only fix would leave already-running nodes
+        permanently broken).
 
         Only applies to `clone_backend=cow-daemon` nodes with a configured
         `cow_daemon.mount_point` -- non-cow-daemon nodes (local backend,
         no NFS mount) have nothing to repair.
 
-        Non-fatal: any exception, unreadable fstab, or failed sudo write
-        is logged at WARNING and returns False. A no-op case (nolock
-        already present, or no fstab entry matches the mount point at all)
+        Non-fatal: any exception, unreadable fstab, or failed sudo write is
+        logged at WARNING and returns False. A no-op case (already NFSv3
+        with nolock, or no fstab entry matches the mount point at all)
         returns True. A successful fstab rewrite attempts a live
-        `mount -o remount` best-effort; if that alone does not apply the
-        new locking option (some kernels require a full umount/mount
-        cycle for a locking-flag change), an INFO log documents that a
-        future reboot or manual remount will apply it -- fstab itself is
-        durably corrected either way.
+        umount+mount cycle -- a filesystem-type AND locking-protocol change
+        cannot be applied via `mount -o remount` (that only re-applies
+        compatible options on the SAME already-mounted filesystem type). If
+        the live umount fails (e.g. EBUSY, mount in active use), the mount
+        is left completely untouched and an INFO log documents that a
+        future reboot or manual remount will apply the fstab fix. If the
+        umount SUCCEEDS but the follow-up mount fails, this is a genuine
+        failure (mount point left unmounted) and is logged at WARNING,
+        returning False so callers can escalate.
 
         Args:
             fstab_path: Path to the fstab file to read/repair. Defaults to
@@ -6116,13 +6130,14 @@ class DeploymentExecutor:
                 )
                 return False
 
-            updated_content = self._add_nolock_to_cow_storage_fstab_entry(
+            updated_content = self._upgrade_cow_storage_fstab_entry_to_nfsv3(
                 current_content, mount_point
             )
             if updated_content is None:
                 logger.debug(
-                    "Issue #1510: cow-storage fstab entry for %s already has "
-                    "nolock (or no matching entry found) — nothing to repair",
+                    "Issue #1510: cow-storage fstab entry for %s is already "
+                    "NFSv3 with nolock (or no matching entry found) — "
+                    "nothing to repair",
                     mount_point,
                     extra={"correlation_id": get_correlation_id()},
                 )
@@ -6135,36 +6150,53 @@ class DeploymentExecutor:
                 logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-219",
-                        f"Issue #1510: failed to add nolock to {fstab_path} "
-                        f"entry for {mount_point}: {tee_result.stderr}",
+                        f"Issue #1510: failed to upgrade {fstab_path} entry "
+                        f"for {mount_point} to NFSv3+nolock: {tee_result.stderr}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
 
             logger.info(
-                "Issue #1510: added nolock to %s entry for %s",
+                "Issue #1510: upgraded %s entry for %s to NFSv3+nolock",
                 fstab_path,
                 mount_point,
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            remount_result = self._run_systemd_op_with_retry(
-                ["sudo", "mount", "-o", "remount", mount_point]
+            umount_result = self._run_systemd_op_with_retry(
+                ["sudo", "umount", mount_point]
             )
-            if remount_result.returncode != 0:
+            if umount_result.returncode != 0:
                 logger.info(
-                    "Issue #1510: live remount of %s did not apply nolock "
-                    "immediately (%s) — fstab is corrected; a future reboot "
-                    "or manual remount will apply it",
+                    "Issue #1510: could not live-unmount %s to apply "
+                    "NFSv3+nolock (%s) — fstab is corrected; the mount "
+                    "itself was left untouched, and a future reboot or "
+                    "manual remount will apply it",
                     mount_point,
-                    remount_result.stderr.strip(),
+                    umount_result.stderr.strip(),
                     extra={"correlation_id": get_correlation_id()},
                 )
                 return True
 
+            mount_result = self._run_systemd_op_with_retry(
+                ["sudo", "mount", mount_point]
+            )
+            if mount_result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-222",
+                        f"Issue #1510: unmounted {mount_point} to apply "
+                        f"NFSv3+nolock but the follow-up mount failed: "
+                        f"{mount_result.stderr}. Mount point is now "
+                        f"UNMOUNTED — manual intervention required.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
             logger.info(
-                "Issue #1510: remounted %s with nolock applied live",
+                "Issue #1510: remounted %s as NFSv3+nolock",
                 mount_point,
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -6181,18 +6213,25 @@ class DeploymentExecutor:
             return False
 
     @staticmethod
-    def _add_nolock_to_cow_storage_fstab_entry(
+    def _upgrade_cow_storage_fstab_entry_to_nfsv3(
         content: str, mount_point: str
     ) -> Optional[str]:
-        """Return updated fstab content with `nolock` added to the options
-        field of the entry whose mount-point field exactly matches
-        `mount_point`, or None if no change is needed (nolock already
-        present, or no matching entry exists at all).
+        """Return updated fstab content with the cow-storage entry upgraded
+        to NFSv3 + nolock (fstype rewritten to `nfs`, options gain
+        `vers=3,nolock` -- any pre-existing `vers=*` option is replaced),
+        or None if no change is needed (already fstype=nfs with vers=3 and
+        nolock present, or no matching entry exists at all).
+
+        Issue #1510 follow-up: `nolock`/`local_lock` has zero effect on
+        NFSv4 (its own OPEN/LOCK state machine bypasses the separate NLM
+        protocol `nolock` controls), so the fstype and locking option must
+        move together -- adding `nolock` alone (as the original #1510 fix
+        did) is a no-op on an NFSv4 mount.
 
         Pure string transformation -- no filesystem/subprocess access --
         so it is independently unit-testable without mocking sudo/systemd.
         Preserves the original line's leading whitespace and line ending;
-        only the options field substring itself is rewritten in place.
+        only the fstype and options fields are rewritten in place.
         """
         lines = content.splitlines(keepends=True)
         for i, line in enumerate(lines):
@@ -6205,11 +6244,34 @@ class DeploymentExecutor:
             fields = lstripped.split()
             if len(fields) < 4 or fields[1] != mount_point:
                 continue
+
+            fstype = fields[2]
             options_field = fields[3]
-            if "nolock" in options_field.split(","):
+            options = [o for o in options_field.split(",") if o]
+
+            already_nfsv3_nolock = (
+                fstype == "nfs" and "vers=3" in options and "nolock" in options
+            )
+            if already_nfsv3_nolock:
                 return None
-            new_options_field = options_field + ",nolock"
-            new_lstripped = lstripped.replace(options_field, new_options_field, 1)
+
+            non_version_options = [
+                o for o in options if not o.startswith("vers=") and o != "nolock"
+            ]
+            new_options: list = []
+            inserted = False
+            for o in non_version_options:
+                new_options.append(o)
+                if o == "_netdev" and not inserted:
+                    new_options.extend(["vers=3", "nolock"])
+                    inserted = True
+            if not inserted:
+                new_options = ["vers=3", "nolock"] + new_options
+
+            new_fields = list(fields)
+            new_fields[2] = "nfs"
+            new_fields[3] = ",".join(new_options)
+            new_lstripped = " ".join(new_fields)
             lines[i] = leading_ws + new_lstripped + ending
             return "".join(lines)
         return None

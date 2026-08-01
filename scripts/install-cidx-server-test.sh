@@ -953,7 +953,12 @@ test_fstab_entry_not_duplicated() {
 run_test "add_fstab_entry does not duplicate the entry on a second run" test_fstab_entry_not_duplicated
 
 test_fstab_entry_includes_nolock() {
-    local tmpdir fstab_file
+    # Issue #1510 follow-up: NFSv4.1 does not support client-side-only
+    # locking at all (nolock/local_lock is baked out by the protocol's own
+    # OPEN/LOCK state machine) -- empirically proven ineffective on the
+    # live staging mount. The mount is downgraded to NFSv3 (fstype=nfs,
+    # vers=3), which genuinely honors nolock via the separate NLM protocol.
+    local tmpdir fstab_file entry_line fstype
     tmpdir="$(mktemp -d)"
     fstab_file="${tmpdir}/fstab"
     touch "${fstab_file}"
@@ -963,13 +968,15 @@ test_fstab_entry_includes_nolock() {
         add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    local matched=0
-    grep -qF 'nolock' "${fstab_file}" && matched=1
+    entry_line="$(grep -F '192.168.60.23:/home/jsbattig/cow-storage' "${fstab_file}")"
+    fstype="$(echo "${entry_line}" | awk '{print $3}')"
     rm -rf "${tmpdir}"
 
-    [[ "${matched}" -eq 1 ]]
+    [[ "${fstype}" == "nfs" ]] \
+        && echo "${entry_line}" | grep -qF 'vers=3' \
+        && echo "${entry_line}" | grep -qF 'nolock'
 }
-run_test "add_fstab_entry includes nolock in mount options (issue #1510: NFSv4 lock-state loss)" \
+run_test "add_fstab_entry uses NFSv3 (fstype=nfs, vers=3) with nolock (issue #1510 follow-up)" \
     test_fstab_entry_includes_nolock
 
 test_fstab_entry_dry_run_writes_nothing() {
@@ -1147,9 +1154,10 @@ test_cow_daemon_dry_run_end_to_end() {
         && echo "${output}" | grep -q "cow-daemon" \
         && echo "${output}" | grep -q "/mnt/cow-storage" \
         && echo "${output}" | grep -q "nolock" \
+        && echo "${output}" | grep -q "vers=3" \
         && ! echo "${output}" | grep -q "daemon-key-xyz"
 }
-run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key, includes nolock (issue #1510)" \
+run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key, uses NFSv3+nolock (issue #1510)" \
     test_cow_daemon_dry_run_end_to_end
 
 test_cow_local_bind_uses_bind_mount() {
