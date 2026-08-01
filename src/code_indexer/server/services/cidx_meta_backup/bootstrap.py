@@ -21,6 +21,12 @@ class CidxMetaBackupBootstrap:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
+        # Bug #1500 (defense-in-depth): every commit this helper currently
+        # issues already passes -m, so this is not fixing an active bug
+        # here, but it protects any future rebase/merge step from opening
+        # an interactive editor in the non-interactive systemd job context
+        # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
+        env.setdefault("GIT_EDITOR", "true")
         return subprocess.run(
             ["git", *args],
             cwd=cidx_meta_path,

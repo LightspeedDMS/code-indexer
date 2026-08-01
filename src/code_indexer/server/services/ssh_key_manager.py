@@ -312,6 +312,27 @@ class SSHKeyManager:
                 if hostname not in key_data["hosts"]:
                     self._sqlite_backend.assign_host(key_name, hostname)
 
+                # --- Cluster mode: mirror host assignment to PG so the sync
+                # service (which reads exclusively from PG) can materialize
+                # the Host block fleet-wide (Bug #1504). Mirrors delete_key's
+                # existing cluster-mode pattern: local write first, then PG;
+                # a PG failure is logged and re-raised, never swallowed. ---
+                if self._pg_backend is not None:
+                    try:
+                        self._pg_backend.assign_host(key_name, hostname)
+                        logger.info(
+                            "SSHKeyManager: assigned host '%s' to key '%s' in PG backend",
+                            hostname,
+                            key_name,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "SSHKeyManager: failed to assign host '%s' to key '%s' in PG backend",
+                            hostname,
+                            key_name,
+                        )
+                        raise
+
                 # Update SSH config
                 self._update_ssh_config()
 

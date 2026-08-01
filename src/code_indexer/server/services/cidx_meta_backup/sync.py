@@ -38,6 +38,16 @@ class CidxMetaBackupSync:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
+        # Bug #1500: `git rebase --continue` after a conflict opens an
+        # editor to confirm the reapplied commit message (the conflict
+        # appends a "# Conflicts:" comment, forcing msg_needs_editing) even
+        # in a non-interactive rebase. The systemd job context has no tty
+        # and no EDITOR/VISUAL configured, so git aborts with "Terminal is
+        # dumb, but EDITOR unset". `true` exits 0 without touching the
+        # message file, so git reuses the original commit message
+        # non-interactively. setdefault so an operator-configured
+        # GIT_EDITOR is never overridden.
+        env.setdefault("GIT_EDITOR", "true")
         return subprocess.run(
             ["git", *args],
             cwd=self.cidx_meta_path,

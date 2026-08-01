@@ -129,6 +129,25 @@ class FakeGlobalReposBackend:
         pass
 
 
+class FakeGoldenRepoMetadataBackend:
+    """
+    Minimal stand-in for GoldenRepoMetadataBackend's refresh-integrity
+    quarantine methods (Bug #1506) -- reports "never quarantined" and
+    no-ops on record/reset, sufficient for tests that don't exercise
+    quarantine behavior directly but whose refresh path now reads this
+    state on every cycle.
+    """
+
+    def get_refresh_integrity_failure_state(self, golden_alias: str):
+        return None
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        return 1
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        return None
+
+
 class FakeBackendRegistry:
     """
     Minimal BackendRegistry-like object with a global_repos attribute.
@@ -136,6 +155,7 @@ class FakeBackendRegistry:
 
     def __init__(self, global_repos: FakeGlobalReposBackend) -> None:
         self.global_repos = global_repos
+        self.golden_repo_metadata = FakeGoldenRepoMetadataBackend()
 
 
 # ---------------------------------------------------------------------------

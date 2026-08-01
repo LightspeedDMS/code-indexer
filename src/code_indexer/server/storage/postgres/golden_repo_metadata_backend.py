@@ -824,6 +824,107 @@ class GoldenRepoMetadataPostgresBackend:
             for row in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Ordinary-refresh integrity-gate failure quarantine (Bug #1506)
+    # ------------------------------------------------------------------
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        """Record one ordinary-refresh integrity-gate failure for a golden
+        repo (Bug #1506). See GoldenRepoMetadataSqliteBackend for the full
+        contract -- this is the drop-in PostgreSQL (cluster-mode) mirror.
+        A single atomic ``INSERT ... ON CONFLICT ... RETURNING`` statement
+        performs the increment server-side (mirrors
+        record_fleet_migration_failure's lost-update-race fix above).
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or detail is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO refresh_integrity_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (golden_alias) DO UPDATE SET "
+                    "consecutive_failure_count = "
+                    "refresh_integrity_quarantine_state.consecutive_failure_count + 1, "
+                    "last_detail = EXCLUDED.last_detail, "
+                    "last_failed_at = EXCLUDED.last_failed_at, "
+                    "updated_at = EXCLUDED.updated_at "
+                    "RETURNING consecutive_failure_count",
+                    (golden_alias, 1, detail, now, now, now),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        count: int = row[0]
+        return count
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        """Clear any persisted refresh-integrity failure/quarantine state
+        for a golden repo (Bug #1506). See GoldenRepoMetadataSqliteBackend
+        for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM refresh_integrity_quarantine_state "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+            conn.commit()
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the currently persisted refresh-integrity failure state
+        for a golden repo, or None if it has never failed (or was reset
+        since). See GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT golden_alias, consecutive_failure_count, "
+                    "last_detail, first_failed_at, last_failed_at "
+                    "FROM refresh_integrity_quarantine_state "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_detail": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+        }
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._pool.close()

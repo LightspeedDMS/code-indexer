@@ -1,6 +1,7 @@
 # Memory Index
 
 ## Safety Rules (prevent recurring mistakes)
+- [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - NEVER full-re-index evolution (hours + a TON of embedder tokens/money); repairs must keep worktree bit-identical, temporal stays OFF, restore from provided copies
 - [feedback_never_touch_other_repos.md](feedback_never_touch_other_repos.md) - NEVER modify files outside the assigned working directory — other clones have their own agents
 - [feedback_admin_password_sacred.md](feedback_admin_password_sacred.md) - NEVER leave admin password changed; always restore admin/admin via DB bypass
 - [feedback_port_config_locked.md](feedback_port_config_locked.md) - NEVER change port config for cidx-server/HAProxy/firewall — causes 503s

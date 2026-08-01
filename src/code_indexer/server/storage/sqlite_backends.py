@@ -1851,7 +1851,137 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Bug #1506: per-golden-alias ordinary-refresh integrity-gate
+            # failure quarantine tracking (see
+            # record_refresh_integrity_failure() below). Deliberately
+            # simpler than fleet_migration_quarantine_state above --
+            # ordinary refresh naturally alternates try/reset each
+            # scheduled cycle, so a bare consecutive counter (no
+            # content-signature auto-clear) is sufficient.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS refresh_integrity_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_detail TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        """
+        Record one ordinary-refresh integrity-gate failure for a golden
+        repo (Bug #1506). ``detail`` (the integrity_check/flush failure
+        text) is ALWAYS overwritten to the value supplied for THIS
+        failure.
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or detail is empty/blank (Codex review
+                Finding 4: matches GoldenRepoMetadataPostgresBackend's
+                validation exactly -- an empty alias/detail is a caller
+                bug that must fail loud, not be silently stored). The
+                actual increment is already atomic via ``execute_atomic``'s
+                ``BEGIN EXCLUSIVE`` transaction below (SQLite has no
+                ``INSERT ... ON CONFLICT ... RETURNING`` in this
+                environment's SQLite 3.34.1, but ``BEGIN EXCLUSIVE``
+                already serializes the read-then-update against any
+                concurrent writer for the whole transaction).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count "
+                "FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO refresh_integrity_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (golden_alias, 1, detail, now, now, now),
+                )
+                return 1
+
+            new_count = row[0] + 1
+            conn.execute(
+                "UPDATE refresh_integrity_quarantine_state "
+                "SET consecutive_failure_count = ?, last_detail = ?, "
+                "last_failed_at = ?, updated_at = ? "
+                "WHERE golden_alias = ?",
+                (new_count, detail, now, now, golden_alias),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted refresh-integrity failure/quarantine state for
+        a golden repo (Bug #1506) -- called on a successful integrity-gate
+        pass. A no-op (never raises FOR AN UNKNOWN ALIAS) when no row
+        exists for ``golden_alias``.
+
+        Raises:
+            ValueError: golden_alias is empty/blank (Codex review Finding
+                4: matches GoldenRepoMetadataPostgresBackend).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted refresh-integrity failure state for
+        a golden repo, or None if it has never failed (or was reset since).
+
+        Raises:
+            ValueError: golden_alias is empty/blank (Codex review Finding
+                4: matches GoldenRepoMetadataPostgresBackend).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, last_detail, "
+            "first_failed_at, last_failed_at "
+            "FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_detail": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+        }
 
     def add_repo(
         self,
