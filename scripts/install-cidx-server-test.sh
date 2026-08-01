@@ -952,6 +952,26 @@ test_fstab_entry_not_duplicated() {
 }
 run_test "add_fstab_entry does not duplicate the entry on a second run" test_fstab_entry_not_duplicated
 
+test_fstab_entry_includes_nolock() {
+    local tmpdir fstab_file
+    tmpdir="$(mktemp -d)"
+    fstab_file="${tmpdir}/fstab"
+    touch "${fstab_file}"
+
+    run_sourced "
+        DRY_RUN=false
+        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+    " >/dev/null
+
+    local matched=0
+    grep -qF 'nolock' "${fstab_file}" && matched=1
+    rm -rf "${tmpdir}"
+
+    [[ "${matched}" -eq 1 ]]
+}
+run_test "add_fstab_entry includes nolock in mount options (issue #1510: NFSv4 lock-state loss)" \
+    test_fstab_entry_includes_nolock
+
 test_fstab_entry_dry_run_writes_nothing() {
     local tmpdir fstab_file output size
     tmpdir="$(mktemp -d)"
@@ -1126,9 +1146,10 @@ test_cow_daemon_dry_run_end_to_end() {
     [[ ${exit_code} -eq 0 ]] \
         && echo "${output}" | grep -q "cow-daemon" \
         && echo "${output}" | grep -q "/mnt/cow-storage" \
+        && echo "${output}" | grep -q "nolock" \
         && ! echo "${output}" | grep -q "daemon-key-xyz"
 }
-run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key" \
+run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key, includes nolock (issue #1510)" \
     test_cow_daemon_dry_run_end_to_end
 
 test_cow_local_bind_uses_bind_mount() {
