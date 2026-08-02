@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.96.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1511 (second call site): the CoW-daemon permission-widening preflight was only wired into `VersionedSnapshotManager._create_clone_backend_snapshot` (refresh/snapshot creation). Repository activation calls `clone_backend.create_clone_at_path()` directly and never went through that path, so activating any golden repo with restrictive-mode index files still failed with `Permission denied` -- reproduced live on staging immediately after deploying the original #1511 fix. The same preflight now also runs in `ActivatedRepoManager._clone_with_copy_on_write` before the activation clone.
+- Bug #1514 (second call site): `ActivatedRepoManager` never called `GitHookManager.ensure_hook_installed()`. A CoW-cloned activated repo carries its golden repo's `.git/hooks/post-checkout` over byte-for-byte, and the subsequent branch checkout fires that stale hook before any indexing (the only place self-heal previously ran) has a chance to repair it -- reproduced live on staging as the exact same `PermissionError` on a stale install-time path #1514 was meant to fix. A new `_ensure_branch_hook_self_heal` helper now self-heals the activated repo's own hook (never the golden repo, never requiring a reindex) immediately before every checkout in both the initial-activation and branch-switch code paths.
+
 ## [11.95.0] - 2026-08-02
 
 ### Fixed
