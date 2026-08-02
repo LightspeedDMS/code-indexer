@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.94.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1507 (follow-up): `SSHKeySyncService.sync()` now refuses to run (loud CRITICAL log + no-op) when invoked under pytest with `ssh_dir` still defaulted to the real, unoverridden `~/.ssh`. A pre-existing test exercising the real solo-mode lifespan sequence with an empty/fake backend silently reconciled against the developer's actual `~/.ssh`, treating every previously-real, manifest-tracked key as stale and deleting it -- a real incident that destroyed three personal SSH private keys with no recoverable backup. Every legitimate test in this suite already passes an explicit `tmp_path`-based `ssh_dir`, so this guard can never affect real coverage.
+
 ## [11.93.0] - 2026-08-01
 
 ### Fixed
