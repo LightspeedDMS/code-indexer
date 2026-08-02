@@ -63,6 +63,12 @@ _REGEX_EXTRACTION_TIMEOUT_SECONDS = 0.03
 # _is_regex_state_limit_error() and its use in search() below.
 _REGEX_STATE_LIMIT_ERROR_MARKER = "size limit"
 
+# Story #1494 AC2 (Finding A4, GIL-blocking analysis report): caps the
+# number of per-result candidates that receive the GIL-held Python-level
+# regex-extraction step in search() below. See that method's use of this
+# constant for the full rationale and fallback behavior.
+_MAX_REGEX_EXTRACTION_CANDIDATES = 2000
+
 
 def _is_regex_state_limit_error(exc: Exception) -> bool:
     """
@@ -1107,6 +1113,17 @@ class TantivyIndexManager:
             # adversarial pattern like "(a|a)*b".
             compiled_regex_pattern = None
             regex_module_supports_timeout = False
+            # Story #1494 AC2 (Finding A4): count of candidates that
+            # actually received the real (GIL-held) Python-level extraction
+            # step; once this reaches _MAX_REGEX_EXTRACTION_CANDIDATES,
+            # remaining candidates fall back to the sentinel position
+            # instead of running the expensive search() call -- bounding
+            # worst-case work on an unbounded (limit=0) regex query.
+            # `regex_extraction_cap_warned` ensures the WARNING below is
+            # logged exactly once per search() call, not once per skipped
+            # candidate.
+            regex_extraction_evaluated_count = 0
+            regex_extraction_cap_warned = False
             if use_regex:
                 # Use 'regex' library for enhanced Unicode support and bounded-timeout
                 # search(). Falls back to stdlib 're' (no timeout kwarg support) only
@@ -1200,48 +1217,73 @@ class TantivyIndexManager:
                 # timeout= kwarg) is unavailable, extraction is skipped entirely
                 # in favor of the sentinel position -- never an UNBOUNDED
                 # backtracking call via stdlib 're'.
+                regex_extraction_capped = False
                 if (
                     use_regex
                     and compiled_regex_pattern
                     and regex_module_supports_timeout
                 ):
-                    try:
-                        match_obj = compiled_regex_pattern.search(
-                            content_raw, timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS
-                        )
+                    if (
+                        regex_extraction_evaluated_count
+                        < _MAX_REGEX_EXTRACTION_CANDIDATES
+                    ):
+                        regex_extraction_evaluated_count += 1
+                        try:
+                            match_obj = compiled_regex_pattern.search(
+                                content_raw, timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS
+                            )
 
-                        if match_obj:
-                            # Extract actual matched text and position
-                            match_text = match_obj.group(0)
-                            match_start = match_obj.start()
+                            if match_obj:
+                                # Extract actual matched text and position
+                                match_text = match_obj.group(0)
+                                match_start = match_obj.start()
 
-                            # Validate for zero-length matches
-                            if len(match_text) == 0:
-                                logger.warning(
-                                    f"Regex pattern '{query_text}' produced zero-length match "
-                                    f"in {path} at line {line_start}. Consider using a more specific pattern."
+                                # Validate for zero-length matches
+                                if len(match_text) == 0:
+                                    logger.warning(
+                                        f"Regex pattern '{query_text}' produced zero-length match "
+                                        f"in {path} at line {line_start}. Consider using a more specific pattern."
+                                    )
+                            else:
+                                # No match found (shouldn't happen since Tantivy found it)
+                                logger.debug(
+                                    f"Regex pattern '{query_text}' matched in Tantivy but not in Python regex "
+                                    f"for file {path}. This may indicate indexing/search inconsistency."
                                 )
-                        else:
-                            # No match found (shouldn't happen since Tantivy found it)
-                            logger.debug(
-                                f"Regex pattern '{query_text}' matched in Tantivy but not in Python regex "
-                                f"for file {path}. This may indicate indexing/search inconsistency."
+                                match_text = query_text
+                                match_start = _NO_MATCH_POSITION
+                        except Exception as e:
+                            # Bounded-timeout extraction failed (adversarial pattern)
+                            # or any other unexpected extraction error. Tantivy
+                            # already confirmed this is a genuine match via its
+                            # ReDoS-immune DFA engine, so fall back gracefully to
+                            # the sentinel position instead of raising or letting a
+                            # slow Python-level backtrack regress the DFA-safety
+                            # guarantee.
+                            logger.warning(
+                                f"Regex extraction timed out or failed for pattern "
+                                f"'{query_text}' in {path} (falling back to "
+                                f"line-based position): {e}"
                             )
                             match_text = query_text
                             match_start = _NO_MATCH_POSITION
-                    except Exception as e:
-                        # Bounded-timeout extraction failed (adversarial pattern)
-                        # or any other unexpected extraction error. Tantivy
-                        # already confirmed this is a genuine match via its
-                        # ReDoS-immune DFA engine, so fall back gracefully to
-                        # the sentinel position instead of raising or letting a
-                        # slow Python-level backtrack regress the DFA-safety
-                        # guarantee.
-                        logger.warning(
-                            f"Regex extraction timed out or failed for pattern "
-                            f"'{query_text}' in {path} (falling back to "
-                            f"line-based position): {e}"
-                        )
+                    else:
+                        # Story #1494 AC2: candidate cap reached -- never
+                        # silently drop the result (anti-silent-failure
+                        # rule). Skip the expensive extraction, mark the
+                        # result so callers can distinguish "capped" from a
+                        # genuine no-match, and use the same sentinel
+                        # position the module-unavailable branch below uses.
+                        regex_extraction_capped = True
+                        if not regex_extraction_cap_warned:
+                            logger.warning(
+                                f"Regex extraction candidate cap "
+                                f"({_MAX_REGEX_EXTRACTION_CANDIDATES}) reached for "
+                                f"pattern '{query_text}'; remaining candidates use a "
+                                f"sentinel match position and are marked "
+                                f"regex_extraction_capped."
+                            )
+                            regex_extraction_cap_warned = True
                         match_text = query_text
                         match_start = _NO_MATCH_POSITION
                 elif use_regex:
@@ -1301,6 +1343,11 @@ class TantivyIndexManager:
                     "language": language or "unknown",
                     "score": score,
                 }
+                # Story #1494 AC2: never silently drop a capped candidate --
+                # surface the fact its regex extraction was skipped instead
+                # of omitting the field (or the result) entirely.
+                if regex_extraction_capped:
+                    result["regex_extraction_capped"] = True
 
                 docs.append(result)
 

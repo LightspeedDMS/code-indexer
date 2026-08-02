@@ -1213,44 +1213,6 @@ class DiagnosticsService:
         # Collection is healthy
         return None
 
-    def _get_storage_statistics(self, storage_path: Path) -> Dict[str, Any]:
-        """
-        Calculate storage statistics for vector storage directory.
-
-        Args:
-            storage_path: Path to storage directory
-
-        Returns:
-            Dictionary with repo_count, total_size_bytes, last_modified
-        """
-        repo_count = 0
-        total_size = 0
-        last_modified = None
-
-        # Count subdirectories as repos and calculate total size
-        if storage_path.is_dir():
-            for item in storage_path.iterdir():
-                if item.is_dir():
-                    repo_count += 1
-
-                    # Calculate size recursively
-                    for file_path in item.rglob("*"):
-                        if file_path.is_file():
-                            total_size += file_path.stat().st_size
-
-                            # Track most recent modification
-                            file_mtime = datetime.fromtimestamp(
-                                file_path.stat().st_mtime
-                            )
-                            if last_modified is None or file_mtime > last_modified:
-                                last_modified = file_mtime
-
-        return {
-            "repo_count": repo_count,
-            "total_size_bytes": total_size,
-            "last_modified": last_modified.isoformat() if last_modified else None,
-        }
-
     def _create_db_error_result(
         self, message: str, details: Optional[Dict[str, Any]] = None
     ) -> DiagnosticResult:

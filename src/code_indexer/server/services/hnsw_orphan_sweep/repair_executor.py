@@ -41,7 +41,7 @@ import os
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.services.temporal.temporal_consolidated_build import (
@@ -385,13 +385,26 @@ def _read_sister_version_vector_dim(version_path: Path) -> Optional[int]:
         return None
 
 
-def _read_sister_chunk_records(version_path: Path, vector_dim: int) -> list:
-    """Read every record from a sister version's (immutable) chunks.db."""
+def _read_sister_chunk_records(
+    version_path: Path, vector_dim: int
+) -> Iterator[Dict[str, Any]]:
+    """Stream every record from a sister version's (immutable) chunks.db.
+
+    Story #1494 AC3 (Finding C7): yields records lazily instead of
+    materializing the entire collection into a list -- combined with
+    Finding A1, a single repaired collection used to be simultaneously the
+    biggest GIL scan and the biggest decode loop in the server process. The
+    store connection is opened and closed entirely within this generator's
+    own lifetime (closed in `finally`, which CPython runs when the
+    generator is exhausted, `.close()`d, or garbage-collected), so it stays
+    open for exactly as long as the caller is iterating -- never longer,
+    never shorter.
+    """
     store = ChunkStore(
         version_path / "chunks.db", expected_dim=vector_dim, immutable=True
     )
     try:
-        return list(store.stream_all())
+        yield from store.stream_all()
     finally:
         store.close()
 
