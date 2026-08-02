@@ -48,7 +48,6 @@ from ..routers.files import router as files_router
 from ..routers.git import router as git_router
 from ..routers.indexing import router as indexing_router
 from ..routers.cache import router as cache_router
-from ..routers.delegation_callbacks import router as delegation_callbacks_router
 from ..routers.maintenance_router import router as maintenance_router
 from ..routers.memories import router as memories_router
 from ..routers.api_keys import router as api_keys_router
@@ -263,7 +262,6 @@ def register_inline_routes(
     app.include_router(users_router)
     app.include_router(audit_router)
     app.include_router(repo_categories_router)
-    app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
     app.include_router(api_keys_router)
     app.include_router(llm_creds_router)

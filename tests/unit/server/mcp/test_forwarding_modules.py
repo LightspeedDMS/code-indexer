@@ -16,7 +16,6 @@ _ALL_DOMAIN_SUBMODULES = [
     "code_indexer.server.mcp.handlers.scip",
     "code_indexer.server.mcp.handlers.guides",
     "code_indexer.server.mcp.handlers.ssh_keys",
-    "code_indexer.server.mcp.handlers.delegation",
     "code_indexer.server.mcp.handlers.pull_requests",
     "code_indexer.server.mcp.handlers.git_read",
     "code_indexer.server.mcp.handlers.git_write",
@@ -96,7 +95,7 @@ def _swap_app_module(sentinel: Any) -> Generator[None, None, None]:
 
 
 class TestLegacyForwardingSubmoduleList:
-    """Verify _LegacyForwardingModule forwards to all 12 domain submodules."""
+    """Verify _LegacyForwardingModule forwards to all 11 domain submodules."""
 
     def test_all_domain_submodules_receive_forwarded_writes(self) -> None:
         """Setting an attribute on _legacy propagates to every submodule."""

@@ -102,7 +102,6 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
-                "code_indexer.server.mcp.handlers.delegation",
                 "code_indexer.server.mcp.handlers.pull_requests",
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",
@@ -186,30 +185,6 @@ from code_indexer.server.mcp.handlers.repos import (  # noqa: F401, E402
     _resolve_golden_repo_base_clone,
     _resolve_golden_repo_path,
     _post_provider_index_snapshot,
-)
-
-from code_indexer.server.mcp.handlers.delegation import (  # noqa: F401, E402
-    # Public handlers extracted from _legacy (Story #496 delegation step)
-    handle_list_delegation_functions,
-    handle_execute_delegation_function,
-    handle_poll_delegation_job,
-    handle_execute_open_delegation,
-    handle_cs_register_repository,
-    handle_cs_list_repositories,
-    handle_cs_check_health,
-    # Private helpers used by tests and external consumers
-    _get_cidx_callback_base_url,
-    _get_delegation_config,
-    _get_delegation_function_repo_path,
-    _get_repo_ready_timeout,
-    _get_user_groups,
-    _load_packages_context,
-    _lookup_golden_repo_for_cs,
-    _resolve_guardrails,
-    _validate_collaborative_params,
-    _validate_competitive_params,
-    _validate_function_parameters,
-    _validate_open_delegation_params,
 )
 
 from code_indexer.server.mcp.handlers.pull_requests import (  # noqa: F401, E402

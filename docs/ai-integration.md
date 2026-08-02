@@ -252,13 +252,6 @@ See [CIDX MCP Bridge](../README.md#cidx-mcp-bridge-for-claude-desktop) for compl
 - `git_diff` - Compare revisions
 - `git_blame` - Line attribution
 
-**Claude Delegation Tools** (execute AI workflows on protected repos):
-- `list_delegation_functions` - Discover available functions
-- `execute_delegation_function` - Execute function on Claude Server
-- `poll_delegation_job` - Wait for job completion via callback
-
-See: [Delegation Functions Guide](delegation-functions.md) for complete documentation.
-
 **150+ MCP tools** available (exact count grows with new releases)
 
 ### Permissions
@@ -535,7 +528,6 @@ nano CLAUDE.md
 
 ## Related Documentation
 
-- **Delegation Functions**: [Delegation Functions Guide](delegation-functions.md) - Execute AI workflows on protected repos
 - **Server Deployment**: [Server Deployment Guide](server-deployment.md)
 - **Architecture**: [Architecture Guide](architecture.md)
 - **Configuration**: [Configuration Guide](configuration.md)

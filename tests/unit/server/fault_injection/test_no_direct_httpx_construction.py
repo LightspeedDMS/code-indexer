@@ -35,7 +35,6 @@ Out-of-scope admin-side files:
   - clients/github_actions_client.py  (GitHub Actions integration)
   - clients/gitlab_ci_client.py       (GitLab CI integration)
   - services/diagnostics_service.py   (internal diagnostics)
-  - clients/claude_server_client.py   (Claude server integration)
 """
 
 from __future__ import annotations

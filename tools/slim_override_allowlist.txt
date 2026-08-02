@@ -4,4 +4,3 @@ xray_search
 xray_explore
 search_code
 regex_search
-execute_open_delegation

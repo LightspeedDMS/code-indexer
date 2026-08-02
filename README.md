@@ -199,8 +199,6 @@ See: [Configuration Guide](docs/configuration.md)
 - [AI Integration Guide](docs/ai-integration.md) -- Connect AI assistants to CIDX
 - [Langfuse Trace Sync](docs/langfuse-trace-sync.md) -- Searchable AI conversation history
 - [Meta-Repo Discovery](docs/meta-repo-discovery.md) -- Cross-repo dependency mapping
-- [Guardrails Convention](docs/guardrails-repo-convention.md) -- Safety guardrails for delegation jobs
-- [Delegation Functions](docs/delegation-functions.md) -- AI workflows for code review and analysis
 
 ### Server Administration
 
