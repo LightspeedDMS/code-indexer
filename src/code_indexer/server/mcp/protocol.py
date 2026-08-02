@@ -80,9 +80,28 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
 }
 
+# Story #1491 AC6/AC2: regex_search is dispatched asynchronously and, since
+# AC6 added a real asyncio.wait_for deadline to the async dispatch branch,
+# now genuinely needs a resolved timeout for the first time. Its own
+# independent bound is search_limits_config.timeout_seconds (the ripgrep
+# subprocess timeout, Issue #1398 Group A) -- NEVER search_timeouts_config's
+# default_handler_timeout_seconds/search_code_handler_timeout_seconds, which
+# must remain free to be tuned without affecting regex_search. This buffer
+# covers the Python-side work that runs beyond the raw subprocess call
+# (trigram prefilter, output parsing, reranking) so the new MCP-layer
+# deadline can never fire BEFORE regex_search's own configured timeout.
+REGEX_SEARCH_TIMEOUT_BUFFER_SECONDS = 30
+
+# Defensive fallback mirroring SearchLimitsConfig.timeout_seconds's own
+# documented default (config_manager.py), used ONLY in the theoretical case
+# where search_limits_config is unset -- ServerConfig.__post_init__
+# guarantees it never is in production (same defensive pattern already
+# used for search_timeouts_config below).
+_DEFAULT_SEARCH_LIMITS_TIMEOUT_SECONDS = 30
+
 
 def _resolve_handler_timeout(tool_name: str) -> int:
-    """Return the effective timeout in seconds for a given tool's sync handler.
+    """Return the effective timeout in seconds for a given tool's handler.
 
     Issue #1398: reads the live, Web-UI-configurable SearchTimeoutsConfig
     instead of the module-level hardcoded constants below (which now exist
@@ -97,6 +116,18 @@ def _resolve_handler_timeout(tool_name: str) -> int:
         Timeout in seconds to use with asyncio.wait_for.
     """
     _cfg = get_config_service().get_config()
+
+    # regex_search's floor is independent of search_timeouts_config
+    # entirely -- resolve it first, before the search_timeouts None guard.
+    if tool_name == "regex_search":
+        search_limits = getattr(_cfg, "search_limits_config", None)
+        subprocess_timeout = (
+            search_limits.timeout_seconds
+            if search_limits is not None
+            else _DEFAULT_SEARCH_LIMITS_TIMEOUT_SECONDS
+        )
+        return subprocess_timeout + REGEX_SEARCH_TIMEOUT_BUFFER_SECONDS  # type: ignore[no-any-return]
+
     search_timeouts = getattr(_cfg, "search_timeouts_config", None)
     if search_timeouts is None:
         return _HANDLER_TIMEOUT_OVERRIDES.get(tool_name, HANDLER_TIMEOUT_SECONDS)
@@ -305,15 +336,32 @@ async def _invoke_handler(
     )
 
     if is_async:
-        return await handler(*call_args, **extra_kwargs)
+        # Story #1491 AC6 (Finding B6, hardening): the async branch is now
+        # bounded by the same timeout_seconds/_resolve_handler_timeout
+        # mechanism the sync branch already uses, producing the identical
+        # timeout error shape on expiry. This does NOT interrupt
+        # synchronous work inside a coroutine (asyncio.wait_for can only
+        # cancel at an actual await point) -- it exists to bound handlers
+        # that are genuinely awaitable throughout, and to bound any future
+        # async handler that regresses into a long-running await.
+        try:
+            return await asyncio.wait_for(
+                handler(*call_args, **extra_kwargs),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Tool execution timed out after {timeout_seconds} seconds",
+            }
     else:
-        # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
-        # branch enforces an outer asyncio.wait_for timeout (the async
-        # branch has none, per the documented sync/async distinction), so
-        # only here is there a meaningful deadline to compute. A handler
-        # that declares handler_deadline_monotonic can use it to bound its
-        # own internal work (e.g. the temporal foreground waiter) so it
-        # always returns before THIS timeout fires with no job_id.
+        # Story #1400 CRITICAL 5 dynamic half: the sync-dispatch branch
+        # enforces an outer asyncio.wait_for timeout via executor offload
+        # (the async branch above uses a direct wait_for since it is
+        # already a coroutine). A handler that declares
+        # handler_deadline_monotonic can use it to bound its own internal
+        # work (e.g. the temporal foreground waiter) so it always returns
+        # before THIS timeout fires with no job_id.
         if "handler_deadline_monotonic" in sig.parameters:
             extra_kwargs["handler_deadline_monotonic"] = (
                 time.monotonic() + timeout_seconds

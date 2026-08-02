@@ -184,72 +184,94 @@ class TestSearchCodeDispatchActuallyHonorsConfiguredTimeout:
         assert result == {"success": True, "value": 1}
 
 
+_NEAR_ZERO_DEFAULT_HANDLER_TIMEOUT_SECONDS = 10
+_NEAR_ZERO_SEARCH_CODE_TIMEOUT_SECONDS = 1
+_CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS = 200
+_SHORT_ASYNC_DEADLINE_SECONDS = 0.05
+_LONGER_THAN_DEADLINE_SLEEP_SECONDS = 10
+
+
 class TestRegexSearchIndependentOfSearchTimeoutsConfig:
     """Regression: regex_search is dispatched ASYNCHRONOUSLY (async def
-    handler), so handle_tools_call's is_async branch calls
-    `await handler(...)` directly with NO asyncio.wait_for wrapper at all.
-    Changing search_timeouts_config (search_code_handler_timeout_seconds or
-    default_handler_timeout_seconds) must have ZERO effect on regex_search's
-    dispatch -- proving the two tools remain independently configurable and
-    do not silently interact."""
+    handler). Story #1491 AC6 (Finding B6) added a real asyncio.wait_for
+    deadline to the async dispatch branch -- so, unlike before, async
+    dispatch NOW does apply timeout_seconds. This class proves the two
+    tools remain independently configurable anyway: _resolve_handler_timeout
+    special-cases "regex_search" to derive its floor from
+    search_limits_config.timeout_seconds (its own subprocess bound), NEVER
+    from search_timeouts_config.default_handler_timeout_seconds /
+    search_code_handler_timeout_seconds, so tuning those two fields cannot
+    silently starve regex_search's genuinely-configured search time."""
 
     def test_regex_search_handler_is_registered_as_async(self) -> None:
         from code_indexer.server.mcp.handlers.search import handle_regex_search
 
         assert asyncio.iscoroutinefunction(handle_regex_search), (
             "handle_regex_search must be async def -- if this ever changes "
-            "to sync def, it would start being wrapped by "
-            "_resolve_handler_timeout's asyncio.wait_for cap, changing "
-            "long-standing behavior silently."
+            "to sync def, it would start being wrapped by the sync branch's "
+            "asyncio.wait_for cap instead of the async-branch/regex-floor "
+            "mechanism, changing long-standing behavior silently."
         )
 
-    @pytest.mark.asyncio
-    async def test_async_dispatch_ignores_even_a_near_zero_timeout_seconds(
+    def test_regex_search_timeout_floor_ignores_default_and_search_code_fields(
         self, isolated_config_service
     ) -> None:
-        """Even if search_code_handler_timeout_seconds (or the default) were
-        driven to an absurdly small value, an async handler dispatched via
-        is_async=True must still complete normally -- _invoke_handler's
-        async branch never consults timeout_seconds at all."""
-        # Validated update FIRST (10 is within the 10-300 range), THEN the
-        # direct-mutation bypass for the artificially small search_code
-        # value LAST -- update_setting's post-mutation validate_config()
-        # call validates the WHOLE search_timeouts_config object, so
-        # applying the out-of-range bypass before a later update_setting
-        # call would raise a spurious ValueError for an unrelated field.
+        """Driving default_handler_timeout_seconds and
+        search_code_handler_timeout_seconds to near-zero must have ZERO
+        effect on regex_search's resolved timeout -- it is derived solely
+        from search_limits_config.timeout_seconds."""
         isolated_config_service.update_setting(
-            "search_timeouts", "default_handler_timeout_seconds", 10
+            "search_timeouts",
+            "default_handler_timeout_seconds",
+            _NEAR_ZERO_DEFAULT_HANDLER_TIMEOUT_SECONDS,
         )
         config = isolated_config_service.get_config()
-        config.search_timeouts_config.search_code_handler_timeout_seconds = 1
+        config.search_timeouts_config.search_code_handler_timeout_seconds = (
+            _NEAR_ZERO_SEARCH_CODE_TIMEOUT_SECONDS
+        )
+        config.search_limits_config.timeout_seconds = (
+            _CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS
+        )
         isolated_config_service.save_config(config)
 
-        async def slow_async_regex_handler(arguments, user):
-            await asyncio.sleep(0.3)  # slower than the 1s configured value
-            # would still legitimately fit under 1s, so use a wait_for-based
-            # proof instead: async branch takes no timeout_seconds at all.
+        resolved = _resolve_handler_timeout("regex_search")
+
+        # Must be strictly larger than the configured subprocess bound
+        # (proving it derives from search_limits, not the near-zero
+        # search_timeouts fields above) -- the extra headroom accounts for
+        # the Python-side prefilter/rerank/JSON work that runs beyond the
+        # raw ripgrep subprocess call.
+        assert resolved > _CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS
+        assert resolved != _NEAR_ZERO_DEFAULT_HANDLER_TIMEOUT_SECONDS
+        assert resolved != _NEAR_ZERO_SEARCH_CODE_TIMEOUT_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_async_dispatch_now_respects_a_real_deadline_per_ac6(
+        self,
+    ) -> None:
+        """Story #1491 AC6: the async branch now genuinely times out a
+        handler that outlives its deadline -- proving the OLD "async
+        dispatch never applies any timeout" behavior is gone."""
+
+        async def slow_async_handler(arguments, user):
+            await asyncio.sleep(_LONGER_THAN_DEADLINE_SLEEP_SECONDS)
             return {"success": True, "matches": []}
 
         user = _make_user()
-        sig = inspect.signature(slow_async_regex_handler)
+        sig = inspect.signature(slow_async_handler)
 
-        # Deliberately pass an absurdly small timeout_seconds (0.001s) --
-        # if the async branch respected it at all, this would time out.
         result = await _invoke_handler(
-            handler=slow_async_regex_handler,
+            handler=slow_async_handler,
             arguments={},
             user=user,
             session_state=None,
             sig=sig,
             is_async=True,
-            timeout_seconds=0.001,
+            timeout_seconds=_SHORT_ASYNC_DEADLINE_SECONDS,
         )
 
-        assert result == {"success": True, "matches": []}, (
-            "Async dispatch must ignore timeout_seconds entirely -- "
-            "regex_search's actual bound is search_limits.timeout_seconds "
-            "(its own subprocess timeout), never this MCP-layer value."
-        )
+        assert result["success"] is False
+        assert "timed out" in result["error"]
 
 
 if __name__ == "__main__":
