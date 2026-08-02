@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.97.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1511 (performance): `_ensure_source_tree_readable_for_clone`'s original per-file Python `os.walk`+`os.stat`+`os.chmod` loop was proven live via py-spy to hang repository activation for 30+ minutes on staging for a golden repo with hundreds of thousands of small index/shard files over NFS (evolution's temporal quarter-shard directories) -- one or two network round trips per file. Replaced with two batched `find ... -exec chmod ... {} +` calls (directories: `g+rx,o+rx`; files: `g+r,o+r`, kept separate so a combined pass could never set execute on an already-executable plain file), preserving the same additive-only, never-strip, log-and-continue-on-failure contract with drastically fewer round trips.
+
 ## [11.96.0] - 2026-08-02
 
 ### Fixed
