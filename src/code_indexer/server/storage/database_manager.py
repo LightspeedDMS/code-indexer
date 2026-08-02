@@ -605,19 +605,6 @@ class DatabaseSchema:
         )
     """
 
-    # Bug #577: Delegation job results for cross-node visibility
-    CREATE_DELEGATION_JOB_RESULTS_TABLE = """
-        CREATE TABLE IF NOT EXISTS delegation_job_results (
-            job_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'pending',
-            output TEXT,
-            exit_code INTEGER,
-            error TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            completed_at TEXT
-        )
-    """
-
     # Story #680: External Dependency Latency Observability
     # Stores raw per-request latency samples for windowed percentile computation.
     CREATE_DEPENDENCY_LATENCY_SAMPLES_TABLE = """
@@ -873,8 +860,13 @@ class DatabaseSchema:
             conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
             # Bug #583: Token blacklist for cluster-wide JWT revocation
             conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
-            # Bug #577: Delegation job results for cross-node visibility
-            conn.execute(self.CREATE_DELEGATION_JOB_RESULTS_TABLE)
+            # Story #1487: Claude Delegation feature fully removed -- drop the
+            # table for any EXISTING database that already has it (symmetric
+            # with PostgreSQL forward migration 042). Approved narrow
+            # exception to the standing NEVER-DROP-TABLE rule, scoped to
+            # this table only: zero remaining consumers once this feature
+            # is removed.
+            conn.execute("DROP TABLE IF EXISTS delegation_job_results")
             # Story #680: External Dependency Latency Observability
             conn.execute(self.CREATE_DEPENDENCY_LATENCY_SAMPLES_TABLE)
             conn.execute(self.CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP)

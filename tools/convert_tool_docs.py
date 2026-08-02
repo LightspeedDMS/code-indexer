@@ -64,10 +64,6 @@ CATEGORY_PATTERNS = [
         r"^authenticate$|^check_health$|^get_job_details$|^get_job_statistics$|^set_session_impersonation$",
         "admin",
     ),
-    (
-        r"^execute_delegation_function$|^list_delegation_functions$|^poll_delegation_job$",
-        "admin",
-    ),
     (r"^depmap_", "depmap"),
     (r"^create_memory$|^delete_memory$|^edit_memory$", "memory"),
     (r"^start_trace$|^end_trace$", "tracing"),

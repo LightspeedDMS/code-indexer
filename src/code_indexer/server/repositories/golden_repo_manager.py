@@ -464,10 +464,10 @@ class GoldenRepoManager:
         # Anti-duplication: get_golden_repo() already performs the identical
         # unconditional self._sqlite_backend.get_repo(alias) -> GoldenRepo(...)
         # read (it is the long-standing public "source of truth" accessor
-        # used throughout the codebase, e.g. activated_repo_manager.py,
-        # mcp/handlers/delegation.py). Delegate to it rather than duplicating
-        # the fetch-and-construct logic; this method's only added value is
-        # the cache-refresh/eviction side effect below.
+        # used throughout the codebase, e.g. activated_repo_manager.py).
+        # Delegate to it rather than duplicating the fetch-and-construct
+        # logic; this method's only added value is the cache-refresh/
+        # eviction side effect below.
         repo = self.get_golden_repo(alias)
         if repo is None:
             self.golden_repos.pop(alias, None)

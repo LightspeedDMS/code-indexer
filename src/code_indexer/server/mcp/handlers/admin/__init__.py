@@ -1493,7 +1493,7 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         ]
 
         # Story #458: Also query the main audit_logs table for general admin actions
-        # (e.g., open_delegation_executed, group/user management events)
+        # (e.g., group/user management events)
         import code_indexer.server.app as _app_module
 
         _svc = getattr(getattr(_app_module, "app", None), "state", None)

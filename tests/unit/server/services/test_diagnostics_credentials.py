@@ -1,9 +1,8 @@
 """
-Tests for Credential Diagnostics (Story S5 - AC3, AC4, AC5).
+Tests for Credential Diagnostics (Story S5 - AC3, AC5).
 
 Tests credential diagnostic methods:
 - AC3: GitLab Token diagnostic validates format AND tests API call
-- AC4: Claude Delegation Credentials diagnostic tests authentication
 - AC5: run_credential_diagnostics() runs all checks in parallel
 - run_category() dispatches CREDENTIALS category
 """
@@ -168,143 +167,12 @@ class TestCheckGitLabToken:
 
 
 @pytest.mark.slow
-class TestCheckClaudeDelegationCredentials:
-    """Tests for check_claude_delegation_credentials() method (AC4)."""
-
-    @pytest.mark.asyncio
-    async def test_claude_delegation_working(self):
-        """Test Claude delegation credentials working with successful auth."""
-        service = DiagnosticsService()
-
-        # Mock ClaudeDelegationManager returning valid config
-        mock_config = MagicMock()
-        mock_config.is_configured = True
-        mock_config.claude_server_url = "https://claude.example.com"
-        mock_config.claude_server_username = "admin"
-        mock_config.claude_server_credential = "password123"
-
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = mock_manager_class.return_value
-            mock_manager.load_config.return_value = mock_config
-
-            # Mock httpx client for login API call
-            with patch(
-                "code_indexer.server.services.diagnostics_service.httpx.AsyncClient"
-            ) as mock_client_class:
-                mock_client = mock_client_class.return_value.__aenter__.return_value
-                mock_response = MagicMock()
-                mock_response.raise_for_status = MagicMock()
-                mock_response.json = MagicMock(
-                    return_value={"access_token": "jwt_token_here"}
-                )
-                mock_client.post = AsyncMock(return_value=mock_response)
-
-                result = await service.check_claude_delegation_credentials()
-
-        assert result.name == "Claude Delegation Credentials"
-        assert result.status == DiagnosticStatus.WORKING
-        assert "valid" in result.message.lower() or "working" in result.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_claude_delegation_not_configured(self):
-        """Test Claude delegation not configured returns NOT_CONFIGURED."""
-        service = DiagnosticsService()
-
-        # Mock ClaudeDelegationManager returning unconfigured config
-        mock_config = MagicMock()
-        mock_config.is_configured = False
-
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = mock_manager_class.return_value
-            mock_manager.load_config.return_value = mock_config
-
-            result = await service.check_claude_delegation_credentials()
-
-        assert result.status == DiagnosticStatus.NOT_CONFIGURED
-        assert "not configured" in result.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_claude_delegation_auth_error_401(self):
-        """Test Claude delegation credentials failing with 401 Unauthorized."""
-        service = DiagnosticsService()
-
-        mock_config = MagicMock()
-        mock_config.is_configured = True
-        mock_config.claude_server_url = "https://claude.example.com"
-        mock_config.claude_server_username = "admin"
-        mock_config.claude_server_credential = "wrong_password"
-
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = mock_manager_class.return_value
-            mock_manager.load_config.return_value = mock_config
-
-            with patch(
-                "code_indexer.server.services.diagnostics_service.httpx.AsyncClient"
-            ) as mock_client_class:
-                mock_client = mock_client_class.return_value.__aenter__.return_value
-                mock_response_obj = Response(
-                    status_code=401,
-                    request=Request("POST", "https://claude.example.com/auth/login"),
-                )
-                mock_client.post = AsyncMock(
-                    side_effect=HTTPStatusError(
-                        "Unauthorized",
-                        request=mock_response_obj.request,
-                        response=mock_response_obj,
-                    )
-                )
-
-                result = await service.check_claude_delegation_credentials()
-
-        assert result.status == DiagnosticStatus.ERROR
-        assert (
-            "401" in result.message or "authentication failed" in result.message.lower()
-        )
-
-    @pytest.mark.asyncio
-    async def test_claude_delegation_timeout(self):
-        """Test Claude delegation credentials timing out."""
-        service = DiagnosticsService()
-
-        mock_config = MagicMock()
-        mock_config.is_configured = True
-        mock_config.claude_server_url = "https://claude.example.com"
-        mock_config.claude_server_username = "admin"
-        mock_config.claude_server_credential = "password123"
-
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = mock_manager_class.return_value
-            mock_manager.load_config.return_value = mock_config
-
-            with patch(
-                "code_indexer.server.services.diagnostics_service.httpx.AsyncClient"
-            ) as mock_client_class:
-                mock_client = mock_client_class.return_value.__aenter__.return_value
-                mock_client.post = AsyncMock(side_effect=TimeoutException("Timeout"))
-
-                result = await service.check_claude_delegation_credentials()
-
-        assert result.status == DiagnosticStatus.ERROR
-        assert (
-            "timeout" in result.message.lower() or "timed out" in result.message.lower()
-        )
-
-
-@pytest.mark.slow
 class TestRunCredentialDiagnostics:
     """Tests for run_credential_diagnostics() method (AC5)."""
 
     @pytest.mark.asyncio
     async def test_run_credential_diagnostics_returns_all_checks(self):
-        """Test run_credential_diagnostics() returns results from all 4 credential checks."""
+        """Test run_credential_diagnostics() returns results from all 3 credential checks."""
         service = DiagnosticsService()
 
         # Mock all credential check methods
@@ -320,10 +188,6 @@ class TestRunCredentialDiagnostics:
         mock_gitlab_result.name = "GitLab Token"
         mock_gitlab_result.status = DiagnosticStatus.NOT_CONFIGURED
 
-        mock_claude_result = MagicMock()
-        mock_claude_result.name = "Claude Delegation Credentials"
-        mock_claude_result.status = DiagnosticStatus.WORKING
-
         with patch.object(
             service, "check_ssh_keys", return_value=mock_ssh_result
         ) as mock_ssh:
@@ -333,26 +197,19 @@ class TestRunCredentialDiagnostics:
                 with patch.object(
                     service, "check_gitlab_token", return_value=mock_gitlab_result
                 ) as mock_gitlab:
-                    with patch.object(
-                        service,
-                        "check_claude_delegation_credentials",
-                        return_value=mock_claude_result,
-                    ) as mock_claude:
-                        results = await service.run_credential_diagnostics()
+                    results = await service.run_credential_diagnostics()
 
         # Verify all checks were called
         mock_ssh.assert_called_once()
         mock_github.assert_called_once()
         mock_gitlab.assert_called_once()
-        mock_claude.assert_called_once()
 
         # Verify all results returned
-        assert len(results) == 4
+        assert len(results) == 3
         result_names = {r.name for r in results}
         assert "SSH Keys" in result_names
         assert "GitHub Token" in result_names
         assert "GitLab Token" in result_names
-        assert "Claude Delegation Credentials" in result_names
 
     @pytest.mark.asyncio
     async def test_run_credential_diagnostics_parallel_execution(self):
@@ -374,12 +231,6 @@ class TestRunCredentialDiagnostics:
             call_order.append("gitlab")
             return MagicMock(name="GitLab Token", status=DiagnosticStatus.WORKING)
 
-        async def mock_claude_delegation():
-            call_order.append("claude")
-            return MagicMock(
-                name="Claude Delegation Credentials", status=DiagnosticStatus.WORKING
-            )
-
         with patch.object(service, "check_ssh_keys", side_effect=mock_ssh_keys):
             with patch.object(
                 service, "check_github_token", side_effect=mock_github_token
@@ -387,16 +238,11 @@ class TestRunCredentialDiagnostics:
                 with patch.object(
                     service, "check_gitlab_token", side_effect=mock_gitlab_token
                 ):
-                    with patch.object(
-                        service,
-                        "check_claude_delegation_credentials",
-                        side_effect=mock_claude_delegation,
-                    ):
-                        results = await service.run_credential_diagnostics()
+                    results = await service.run_credential_diagnostics()
 
-        # All 4 checks should have been executed
-        assert len(call_order) == 4
-        assert len(results) == 4
+        # All 3 checks should have been executed
+        assert len(call_order) == 3
+        assert len(results) == 3
 
 
 @pytest.mark.slow
@@ -424,10 +270,6 @@ class TestRunCategoryCredentials:
                 MagicMock(name="SSH Keys", status=DiagnosticStatus.WORKING),
                 MagicMock(name="GitHub Token", status=DiagnosticStatus.WORKING),
                 MagicMock(name="GitLab Token", status=DiagnosticStatus.NOT_CONFIGURED),
-                MagicMock(
-                    name="Claude Delegation Credentials",
-                    status=DiagnosticStatus.WORKING,
-                ),
             ]
 
             with patch.object(
@@ -442,7 +284,7 @@ class TestRunCategoryCredentials:
 
             # Verify results were cached
             cached_results = service.get_category_status(DiagnosticCategory.CREDENTIALS)
-            assert len(cached_results) == 4
+            assert len(cached_results) == 3
             assert cached_results == mock_results
         finally:
             if os.path.exists(tmp_db_path):

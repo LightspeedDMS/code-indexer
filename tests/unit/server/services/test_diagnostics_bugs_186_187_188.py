@@ -1,7 +1,10 @@
 """
-Unit tests for Bug #186, #187, #188 diagnostic fixes.
+Unit tests for Bug #187, #188 diagnostic fixes.
 
-Bug #186: Claude Server/Delegation NoneType crash when config file doesn't exist
+Bug #186: Claude Server/Delegation NoneType crash when config file doesn't
+exist -- this bug's fix was in check_claude_server()/
+check_claude_delegation_credentials(), both removed along with the entire
+Claude Delegation feature (Story #1487); its coverage no longer applies.
 Bug #187: SQLite wrong-DB table check (groups tables in wrong database)
 Bug #188: Vector Storage false positive on temporal collections
 """
@@ -16,58 +19,6 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticStatus,
     DiagnosticsService,
 )
-
-
-class TestBug186ClaudeDelegationNoneType:
-    """Test Bug #186: NoneType crash when delegation config doesn't exist."""
-
-    @pytest.mark.asyncio
-    async def test_check_claude_server_with_missing_config_file(self, tmp_path):
-        """
-        Test that check_claude_server() handles None from load_config() gracefully.
-
-        Before fix: AttributeError: 'NoneType' object has no attribute 'is_configured'
-        After fix: Returns NOT_CONFIGURED status without crash
-        """
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = Mock()
-            # Simulate load_config() returning None when file doesn't exist
-            mock_manager.load_config.return_value = None
-            mock_manager_class.return_value = mock_manager
-
-            service = DiagnosticsService()
-            result = await service.check_claude_server()
-
-            # Should not crash and return NOT_CONFIGURED
-            assert result.status == DiagnosticStatus.NOT_CONFIGURED
-            assert "not configured" in result.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_check_claude_delegation_credentials_with_missing_config_file(
-        self, tmp_path
-    ):
-        """
-        Test that check_claude_delegation_credentials() handles None from load_config() gracefully.
-
-        Before fix: AttributeError: 'NoneType' object has no attribute 'is_configured'
-        After fix: Returns NOT_CONFIGURED status without crash
-        """
-        with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_manager_class:
-            mock_manager = Mock()
-            # Simulate load_config() returning None when file doesn't exist
-            mock_manager.load_config.return_value = None
-            mock_manager_class.return_value = mock_manager
-
-            service = DiagnosticsService()
-            result = await service.check_claude_delegation_credentials()
-
-            # Should not crash and return NOT_CONFIGURED
-            assert result.status == DiagnosticStatus.NOT_CONFIGURED
-            assert "not configured" in result.message.lower()
 
 
 class TestBug187SQLiteWrongDBTableCheck:

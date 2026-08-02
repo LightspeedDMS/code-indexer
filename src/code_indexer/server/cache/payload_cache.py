@@ -308,14 +308,14 @@ class PayloadCache:
     def store_with_key(self, key: str, content: str) -> None:
         """Store content with explicit key.
 
-        Story #720: Delegation Result Caching
+        Story #720: Explicit-Key Payload Caching
         Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Unlike store() which generates UUID4, this uses the provided key.
         If key already exists, updates the content and timestamp.
 
         Args:
-            key: Explicit key for storage (e.g., "delegation:job-uuid")
+            key: Explicit key for storage (e.g., "query:abc-123")
             content: Content to cache
         """
         if self._backend is not None:
@@ -344,7 +344,7 @@ class PayloadCache:
     def has_key(self, key: str) -> bool:
         """Check if a key exists in the cache without retrieving content.
 
-        Story #720: Delegation Result Caching
+        Story #720: Explicit-Key Payload Caching
         Story #50: Converted from async to sync for FastAPI thread pool execution.
 
         Efficiently checks existence using COUNT(*) without loading content.

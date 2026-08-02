@@ -81,8 +81,8 @@ _CHILD_POOL_TIMEOUT_SECONDS = 30.0
 
 # Mirrors config_service.py's CONFIG_KEY_RUNTIME -- duplicated as a literal
 # rather than imported to avoid pulling the full ConfigService module (with
-# its ClaudeDelegationManager/DbOutageThrottle construction-time
-# dependencies) into this lightweight child-process read path.
+# its DbOutageThrottle construction-time dependencies) into this
+# lightweight child-process read path.
 _CONFIG_KEY_RUNTIME = "runtime"
 
 

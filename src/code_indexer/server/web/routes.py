@@ -6446,9 +6446,6 @@ def _get_current_config() -> dict:
         # Provide defaults if langfuse config is missing
         langfuse_config = asdict(LangfuseConfig())
 
-    # Get claude_delegation config (Story #721)
-    claude_delegation_config = settings.get("claude_delegation", {})
-
     # Get search_limits, file_content_limits, and golden_repos config (Story #3)
     # Provide defaults if config sections are missing (backward compatibility)
     search_limits_config = settings.get("search_limits")
@@ -6589,7 +6586,6 @@ def _get_current_config() -> dict:
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
-        "claude_delegation": claude_delegation_config,
         "search_limits": search_limits_config,
         "golden_repos": golden_repos_config,
         # Story #3 - Phase 2: P0/P1 settings
@@ -7968,18 +7964,6 @@ def _create_config_page_response(
     github_token_data = token_manager.get_token("github")
     gitlab_token_data = token_manager.get_token("gitlab")
 
-    # Get golden repos for delegation config dropdown (Story #459)
-    golden_repos_list = []
-    try:
-        grm = _get_golden_repo_manager()
-        if grm:
-            repos = grm.list_golden_repos()
-            golden_repos_list = sorted(
-                [r.get("alias", "") for r in repos if r.get("alias")]
-            )
-    except Exception as e:
-        logger.warning("Failed to fetch golden repos for config dropdown: %s", e)
-
     response = templates.TemplateResponse(
         request,
         "config.html",
@@ -7997,7 +7981,6 @@ def _create_config_page_response(
             "github_token_data": github_token_data,
             "gitlab_token_data": gitlab_token_data,
             "restart_required_fields": RESTART_REQUIRED_FIELDS,
-            "golden_repos_list": golden_repos_list,
         },
     )
 
@@ -8791,149 +8774,6 @@ def config_page(request: Request):
         return _create_login_redirect(request)
 
     return _create_config_page_response(request, session)
-
-
-@web_router.post(
-    "/config/claude_delegation",
-    response_class=HTMLResponse,
-    dependencies=[Depends(dependencies.require_elevation())],
-)
-async def update_claude_delegation_config(
-    request: Request,
-    csrf_token: Optional[str] = Form(None),
-):
-    """Update Claude Delegation configuration with connectivity validation (Story #721)."""
-    from ..services.config_service import get_config_service
-    from ..config.delegation_config import ClaudeDelegationConfig
-
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    if not validate_login_csrf_token(request, csrf_token):
-        return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
-
-    form_data = await request.form()
-    config_service = get_config_service()
-    delegation_manager = config_service.get_delegation_manager()
-
-    # Extract credential, preserving existing if empty
-    credential = form_data.get("claude_server_credential", "")
-    if not credential:
-        existing = delegation_manager.load_config()
-        credential = existing.claude_server_credential if existing else ""
-
-    url = form_data.get("claude_server_url", "").strip()  # type: ignore[union-attr]
-    username = form_data.get("claude_server_username", "").strip()  # type: ignore[union-attr]
-
-    if not url or not username or not credential:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message="URL, username, and credential are required",
-            validation_errors={"claude_delegation": "Missing required fields"},
-        )
-
-    # Validate connectivity before saving
-    cred_type = form_data.get("claude_server_credential_type", "password")
-    skip_ssl = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
-    result = delegation_manager.validate_connectivity(
-        url,
-        username,
-        str(credential),
-        cred_type,  # type: ignore[arg-type]
-        skip_ssl_verify=skip_ssl,
-    )
-
-    if not result.success:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Connection failed: {result.error_message}",
-            validation_errors={"claude_delegation": result.error_message},
-        )
-
-    # Save configuration with encrypted credential
-    from ..config.delegation_config import DEFAULT_FUNCTION_REPO_ALIAS
-
-    cidx_callback_url = form_data.get("cidx_callback_url", "").strip()  # type: ignore[union-attr]  # Story #720
-    skip_ssl_verify = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
-    guardrails_enabled = (
-        form_data.get("guardrails_enabled", "true").lower() == "true"  # type: ignore[union-attr]
-    )  # Story #457
-    delegation_guardrails_repo = form_data.get(  # type: ignore[union-attr]
-        "delegation_guardrails_repo", ""
-    ).strip()  # Story #457
-    delegation_default_engine = form_data.get(  # type: ignore[union-attr]
-        "delegation_default_engine", "claude-code"
-    ).strip()  # Story #459
-    delegation_default_mode = form_data.get(  # type: ignore[union-attr]
-        "delegation_default_mode", "single"
-    ).strip()  # Story #459
-
-    # Validate guardrails repo exists in golden repos (Story #459)
-    if delegation_guardrails_repo:
-        try:
-            grm = _get_golden_repo_manager()
-            if grm:
-                grm.get_actual_repo_path(delegation_guardrails_repo)
-        except Exception:
-            return _create_config_page_response(
-                request,
-                session,
-                error_message=f"Guardrails repository '{delegation_guardrails_repo}' not found in golden repos. Please select a valid repository or leave empty.",
-                validation_errors={
-                    "claude_delegation": f"Invalid guardrails repo: {delegation_guardrails_repo}"
-                },
-            )
-
-    # Validate engine and mode values (Story #459)
-    VALID_ENGINES = {"claude-code", "codex", "gemini", "opencode", "q"}
-    VALID_MODES = {"single", "collaborative", "competitive"}
-
-    if delegation_default_engine not in VALID_ENGINES:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Invalid engine '{delegation_default_engine}'. Must be one of: {', '.join(sorted(VALID_ENGINES))}",
-            validation_errors={
-                "claude_delegation": f"Invalid engine: {delegation_default_engine}"
-            },
-        )
-
-    if delegation_default_mode not in VALID_MODES:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Invalid mode '{delegation_default_mode}'. Must be one of: {', '.join(sorted(VALID_MODES))}",
-            validation_errors={
-                "claude_delegation": f"Invalid mode: {delegation_default_mode}"
-            },
-        )
-
-    config = ClaudeDelegationConfig(
-        function_repo_alias=form_data.get("function_repo_alias", "").strip()  # type: ignore[union-attr]
-        or DEFAULT_FUNCTION_REPO_ALIAS,
-        claude_server_url=url,
-        claude_server_username=username,
-        claude_server_credential_type=cred_type,  # type: ignore[arg-type]
-        claude_server_credential=credential,  # type: ignore[arg-type]
-        cidx_callback_url=cidx_callback_url,
-        skip_ssl_verify=skip_ssl_verify,
-        guardrails_enabled=guardrails_enabled,
-        delegation_guardrails_repo=delegation_guardrails_repo,
-        delegation_default_engine=delegation_default_engine,
-        delegation_default_mode=delegation_default_mode,
-    )
-    delegation_manager.save_config(config)
-
-    return _create_config_page_response(
-        request,
-        session,
-        success_message="Claude Delegation configuration saved and verified",
-    )
 
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
