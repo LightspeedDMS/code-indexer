@@ -87,7 +87,7 @@ def _init_repo_with_metadata(repo_dir: Path) -> None:
 
 
 def _read_branch(metadata_path: Path) -> str:
-    return json.loads(metadata_path.read_text())["current_branch"]
+    return str(json.loads(metadata_path.read_text())["current_branch"])
 
 
 class TestGitHookManagerStalePathBug1514:
