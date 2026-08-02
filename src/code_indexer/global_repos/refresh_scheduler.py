@@ -2313,6 +2313,24 @@ class RefreshScheduler:
                                             source_path, alias_name
                                         )
                                         if not force_reconcile:
+                                            # Bug #1508: has_changes() is a pure git-ref
+                                            # comparison and has zero awareness of whether
+                                            # the LAST indexing pass for the current HEAD
+                                            # actually completed. If a prior refresh's git
+                                            # pull succeeded but indexing was interrupted
+                                            # (server restart, crash, OOM) before
+                                            # metadata.json was updated, local HEAD already
+                                            # equals origin HEAD forever afterward, so
+                                            # has_changes() reports False on every
+                                            # subsequent cycle and the stale index is never
+                                            # repaired. Cross-check metadata.json before
+                                            # honoring the short-circuit.
+                                            force_reconcile = (
+                                                self._check_stale_index_metadata(
+                                                    source_path, alias_name
+                                                )
+                                            )
+                                        if not force_reconcile:
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
@@ -3777,6 +3795,100 @@ class RefreshScheduler:
                 alias_name,
                 e,
             )
+        return False
+
+    def _check_stale_index_metadata(self, source_path: str, alias_name: str) -> bool:
+        """Detect an interrupted/stale index that has_changes() cannot see.
+
+        Bug #1508: GitPullUpdater.has_changes() is a pure git-ref comparison
+        (local HEAD vs @{upstream}). It has zero awareness of whether the
+        LAST indexing pass for the current local HEAD actually completed.
+        If a refresh's git-pull step succeeds but the subsequent indexing
+        step is interrupted (server restart landing mid-refresh, `cidx
+        index` crash, OOM kill) before .code-indexer/metadata.json is
+        updated, every SUBSEQUENT refresh will see local HEAD == origin
+        HEAD and has_changes() will report False forever -- permanently
+        masking that the on-disk index is stale relative to the git tree
+        it is supposedly built from.
+
+        This cross-checks metadata.json against two independent signals:
+        - status "in_progress"/"failed": the last indexing attempt for
+          whatever commit it recorded never completed.
+        - current_commit != actual working-tree HEAD: the git tree has
+          advanced (via a pull) past the last commit that was ever
+          recorded as indexed, regardless of that run's reported status.
+
+        Args:
+            source_path: Absolute path to the live repo directory.
+            alias_name: Global alias name used only for logging.
+
+        Returns:
+            True if a reconcile pass is needed to catch up a stale index,
+            False if metadata is absent, unreadable, or fully consistent.
+        """
+        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
+        if not metadata_path.exists():
+            return False
+
+        try:
+            with open(metadata_path) as f:
+                meta = json.load(f)
+        except Exception as e:
+            logger.warning(
+                "Could not read metadata.json for %s while checking for a "
+                "stale index, proceeding without forced reconcile: %s",
+                alias_name,
+                e,
+            )
+            return False
+
+        status = meta.get("status", "")
+        if status in ("in_progress", "failed"):
+            logger.warning(
+                "Stale/interrupted index detected for %s (metadata "
+                "status=%s) despite no new git changes -- forcing "
+                "reconcile to catch up (Bug #1508)",
+                alias_name,
+                status,
+            )
+            return True
+
+        recorded_commit = meta.get("current_commit")
+        if not recorded_commit:
+            return False
+
+        try:
+            head_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            logger.debug(
+                "Could not determine git HEAD for %s while checking for a "
+                "stale index: %s",
+                alias_name,
+                e,
+            )
+            return False
+
+        if head_result.returncode != 0:
+            return False
+
+        actual_commit = head_result.stdout.strip()
+        if actual_commit and actual_commit != recorded_commit:
+            logger.warning(
+                "Index metadata for %s reflects commit %s but working tree "
+                "HEAD is %s -- forcing reconcile to catch up on drifted "
+                "index (Bug #1508)",
+                alias_name,
+                recorded_commit,
+                actual_commit,
+            )
+            return True
+
         return False
 
     def _detect_existing_indexes(

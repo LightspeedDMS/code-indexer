@@ -22,7 +22,9 @@ which storage backend was used.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -39,6 +41,83 @@ if TYPE_CHECKING:
 _V_TIMESTAMP_CAPTURE_RE = re.compile(r"^v_(\d+)$")
 
 logger = logging.getLogger(__name__)
+
+#: Minimum mode bits required on a directory for a different OS user (e.g.
+#: the CoW daemon's user) to read+traverse it: group r+x, other r+x.
+_MIN_DIR_MODE_BITS = 0o055
+
+#: Minimum mode bits required on a file for a different OS user to read it:
+#: group r, other r.
+_MIN_FILE_MODE_BITS = 0o044
+
+
+def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
+    """Best-effort widen *source_path*'s permissions so a different-OS-user,
+    remote-executing clone backend (the CoW daemon, Issue #1511) can read it.
+
+    The CoW daemon runs `cp --reflink=auto -a` as its own OS user, which is
+    typically NOT the OS user (`cidx index`) that wrote the golden-repo's
+    index files -- those files commonly end up at restrictive mode 600 from
+    that process's ambient umask, causing "Permission denied" for every
+    clone attempt. This preflight defensively ensures group+other can at
+    least read (and, for directories, traverse) every entry under
+    *source_path* before handing it to such a backend.
+
+    Never strips existing permissions -- only ADDS bits (`|=`). Resilient to
+    per-entry failures: an individual unreadable/racing/deleted-mid-walk
+    entry is logged as a WARNING and skipped, never aborting the whole
+    preflight (the downstream `cp` call will surface a loud, clear error if
+    something still can't be read after this preflight runs).
+    """
+
+    def _widen(path: str, min_bits: int) -> None:
+        try:
+            current_mode = stat.S_IMODE(os.stat(path).st_mode)
+            if current_mode & min_bits != min_bits:
+                os.chmod(path, current_mode | min_bits)
+        except OSError as exc:
+            logger.warning(
+                "Failed to widen permissions on '%s' for CoW-daemon clone "
+                "readability; continuing: %s",
+                path,
+                exc,
+            )
+
+    try:
+        _widen(source_path, _MIN_DIR_MODE_BITS)
+    except OSError as exc:  # pragma: no cover - defensive, mirrors _widen
+        logger.warning(
+            "Failed to widen permissions on root '%s' for CoW-daemon clone "
+            "readability; continuing: %s",
+            source_path,
+            exc,
+        )
+
+    try:
+        walker = os.walk(source_path)
+    except OSError as exc:
+        logger.warning(
+            "Failed to walk '%s' for CoW-daemon clone readability "
+            "preflight; continuing: %s",
+            source_path,
+            exc,
+        )
+        return
+
+    try:
+        for dirpath, dirnames, filenames in walker:
+            for dirname in dirnames:
+                _widen(os.path.join(dirpath, dirname), _MIN_DIR_MODE_BITS)
+            for filename in filenames:
+                _widen(os.path.join(dirpath, filename), _MIN_FILE_MODE_BITS)
+    except OSError as exc:  # pragma: no cover - defensive, os.walk internals
+        logger.warning(
+            "Error iterating '%s' during CoW-daemon clone readability "
+            "preflight; continuing: %s",
+            source_path,
+            exc,
+        )
+
 
 #: Default timeout in seconds for the filesystem CoW ``cp`` command.
 _DEFAULT_COW_TIMEOUT = 600
@@ -174,6 +253,20 @@ class VersionedSnapshotManager:
         verify a fix against here).
         """
         assert self._clone_backend is not None  # caller-guaranteed (create_snapshot)
+
+        # Issue #1511: the CoW daemon runs as a different OS user (on a
+        # different host) than the process that wrote the golden-repo's
+        # index files, which commonly end up at restrictive mode 600 from
+        # that writer's ambient umask -- causing `cp --reflink=auto -a` to
+        # fail with "Permission denied" for every clone attempt. Defensively
+        # widen the source tree's readability before handing it to the
+        # daemon. Gated by class name, mirroring the existing
+        # backend-name-based dispatch in list_snapshots(); LocalCloneBackend
+        # (same OS user) and OntapCloneBackend (different mechanism
+        # entirely) are intentionally left untouched.
+        if type(self._clone_backend).__name__ == "CowDaemonBackend":
+            _ensure_source_tree_readable_for_clone(source_path)
+
         backend_versioned_base = getattr(self._clone_backend, "_versioned_base", None)
         if backend_versioned_base is None:
             return self._clone_backend.create_clone(

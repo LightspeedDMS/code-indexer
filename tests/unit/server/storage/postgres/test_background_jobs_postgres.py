@@ -1120,6 +1120,96 @@ class TestCleanupOrphanedJobsOnStartupNodeScoped:
 
 
 # ---------------------------------------------------------------------------
+# cleanup_orphaned_jobs_on_startup — NULL executing_node reclaim (Bug #1512)
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupOrphanedJobsOnStartupNullExecutingNode:
+    """Bug #1512: a 'running' row with executing_node=NULL is unreachable by
+    the node-scoped filter (`executing_node = %s`) on EVERY node — SQL NULL
+    is never equal to anything, including another NULL. Such a row can only
+    ever be a genuine bug/orphan (no legitimate code path leaves a 'running'
+    row with a NULL owner: DistributedJobClaimer.claim_next_job's atomic
+    UPDATE always sets executing_node and status='running' together), so any
+    node's startup cleanup may safely reclaim it. This must NOT touch
+    'pending' rows with executing_node IS NULL — those are the legitimate
+    pod-pull work-stealing queue state and must remain claimable."""
+
+    def test_cleanup_sql_also_matches_running_with_null_executing_node(self):
+        """
+        Given cleanup_orphaned_jobs_on_startup(node_id="node-A")
+        When the UPDATE SQL is generated
+        Then it must ALSO match rows with status='running' AND
+        executing_node IS NULL, not only rows owned by node-A.
+
+        This is the discriminating assertion: the pre-fix SQL only contains
+        `AND executing_node = %s` — a single node-scoped equality check with
+        no NULL-handling branch at all. A NULL-owner row structurally cannot
+        match that clause on any node, so it is never reachable. The fixed
+        SQL must add an explicit `executing_node IS NULL` disjunct scoped to
+        status='running' (never 'pending', to avoid breaking pod-pull).
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=1)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        count = backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
+
+        assert count == 1
+        sql, params = cur.execute.call_args[0]
+        # Node-scoped ownership branch is still present (existing behavior).
+        assert "executing_node = %s" in sql
+        assert "node-A" in params
+        # New: an explicit NULL-executing_node branch scoped to 'running'.
+        assert "executing_node IS NULL" in sql
+
+    def test_cleanup_null_branch_never_matches_pending_status(self):
+        """
+        The NULL-executing_node reclaim branch must be scoped to status =
+        'running' only. It must NOT read as a bare `executing_node IS NULL`
+        disjunct with no status qualifier, or it would also reclaim
+        legitimate PENDING pod-pull work-stealing rows (executing_node IS
+        NULL is their normal, expected, unclaimed queue state) and break
+        cross-node work-stealing.
+
+        Verified structurally: the SQL must contain a single grouped
+        condition tying `status = 'running'` directly to
+        `executing_node IS NULL` within the same parenthesized clause, not
+        merely have both substrings appear somewhere in the query (which a
+        malformed unscoped `OR executing_node IS NULL` combined with the
+        pre-existing 'running'/'pending' text elsewhere would also satisfy).
+        """
+        import re
+
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=0)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
+
+        sql, _params = cur.execute.call_args[0]
+        # The NULL-reclaim branch must be its own grouped clause combining
+        # status = 'running' AND executing_node IS NULL, in either order,
+        # with nothing else inside that specific parenthesized group.
+        grouped_pattern = re.compile(
+            r"\(\s*status\s*=\s*'running'\s+AND\s+executing_node\s+IS\s+NULL\s*\)"
+            r"|"
+            r"\(\s*executing_node\s+IS\s+NULL\s+AND\s+status\s*=\s*'running'\s*\)",
+            re.IGNORECASE,
+        )
+        assert grouped_pattern.search(sql), (
+            f"Expected a grouped (status='running' AND executing_node IS NULL) "
+            f"clause in SQL, got: {sql}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
 

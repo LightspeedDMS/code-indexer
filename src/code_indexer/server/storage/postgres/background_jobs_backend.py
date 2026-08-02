@@ -761,6 +761,21 @@ class BackgroundJobsPostgresBackend:
         Any job still in 'running' or 'pending' state when the server starts
         was orphaned by a previous crash or restart.
 
+        Bug #1512: a 'running' row with executing_node IS NULL is
+        unreachable by the node-scoped ``executing_node = %s`` branch on
+        EVERY node — SQL ``NULL = <anything>`` is never true, including
+        another NULL. No legitimate code path ever leaves a 'running' row
+        with a NULL owner: DistributedJobClaimer.claim_next_job's atomic
+        UPDATE always sets ``executing_node`` and ``status = 'running'``
+        together in the same statement, and register_job_if_no_conflict
+        stamps a real node_id for every non-pod-pull-eligible operation
+        type. Such a row can therefore only be a genuine bug/orphan, so ANY
+        node's startup cleanup may safely reclaim it — added as a second,
+        independent OR-branch scoped to ``status = 'running'`` only (never
+        'pending', to avoid reclaiming the legitimate PENDING pod-pull
+        work-stealing queue state, where executing_node IS NULL is the
+        normal, expected, unclaimed state).
+
         Returns:
             Number of orphaned jobs cleaned up.
         """
@@ -784,8 +799,9 @@ class BackgroundJobsPostgresBackend:
                     SET status = 'failed',
                         error = %s,
                         completed_at = %s
-                    WHERE status IN ('running', 'pending')
-                      AND executing_node = %s
+                    WHERE (status IN ('running', 'pending')
+                           AND executing_node = %s)
+                       OR (status = 'running' AND executing_node IS NULL)
                     """,
                     (error_message, interrupted_at, node_id),
                 )

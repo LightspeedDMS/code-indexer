@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.95.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1508: `RefreshScheduler` no longer trusts `has_changes()==False` alone to skip a refresh cycle. A new `_check_stale_index_metadata()` check cross-references `.code-indexer/metadata.json`'s recorded `status`/`current_commit` against the actual working-tree HEAD -- an interrupted indexing run (`status` still `in_progress`/`failed`) or a drifted `current_commit` now forces a reconcile pass even when git itself reports no new commits, closing the class of bug where git-pull success permanently masked a stale index.
+- Bug #1511: CoW-daemon-backed snapshot creation preflight-widens source-tree read permissions (`_ensure_source_tree_readable_for_clone`) immediately before dispatching to `CowDaemonBackend`, fixing a fleet-wide failure where the daemon process (running as a different OS user than the golden-repo file owner) could not open golden-repo files for reading, permanently blocking snapshot/clone creation with `Permission denied`. Confirmed live on staging: activating `evolution` failed with exactly this error before the fix.
+- Bug #1512: PostgreSQL's `cleanup_orphaned_jobs_on_startup()` now also reclaims `running` jobs with `executing_node IS NULL` (SQL `NULL = <node>` never matches, so such a row was permanently unreachable by every node's node-scoped cleanup, forever blocking that repo's per-alias unique-active-job constraint). SQLite backend needed no change -- solo mode is single-node by definition.
+
 ## [11.94.0] - 2026-08-02
 
 ### Fixed
