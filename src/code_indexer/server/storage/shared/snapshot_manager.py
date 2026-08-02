@@ -22,9 +22,7 @@ which storage backend was used.
 from __future__ import annotations
 
 import logging
-import os
 import re
-import stat
 import subprocess
 import threading
 import time
@@ -42,14 +40,6 @@ _V_TIMESTAMP_CAPTURE_RE = re.compile(r"^v_(\d+)$")
 
 logger = logging.getLogger(__name__)
 
-#: Minimum mode bits required on a directory for a different OS user (e.g.
-#: the CoW daemon's user) to read+traverse it: group r+x, other r+x.
-_MIN_DIR_MODE_BITS = 0o055
-
-#: Minimum mode bits required on a file for a different OS user to read it:
-#: group r, other r.
-_MIN_FILE_MODE_BITS = 0o044
-
 
 def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
     """Best-effort widen *source_path*'s permissions so a different-OS-user,
@@ -63,60 +53,66 @@ def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
     least read (and, for directories, traverse) every entry under
     *source_path* before handing it to such a backend.
 
-    Never strips existing permissions -- only ADDS bits (`|=`). Resilient to
-    per-entry failures: an individual unreadable/racing/deleted-mid-walk
-    entry is logged as a WARNING and skipped, never aborting the whole
-    preflight (the downstream `cp` call will surface a loud, clear error if
-    something still can't be read after this preflight runs).
+    Bug #1511 follow-up: the original implementation walked the tree in
+    Python (`os.walk` + a separate `os.stat`/`os.chmod` pair per entry). For
+    a golden repo with hundreds of thousands of small index/shard files over
+    NFS (e.g. evolution's temporal quarter-shard directories), that is one
+    or two network round trips PER FILE and measurably hung repository
+    activation for 30+ minutes in production (proven live via py-spy). Two
+    batched `find ... -exec chmod ... {} +` calls -- one scoped to
+    directories, one to files -- do the equivalent additive-only widening
+    in one native traversal each, instead of a Python-level round trip per
+    entry. Directories get `g+rx,o+rx` (read+traverse); files get
+    `g+r,o+r` ONLY (never execute -- a single combined `chmod ... X` pass
+    would risk setting the execute bit on a plain file that already had
+    some other execute bit set, which this project's contract forbids).
+
+    Never strips existing permissions -- only ADDS bits. Resilient to
+    partial failures: `find -exec chmod ... +` batches many paths per
+    invoked `chmod`, and GNU chmod continues past an individual failing
+    path within a batch rather than aborting -- a non-zero overall exit is
+    logged as a WARNING, never raised (the downstream `cp` call will
+    surface a loud, clear error if something still can't be read after this
+    preflight runs).
     """
 
-    def _widen(path: str, min_bits: int) -> None:
+    def _run_chmod(entry_type: str, mode: str) -> None:
         try:
-            current_mode = stat.S_IMODE(os.stat(path).st_mode)
-            if current_mode & min_bits != min_bits:
-                os.chmod(path, current_mode | min_bits)
+            result = subprocess.run(
+                [
+                    "find",
+                    source_path,
+                    "-type",
+                    entry_type,
+                    "-exec",
+                    "chmod",
+                    mode,
+                    "{}",
+                    "+",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "CoW-daemon clone readability preflight (%s) on '%s' "
+                    "reported errors (exit %d); continuing: %s",
+                    entry_type,
+                    source_path,
+                    result.returncode,
+                    result.stderr.strip(),
+                )
         except OSError as exc:
             logger.warning(
-                "Failed to widen permissions on '%s' for CoW-daemon clone "
-                "readability; continuing: %s",
-                path,
+                "Failed to run permission-widening preflight (%s) on '%s' "
+                "for CoW-daemon clone readability; continuing: %s",
+                entry_type,
+                source_path,
                 exc,
             )
 
-    try:
-        _widen(source_path, _MIN_DIR_MODE_BITS)
-    except OSError as exc:  # pragma: no cover - defensive, mirrors _widen
-        logger.warning(
-            "Failed to widen permissions on root '%s' for CoW-daemon clone "
-            "readability; continuing: %s",
-            source_path,
-            exc,
-        )
-
-    try:
-        walker = os.walk(source_path)
-    except OSError as exc:
-        logger.warning(
-            "Failed to walk '%s' for CoW-daemon clone readability "
-            "preflight; continuing: %s",
-            source_path,
-            exc,
-        )
-        return
-
-    try:
-        for dirpath, dirnames, filenames in walker:
-            for dirname in dirnames:
-                _widen(os.path.join(dirpath, dirname), _MIN_DIR_MODE_BITS)
-            for filename in filenames:
-                _widen(os.path.join(dirpath, filename), _MIN_FILE_MODE_BITS)
-    except OSError as exc:  # pragma: no cover - defensive, os.walk internals
-        logger.warning(
-            "Error iterating '%s' during CoW-daemon clone readability "
-            "preflight; continuing: %s",
-            source_path,
-            exc,
-        )
+    _run_chmod("d", "g+rx,o+rx")
+    _run_chmod("f", "g+r,o+r")
 
 
 #: Default timeout in seconds for the filesystem CoW ``cp`` command.

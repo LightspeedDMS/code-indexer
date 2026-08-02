@@ -128,23 +128,31 @@ class TestCowDaemonPermissionPreflight:
     def test_chmod_failure_on_one_entry_does_not_abort_snapshot(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        """A single OSError during the chmod preflight must be logged and
-        swallowed -- create_snapshot must still complete and still call
-        create_clone."""
+        """A failing `find`/`chmod` invocation during the preflight must be
+        logged and swallowed -- create_snapshot must still complete and
+        still call create_clone."""
         source_dir = _build_source_tree(tmp_path)
         versioned_base = str(tmp_path / "versioned_base")
         backend = CowDaemonBackend(versioned_base)
         manager = VersionedSnapshotManager(clone_backend=backend)
 
-        real_chmod = os.chmod
-        failing_path = str(source_dir / "index" / "hnsw_index.bin")
+        import subprocess as subprocess_module
+        from code_indexer.server.storage.shared import snapshot_manager
 
-        def flaky_chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
-            if str(path) == failing_path:
-                raise OSError("simulated permission failure")
-            real_chmod(path, mode, *args, **kwargs)
+        real_run = subprocess_module.run
 
-        monkeypatch.setattr(os, "chmod", flaky_chmod)
+        def flaky_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+            result = real_run(cmd, *args, **kwargs)
+            # Simulate one failing entry within the batch: chmod ran but
+            # reported a non-zero exit for at least one path.
+            return subprocess_module.CompletedProcess(
+                cmd,
+                returncode=1,
+                stdout=result.stdout,
+                stderr="simulated permission failure",
+            )
+
+        monkeypatch.setattr(snapshot_manager.subprocess, "run", flaky_run)
 
         # Must not raise despite the injected failure.
         result = manager.create_snapshot("myrepo", str(source_dir))
