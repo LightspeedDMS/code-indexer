@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.92.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1507: solo/SQLite-mode servers now materialize DB-registered SSH keys to `~/.ssh/` + `~/.ssh/config` at startup, reusing `SSHKeySyncService` unmodified (previously wired only in postgres/cluster mode). A key correctly registered via any admin front door on a solo server would persist to the `ssh_keys` table but never actually reach disk, making it unusable for git operations -- this affects production, which runs solo/SQLite.
+
 ## [11.91.0] - 2026-08-01
 
 ### Fixed
