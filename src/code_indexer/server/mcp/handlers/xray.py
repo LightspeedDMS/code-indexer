@@ -55,6 +55,19 @@ _DUMP_AST_MAX_NODES_DEFAULT = 500
 _DUMP_AST_MAX_NODES_MIN = 1
 _DUMP_AST_MAX_NODES_MAX = 2000
 
+# Story #1494 AC1 (Finding A2, GIL-blocking analysis report, HIGH):
+# tree-sitter 0.21.3 holds the GIL for the ENTIRE parse duration (measured
+# 0.89x thread scaling -- no release at all; 159ms whole-process freeze
+# parsing a 759KB file). handle_xray_dump_ast() parses in-process with no
+# size cap on the source file -- max_nodes bounds only the serialized
+# output, not the parse itself. The Rust xray-cli subprocess (the safe
+# scan path used by handle_xray_search/handle_xray_explore) has no
+# AST-dump capability -- verified by inspecting rust/xray-cli/src/main.rs,
+# which only supports --dynlib/--files/--json evaluator-scan mode -- so
+# per the report's mitigation 2, this caps the in-process parse by file
+# size instead of relocating it to a subprocess.
+_DUMP_AST_MAX_FILE_SIZE_BYTES = 256 * 1024
+
 # Default Rust evaluator used when the caller omits evaluator_code.
 # Returns one finding per file at the root node's start line.
 # Semantically equivalent to the legacy "accept all Phase 1 hits" behavior.
@@ -1477,6 +1490,26 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "error": "file_not_found",
                 "message": f"File not found: {file_path_raw!r}",
+            }
+        )
+
+    # 5.5. File-size cap (Story #1494 AC1, Finding A2): refuse BEFORE
+    # touching tree-sitter at all -- os.stat() is a cheap syscall, so a
+    # file above the cap is rejected near-instantly instead of triggering
+    # an unbounded, GIL-held in-process parse (159ms measured on a 759KB
+    # file per the report; scales with file size, with no upper bound).
+    file_size = target.stat().st_size
+    if file_size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return _mcp_response(
+            {
+                "error": "file_too_large",
+                "message": (
+                    f"AST dump refused: file exceeds the in-process parse "
+                    f"size limit of {_DUMP_AST_MAX_FILE_SIZE_BYTES} bytes "
+                    f"(file is {file_size} bytes). Narrow to a smaller "
+                    f"file, or use xray_search/xray_explore (the Rust "
+                    f"subprocess scan path) which has no such limit."
+                ),
             }
         )
 
