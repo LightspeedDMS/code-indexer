@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -126,6 +126,52 @@ def _wire_query_tracker_into_semantic_query_manager(
     activated_repo_manager = getattr(app.state, "activated_repo_manager", None)
     if activated_repo_manager is not None:
         activated_repo_manager.set_query_tracker(query_tracker)
+
+
+def _materialize_solo_ssh_keys(
+    backend_registry: Any, ssh_dir: str = "~/.ssh"
+) -> Optional[Dict[str, Any]]:
+    """Materialize solo/SQLite-mode SSH keys from the backend to disk (Issue #1507).
+
+    `SSHKeySyncService` (Bug #428/#581/#1072) already writes DB-registered SSH
+    keys out to ``~/.ssh/`` and regenerates the CIDX-managed block of
+    ``~/.ssh/config`` -- it is fully backend-agnostic (``fernet=None`` means
+    "write the private key bytes as-is", which is exactly solo mode's own
+    storage convention: `SSHKeyManager.create_key()` never encrypts when no
+    PG backend/fernet is configured). It was previously constructed ONLY
+    inside the `storage_mode == "postgres"` cluster branch below, so a
+    solo/SQLite server (what production actually runs) had no equivalent
+    startup self-heal: a key correctly registered in the `ssh_keys` table
+    could still be missing from disk (fresh host, wiped ``~/.ssh``, DB
+    relocated to a new node) with no way to recover. This helper is called
+    from the solo/SQLite branch of the startup path further below in this
+    module, right after the cluster-mode block.
+
+    `StorageFactory.create_backends()` (`server/storage/factory.py`)
+    constructs an `SSHKeysSqliteBackend` for `backend_registry.ssh_keys` in
+    BOTH storage modes (confirmed by reading `service_init.py`: the SQLite
+    branch calls the same factory, unconditionally), so this call site needs
+    no PG-specific wiring -- it reuses the exact same sync mechanism cluster
+    mode already relies on, pointed at the solo backend instead.
+
+    Extracted as a small, dedicated, unit-testable helper (mirroring the
+    `_wire_query_tracker_into_semantic_query_manager` precedent above)
+    rather than left inline in lifespan.py's large async startup generator,
+    which cannot be unit tested in isolation without a full FastAPI app.
+
+    Returns the `sync()` result dict, or None if `backend_registry` has no
+    `ssh_keys` attribute (defensive -- should not happen given the factory
+    always populates it, kept fail-soft per this module's convention).
+    """
+    ssh_keys_backend = getattr(backend_registry, "ssh_keys", None)
+    if ssh_keys_backend is None:
+        return None
+
+    from code_indexer.server.services.ssh_key_sync_service import SSHKeySyncService
+
+    sync_service = SSHKeySyncService(ssh_keys_backend=ssh_keys_backend, ssh_dir=ssh_dir)
+    result: Dict[str, Any] = sync_service.sync()
+    return result
 
 
 def make_lifespan(
@@ -3975,6 +4021,28 @@ def make_lifespan(
                 logger.error(
                     f"Failed to start cluster services: {e}",
                     extra={"correlation_id": get_correlation_id()},
+                )
+
+        # Issue #1507: Solo/SQLite mode has no cluster to sync SSH keys across,
+        # but a DB-registered key can still be missing from ~/.ssh/ (fresh
+        # host, wiped ~/.ssh, DB copied to a new node) -- self-heal it at
+        # startup the same way the cluster branch above already does for
+        # PostgreSQL mode, reusing the same SSHKeySyncService unmodified.
+        if storage_mode != "postgres" and backend_registry is not None:
+            try:
+                _solo_ssh_sync_result = _materialize_solo_ssh_keys(backend_registry)
+                if _solo_ssh_sync_result is not None:
+                    logger.info(
+                        "Issue #1507: Solo SSH key materialization complete: "
+                        "%d written, %d removed, %d unchanged",
+                        len(_solo_ssh_sync_result.get("written", [])),
+                        len(_solo_ssh_sync_result.get("removed", [])),
+                        len(_solo_ssh_sync_result.get("unchanged", [])),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Issue #1507: Solo SSH key materialization failed (non-fatal): %s",
+                    exc,
                 )
 
         # Story #492: Start NodeMetricsWriterService (always on, SQLite or postgres)
