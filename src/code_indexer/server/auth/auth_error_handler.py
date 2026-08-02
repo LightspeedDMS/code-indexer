@@ -13,10 +13,32 @@ import secrets
 from enum import Enum
 from typing import Dict, Any, Optional
 
+import bcrypt
+
 # datetime imports removed - not needed for this implementation
 
 from .audit_logger import PasswordChangeAuditLogger
 from .timing_attack_prevention import TimingAttackPrevention
+
+# Static bcrypt hash used ONLY for timing-equalization work when no real
+# credential hash exists to compare against (e.g. non-existent user on the
+# failed-auth path). Cost factor 12 matches PasswordManager's BcryptHasher
+# default, so bcrypt.checkpw() against this hash takes comparable time to a
+# real credential verification -- preserving the timing-attack-prevention
+# contract documented in timing_attack_prevention.py:54-62. Generated once,
+# offline via bcrypt.hashpw(b"dummy", bcrypt.gensalt(12)); the password
+# behind it is not secret (it protects nothing) and is never used to
+# authenticate anything real. Bug/Story #1494 AC4, Finding C8: replaces a
+# pure-Python hashlib.sha256 loop that held the GIL for its whole duration
+# -- real bcrypt.checkpw releases the GIL instead, matching the success
+# (real-credential) verification path.
+_DUMMY_BCRYPT_HASH = b"$2b$12$HAOEkeX.snpyOGQadhLkOeNxDcfS.JRTlxn/Uxrcq5gtPiMxYEdy."
+_DUMMY_BCRYPT_PASSWORD = b"dummy-password-for-timing-equalization"
+
+# _perform_security_work() timing-equalization tuning constants.
+_SECURITY_WORK_DUMMY_DATA_SIZE_BYTES = 32
+_SECURITY_WORK_HASH_ITERATIONS = 5
+_SECURITY_WORK_MAX_RANDOM_DELAY_MS = 10
 
 
 class AuthErrorType(Enum):
@@ -155,20 +177,17 @@ class AuthErrorHandler:
         Perform dummy password hashing work for timing consistency.
 
         When a user doesn't exist, we still need to perform password-like
-        work to prevent timing-based user enumeration attacks.
+        work to prevent timing-based user enumeration attacks. Story #1494
+        AC4 (Finding C8): this now calls the REAL bcrypt.checkpw against a
+        static dummy hash rather than faking the timing with a pure-Python
+        hash loop -- real bcrypt releases the GIL during its work, matching
+        the success (real-credential) verification path exactly, so a
+        credential-stuffing burst no longer produces GIL-held CPU here
+        while the success path stays GIL-free.
         """
-        # Generate dummy password and salt
-        dummy_password = secrets.token_hex(16)
-        dummy_salt = secrets.token_hex(8)
-
-        # Perform bcrypt-like work (multiple hashing rounds with more computation)
-        # Need to match real bcrypt timing (~50-200ms)
-        result = dummy_password.encode("utf-8")
-        for _ in range(5000):  # Many more rounds to match bcrypt cost
-            result = hashlib.sha256(result + dummy_salt.encode("utf-8")).digest()
-            # Add some additional computational work
-            for i in range(20):
-                result = hashlib.sha256(result + str(i).encode("utf-8")).digest()
+        # Return value intentionally discarded -- only the GIL-releasing
+        # timing work matters here, never the (meaningless) match outcome.
+        _ = bcrypt.checkpw(_DUMMY_BCRYPT_PASSWORD, _DUMMY_BCRYPT_HASH)
 
     def create_registration_response(
         self,
@@ -277,14 +296,16 @@ class AuthErrorHandler:
         regardless of the specific path taken.
         """
         # Generate some random work similar to what real auth operations do
-        dummy_data = secrets.token_bytes(32)
+        dummy_data = secrets.token_bytes(_SECURITY_WORK_DUMMY_DATA_SIZE_BYTES)
 
         # Perform hash operations similar to password validation
-        for _ in range(5):
+        for _ in range(_SECURITY_WORK_HASH_ITERATIONS):
             dummy_data = hashlib.sha256(dummy_data).digest()
 
         # Add a small random delay to prevent precise timing analysis
-        time.sleep(secrets.randbelow(10) / 1000.0)  # 0-9ms random
+        time.sleep(
+            secrets.randbelow(_SECURITY_WORK_MAX_RANDOM_DELAY_MS) / 1000.0
+        )  # 0-9ms random
 
 
 # Global instance for use across authentication endpoints
