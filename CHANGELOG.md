@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.98.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1515: `app.state.backend_registry` is now assigned in `make_lifespan()` immediately after `app.state.storage_mode` is set, BEFORE `GlobalReposLifecycleManager` (which immediately spawns a background reconciliation thread calling into `RefreshScheduler`/`GlobalActivator`) is constructed and started. Previously the assignment happened later in the same function, so in cluster (postgres) mode the first reconciliation pass -- and any repository activation racing server startup -- silently resolved against an empty per-node SQLite registry instead of the shared PostgreSQL-backed one, logging "storage_mode=postgres but backend_registry not set; falling back to SQLite" and producing genuine registry drift. Reproduced live on staging: a refresh job correctly marked failed via the postgres-backed startup-orphan cleanup was still reported as an active conflict by `RefreshScheduler`'s own stale SQLite-backed check, permanently blocking activation for that golden repo until a manual server restart.
+
 ## [11.97.0] - 2026-08-02
 
 ### Fixed
