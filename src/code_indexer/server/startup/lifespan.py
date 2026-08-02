@@ -214,6 +214,25 @@ def make_lifespan(
         # and MCP handlers can access it without re-reading config.
         app.state.storage_mode = storage_mode
 
+        # Bug #1515: Make backend_registry available to MCP handlers AND to
+        # RefreshScheduler/GlobalActivator (via registry_factory's
+        # resolve_backend_registry_attr()) as early as possible -- BEFORE
+        # GlobalReposLifecycleManager is constructed and started below.
+        # GlobalReposLifecycleManager.start() immediately spawns a background
+        # "golden-repos-reconcile" thread that calls
+        # RefreshScheduler.reconcile_golden_repos(), which lazily resolves the
+        # shared PostgreSQL backend via app.state.backend_registry. If this
+        # assignment happened later (as it previously did, right before the
+        # Langfuse SDK eager-init call), that first reconciliation pass (and
+        # any activation racing server startup) would silently fall back to
+        # an empty per-node SQLite registry in cluster (postgres) mode,
+        # logging "storage_mode=postgres but backend_registry not set;
+        # falling back to SQLite" and producing genuine registry drift.
+        # In SQLite mode it contains SQLite backends; in postgres mode, PG
+        # backends. MCP handlers use app.state.backend_registry
+        # unconditionally.
+        app.state.backend_registry = backend_registry
+
         # Story #680: Store latency_tracker in app.state for dashboard route access.
         app.state.latency_tracker = latency_tracker
 
@@ -3053,10 +3072,10 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # Make backend_registry available to MCP handlers for BOTH modes.
-        # In SQLite mode it contains SQLite backends; in postgres mode, PG backends.
-        # MCP handlers use app.state.backend_registry unconditionally.
-        app.state.backend_registry = backend_registry
+        # Bug #1515: app.state.backend_registry is now assigned much earlier
+        # in this function (immediately after app.state.storage_mode), before
+        # GlobalReposLifecycleManager/RefreshScheduler/GlobalActivator are
+        # constructed -- see that assignment for the full rationale.
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
         # singleton. The singleton is created at import time with no backend; we inject
