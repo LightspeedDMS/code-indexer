@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.100.0] - 2026-08-02
+
+### Performance
+
+- Story #1494: Bounded the X-Ray in-process AST dump to files under 256KB (larger files return an explicit `file_too_large` error rather than freezing the event loop with an unbounded tree-sitter parse); bounded the Tantivy FTS regex position-extraction post-filter at 2000 candidates per search (results beyond the cap are marked `regex_extraction_capped` rather than dropped -- the full match set is always returned); converted the HNSW orphan-sweep sister-repair chunk reader to a streaming generator instead of materializing a full list.
+
+### Fixed
+
+- Story #1494: The dummy-password timing-attack mitigation in the login path now performs a real `bcrypt.checkpw` call (which releases the GIL) against a static precomputed hash, replacing a 5000-iteration pure-Python `hashlib.sha256` loop that held the GIL for its full duration and did not scale under concurrent failed-login attempts.
+
+### Removed
+
+- Story #1494: Deleted the dead `DiagnosticsService._get_storage_statistics` method (zero call sites).
+
 ## [11.99.0] - 2026-08-02
 
 ### Removed
