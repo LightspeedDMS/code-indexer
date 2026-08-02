@@ -68,6 +68,27 @@ class SSHKeySyncService:
               - unchanged: list of key names already up-to-date
               - errors: list of error strings encountered
         """
+        # Safety guard (2026-08-02 incident): a test that constructs this
+        # service without overriding ssh_dir silently reconciles against
+        # the REAL, unoverridden ~/.ssh -- an empty/fake test backend then
+        # makes every previously-real, manifest-tracked key "stale" and
+        # deletes it. This guard makes that class of mistake a loud no-op
+        # instead of a silent, irreversible deletion of a developer's
+        # actual keys. It can never affect a legitimate test: every real
+        # test in this suite passes an explicit tmp_path-based ssh_dir,
+        # which never equals the real expanduser("~/.ssh").
+        if (
+            "PYTEST_CURRENT_TEST" in os.environ
+            and self._ssh_dir == Path("~/.ssh").expanduser()
+        ):
+            msg = (
+                "SSHKeySyncService.sync() refused: running under pytest "
+                f"with an unoverridden real ssh_dir ({self._ssh_dir}). "
+                "Pass an explicit tmp_path-based ssh_dir in tests."
+            )
+            logger.critical(msg)
+            return {"written": [], "removed": [], "unchanged": [], "errors": [msg]}
+
         self._ssh_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
         # Read current state from backend

@@ -435,3 +435,62 @@ class TestBackendErrorHandling:
 
         assert nested_dir.exists()
         assert result["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: safety guard against real ~/.ssh under pytest (real incident,
+# 2026-08-02 -- a test that forgot to override ssh_dir let sync() delete
+# three genuine private keys from the developer's actual home directory)
+# ---------------------------------------------------------------------------
+
+
+class TestRealHomeUnderPytestGuard:
+    """sync() must refuse to touch the real, unoverridden ~/.ssh while a
+    test process is active, regardless of what the backend reports. This
+    guard can never affect a legitimate test, since every legitimate test
+    passes an explicit tmp_path-based ssh_dir -- it exists solely to make
+    an accidentally-real ssh_dir a loud no-op instead of a silent deletion
+    of the developer's actual keys."""
+
+    def test_sync_refuses_when_ssh_dir_is_real_home_under_pytest(self) -> None:
+        from code_indexer.server.services.ssh_key_sync_service import (
+            SSHKeySyncService,
+        )
+
+        # Backend reports NO keys -- exactly the shape that triggered the
+        # real incident (an empty/fake test backend reconciling against a
+        # manifest of previously-real keys would delete everything).
+        backend = _make_backend([])
+        # Deliberately DO NOT override ssh_dir -- this reproduces the bug:
+        # relying on the class default, which resolves to the real ~/.ssh.
+        svc = SSHKeySyncService(ssh_keys_backend=backend)
+
+        # PYTEST_CURRENT_TEST is set by pytest itself for the duration of
+        # every test -- no monkeypatching needed, this test genuinely runs
+        # under pytest right now.
+        assert "PYTEST_CURRENT_TEST" in os.environ
+
+        result = svc.sync()
+
+        assert result["written"] == []
+        assert result["removed"] == []
+        assert result["unchanged"] == []
+        assert any("refus" in e.lower() for e in result["errors"])
+        # The backend must never even be consulted -- the guard fires
+        # before any read/write/delete against the real filesystem.
+        backend.list_keys.assert_not_called()
+
+    def test_sync_proceeds_normally_when_ssh_dir_is_tmp_path_under_pytest(
+        self, tmp_path: Path
+    ) -> None:
+        """Every existing, legitimate test in this file uses tmp_path --
+        confirm the guard is a true no-op for that case (it must not
+        regress any of the tests above)."""
+        backend = _make_backend([_key_data("akey")])
+        svc = _make_service(backend, tmp_path)
+
+        result = svc.sync()
+
+        assert result["written"] == ["akey"]
+        assert result["errors"] == []
+        assert (tmp_path / "akey").exists()

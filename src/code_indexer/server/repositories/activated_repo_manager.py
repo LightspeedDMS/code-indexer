@@ -1140,10 +1140,28 @@ class ActivatedRepoManager:
         # 404 when the dir was gone, with no front-door cleanup path.
         # _load_metadata() dispatches to PG (cluster) or JSON file (solo) and is
         # the single source of truth for both modes.
+        #
+        # Bug #1514: the mirror-image gap.  An activation that fails AFTER
+        # creating the on-disk clone but BEFORE writing the metadata
+        # registration row leaves an orphan directory with no registry
+        # entry.  _do_deactivate_repository (the background-job worker)
+        # already has correct orphan-cleanup logic for exactly this case
+        # (Bug #1030 Fix A: no metadata, dir exists -> remove dir, return
+        # success), but it was unreachable through this front door, which
+        # used to raise "not found" whenever metadata was absent -- with
+        # no regard for whether an on-disk directory still existed.  Only
+        # a request with NEITHER metadata NOR an on-disk directory is a
+        # genuine 404; when a directory exists, route through the same
+        # background-job path so the existing worker-side cleanup runs.
+        # get_activated_repo_path() is the same pre-existing, already-used
+        # path-construction primitive _do_deactivate_repository's own
+        # orphan branch relies on -- no new path-handling logic is added.
         if self._load_metadata(username, user_alias) is None:
-            raise ActivatedRepoError(
-                f"Activated repository '{user_alias}' not found for user '{username}'"
-            )
+            repo_dir = self.get_activated_repo_path(username, user_alias)
+            if not os.path.exists(repo_dir):
+                raise ActivatedRepoError(
+                    f"Activated repository '{user_alias}' not found for user '{username}'"
+                )
 
         # Submit background job
         job_id = self.background_job_manager.submit_job(

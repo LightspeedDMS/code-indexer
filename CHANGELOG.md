@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.94.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1507 (follow-up): `SSHKeySyncService.sync()` now refuses to run (loud CRITICAL log + no-op) when invoked under pytest with `ssh_dir` still defaulted to the real, unoverridden `~/.ssh`. A pre-existing test exercising the real solo-mode lifespan sequence with an empty/fake backend silently reconciled against the developer's actual `~/.ssh`, treating every previously-real, manifest-tracked key as stale and deleting it -- a real incident that destroyed three personal SSH private keys with no recoverable backup. Every legitimate test in this suite already passes an explicit `tmp_path`-based `ssh_dir`, so this guard can never affect real coverage.
+
+## [11.93.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1513: repository activation on cow-daemon (cluster) deployments could hang forever -- none of `CowDaemonBackend`'s HTTP calls to the CoW storage daemon passed a timeout, so a lost/dropped daemon response left the client blocked indefinitely (observed in production as a permanent CLOSE-WAIT connection). Adds a `request_timeout_seconds` config field (default 30s) applied to all daemon HTTP calls.
+- Bug #1514: activating a golden repo onto a non-default branch could fail with a `PermissionError` on a stale, install-time absolute path baked into the repo's `.git/hooks/post-checkout` script -- this project creates repo copies via `cp --reflink=auto -a` (not `git clone`), so a hardcoded path from wherever the hook was first installed traveled byte-for-byte into every subsequent copy. The hook now resolves the repo root dynamically at run time via `git rev-parse --show-toplevel`, with automatic self-heal for already-installed old-style hooks. Also fixes a related orphan: a branch-activation failure occurring after the on-disk clone was created but before repository registration previously left a permanently unreachable directory with no front-door cleanup path -- `deactivate_repository()` now detects and cleans up this case.
+
 ## [11.92.0] - 2026-08-01
 
 ### Fixed

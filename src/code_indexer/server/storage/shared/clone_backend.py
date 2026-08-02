@@ -365,6 +365,14 @@ class CowDaemonBackend:
         self._mount_point = config.mount_point.rstrip("/")
         self._poll_interval = config.poll_interval_seconds
         self._timeout = config.timeout_seconds
+        # Bug #1513: per-HTTP-call timeout (connect+read), applied to EVERY
+        # requests.* call below. Distinct from self._timeout (the overall
+        # job-completion poll deadline) -- this bounds each individual round
+        # trip so a lost/dropped daemon response fails loudly and fast
+        # instead of hanging the caller forever (production symptom: a
+        # CLOSE-WAIT connection and a repo-activation job stuck at 40%
+        # indefinitely, with no error ever surfaced).
+        self._request_timeout = config.request_timeout_seconds
         self._daemon_storage_path = (config.daemon_storage_path or "").rstrip("/")
         # Bug #1084 read-after-create barrier: the daemon creates the snapshot
         # on its local XFS; this (scheduler) node reaches it over NFS and may
@@ -598,6 +606,7 @@ class CowDaemonBackend:
             f"{self._daemon_url}/api/v1/clones",
             json=body,
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         response.raise_for_status()
 
@@ -651,6 +660,7 @@ class CowDaemonBackend:
             resp = requests.get(
                 f"{self._daemon_url}/api/v1/jobs/{job_id}",
                 headers=self._headers(),
+                timeout=self._request_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -706,6 +716,7 @@ class CowDaemonBackend:
         resp = requests.delete(
             f"{self._daemon_url}/api/v1/clones/{namespace}/{name}",
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         if resp.status_code == 404:
             return True
@@ -724,6 +735,7 @@ class CowDaemonBackend:
             f"{self._daemon_url}/api/v1/clones",
             params={"namespace": sanitized_namespace},
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         resp.raise_for_status()
         return list(resp.json())
@@ -740,6 +752,7 @@ class CowDaemonBackend:
         resp = requests.get(
             f"{self._daemon_url}/api/v1/clones/{sanitized_namespace}/{sanitized_name}",
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         if resp.status_code == 404:
             return False
