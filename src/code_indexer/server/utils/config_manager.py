@@ -1306,6 +1306,15 @@ class OntapConfig:
 
 _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS = 2
 _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS = 600
+# Bug #1513: per-HTTP-call timeout, distinct from timeout_seconds above (which
+# bounds the overall async job-completion poll LOOP). Every individual
+# requests.post/get/delete call to the CoW daemon (create job, poll job,
+# delete, list, exists) is a fast metadata operation that should return almost
+# instantly -- it must never be allowed to hang forever when the daemon's
+# response is lost/dropped (observed in production as a stuck CLOSE-WAIT
+# connection and repo activation frozen at 40% indefinitely). 30s is generous
+# headroom for a daemon under load while still failing loud and fast.
+_COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 
 
 @dataclass
@@ -1320,6 +1329,12 @@ class CowDaemonConfig:
     daemon_storage_path: Optional[str] = (
         None  # Story #1034: daemon-side absolute path (where daemon's local XFS lives); used by CowDaemonBackend to translate CIDX paths (mount_point view) to daemon paths (storage_path view) so reflink works on the daemon's local filesystem. Defaults to None for backward compat (no translation when None).
     )
+    # Bug #1513: per-HTTP-call timeout (connect+read), applied to EVERY
+    # requests.* call CowDaemonBackend makes. NOT the same as timeout_seconds
+    # (the overall job-completion poll deadline) -- this bounds each
+    # individual round-trip so a lost/dropped daemon response fails loudly
+    # instead of hanging the caller forever.
+    request_timeout_seconds: int = _COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 @dataclass
