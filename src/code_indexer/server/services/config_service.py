@@ -25,7 +25,6 @@ from typing import (
     runtime_checkable,
 )
 
-from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
@@ -258,7 +257,7 @@ class ConfigService:
                            Defaults to ~/.cidx-server
             config_manager: Optional pre-built ServerConfigManager instance.
                           When provided, server_dir_path is ignored for config
-                          loading (but still used for ClaudeDelegationManager).
+                          loading.
                           Primarily useful for unit tests.
         """
         if config_manager is not None:
@@ -266,7 +265,6 @@ class ConfigService:
         else:
             self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
-        self._delegation_manager = ClaudeDelegationManager(server_dir_path)
         # Story #578: Unified DB for runtime config (SQLite or PG)
         self._pool: Any = None  # PG pool (set via set_connection_pool for cluster)
         self._sqlite_db_path: Optional[str] = None  # SQLite path (solo mode)
@@ -397,10 +395,6 @@ class ConfigService:
         if self._reload_thread is not None:
             self._reload_thread.join(timeout=5)
             logger.info("ConfigService: config reload thread stopped")
-
-    def get_delegation_manager(self) -> ClaudeDelegationManager:
-        """Get the Claude Delegation manager for config operations."""
-        return self._delegation_manager
 
     def load_config(self) -> ServerConfig:
         """
@@ -690,8 +684,6 @@ class ConfigService:
                     else 5
                 ),
             },
-            # Claude Delegation configuration (Story #721)
-            "claude_delegation": self._get_delegation_settings(),
             # Story #3 - Configuration Consolidation: Migrated settings
             "search_limits": {
                 "max_result_size_mb": config.search_limits_config.max_result_size_mb,
@@ -956,26 +948,6 @@ class ConfigService:
         }
 
         return settings
-
-    def _get_delegation_settings(self) -> Dict[str, Any]:
-        """Get Claude Delegation settings for display (credential masked)."""
-        delegation_config = self._delegation_manager.load_config()
-        if delegation_config is None:
-            delegation_config = ClaudeDelegationConfig()
-
-        return {
-            "function_repo_alias": delegation_config.function_repo_alias,
-            "claude_server_url": delegation_config.claude_server_url,
-            "claude_server_username": delegation_config.claude_server_username,
-            "claude_server_credential_type": delegation_config.claude_server_credential_type,
-            "is_configured": delegation_config.is_configured,
-            "cidx_callback_url": delegation_config.cidx_callback_url,  # Story #720
-            "skip_ssl_verify": delegation_config.skip_ssl_verify,  # Allow self-signed certs for E2E
-            "guardrails_enabled": delegation_config.guardrails_enabled,  # Story #457
-            "delegation_guardrails_repo": delegation_config.delegation_guardrails_repo,  # Story #457
-            "delegation_default_engine": delegation_config.delegation_default_engine,  # Story #459
-            "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
-        }
 
     def _apply_setting(
         self, config: ServerConfig, category: str, key: str, value: Any

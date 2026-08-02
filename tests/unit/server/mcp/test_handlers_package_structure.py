@@ -126,13 +126,6 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "ci_retry_run",
         "get_cached_content",
         "set_session_impersonation",
-        "list_delegation_functions",
-        "execute_delegation_function",
-        "poll_delegation_job",
-        "execute_open_delegation",
-        "cs_register_repository",
-        "cs_list_repositories",
-        "cs_check_health",
         "list_groups",
         "create_group",
         "get_group",
@@ -200,7 +193,6 @@ DOMAIN_MODULES = [
     "scip",
     "admin",
     "ssh_keys",
-    "delegation",
     "guides",
     "depmap",
 ]
@@ -280,7 +272,6 @@ def test_all_public_handlers_importable():
     assert hasattr(h, "scip_definition")
     assert hasattr(h, "handle_authenticate")
     assert hasattr(h, "handle_manage_ssh_key")
-    assert hasattr(h, "handle_list_delegation_functions")
     assert hasattr(h, "quick_reference")
 
 

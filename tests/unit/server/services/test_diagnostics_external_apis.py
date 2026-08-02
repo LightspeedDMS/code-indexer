@@ -4,7 +4,6 @@ Tests for External API Integration Diagnostics (Story S4).
 Tests all external API diagnostic checks:
 - GitHub API diagnostic (AC1)
 - GitLab API diagnostic (AC2)
-- Claude Server diagnostic (AC3)
 - OIDC Provider diagnostic (AC4)
 - OpenTelemetry Collector diagnostic (AC5)
 - 30-second timeout (AC6)
@@ -73,22 +72,6 @@ def mock_token_manager():
             "github": token_data_github,
             "gitlab": token_data_gitlab,
         }.get(platform)
-        yield mock
-
-
-@pytest.fixture
-def mock_delegation_manager():
-    """Mock ClaudeDelegationManager for Claude Server config."""
-    with patch(
-        "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-    ) as mock:
-        delegation_config = MagicMock()
-        delegation_config.is_configured = True
-        delegation_config.claude_server_url = "https://claude.example.com"
-        delegation_config.claude_server_username = "test_user"
-        delegation_config.claude_server_credential = "test_password"
-        delegation_config.claude_server_credential_type = "password"
-        mock.return_value.load_config.return_value = delegation_config
         yield mock
 
 
@@ -265,72 +248,6 @@ async def test_check_gitlab_api_error_http_error(
         assert "GitLab API request failed" in result.message or "403" in result.message
 
 
-# AC3: Claude Server diagnostic tests
-
-
-@pytest.mark.asyncio
-async def test_check_claude_server_working(
-    diagnostics_service, mock_delegation_manager, mock_config_manager
-):
-    """Test Claude Server diagnostic returns WORKING when delegation endpoint accessible."""
-    with patch("httpx.AsyncClient") as mock_client:
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"access_token": "test_token"}
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-            return_value=mock_response
-        )
-
-        result = await diagnostics_service.check_claude_server()
-
-        assert result.name == "Claude Server"
-        assert result.status == DiagnosticStatus.WORKING
-        assert "Claude Server is accessible" in result.message
-
-
-@pytest.mark.asyncio
-async def test_check_claude_server_not_configured(
-    diagnostics_service, mock_config_manager
-):
-    """Test Claude Server diagnostic returns NOT_CONFIGURED when not configured."""
-    with patch(
-        "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-    ) as mock:
-        delegation_config = MagicMock()
-        delegation_config.is_configured = False
-        mock.return_value.load_config.return_value = delegation_config
-
-        result = await diagnostics_service.check_claude_server()
-
-        assert result.name == "Claude Server"
-        assert result.status == DiagnosticStatus.NOT_CONFIGURED
-        assert "not configured" in result.message.lower()
-
-
-@pytest.mark.asyncio
-async def test_check_claude_server_error_connection_failed(
-    diagnostics_service, mock_delegation_manager, mock_config_manager
-):
-    """Test Claude Server diagnostic returns ERROR when connection fails."""
-    import httpx
-
-    with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-            side_effect=httpx.ConnectError("Connection refused")
-        )
-
-        result = await diagnostics_service.check_claude_server()
-
-        assert result.name == "Claude Server"
-        assert result.status == DiagnosticStatus.ERROR
-        assert (
-            "Claude Server connection failed" in result.message
-            or "connection" in result.message.lower()
-        )
-
-
 # AC4: OIDC Provider diagnostic tests
 
 
@@ -487,7 +404,6 @@ async def test_check_otel_collector_error_connection_failed(
 async def test_external_api_checks_have_30_second_timeout(
     diagnostics_service,
     mock_token_manager,
-    mock_delegation_manager,
     mock_config_manager,
 ):
     """Test that all API checks use 30-second timeout (AC6)."""
@@ -518,7 +434,6 @@ async def test_external_api_checks_have_30_second_timeout(
 async def test_run_category_dispatches_to_external_api_diagnostics(
     diagnostics_service,
     mock_token_manager,
-    mock_delegation_manager,
     mock_config_manager,
 ):
     """Test that run_category(EXTERNAL_APIS) dispatches to run_external_api_diagnostics."""
@@ -545,7 +460,6 @@ async def test_run_category_dispatches_to_external_api_diagnostics(
         assert len(results) > 0
         assert any(r.name == "GitHub API" for r in results)
         assert any(r.name == "GitLab API" for r in results)
-        assert any(r.name == "Claude Server" for r in results)
         assert any(r.name == "OIDC Provider" for r in results)
         assert any(r.name == "OpenTelemetry Collector" for r in results)
 
@@ -569,7 +483,6 @@ def test_external_api_cache_ttl_is_5_minutes():
 async def test_external_api_diagnostics_cached_for_5_minutes(
     diagnostics_service,
     mock_token_manager,
-    mock_delegation_manager,
     mock_config_manager,
 ):
     """Test that external API diagnostic results are cached for 5 minutes."""
@@ -637,35 +550,26 @@ async def test_all_apis_return_not_configured_when_not_configured(
         mock_token.return_value.get_token.return_value = None
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ClaudeDelegationManager"
-        ) as mock_delegation:
-            delegation_config = MagicMock()
-            delegation_config.is_configured = False
-            mock_delegation.return_value.load_config.return_value = delegation_config
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_config:
+            config = MagicMock()
+            config.oidc_provider_config = MagicMock()
+            config.oidc_provider_config.enabled = False
+            config.telemetry_config = MagicMock()
+            config.telemetry_config.enabled = False
+            mock_config.return_value.get_config.return_value = config
 
-            with patch(
-                "code_indexer.server.services.config_service.get_config_service"
-            ) as mock_config:
-                config = MagicMock()
-                config.oidc_provider_config = MagicMock()
-                config.oidc_provider_config.enabled = False
-                config.telemetry_config = MagicMock()
-                config.telemetry_config.enabled = False
-                mock_config.return_value.get_config.return_value = config
+            # Run all checks
+            github_result = await diagnostics_service.check_github_api()
+            gitlab_result = await diagnostics_service.check_gitlab_api()
+            oidc_result = await diagnostics_service.check_oidc_provider()
+            otel_result = await diagnostics_service.check_otel_collector()
 
-                # Run all checks
-                github_result = await diagnostics_service.check_github_api()
-                gitlab_result = await diagnostics_service.check_gitlab_api()
-                claude_result = await diagnostics_service.check_claude_server()
-                oidc_result = await diagnostics_service.check_oidc_provider()
-                otel_result = await diagnostics_service.check_otel_collector()
-
-                # All should be NOT_CONFIGURED
-                assert github_result.status == DiagnosticStatus.NOT_CONFIGURED
-                assert gitlab_result.status == DiagnosticStatus.NOT_CONFIGURED
-                assert claude_result.status == DiagnosticStatus.NOT_CONFIGURED
-                assert oidc_result.status == DiagnosticStatus.NOT_CONFIGURED
-                assert otel_result.status == DiagnosticStatus.NOT_CONFIGURED
+            # All should be NOT_CONFIGURED
+            assert github_result.status == DiagnosticStatus.NOT_CONFIGURED
+            assert gitlab_result.status == DiagnosticStatus.NOT_CONFIGURED
+            assert oidc_result.status == DiagnosticStatus.NOT_CONFIGURED
+            assert otel_result.status == DiagnosticStatus.NOT_CONFIGURED
 
 
 # Parallel execution test
@@ -675,7 +579,6 @@ async def test_all_apis_return_not_configured_when_not_configured(
 async def test_run_external_api_diagnostics_executes_in_parallel(
     diagnostics_service,
     mock_token_manager,
-    mock_delegation_manager,
     mock_config_manager,
 ):
     """Test that run_external_api_diagnostics executes all checks in parallel using asyncio.gather."""
@@ -714,5 +617,5 @@ async def test_run_external_api_diagnostics_executes_in_parallel(
         assert duration < 0.3, f"Expected parallel execution ~0.1s, got {duration}s"
 
         # Verify all checks completed
-        assert len(results) == 5
+        assert len(results) == 4
         assert all(isinstance(r, DiagnosticResult) for r in results)

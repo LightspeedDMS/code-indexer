@@ -4,8 +4,8 @@ Diagnostics Service for CIDX Server.
 Provides diagnostic checks across five categories:
 - CLI Tool Dependencies (ripgrep, Git, Coursier, Claude CLI, SCIP tools)
 - SDK Prerequisites (.NET, Go, Node.js)
-- External API Integrations (GitHub, GitLab, Claude Server, OIDC, OpenTelemetry)
-- Credential & Connectivity (SSH keys, GitHub/GitLab tokens, Claude delegation)
+- External API Integrations (GitHub, GitLab, OIDC, OpenTelemetry)
+- Credential & Connectivity (SSH keys, GitHub/GitLab tokens)
 - Core Infrastructure (SQLite database, vector storage)
 
 Features caching with category-specific TTLs and persistence to SQLite database.
@@ -29,7 +29,6 @@ from code_indexer.server.services.ci_token_manager import (
     GITHUB_TOKEN_PATTERN,
     GITLAB_TOKEN_PATTERN,
 )
-from code_indexer.server.config.delegation_config import ClaudeDelegationManager
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
@@ -1470,77 +1469,6 @@ class DiagnosticsService:
                 details={"error_type": type(e).__name__},
             )
 
-    async def check_claude_server(self) -> DiagnosticResult:
-        """
-        Check Claude Server connectivity via delegation endpoint.
-
-        Returns:
-            DiagnosticResult with Claude Server status
-        """
-        try:
-            # Get delegation config
-            delegation_manager = ClaudeDelegationManager()
-            config = delegation_manager.load_config()
-
-            # Bug #186 fix: Handle None return when config file doesn't exist
-            if config is None or not config.is_configured:
-                return DiagnosticResult(
-                    name="Claude Server",
-                    status=DiagnosticStatus.NOT_CONFIGURED,
-                    message="Claude Server not configured",
-                    details={},
-                )
-
-            # Test delegation endpoint (login endpoint)
-            login_url = f"{config.claude_server_url}/auth/login"
-
-            # Make API call with timeout
-            async with httpx.AsyncClient(timeout=API_TIMEOUT_SECONDS) as client:
-                # Test login endpoint
-                response = await client.post(
-                    login_url,
-                    json={
-                        "username": config.claude_server_username,
-                        "password": config.claude_server_credential,
-                    },
-                )
-                response.raise_for_status()
-
-                return DiagnosticResult(
-                    name="Claude Server",
-                    status=DiagnosticStatus.WORKING,
-                    message="Claude Server is accessible",
-                    details={},
-                )
-        except httpx.TimeoutException:
-            return DiagnosticResult(
-                name="Claude Server",
-                status=DiagnosticStatus.ERROR,
-                message="Claude Server request timed out",
-                details={},
-            )
-        except httpx.ConnectError:
-            return DiagnosticResult(
-                name="Claude Server",
-                status=DiagnosticStatus.ERROR,
-                message="Claude Server connection failed",
-                details={},
-            )
-        except httpx.HTTPStatusError as e:
-            return DiagnosticResult(
-                name="Claude Server",
-                status=DiagnosticStatus.ERROR,
-                message=f"Claude Server request failed: {e.response.status_code}",
-                details={"status_code": e.response.status_code},
-            )
-        except Exception as e:
-            return DiagnosticResult(
-                name="Claude Server",
-                status=DiagnosticStatus.ERROR,
-                message=f"Claude Server error: {str(e)}",
-                details={"error_type": type(e).__name__},
-            )
-
     async def check_oidc_provider(self) -> DiagnosticResult:
         """
         Check OIDC Provider connectivity via discovery endpoint.
@@ -1674,7 +1602,6 @@ class DiagnosticsService:
         results = await asyncio.gather(
             self.check_github_api(),
             self.check_gitlab_api(),
-            self.check_claude_server(),
             self.check_oidc_provider(),
             self.check_otel_collector(),
         )
@@ -1959,102 +1886,14 @@ class DiagnosticsService:
                 details={"error_type": type(e).__name__},
             )
 
-    async def check_claude_delegation_credentials(self) -> DiagnosticResult:
-        """
-        Check Claude Delegation credentials authentication (Story S5 AC4).
-
-        Tests JWT token acquisition via login endpoint.
-
-        Returns:
-            DiagnosticResult with Claude delegation credentials status:
-            - WORKING: Successfully acquired access token
-            - ERROR: Authentication failed
-            - NOT_CONFIGURED: Credentials not configured
-        """
-        try:
-            # Get delegation config
-            delegation_manager = ClaudeDelegationManager()
-            config = delegation_manager.load_config()
-
-            # Bug #186 fix: Handle None return when config file doesn't exist
-            if config is None or not config.is_configured:
-                return DiagnosticResult(
-                    name="Claude Delegation Credentials",
-                    status=DiagnosticStatus.NOT_CONFIGURED,
-                    message="Claude Delegation credentials not configured",
-                    details={},
-                )
-
-            # Test delegation endpoint (login endpoint)
-            login_url = f"{config.claude_server_url}/auth/login"
-
-            # Make API call with timeout
-            async with httpx.AsyncClient(timeout=API_TIMEOUT_SECONDS) as client:
-                # Test login endpoint
-                response = await client.post(
-                    login_url,
-                    json={
-                        "username": config.claude_server_username,
-                        "password": config.claude_server_credential,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                # Verify access_token in response
-                if "access_token" not in data:
-                    return DiagnosticResult(
-                        name="Claude Delegation Credentials",
-                        status=DiagnosticStatus.ERROR,
-                        message="Claude Server authentication succeeded but no access_token returned",
-                        details={},
-                    )
-
-                return DiagnosticResult(
-                    name="Claude Delegation Credentials",
-                    status=DiagnosticStatus.WORKING,
-                    message="Claude Delegation credentials are valid and working",
-                    details={},
-                )
-
-        except httpx.TimeoutException:
-            return DiagnosticResult(
-                name="Claude Delegation Credentials",
-                status=DiagnosticStatus.ERROR,
-                message="Claude Server request timed out",
-                details={},
-            )
-        except httpx.ConnectError:
-            return DiagnosticResult(
-                name="Claude Delegation Credentials",
-                status=DiagnosticStatus.ERROR,
-                message="Claude Server connection failed",
-                details={},
-            )
-        except httpx.HTTPStatusError as e:
-            return DiagnosticResult(
-                name="Claude Delegation Credentials",
-                status=DiagnosticStatus.ERROR,
-                message=f"Claude Server authentication failed: {e.response.status_code}",
-                details={"status_code": e.response.status_code},
-            )
-        except Exception as e:
-            return DiagnosticResult(
-                name="Claude Delegation Credentials",
-                status=DiagnosticStatus.ERROR,
-                message=f"Claude Delegation error: {str(e)}",
-                details={"error_type": type(e).__name__},
-            )
-
     async def run_credential_diagnostics(self) -> List[DiagnosticResult]:
         """
         Run all credential diagnostic checks in parallel (Story S5 AC5).
 
-        Executes all 4 credential checks using asyncio.gather:
+        Executes all 3 credential checks using asyncio.gather:
         - SSH Keys
         - GitHub Token
         - GitLab Token
-        - Claude Delegation Credentials
 
         Returns:
             List of DiagnosticResult objects for all credential checks
@@ -2063,7 +1902,6 @@ class DiagnosticsService:
             self.check_ssh_keys(),
             self.check_github_token(),
             self.check_gitlab_token(),
-            self.check_claude_delegation_credentials(),
         )
         return list(results)
 

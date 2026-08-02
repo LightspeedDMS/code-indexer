@@ -2,7 +2,7 @@
 LLM Lease State Persistence (Story #365).
 
 Persists authoritative lease state (lease_id, credential_id) to disk,
-encrypted with AES-256-CBC using the same pattern as delegation_config.py.
+encrypted with AES-256-CBC (PBKDF2-derived key, machine-specific salt).
 Default path: ~/.cidx-server/llm_lease_state.json
 """
 
@@ -168,7 +168,7 @@ class LlmLeaseStateManager:
         )
 
     # ------------------------------------------------------------------
-    # Encryption helpers (same algorithm as delegation_config.py)
+    # Encryption helpers (AES-256-CBC, PBKDF2-derived key)
     # ------------------------------------------------------------------
 
     def _derive_encryption_key(self) -> bytes:

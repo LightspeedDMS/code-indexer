@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.99.0] - 2026-08-02
+
+### Removed
+
+- Story #1487: Removed the Claude Server delegation feature entirely -- `ClaudeServerClient`, `DelegationJobTracker`, `DelegationFunctionLoader`, `PromptTemplateProcessor`, the delegation MCP tools (`cs_check_health`, `cs_list_repositories`, `cs_register_repository`, `execute_delegation_function`, `execute_open_delegation`, `list_delegation_functions`, `poll_delegation_job`), the `delegation_callbacks` router, the delegation Web Config UI section, and the `delegation_job_results` table (migration 042, dropped with explicit approval). The `delegate_open` permission is removed from the `power_user` role.
+
+### Performance
+
+- Story #1490: Released the GIL in the remaining `hnswlib` fork bindings (`check_integrity`, `repair_orphans`, `init_index`, `get_ids_list`, `mark_deleted`, `resize_index`, and `BFIndex` save/load) so long-running native HNSW operations no longer block concurrent request handling on the shared event loop. Verified live: 3100 concurrent `/health` requests served at idle latency while 53 real production orphan-integrity-check-and-repair passes ran in a background thread.
+
 ## [11.98.0] - 2026-08-02
 
 ### Fixed

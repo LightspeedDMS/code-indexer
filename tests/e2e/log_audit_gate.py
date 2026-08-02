@@ -114,13 +114,6 @@ from typing import Any, Callable, List, cast
 #   in a different git operation (e.g. "git_push file not found") would still be
 #   flagged by the gate.
 #
-# "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found"
-#   Emitted by the delegation handler when list_delegation_functions is called
-#   and the claude-delegation-functions golden repo is absent from the test server.
-#   Produced by test_06_mcp_admin.py.  Log code MCP-GENERAL-120 is the stable
-#   identifier; a delegation failure from a registered function would surface
-#   under a different message / code.
-#
 # "[REPO-GENERAL-017] ValidationError"
 #   Emitted by the error_handler middleware for every FastAPI RequestValidationError
 #   (HTTP 422).  Produced by:
@@ -178,8 +171,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # data dir.  [APP-GENERAL-050] is a benign idempotent no-op WARNING (the watch
     # was never running); it does not affect backup or refresh correctness.
     "No watch running for",
-    # test_06: list_delegation_functions when claude-delegation-functions repo absent.
-    "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found",
     # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
     # server returns 422 and logs REPO-GENERAL-017 ValidationError.
     "[REPO-GENERAL-017] ValidationError",
