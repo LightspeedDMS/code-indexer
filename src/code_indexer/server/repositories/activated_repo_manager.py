@@ -11,6 +11,9 @@ from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
+from code_indexer.server.storage.shared.snapshot_manager import (
+    _ensure_source_tree_readable_for_clone,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -24,7 +27,7 @@ import uuid
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Union
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.shared.clone_backend import CloneBackend
@@ -37,6 +40,7 @@ from ..services.deactivation_query_drain import wait_for_activated_repo_query_dr
 from ..services.job_tracker import DuplicateJobError
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
+from ...services.git_hook_manager import GitHookManager
 
 
 def _dict_row_factory() -> Any:
@@ -1218,6 +1222,12 @@ class ActivatedRepoManager:
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
 
+        # Bug #1514: self-heal the activated repo's OWN stale-path
+        # post-checkout hook BEFORE any of this method's checkout paths
+        # (remote-tracking switch, local switch, or create-branch
+        # checkout) can trigger it.
+        self._ensure_branch_hook_self_heal(repo_dir)
+
         try:
             # Step 1: Determine if we should attempt to fetch from remote
             should_fetch, remote_info = self._should_fetch_from_remote(repo_dir)
@@ -2140,6 +2150,13 @@ class ActivatedRepoManager:
             # Switch to requested branch if different from default
             if branch_name != golden_repo.default_branch:
                 update_progress(70, f"Switching to branch '{branch_name}'")
+                # Bug #1514: self-heal the activated repo's OWN stale-path
+                # post-checkout hook (inherited byte-for-byte from the CoW
+                # clone) BEFORE this checkout fires it -- the first
+                # checkout on a freshly-cloned activated repo happens
+                # before any indexing ever runs, so ensure_hook_installed()
+                # never gets a chance to self-heal via the indexing flow.
+                self._ensure_branch_hook_self_heal(activated_repo_path)
                 result = subprocess.run(
                     ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
                     cwd=activated_repo_path,
@@ -3266,6 +3283,21 @@ class ActivatedRepoManager:
                 if rc is not None
                 else self._COW_CLONE_TIMEOUT_DEFAULT
             )
+            # Issue #1511 (second call site): the CoW daemon runs as a
+            # different OS user (on a different host) than the process that
+            # wrote the golden-repo's index files, which commonly end up at
+            # restrictive mode 600 from that writer's ambient umask --
+            # causing `cp --reflink=auto -a` to fail with "Permission
+            # denied" for every activation clone attempt. The original
+            # #1511 fix only wired this preflight into
+            # VersionedSnapshotManager._create_clone_backend_snapshot
+            # (refresh/snapshot creation); activation calls
+            # create_clone_at_path directly and never went through that
+            # path, so the failure reproduced live on staging. Gated
+            # identically by class name (LocalCloneBackend / OntapCloneBackend
+            # are intentionally left untouched).
+            if type(self._clone_backend).__name__ == "CowDaemonBackend":
+                _ensure_source_tree_readable_for_clone(source_path)
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
@@ -3943,6 +3975,49 @@ class ActivatedRepoManager:
             f"Branch-delta reindex completed for '{user_alias}'",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    def _ensure_branch_hook_self_heal(self, repo_dir: Union[str, Path]) -> None:
+        """
+        Bug #1514: self-heal the activated repo's OWN post-checkout git
+        hook, in-place, before any `git checkout` runs against it.
+
+        A CoW clone of an activated repository copies
+        `.git/hooks/post-checkout` byte-for-byte from the golden repo's
+        own clone -- if that hook predates the #1514 dynamic-path fix (or
+        was itself inherited from yet another machine), it bakes in a
+        stale, install-time absolute path that dereferences to the WRONG
+        machine's metadata.json. `GitHookManager.ensure_hook_installed()`
+        already implements the self-heal (remove + reinstall with the
+        dynamic-path implementation) for the CLI indexing flow
+        (`smart_indexer.py`) -- this method reuses that SAME primitive for
+        the activation / branch-switch flow, which never gave it a chance
+        to run because the stale hook fires on the very FIRST checkout,
+        before any indexing has ever touched the activated repo's own
+        copy.
+
+        This is a best-effort repair: it must NEVER raise or abort
+        activation/branch-switch on failure, mirroring
+        `smart_indexer.py`'s own try/except-and-warn pattern around
+        `ensure_hook_installed()`.
+
+        Args:
+            repo_dir: Path (or path-like string) to the ACTIVATED repo's
+                own clone directory -- never the golden repo's path.
+        """
+        if not repo_dir:
+            self.logger.warning("Skipping git hook self-heal: repo_dir is empty/None")
+            return
+        try:
+            metadata_file = Path(repo_dir) / ".code-indexer" / "metadata.json"
+            git_hook_manager = GitHookManager(
+                repo_path=Path(repo_dir), metadata_file=metadata_file
+            )
+            git_hook_manager.ensure_hook_installed()
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to self-heal git hook for activated repo at '{repo_dir}': {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     def _validate_branch_name(self, branch_name: str) -> None:
         """
