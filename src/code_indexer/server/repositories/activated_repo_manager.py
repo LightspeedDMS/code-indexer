@@ -11,6 +11,9 @@ from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
+from code_indexer.server.storage.shared.snapshot_manager import (
+    _ensure_source_tree_readable_for_clone,
+)
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -3266,6 +3269,21 @@ class ActivatedRepoManager:
                 if rc is not None
                 else self._COW_CLONE_TIMEOUT_DEFAULT
             )
+            # Issue #1511 (second call site): the CoW daemon runs as a
+            # different OS user (on a different host) than the process that
+            # wrote the golden-repo's index files, which commonly end up at
+            # restrictive mode 600 from that writer's ambient umask --
+            # causing `cp --reflink=auto -a` to fail with "Permission
+            # denied" for every activation clone attempt. The original
+            # #1511 fix only wired this preflight into
+            # VersionedSnapshotManager._create_clone_backend_snapshot
+            # (refresh/snapshot creation); activation calls
+            # create_clone_at_path directly and never went through that
+            # path, so the failure reproduced live on staging. Gated
+            # identically by class name (LocalCloneBackend / OntapCloneBackend
+            # are intentionally left untouched).
+            if type(self._clone_backend).__name__ == "CowDaemonBackend":
+                _ensure_source_tree_readable_for_clone(source_path)
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
