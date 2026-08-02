@@ -85,5 +85,5 @@ class TestExpectedForkCommitConstant:
 
     def test_expected_hnswlib_fork_commit_constant_defined(self):
         assert (
-            EXPECTED_HNSWLIB_FORK_COMMIT == "878cfbe585395a8bdd95f593d071f778d2fac457"
+            EXPECTED_HNSWLIB_FORK_COMMIT == "8155cfc9d02a5a46528a3faab697555952ed40c6"
         )

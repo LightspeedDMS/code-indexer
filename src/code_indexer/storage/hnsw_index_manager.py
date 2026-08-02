@@ -110,7 +110,7 @@ class HNSWIntegrityRepairError(RuntimeError):
 # sync with pyproject.toml manually. Also imported by
 # `server/services/hnswlib_capability_check.py` (Bug #1392's non-fatal
 # server startup probe, unchanged/reused by Bug #1415).
-EXPECTED_HNSWLIB_FORK_COMMIT = "878cfbe585395a8bdd95f593d071f778d2fac457"
+EXPECTED_HNSWLIB_FORK_COMMIT = "8155cfc9d02a5a46528a3faab697555952ed40c6"
 
 
 class HNSWRebuildAllInvalidError(RuntimeError):
