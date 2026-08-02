@@ -13,6 +13,22 @@ from typing import Optional
 class GitHookManager:
     """Manages git hooks for branch change detection."""
 
+    # Bug #1514: bash env-var name used by the generated hook to resolve the
+    # repo root fresh on EVERY invocation (via `git rev-parse
+    # --show-toplevel`), instead of embedding an install-time absolute path.
+    # This project creates repository copies via full-tree copy operations
+    # (CoW reflink `cp --reflink=auto -a` for golden-repo base clones and
+    # activated-repo clones, or a raw filesystem copy used to seed a golden
+    # repo) rather than `git clone` -- `git clone` would create a FRESH
+    # `.git/hooks` directory, but a raw filesystem copy carries
+    # `.git/hooks/post-checkout` over byte-for-byte, stale absolute path
+    # baked in and all. The marker's presence in an existing hook file's
+    # content also serves as the "already on the dynamic-path
+    # implementation" signal ensure_hook_installed() checks to decide
+    # whether an old-style (install-time-absolute-path) hook needs to be
+    # self-healed.
+    _DYNAMIC_PATH_MARKER = "CIDX_HOOK_REPO_ROOT"
+
     def __init__(self, repo_path: Path, metadata_file: Optional[Path] = None):
         """
         Initialize git hook manager.
@@ -28,6 +44,29 @@ class GitHookManager:
     def is_git_repository(self) -> bool:
         """Check if the path is a git repository."""
         return (self.repo_path / ".git").exists()
+
+    def _relative_metadata_path(self) -> str:
+        """Return metadata_file's path relative to repo_path (POSIX form).
+
+        Bug #1514: the hook must never bake an absolute, install-time path
+        -- only the RELATIVE suffix (e.g. ".code-indexer/metadata.json") is
+        safe to embed; the repo root itself is re-resolved at hook-run
+        time via `git rev-parse --show-toplevel`.
+
+        Falls back to the absolute path string if metadata_file is not
+        located under repo_path -- defensive only, since every current
+        caller passes a metadata file under codebase_dir/.code-indexer/.
+        """
+        assert self.metadata_file is not None
+        try:
+            return (
+                Path(self.metadata_file)
+                .resolve()
+                .relative_to(self.repo_path.resolve())
+                .as_posix()
+            )
+        except ValueError:
+            return str(self.metadata_file)
 
     def install_branch_change_hook(self) -> None:
         """Install post-checkout hook to detect branch changes."""
@@ -60,25 +99,43 @@ class GitHookManager:
         hook_file.chmod(0o755)
 
     def _generate_hook_content(self) -> str:
-        """Generate the hook script content."""
+        """Generate the hook script content.
+
+        Bug #1514: the metadata file's directory is resolved DYNAMICALLY
+        every time the hook runs (via `git rev-parse --show-toplevel`
+        joined with the relative suffix computed at install time), never
+        embedded as a fixed absolute path. This makes the hook
+        self-correcting across any full-tree copy of the repository --
+        the exact operation this project performs for golden-repo base
+        clones, activated-repo CoW clones, and versioned snapshots.
+        """
+        marker = self._DYNAMIC_PATH_MARKER
+        relative_metadata = self._relative_metadata_path()
         python_script = f"""
-# Code Indexer Branch Tracking
-# This section updates the progressive metadata file when branch changes occur
+# Code Indexer Branch Tracking ({marker})
+# This section updates the progressive metadata file when branch changes occur.
+# Bug #1514: the metadata path is resolved from the repo's CURRENT location
+# at hook-run time -- never baked in as an install-time absolute path -- so
+# this hook file keeps working correctly after being copied wholesale
+# (CoW reflink clone, rsync, raw filesystem copy) to a different directory.
 
 # Check if this is a branch switch (not file checkout)
 if [ "$3" = "1" ]; then
     # Get current branch name
     CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "unknown")
-    
-    # Update metadata file using Python
-    python3 -c "
+    # Resolve the repo root fresh on every invocation.
+    {marker}=$(git rev-parse --show-toplevel 2>/dev/null)
+
+    if [ -n "${marker}" ]; then
+        {marker}="${marker}" python3 -c "
 import sys
 import json
 import errno
 import fcntl
+import os
 from pathlib import Path
 
-metadata_file = Path('{self.metadata_file}')
+metadata_file = Path(os.environ['{marker}']) / '{relative_metadata}'
 if metadata_file.exists():
     try:
         with open(metadata_file, 'r+') as f:
@@ -103,21 +160,43 @@ if metadata_file.exists():
         # File access issues, skip update
         pass
 "
+    fi
 fi
 """
         return python_script
 
     def ensure_hook_installed(self) -> None:
-        """Ensure the branch change hook is installed, installing if missing."""
+        """Ensure the branch change hook is installed, installing if missing.
+
+        Bug #1514 self-heal: a hook file that already contains the
+        "# Code Indexer Branch Tracking" marker but NOT the dynamic-path
+        marker was inherited from a full-tree copy of a DIFFERENT
+        directory (an old-style hook bakes an install-time absolute path
+        that stays wrong for this copy's own location forever). Such a
+        hook is removed and reinstalled so it starts resolving its own
+        current location at run time, instead of being left in place
+        just because *a* Code Indexer hook marker is present.
+        """
         if not self.is_git_repository():
             return  # Not a git repo, nothing to do
 
         hook_file = self.hooks_dir / "post-checkout"
 
-        if (
-            not hook_file.exists()
-            or "# Code Indexer Branch Tracking" not in hook_file.read_text()
-        ):
+        if not hook_file.exists():
+            self.install_branch_change_hook()
+            return
+
+        content = hook_file.read_text()
+
+        if "# Code Indexer Branch Tracking" not in content:
+            self.install_branch_change_hook()
+            return
+
+        if self._DYNAMIC_PATH_MARKER not in content:
+            # Old-style hook (install-time absolute path baked in),
+            # inherited verbatim from a copy of a different directory --
+            # repair it in place.
+            self.remove_hook()
             self.install_branch_change_hook()
 
     def remove_hook(self) -> None:
