@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.105.0] - 2026-08-03
+
+### Fixed
+
+- **CRITICAL** #1521: `SSHKeySyncService`'s stale-key manifest (`~/.ssh/.cidx-ssh-keys.json`) is now scoped by a SHA-256 hash of the owning backend's identity (resolved SQLite path, or PostgreSQL connection identity in cluster mode) instead of being a single flat list shared by every process on the host. Previously, a second server instance pointed at the same real `~/.ssh` with a different (e.g. empty, freshly-created) backend would see every name in the shared manifest as unconditionally stale relative to its own backend and delete those key files -- even though a different, legitimate instance's backend still owned them. This closed a real, already-exploited data-loss vector (confirmed via a real two-backend reproduction test) while preserving the legitimate cluster same-backend multi-node cleanup behavior (proven via a dedicated control test). A legacy (pre-fix) manifest's entries are never adopted as managed after upgrade -- their provenance is unknowable, so they are safely dropped from auto-cleanup eligibility rather than risk a wrongful deletion.
+- Fixed #1521 (secondary): all three SSH-key delete front doors (REST, MCP, Web) previously reported success unconditionally regardless of `SSHKeyManager.delete_key()`'s actual return value, silently hiding the #1519 provenance guard's legitimate refusal to delete an untracked same-named file. All three now report an honest failure when the guard refuses.
+
 ## [11.104.0] - 2026-08-03
 
 ### Fixed
