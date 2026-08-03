@@ -66,6 +66,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -211,3 +212,39 @@ class CollectionMetaCache:
             "immutable": self._immutable.counters(),
             "mutable": self._mutable.counters(),
         }
+
+
+# ---------------------------------------------------------------------------
+# Singleton accessor (mirrors get_global_id_index_cache / reset_global_id_
+# index_cache in server/cache/id_index_cache.py).
+#
+# Post-manual-E2E-test production fix (Story #1492 follow-up): a real
+# running server was strace-verified to show ZERO cross-request benefit
+# from this cache, because FilesystemVectorStore.__init__ only constructs
+# a CollectionMetaCache() when the caller passes None -- and every query
+# constructs a brand-new FilesystemVectorStore, so every instance got its
+# own private cache that died with it. FilesystemBackend.get_vector_store_
+# client() must inject THIS singleton in server mode (the same
+# hnsw_index_cache-is-not-None proxy for "server mode" id_index_cache
+# already uses) for the cache to survive across requests.
+# ---------------------------------------------------------------------------
+
+_global_collection_meta_cache_instance: Optional[CollectionMetaCache] = None
+_global_collection_meta_cache_lock = threading.Lock()
+
+
+def get_global_collection_meta_cache() -> CollectionMetaCache:
+    """Get or create the process-wide CollectionMetaCache singleton."""
+    global _global_collection_meta_cache_instance
+    if _global_collection_meta_cache_instance is None:
+        with _global_collection_meta_cache_lock:
+            if _global_collection_meta_cache_instance is None:
+                _global_collection_meta_cache_instance = CollectionMetaCache()
+    return _global_collection_meta_cache_instance
+
+
+def reset_global_collection_meta_cache() -> None:
+    """Reset the singleton (for testing)."""
+    global _global_collection_meta_cache_instance
+    with _global_collection_meta_cache_lock:
+        _global_collection_meta_cache_instance = None

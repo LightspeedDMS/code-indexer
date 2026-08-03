@@ -121,3 +121,59 @@ class TestCollectionMetaCacheDriftSafety:
 
         cache = CollectionMetaCache()
         assert cache.get(collection_dir) is None
+
+
+class TestGlobalCollectionMetaCacheSingleton:
+    """Post-manual-E2E-test production fix (Story #1492 follow-up).
+
+    A real running server was strace-verified to show ZERO cross-request
+    benefit from CollectionMetaCache: every query constructs a fresh
+    FilesystemVectorStore, and FilesystemVectorStore.__init__ only builds a
+    CollectionMetaCache() when the caller passes None -- so every instance
+    got its own private cache that died with it. get_global_collection_meta_cache()
+    is the process-wide singleton getter that FilesystemBackend.get_vector_store_client()
+    must inject in server mode, mirroring the established
+    get_global_id_index_cache() pattern (server/cache/id_index_cache.py).
+    """
+
+    def setup_method(self) -> None:
+        from code_indexer.storage.shared.collection_meta_cache import (
+            reset_global_collection_meta_cache,
+        )
+
+        reset_global_collection_meta_cache()
+
+    def teardown_method(self) -> None:
+        from code_indexer.storage.shared.collection_meta_cache import (
+            reset_global_collection_meta_cache,
+        )
+
+        reset_global_collection_meta_cache()
+
+    def test_returns_same_instance_across_calls(self) -> None:
+        from code_indexer.storage.shared.collection_meta_cache import (
+            get_global_collection_meta_cache,
+        )
+
+        first = get_global_collection_meta_cache()
+        second = get_global_collection_meta_cache()
+        assert first is second
+
+    def test_returns_a_real_collection_meta_cache_instance(self) -> None:
+        from code_indexer.storage.shared.collection_meta_cache import (
+            get_global_collection_meta_cache,
+        )
+
+        instance = get_global_collection_meta_cache()
+        assert isinstance(instance, CollectionMetaCache)
+
+    def test_reset_creates_a_fresh_instance(self) -> None:
+        from code_indexer.storage.shared.collection_meta_cache import (
+            get_global_collection_meta_cache,
+            reset_global_collection_meta_cache,
+        )
+
+        first = get_global_collection_meta_cache()
+        reset_global_collection_meta_cache()
+        second = get_global_collection_meta_cache()
+        assert first is not second

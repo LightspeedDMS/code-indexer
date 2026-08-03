@@ -151,3 +151,42 @@ class ChunkStoreThreadCache:
         for _key, (_mtime, store) in entries.items():
             _safe_close(store)
         entries.clear()
+
+
+# ---------------------------------------------------------------------------
+# Singleton accessor (mirrors get_global_id_index_cache / reset_global_id_
+# index_cache in server/cache/id_index_cache.py, and the identical
+# collection_meta_cache.py accessor added alongside this one).
+#
+# Post-manual-E2E-test production fix (Story #1492 follow-up): a real
+# running server was strace-verified to show ZERO cross-request benefit
+# from this cache, because FilesystemVectorStore.__init__ only constructs
+# a ChunkStoreThreadCache() when the caller passes None -- and every query
+# constructs a brand-new FilesystemVectorStore, so every instance got its
+# own private, single-use cache that died with it. This module's own
+# docstring already documents that ONE shared instance is safe across as
+# many threads as needed (it only coordinates which per-thread store lives
+# under threading.local() -- it never itself holds or hands out a
+# connection across threads), so FilesystemBackend.get_vector_store_
+# client() must inject THIS singleton in server mode.
+# ---------------------------------------------------------------------------
+
+_global_chunk_store_cache_instance: Optional[ChunkStoreThreadCache] = None
+_global_chunk_store_cache_lock = threading.Lock()
+
+
+def get_global_chunk_store_cache() -> ChunkStoreThreadCache:
+    """Get or create the process-wide ChunkStoreThreadCache singleton."""
+    global _global_chunk_store_cache_instance
+    if _global_chunk_store_cache_instance is None:
+        with _global_chunk_store_cache_lock:
+            if _global_chunk_store_cache_instance is None:
+                _global_chunk_store_cache_instance = ChunkStoreThreadCache()
+    return _global_chunk_store_cache_instance
+
+
+def reset_global_chunk_store_cache() -> None:
+    """Reset the singleton (for testing)."""
+    global _global_chunk_store_cache_instance
+    with _global_chunk_store_cache_lock:
+        _global_chunk_store_cache_instance = None

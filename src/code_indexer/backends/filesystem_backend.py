@@ -156,20 +156,45 @@ class FilesystemBackend(VectorStoreBackend):
         Story #526: Passes hnsw_index_cache to enable server-side caching.
         Bug #1078: Passes id_index_cache (global singleton) when in server mode
                    (indicated by hnsw_index_cache being set), otherwise None.
+        Story #1492 post-manual-E2E-test fix: passes collection_meta_cache
+                   and chunk_store_cache (global singletons) the same way --
+                   a real running server was strace-verified to show ZERO
+                   cross-request benefit from either cache because this
+                   method previously left both as the FilesystemVectorStore
+                   default (None), so every per-query instance got its own
+                   private, single-use cache that died with it.
 
         Returns:
             FilesystemVectorStore instance configured for this project
         """
         from ..storage.filesystem_vector_store import FilesystemVectorStore
 
-        # Bug #1078: server mode (hnsw_index_cache present) -> inject id_index cache.
-        # Local import avoids pulling server modules into CLI startup path.
+        # Bug #1078 / Story #1492: server mode (hnsw_index_cache present) ->
+        # inject the process-wide singletons. Local imports avoid pulling
+        # server modules into the CLI startup path.
         id_index_cache = None
+        collection_meta_cache = None
+        chunk_store_cache = None
         skip_staleness = False
         if self.hnsw_index_cache is not None:
             from ..server.cache.id_index_cache import get_global_id_index_cache
 
             id_index_cache = get_global_id_index_cache()
+
+            # Story #1492 follow-up: same server-mode gate as id_index_cache
+            # above -- these two caches' own module docstrings already
+            # describe being safe to share as a cross-request singleton;
+            # this closes the gap where nothing ever constructed them that
+            # way in production.
+            from ..storage.shared.collection_meta_cache import (
+                get_global_collection_meta_cache,
+            )
+            from ..storage.shared.chunk_store_cache import (
+                get_global_chunk_store_cache,
+            )
+
+            collection_meta_cache = get_global_collection_meta_cache()
+            chunk_store_cache = get_global_chunk_store_cache()
 
             # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable .versioned snapshots.
             # Import is server-mode-only (guarded by hnsw_index_cache) so CLI never pulls
@@ -189,6 +214,8 @@ class FilesystemBackend(VectorStoreBackend):
             memory_governor=self.memory_governor,
             activation_id=self.activation_id,
             use_chunks_db_for_new_collections=self.use_chunks_db_for_new_collections,
+            collection_meta_cache=collection_meta_cache,
+            chunk_store_cache=chunk_store_cache,
         )
 
     def health_check(self) -> bool:

@@ -173,3 +173,61 @@ class TestCrossThreadSafety:
         )
         _run_workers_concurrently(worker)
         _assert_every_thread_got_a_distinct_connection(results)
+
+
+class TestGlobalChunkStoreCacheSingleton:
+    """Post-manual-E2E-test production fix (Story #1492 follow-up).
+
+    A real running server was strace-verified to show ZERO cross-request
+    benefit from ChunkStoreThreadCache: every query constructs a fresh
+    FilesystemVectorStore, and FilesystemVectorStore.__init__ only builds a
+    ChunkStoreThreadCache() when the caller passes None -- so every
+    instance got its own private, single-use cache. Since the module's own
+    docstring states one shared instance is safe across as many threads as
+    needed (it only coordinates which per-thread store lives under
+    threading.local()), get_global_chunk_store_cache() is the process-wide
+    singleton getter FilesystemBackend.get_vector_store_client() must
+    inject in server mode, mirroring get_global_id_index_cache().
+    """
+
+    def setup_method(self) -> None:
+        from code_indexer.storage.shared.chunk_store_cache import (
+            reset_global_chunk_store_cache,
+        )
+
+        reset_global_chunk_store_cache()
+
+    def teardown_method(self) -> None:
+        from code_indexer.storage.shared.chunk_store_cache import (
+            reset_global_chunk_store_cache,
+        )
+
+        reset_global_chunk_store_cache()
+
+    def test_returns_same_instance_across_calls(self) -> None:
+        from code_indexer.storage.shared.chunk_store_cache import (
+            get_global_chunk_store_cache,
+        )
+
+        first = get_global_chunk_store_cache()
+        second = get_global_chunk_store_cache()
+        assert first is second
+
+    def test_returns_a_real_chunk_store_thread_cache_instance(self) -> None:
+        from code_indexer.storage.shared.chunk_store_cache import (
+            get_global_chunk_store_cache,
+        )
+
+        instance = get_global_chunk_store_cache()
+        assert isinstance(instance, ChunkStoreThreadCache)
+
+    def test_reset_creates_a_fresh_instance(self) -> None:
+        from code_indexer.storage.shared.chunk_store_cache import (
+            get_global_chunk_store_cache,
+            reset_global_chunk_store_cache,
+        )
+
+        first = get_global_chunk_store_cache()
+        reset_global_chunk_store_cache()
+        second = get_global_chunk_store_cache()
+        assert first is not second
