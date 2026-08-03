@@ -417,6 +417,7 @@ def execute_temporal_query_with_fusion(
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             at_commit_ts=at_commit_ts,
             precomputed_query_vector=precomputed_query_vector,
+            true_user_limit=limit,
             display_limit=limit,
             on_shard_complete=on_shard_complete,
             cancel_check=cancel_check,
@@ -606,6 +607,12 @@ def _query_shards_raw(
     no_embedding_cache_shortcut: bool = False,
     at_commit_ts: Optional[int] = None,
     precomputed_query_vector: Optional[List[float]] = None,
+    # Story #1493 AC1: the ORIGINAL user-requested limit, forwarded to every
+    # per-shard _query_single_provider call so TemporalSearchService can
+    # bound the COMBINED (shard x chunk-type) overfetch multiplier against
+    # the real user request rather than the already-shard-multiplied
+    # overfetch_limit above.
+    true_user_limit: Optional[int] = None,
     # Story #1400 Phase 4: display limit for the per-shard cumulative fuse
     # passed to on_shard_complete. None-safe: falls back to overfetch_limit
     # (a safe, if slightly-generous, upper bound) when omitted -- existing
@@ -705,6 +712,7 @@ def _query_shards_raw(
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                         at_commit_ts=at_commit_ts,
                         precomputed_query_vector=precomputed_query_vector,
+                        true_user_limit=true_user_limit,
                     )
 
                 # Story #1457 AC8 Step 6: pin-wrapped read, with the
@@ -730,6 +738,7 @@ def _query_shards_raw(
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     at_commit_ts=at_commit_ts,
                     precomputed_query_vector=precomputed_query_vector,
+                    true_user_limit=true_user_limit,
                 )
             if result.results:
                 results_by_shard[collection_display_name(_query_coll_name)] = (
@@ -847,6 +856,11 @@ def _query_single_provider(
     # seam across sequential shards of the SAME embedder). Forwarded verbatim
     # to TemporalSearchService.query_temporal.
     precomputed_query_vector: Optional[List[float]] = None,
+    # Story #1493 AC1: the ORIGINAL user-requested limit, forwarded verbatim
+    # to TemporalSearchService.query_temporal so it can bound the COMBINED
+    # (shard x chunk-type) overfetch multiplier against the real user
+    # request rather than the already-shard-multiplied `limit` above.
+    true_user_limit: Optional[int] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     from .temporal_search_service import TemporalSearchService
@@ -889,6 +903,7 @@ def _query_single_provider(
         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         at_commit_ts=at_commit_ts,
         precomputed_query_vector=precomputed_query_vector,
+        true_user_limit=true_user_limit,
     )
 
     from .temporal_collection_naming import collection_display_name
