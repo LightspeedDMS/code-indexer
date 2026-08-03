@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.103.0] - 2026-08-03
+
+### Performance
+
+- Story #1493: temporal search overfetch is now bounded by `TEMPORAL_COMBINED_OVERFETCH_CEILING = 60`, capping a combined multiplier that could previously reach 120x on `commit_message` queries. CHUNKS_DB collections skip decoding discarded non-head chunk-type candidates entirely (zero-I/O), improving head-chunk recall. Recall-comparison evidence (7 real natural-language queries against a realistic multi-chunk corpus) confirms byte-identical results before/after; a deterministic engineered-vector test documents a real, adversarial-only SHARDED_JSON recall risk that natural-language queries do not appear to produce in practice.
+
+### Fixed
+
+- Fixed intermittent test failures in the new Story #1493 boundary-risk test caused by HNSW's multi-threaded index-construction non-determinism (concurrent insertion occasionally orphaning graph nodes, degrading approximate search on a razor-thin engineered rank margin). `HNSWIndexManager`/`FilesystemVectorStore` gained an additive, optional `num_threads`/`hnsw_num_threads` constructor parameter (defaults preserve existing multi-threaded production behavior for every existing caller) so tests needing deterministic construction can force single-threaded index builds.
+
 ## [11.102.0] - 2026-08-03
 
 ### Performance
