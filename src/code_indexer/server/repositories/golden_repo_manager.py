@@ -2790,6 +2790,10 @@ class GoldenRepoManager:
     def resolve_workspace_id(self, alias: str) -> str:
         """Resolve the workspace-mcp ``workspace_id`` for *alias* or raise.
 
+        EVO-65365: no longer on the Option-C production golden path (which
+        addresses golden repos by bare alias, not workspace_id); retained for the
+        workspace_id addressing/compat mode in ``build_scip_generator`` and tests.
+
         EVO-65021: this is the accessor the delegated SCIP indexer (stream-01)
         consumes to address sandbox-mcp (``sb-{workspace_id}``). Unlike
         :meth:`get_workspace_id`, it never returns a falsy handle — it raises

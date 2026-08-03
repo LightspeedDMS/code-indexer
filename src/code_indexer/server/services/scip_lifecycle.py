@@ -200,11 +200,13 @@ def funnel_scip_generation(
     Parameters
     ----------
     alias:
-        Golden-repo alias (needed to resolve the sandbox ``workspace_id`` under
-        the delegated backend). ``None``/empty → delegated fail-soft skip.
-        This MUST be a **golden** alias (bare, no ``-global`` suffix): the
-        delegated resolver is ``GoldenRepoManager.resolve_workspace_id``, which
-        is keyed by the bare golden alias. The golden entrypoint normalizes the
+        Golden-repo alias sent to the sandbox under the delegated backend.
+        ``None``/empty → delegated fail-soft skip. This MUST be a **golden**
+        alias (bare, no ``-global`` suffix): under Option C (EVO-65365) the
+        delegated backend hands the bare alias to the sandbox, which resolves it
+        to the filesystem path ``<GOLDEN_REPOS_ROOT>/<alias>``. A ``-global``
+        registry alias would resolve to a non-existent path → a generic failed
+        build (not a clean typed skip), so the golden entrypoint normalizes the
         ``-global`` registry alias to bare before calling here (CRITICAL-1).
     repo_root:
         Repo root (== the sandbox ``/workspace`` mount for golden repos).
@@ -301,14 +303,22 @@ def funnel_scip_generation(
             alias=alias,
         )
         if generator is None:
-            # stream-01 seam #3 fail-soft: no retained workspace_id for this repo.
+            # DEFENSIVE guard (stream-01 seam #3). Under Option C (EVO-65365) the
+            # production builder (``build_scip_generator_for_golden_repo``) always
+            # returns a generator for a golden repo — it addresses by bare alias
+            # and no longer resolves a workspace_id — so a None here does NOT mean
+            # "missing workspace_id"; it means the injected ``generator_builder``
+            # seam returned None (a builder-seam/config anomaly, or a test). Kept
+            # so such an anomaly fails soft (skip SCIP) rather than crashing the
+            # index job.
             logger.warning(
-                "EVO-65021 fail-soft: no retained workspace_id for '%s'; "
-                "skipping delegated SCIP (repo stays 'skipped: No SCIP index "
-                "available')",
+                "EVO-65365 fail-soft: SCIP generator_builder returned None for "
+                "'%s' (builder-seam/config anomaly — the Option C production "
+                "builder always returns a generator); skipping delegated SCIP "
+                "(repo stays 'skipped: No SCIP index available')",
                 alias,
             )
-            record_scip_metric("delegated_skipped_no_workspace_id")
+            record_scip_metric("delegated_skipped_builder_returned_none")
             return ScipDelegationOutcome.SKIPPED
 
         commit = get_current_commit(repo_root) or ""

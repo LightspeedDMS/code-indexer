@@ -140,6 +140,54 @@ class TestBackendSeam:
         assert len(recorder.calls) == 1
         call = recorder.calls[0]
         assert call["workspace_id"] == "W-77"
+        assert call["golden_alias"] is None
+        assert call["language"] == "typescript"
+
+    def test_rebuild_threads_golden_alias(self, tmp_path):
+        """EVO-65365: rebuild_projects() also threads golden_alias (not just
+        generate()). Mirrors test_injected_map_and_golden_alias_threaded on the
+        rebuild path so removing the golden_alias kwarg at generator.py:466 fails
+        the suite."""
+        from code_indexer.scip.status import (
+            StatusTracker,
+            GenerationStatus,
+            ProjectStatus,
+            OverallStatus,
+        )
+        from datetime import datetime
+
+        (tmp_path / "package.json").write_text("{}")
+        recorder = _RecordingIndexer()
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": recorder},
+            golden_alias="svc-foo",
+        )
+
+        # Seed a status file with one failed TS project at the repo root.
+        tracker = StatusTracker(gen.scip_dir)
+        status = GenerationStatus(
+            overall_status=OverallStatus.FAILED,
+            total_projects=1,
+            successful_projects=0,
+            failed_projects=1,
+            projects={
+                ".": ProjectStatus(
+                    status=OverallStatus.FAILED,
+                    language="typescript",
+                    build_system="npm",
+                    timestamp=datetime.now().isoformat(),
+                )
+            },
+        )
+        tracker.save(status)
+
+        gen.rebuild_projects(["."], force=True)
+
+        assert len(recorder.calls) == 1
+        call = recorder.calls[0]
+        assert call["golden_alias"] == "svc-foo"
+        assert call["workspace_id"] is None
         assert call["language"] == "typescript"
 
 

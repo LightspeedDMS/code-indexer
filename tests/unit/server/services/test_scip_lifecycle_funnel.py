@@ -134,9 +134,12 @@ class TestFailSoft:
         assert out is ScipDelegationOutcome.SKIPPED
         assert get_scip_metrics().get("delegated_skipped_no_alias") == 1
 
-    def test_no_workspace_id_skips(self, tmp_path, monkeypatch):
+    def test_builder_returned_none_skips(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
-        # builder returns None → stream-01 seam #3 fail-soft (no workspace_id).
+        # builder returns None → stream-01 seam #3 DEFENSIVE guard. Under Option C
+        # (EVO-65365) the production builder always returns a generator for a
+        # golden repo, so a None indicates a builder-seam/config anomaly (or, as
+        # here, a test injecting the seam) — the funnel fails soft, not crashes.
         out = funnel_scip_generation(
             alias="r",
             repo_root=tmp_path,
@@ -146,7 +149,7 @@ class TestFailSoft:
             generator_builder=lambda *a, **k: None,
         )
         assert out is ScipDelegationOutcome.SKIPPED
-        assert get_scip_metrics().get("delegated_skipped_no_workspace_id") == 1
+        assert get_scip_metrics().get("delegated_skipped_builder_returned_none") == 1
 
     def test_builder_raising_is_swallowed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
