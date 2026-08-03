@@ -10368,7 +10368,23 @@ def delete_ssh_key(
 
     try:
         manager = _get_ssh_key_manager()
-        manager.delete_key(key_name)
+
+        # Bug #1521: delete_key() returns False when the Bug #1519 provenance
+        # guard refuses to remove a same-named file this server never proved it
+        # wrote. That return value used to be discarded, so a refused deletion
+        # was rendered as a success -- a silent lie about a safety-critical
+        # operation.
+        if not manager.delete_key(key_name):
+            return _create_ssh_keys_page_response(
+                request,
+                session,
+                error_message=(
+                    f"Refused to delete '{key_name}': an untracked file of that "
+                    f"name exists in the SSH directory and this server has no "
+                    f"record of creating it. Remove it manually if it is "
+                    f"genuinely unwanted."
+                ),
+            )
 
         return _create_ssh_keys_page_response(
             request,
