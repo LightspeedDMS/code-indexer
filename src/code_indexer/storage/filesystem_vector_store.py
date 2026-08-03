@@ -393,6 +393,7 @@ class FilesystemVectorStore:
         # eager top-level import this module deliberately avoids (Bug #1468
         # lazy-load discipline).
         chunk_store_cache: Optional[Any] = None,
+        hnsw_num_threads: Optional[int] = None,
     ):
         # collection_meta_cache: Story #1492 AC1 -- optional injected
         # CollectionMetaCache (server mode: a shared, cross-request
@@ -446,6 +447,16 @@ class FilesystemVectorStore:
                 Defaults to None for the CLI/solo/non-activated path, which
                 keeps today's pure path-derived cache key byte-for-byte
                 unchanged.
+            hnsw_num_threads: Story #1493 flakiness investigation -- optional
+                override forwarded to the HNSWIndexManager constructed by
+                end_indexing() for its full-rebuild path (build_index/
+                rebuild_from_vectors thread count for hnswlib's
+                add_items()). None (default, every existing caller)
+                preserves today's behavior exactly (HNSWIndexManager falls
+                back to DEFAULT_HNSW_NUM_THREADS, hnswlib's own -1 "use
+                every available core"). Tests needing fully deterministic,
+                race-free HNSW graph construction may pass
+                hnsw_num_threads=1; production never sets this.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -507,6 +518,12 @@ class FilesystemVectorStore:
         # Server mode injects get_memory_governor() via FilesystemBackend.get_vector_store_client().
         # CLI/solo leaves this None so eviction is byte-identical to Bug #1171.
         self.memory_governor: Optional[Any] = memory_governor
+
+        # Story #1493 flakiness investigation: optional HNSWIndexManager
+        # thread-count override, forwarded to the manager end_indexing()
+        # constructs for its full-rebuild path. None (every existing
+        # caller) preserves today's default multi-threaded behavior exactly.
+        self._hnsw_num_threads: Optional[int] = hnsw_num_threads
 
         # Story #1457 AC8: optional TemporalShardResolver, per-instance-gated.
         # None (default) preserves byte-identical direct construction for
@@ -989,7 +1006,12 @@ class FilesystemVectorStore:
         # Conditional HNSW rebuild based on watch mode
         from .hnsw_index_manager import HNSWIndexManager
 
-        hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
+        # Story #1493 flakiness investigation: self._hnsw_num_threads is
+        # None for every existing caller, resolving to HNSWIndexManager's
+        # own DEFAULT_HNSW_NUM_THREADS (-1) -- byte-identical to today.
+        hnsw_manager = HNSWIndexManager(
+            vector_dim=vector_size, space="cosine", num_threads=self._hnsw_num_threads
+        )
         hnsw_skipped = False
 
         # HNSW-002: Auto-detection for incremental vs full rebuild

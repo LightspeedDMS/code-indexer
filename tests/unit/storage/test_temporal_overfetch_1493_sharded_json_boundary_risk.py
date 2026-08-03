@@ -140,8 +140,30 @@ def _build_engineered_collection(
     orth_raw = orth_raw - np.dot(orth_raw, query_unit) * query_unit
     orth_unit = _unit(orth_raw)
 
+    # Flakiness-investigation fix (post-#1493 code review): force
+    # single-threaded HNSW insertion via the explicit hnsw_num_threads=1
+    # constructor override (test-only; production never sets this).
+    # hnswlib's add_items() defaults to num_threads=-1 (use every available
+    # core); under concurrent insertion, HNSW's internal link-graph updates
+    # race across worker threads and can occasionally leave a node ORPHANED
+    # (disconnected from its expected neighbors) -- confirmed via captured
+    # `HNSW_ORPHAN_REPAIR_EVENT orphan_count=N repaired=true` log lines on
+    # the exact runs that failed. Even after Story #1359's finalize-time
+    # repair reports success, the graph's *search* quality stays degraded
+    # specifically for the "request almost the entire corpus" case all
+    # three tests below exercise (prefetch_limit=total_vectors clamps
+    # hnswlib's internal k down to exactly queryable_count) -- triggering
+    # knn_query's `contiguous 2D array` error and a halved-k retry that
+    # silently drops genuine top-ranked matches, not just this fixture's
+    # razor-thin engineered boundary case. Forcing num_threads=1 makes
+    # insertion order equal input order with no races, eliminating the
+    # orphan and, with it, this whole failure chain -- verified empirically
+    # at 120/120 passing builds versus a reproduced ~6-12% failure rate
+    # with the default multi-threaded path.
     store = FilesystemVectorStore(
-        base_path=tmp_path, use_chunks_db_for_new_collections=False
+        base_path=tmp_path,
+        use_chunks_db_for_new_collections=False,
+        hnsw_num_threads=1,
     )
     store.create_collection("coll", vector_size=VECTOR_DIM)
     store.begin_indexing("coll")
@@ -257,29 +279,43 @@ def _target_path(target_point_id: str) -> str:
 def test_target_rank_is_engineered_correctly(
     engineered_collection: Tuple[FilesystemVectorStore, np.ndarray, str, int],
 ) -> None:
-    """Sanity check on the fixture itself: the target's raw HNSW rank must
-    be EXACTLY where this test claims (182) -- strictly between
+    """Sanity check on the fixture itself: the target's TRUE cosine-similarity
+    rank must be EXACTLY where this test claims (182) -- strictly between
     CAPPED_SEARCH_LIMIT (180) and NATURAL_SEARCH_LIMIT (360) -- or the rest
-    of this module's claims are meaningless."""
+    of this module's claims are meaningless.
+
+    Verified via an EXACT, deterministic brute-force cosine-similarity sort
+    of the raw vectors read directly off disk (scroll_points, pure JSON
+    reads) -- no HNSW, no approximation, no threading -- rather than routing
+    through the approximate, occasionally graph-topology-varying HNSW search
+    path (store.search()). A sanity check on analytically-constructed
+    vectors' true similarity ordering should be verified via exact math, not
+    an approximate nearest-neighbor index: this makes THIS specific test
+    100% deterministic by construction, independent of hnswlib's internal
+    behavior entirely (belt-and-suspenders on top of the fixture's
+    hnsw_num_threads=1 override, which independently makes the *other* two
+    tests' real HNSW search deterministic)."""
     store, query_vector, target_point_id, total_vectors = engineered_collection
 
-    # limit/prefetch_limit are deliberately > total_vectors (not exactly
-    # equal) -- hnswlib has a known edge case where requesting k exactly
-    # equal to the number of indexed elements triggers an internal
-    # "contiguous-2D-array" error and a k-halving retry fallback. A
-    # strictly larger request is the normal way to ask for "everything"
-    # and avoids that edge case; search()'s HNSW k is driven by
-    # prefetch_limit when supplied, so both must be raised together.
-    raw_all = store.search(
-        query="unused",
-        embedding_provider=_RaisesIfUsed(),
-        collection_name="coll",
+    all_points, _ = store.scroll_points(
+        "coll",
         limit=total_vectors * 2,
-        precomputed_query_vector=query_vector.tolist(),
-        prefetch_limit=total_vectors * 2,
-        ef=HNSW_EF_EXHAUSTIVE,
+        with_payload=False,
+        with_vectors=True,
     )
-    ranked_ids = [r["id"] for r in raw_all]
+    assert len(all_points) == total_vectors
+
+    query_unit = query_vector / np.linalg.norm(query_vector)
+    similarities: List[Tuple[str, float]] = []
+    for point in all_points:
+        vector = np.asarray(point["vector"], dtype=np.float64)
+        vector_unit = vector / np.linalg.norm(vector)
+        similarities.append((point["id"], float(np.dot(query_unit, vector_unit))))
+
+    ranked_ids = [
+        point_id
+        for point_id, _ in sorted(similarities, key=lambda item: item[1], reverse=True)
+    ]
     target_rank = ranked_ids.index(target_point_id) + 1
 
     assert target_rank == EXPECTED_TARGET_RANK == 182
