@@ -2,9 +2,9 @@
   "description": "Story #1493 AC3 fixed, recorded query set for the temporal overfetch-ceiling recall comparison. Run via scripts/analysis/temporal_overfetch_1493_recall_compare.py against a repo built by scripts/analysis/temporal_overfetch_1493_build_fixture.py.",
   "target_repo_fixture": {
     "builder_script": "scripts/analysis/temporal_overfetch_1493_build_fixture.py",
-    "shape": "~520 real commits, two quarters (2024 Q1 and 2024 Q3, ~260 commits each), six rotating topic files, real VoyageAI embeddings via `cidx index --index-commits`",
+    "shape": "20 real commits, two quarters (2024 Q1 and 2024 Q3, 10 commits each), six rotating topic files, EACH commit's diff sized (~1009-line full-file rewrite) so its aggregated per-commit document chunks into ~36 pieces (matching temporal_overfetch_1493_ac4_benchmark.py's 2.7% head-density ratio), real VoyageAI embeddings via `cidx index --index-commits` (measured: 612 total chunks, achieved_head_ratio=0.0327). Corrects the ORIGINAL fixture, which produced exactly 1 chunk/commit (100% head chunks) -- see build_fixture.py's module docstring for the full methodology-flaw history.",
     "shard_identifiers": ["code-indexer-temporal-voyage_context_4-2024Q1", "code-indexer-temporal-voyage_context_4-2024Q3"],
-    "sizing_rationale": "260 commits/quarter exceeds the AC1 combined-overfetch-ceiling's capped threshold for the worst-case query (true_user_limit=3 * TEMPORAL_COMBINED_OVERFETCH_CEILING=60 = 180), so the cap actually truncates real per-shard candidates rather than trivially returning everything regardless of cap value."
+    "sizing_rationale": "Q1's real total is 252 chunks (6 pure-addition first-touch commits at ~18 chunks each + 4 modified commits at ~36 each) and Q3's is 360 chunks (all 10 modified) -- both exceed the AC1 combined-overfetch-ceiling's capped threshold for the worst-case query (true_user_limit=3 * TEMPORAL_COMBINED_OVERFETCH_CEILING=60 = 180), so the cap actually truncates real per-shard candidates rather than trivially returning everything regardless of cap value. Commit COUNT no longer needs to be large (520->20): realistic PER-COMMIT chunking density, not commit count, is what makes the corpus realistic -- see reports/perf/temporal_overfetch_1493_corpus_stats.json for the full per-commit measured breakdown."
   },
   "queries": [
     {

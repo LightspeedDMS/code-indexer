@@ -11,5 +11,8 @@
       "noise_commit_count": 300,
       "measured_rank": 301
     }
-  ]
+  ],
+  "characterization": "candidate_window_exclusion",
+  "display_limit": 3,
+  "does_not_demonstrate": "concrete recall loss -- with display_limit=3, a candidate ranked 301 can never appear in a top-3 by-score result regardless of whether the raw candidate pool includes it; the genuine recall-loss proof is the deterministic engineered-vector unit test tests/unit/storage/test_temporal_overfetch_1493_sharded_json_boundary_risk.py"
 }

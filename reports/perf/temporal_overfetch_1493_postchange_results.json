@@ -1,23 +1,23 @@
 {
   "label": "postchange",
-  "captured_at": "2026-08-03T08:50:59.977021+00:00",
-  "repo": "/tmp/claude-1000/-home-jsbattig-Dev-code-indexer/00955505-d680-44dc-bc54-13769dbb9d22/scratchpad/ac3-main-corpus",
-  "query_set_file": "/home/jsbattig/Dev/code-indexer/.claude/worktrees/agent-ac275eb485c037908/reports/perf/temporal_overfetch_1493_query_set.json",
+  "captured_at": "2026-08-03T14:01:18.113100+00:00",
+  "repo": "/tmp/claude-1000/-home-jsbattig-Dev-code-indexer/bf453024-c658-4c98-bc2d-eebbb3ac44f3/scratchpad/1493_recall/repo",
+  "query_set_file": "reports/perf/temporal_overfetch_1493_query_set.json",
   "results": [
     {
       "query_id": "Q1_commit_message_multi_shard",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "b2191b7",
-        "efe9e00",
-        "f8e5df6",
-        "93c8fd9",
-        "752db94",
-        "0a0ebe1",
-        "664349d",
-        "334cb4a",
-        "b030703",
-        "f251ccf"
+        "b999f95",
+        "eb8c1d8",
+        "6e6e435",
+        "ee83749",
+        "8034962",
+        "714225b",
+        "d65997d",
+        "8fd6137",
+        "4b8e54e",
+        "12de1dc"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -26,11 +26,11 @@
       "query_id": "Q2_commit_message_small_limit",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "d873c57",
-        "bbfa3e5",
-        "7f82da8",
-        "da4ba69",
-        "d2846b1"
+        "8034962",
+        "185cd11",
+        "0d71bda",
+        "5d07bba",
+        "b999f95"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -39,16 +39,14 @@
       "query_id": "Q3_commit_diff",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "2fb0908",
-        "e24f3ec",
-        "e910300",
-        "6720af7",
-        "8be50c0",
-        "fc374bf",
-        "5fb682c",
-        "66462d6",
-        "c687eda",
-        "a742ff7"
+        "eadbf24",
+        "1f78012",
+        "8fd6137",
+        "b999f95",
+        "d65997d",
+        "ee83749",
+        "4371c61",
+        "eb8c1d8"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -57,16 +55,10 @@
       "query_id": "Q4_no_chunk_type",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "08f6953",
-        "0214105",
-        "2a9446e",
-        "a2e23e3",
-        "25173a8",
-        "30c054b",
-        "82687b2",
-        "dd0816b",
-        "e35e763",
-        "f06a3a2"
+        "714225b",
+        "4371c61",
+        "d65997d",
+        "8034962"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -75,26 +67,26 @@
       "query_id": "Q5_commit_message_larger_limit",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "5263793",
-        "3d9425e",
-        "edd53a2",
-        "eebe655",
-        "cb7c687",
-        "66192aa",
-        "48d28f4",
-        "375758e",
-        "7380c86",
-        "47b32e7",
-        "5ee55c9",
-        "e0ff510",
-        "467eb2e",
-        "3ae2ca8",
-        "67b2416",
-        "406ccc5",
-        "2df5ac4",
-        "64628d5",
-        "f4b3903",
-        "be78a15"
+        "ca8f162",
+        "23156ba",
+        "1758471",
+        "4371c61",
+        "eadbf24",
+        "714225b",
+        "8fd6137",
+        "1f78012",
+        "d65997d",
+        "4b8e54e",
+        "6e6e435",
+        "0d71bda",
+        "223231d",
+        "12de1dc",
+        "8034962",
+        "185cd11",
+        "5d07bba",
+        "eb8c1d8",
+        "ee83749",
+        "b999f95"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -103,16 +95,9 @@
       "query_id": "Q6_commit_diff_single_shard",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "9f3fa1f",
-        "04dd95c",
-        "eea805b",
-        "ee438bf",
-        "93e53ae",
-        "365d97a",
-        "ea857fd",
-        "a242f52",
-        "265ccc5",
-        "47f5b25"
+        "5d07bba",
+        "8034962",
+        "223231d"
       ],
       "stderr_tail": "",
       "label": "postchange"
@@ -121,9 +106,9 @@
       "query_id": "Q7_commit_message_worst_case_small_limit",
       "returncode": 0,
       "ranked_commit_hashes": [
-        "467eb2e",
-        "a59d02b",
-        "67b2416"
+        "23156ba",
+        "ca8f162",
+        "1758471"
       ],
       "stderr_tail": "",
       "label": "postchange"

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-03T08:51:11.319092+00:00",
+  "generated_at": "2026-08-03T14:01:38.145779+00:00",
   "overall_verdict": "PASS",
   "queries": [
     {
@@ -10,29 +10,52 @@
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "b2191b7",
-        "efe9e00",
-        "f8e5df6",
-        "93c8fd9",
-        "752db94",
-        "0a0ebe1",
-        "664349d",
-        "334cb4a",
-        "b030703",
-        "f251ccf"
+        "b999f95",
+        "eb8c1d8",
+        "6e6e435",
+        "ee83749",
+        "8034962",
+        "714225b",
+        "d65997d",
+        "8fd6137",
+        "4b8e54e",
+        "12de1dc"
       ],
       "postchange_order": [
-        "b2191b7",
-        "efe9e00",
-        "f8e5df6",
-        "93c8fd9",
-        "752db94",
-        "0a0ebe1",
-        "664349d",
-        "334cb4a",
-        "b030703",
-        "f251ccf"
-      ]
+        "b999f95",
+        "eb8c1d8",
+        "6e6e435",
+        "ee83749",
+        "8034962",
+        "714225b",
+        "d65997d",
+        "8fd6137",
+        "4b8e54e",
+        "12de1dc"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_message",
+        "true_user_limit": 10,
+        "natural_search_limit": 1200,
+        "capped_search_limit": 600,
+        "natural_window_survivors": 20,
+        "capped_window_survivors": 20,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1",
+          "code-indexer-temporal-voyage_context_4-2024Q3"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 252
+          },
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+            "candidates_returned": 360
+          }
+        ]
+      }
     },
     {
       "query_id": "Q2_commit_message_small_limit",
@@ -42,83 +65,117 @@
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "d873c57",
-        "bbfa3e5",
-        "7f82da8",
-        "da4ba69",
-        "d2846b1"
+        "8034962",
+        "185cd11",
+        "0d71bda",
+        "5d07bba",
+        "b999f95"
       ],
       "postchange_order": [
-        "d873c57",
-        "bbfa3e5",
-        "7f82da8",
-        "da4ba69",
-        "d2846b1"
-      ]
+        "8034962",
+        "185cd11",
+        "0d71bda",
+        "5d07bba",
+        "b999f95"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_message",
+        "true_user_limit": 5,
+        "natural_search_limit": 600,
+        "capped_search_limit": 300,
+        "natural_window_survivors": 20,
+        "capped_window_survivors": 18,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1",
+          "code-indexer-temporal-voyage_context_4-2024Q3"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 252
+          },
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+            "candidates_returned": 360
+          }
+        ]
+      }
     },
     {
       "query_id": "Q3_commit_diff",
-      "baseline_count": 10,
-      "postchange_count": 10,
+      "baseline_count": 8,
+      "postchange_count": 8,
       "overlap_jaccard": 1.0,
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "2fb0908",
-        "e24f3ec",
-        "e910300",
-        "6720af7",
-        "8be50c0",
-        "fc374bf",
-        "5fb682c",
-        "66462d6",
-        "c687eda",
-        "a742ff7"
+        "eadbf24",
+        "1f78012",
+        "8fd6137",
+        "b999f95",
+        "d65997d",
+        "ee83749",
+        "4371c61",
+        "eb8c1d8"
       ],
       "postchange_order": [
-        "2fb0908",
-        "e24f3ec",
-        "e910300",
-        "6720af7",
-        "8be50c0",
-        "fc374bf",
-        "5fb682c",
-        "66462d6",
-        "c687eda",
-        "a742ff7"
-      ]
+        "eadbf24",
+        "1f78012",
+        "8fd6137",
+        "b999f95",
+        "d65997d",
+        "ee83749",
+        "4371c61",
+        "eb8c1d8"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_diff",
+        "true_user_limit": 10,
+        "natural_search_limit": 45,
+        "capped_search_limit": 45,
+        "natural_window_survivors": 90,
+        "capped_window_survivors": 90,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1",
+          "code-indexer-temporal-voyage_context_4-2024Q3"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 45
+          },
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+            "candidates_returned": 45
+          }
+        ]
+      }
     },
     {
       "query_id": "Q4_no_chunk_type",
-      "baseline_count": 10,
-      "postchange_count": 10,
+      "baseline_count": 4,
+      "postchange_count": 4,
       "overlap_jaccard": 1.0,
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "08f6953",
-        "0214105",
-        "2a9446e",
-        "a2e23e3",
-        "25173a8",
-        "30c054b",
-        "82687b2",
-        "dd0816b",
-        "e35e763",
-        "f06a3a2"
+        "714225b",
+        "4371c61",
+        "d65997d",
+        "8034962"
       ],
       "postchange_order": [
-        "08f6953",
-        "0214105",
-        "2a9446e",
-        "a2e23e3",
-        "25173a8",
-        "30c054b",
-        "82687b2",
-        "dd0816b",
-        "e35e763",
-        "f06a3a2"
-      ]
+        "714225b",
+        "4371c61",
+        "d65997d",
+        "8034962"
+      ],
+      "survivor_counts": {
+        "applicable": false,
+        "reason": "chunk_type=None performs no is_head post-filter; the AC1 cap is a documented no-op for this query."
+      }
     },
     {
       "query_id": "Q5_commit_message_larger_limit",
@@ -128,81 +185,108 @@
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "5263793",
-        "3d9425e",
-        "edd53a2",
-        "eebe655",
-        "cb7c687",
-        "66192aa",
-        "48d28f4",
-        "375758e",
-        "7380c86",
-        "47b32e7",
-        "5ee55c9",
-        "e0ff510",
-        "467eb2e",
-        "3ae2ca8",
-        "67b2416",
-        "406ccc5",
-        "2df5ac4",
-        "64628d5",
-        "f4b3903",
-        "be78a15"
+        "ca8f162",
+        "23156ba",
+        "1758471",
+        "4371c61",
+        "eadbf24",
+        "714225b",
+        "8fd6137",
+        "1f78012",
+        "d65997d",
+        "4b8e54e",
+        "6e6e435",
+        "0d71bda",
+        "223231d",
+        "12de1dc",
+        "8034962",
+        "185cd11",
+        "5d07bba",
+        "eb8c1d8",
+        "ee83749",
+        "b999f95"
       ],
       "postchange_order": [
-        "5263793",
-        "3d9425e",
-        "edd53a2",
-        "eebe655",
-        "cb7c687",
-        "66192aa",
-        "48d28f4",
-        "375758e",
-        "7380c86",
-        "47b32e7",
-        "5ee55c9",
-        "e0ff510",
-        "467eb2e",
-        "3ae2ca8",
-        "67b2416",
-        "406ccc5",
-        "2df5ac4",
-        "64628d5",
-        "f4b3903",
-        "be78a15"
-      ]
+        "ca8f162",
+        "23156ba",
+        "1758471",
+        "4371c61",
+        "eadbf24",
+        "714225b",
+        "8fd6137",
+        "1f78012",
+        "d65997d",
+        "4b8e54e",
+        "6e6e435",
+        "0d71bda",
+        "223231d",
+        "12de1dc",
+        "8034962",
+        "185cd11",
+        "5d07bba",
+        "eb8c1d8",
+        "ee83749",
+        "b999f95"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_message",
+        "true_user_limit": 20,
+        "natural_search_limit": 2400,
+        "capped_search_limit": 1200,
+        "natural_window_survivors": 20,
+        "capped_window_survivors": 20,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1",
+          "code-indexer-temporal-voyage_context_4-2024Q3"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 252
+          },
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+            "candidates_returned": 360
+          }
+        ]
+      }
     },
     {
       "query_id": "Q6_commit_diff_single_shard",
-      "baseline_count": 10,
-      "postchange_count": 10,
+      "baseline_count": 3,
+      "postchange_count": 3,
       "overlap_jaccard": 1.0,
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "9f3fa1f",
-        "04dd95c",
-        "eea805b",
-        "ee438bf",
-        "93e53ae",
-        "365d97a",
-        "ea857fd",
-        "a242f52",
-        "265ccc5",
-        "47f5b25"
+        "5d07bba",
+        "8034962",
+        "223231d"
       ],
       "postchange_order": [
-        "9f3fa1f",
-        "04dd95c",
-        "eea805b",
-        "ee438bf",
-        "93e53ae",
-        "365d97a",
-        "ea857fd",
-        "a242f52",
-        "265ccc5",
-        "47f5b25"
-      ]
+        "5d07bba",
+        "8034962",
+        "223231d"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_diff",
+        "true_user_limit": 10,
+        "natural_search_limit": 45,
+        "capped_search_limit": 45,
+        "natural_window_survivors": 45,
+        "capped_window_survivors": 45,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 45
+          }
+        ]
+      }
     },
     {
       "query_id": "Q7_commit_message_worst_case_small_limit",
@@ -212,15 +296,38 @@
       "recall_vs_baseline": 1.0,
       "verdict": "IDENTICAL",
       "baseline_order": [
-        "467eb2e",
-        "a59d02b",
-        "67b2416"
+        "23156ba",
+        "ca8f162",
+        "1758471"
       ],
       "postchange_order": [
-        "467eb2e",
-        "a59d02b",
-        "67b2416"
-      ]
+        "23156ba",
+        "ca8f162",
+        "1758471"
+      ],
+      "survivor_counts": {
+        "applicable": true,
+        "chunk_type": "commit_message",
+        "true_user_limit": 3,
+        "natural_search_limit": 360,
+        "capped_search_limit": 180,
+        "natural_window_survivors": 20,
+        "capped_window_survivors": 20,
+        "shards_queried": [
+          "code-indexer-temporal-voyage_context_4-2024Q1",
+          "code-indexer-temporal-voyage_context_4-2024Q3"
+        ],
+        "per_shard": [
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+            "candidates_returned": 252
+          },
+          {
+            "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+            "candidates_returned": 360
+          }
+        ]
+      }
     }
   ]
 }

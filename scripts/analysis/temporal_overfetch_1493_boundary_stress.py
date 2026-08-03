@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Story #1493 AC3: SHARDED_JSON overfetch-cap boundary-stress construction.
+"""Story #1493 AC3: SHARDED_JSON overfetch-cap candidate-window-exclusion
+demonstration (real embeddings).
 
 Code review concern (Story #1493, this is not a hypothetical): AC2's
 decode-avoidance mechanism only applies to the CHUNKS_DB storage layout --
 so any recall RISK from AC1's combined-overfetch-ceiling cap lands
 specifically on the legacy SHARDED_JSON layout (the layout a plain
 `cidx index --index-commits` run actually produces). The primary 7-query
-comparison's corpus never demonstrated the cap actually EXCLUDING a real,
-relevant candidate -- this script constructs and VERIFIES a case that does.
+comparison's corpus never demonstrated the cap actually EXCLUDING a real
+candidate from the raw HNSW candidate pool -- this script constructs and
+VERIFIES a case that does.
 
 Method:
   1. Build a git repo with NUM_NOISE_COMMITS commits whose messages are
@@ -34,12 +36,32 @@ Method:
      message) if the window is never hit -- this script NEVER silently
      reports a fabricated "it works" when the boundary was not actually
      exercised.
-  5. On success, prints (and can persist to JSON) the verified target
-     commit hash, its measured rank, and the noise-commit count used -- the
-     companion comparison script then runs the ACTUAL AC1/AC2-affected
-     chunk_type=commit_message / limit=3 query against this same repo,
-     baseline vs post-change, to see whether the cap really does or does
-     not drop the target.
+  5. On success, prints (and persists to JSON) the verified target commit
+     hash, its measured rank, and the noise-commit count used.
+
+SCOPE CORRECTION (code review, round 2): this artifact demonstrates ONLY
+that AC1's cap excludes a real candidate from the raw HNSW candidate POOL
+(rank 301 falls outside the capped window of 180 but inside the natural
+window of 360). It does NOT, by itself, demonstrate a concrete recall LOSS
+at the report's documented worst case (chunk_type=commit_message,
+true_user_limit=3): with a display limit of 3, a candidate ranked 301st can
+never appear in a top-3 BY-SCORE result regardless of whether the raw
+candidate pool includes it or not -- there are 300 higher-scoring
+candidates competing for the same 3 display slots either way. A follow-up
+step demonstrating an ACTUAL baseline-vs-postchange recall difference at
+chunk_type=commit_message/limit=3 against this SAME repo was considered and
+found impractical: producing a genuine real-embedding scenario where (a) a
+target's raw rank falls strictly in the (180, 360] excluded window AND (b)
+that same target would otherwise legitimately place in the final top-3 by
+score requires engineering a specific mix of head/non-head chunk ranks that
+real embedding geometry does not reliably reproduce on demand. That exact
+scenario IS demonstrated -- deterministically, reproducibly, with a real
+FilesystemVectorStore.search() call -- by the engineered-vector unit test
+`tests/unit/storage/test_temporal_overfetch_1493_sharded_json_boundary_risk.py`,
+which is the genuine, review-approved recall-loss proof. This script's
+JSON output should be read as a "candidate-window exclusion demonstration"
+(real embeddings prove the cap really does exclude a real candidate from
+consideration), not as a recall-loss demonstration.
 
 Usage:
     python3 temporal_overfetch_1493_boundary_stress.py \\
@@ -79,6 +101,10 @@ TARGET_FILE_CONTENT = (
 # included without it" case the code review asked to see exercised.
 CAPPED_THRESHOLD = 180
 NATURAL_THRESHOLD = 360
+# The documented worst case's true_user_limit == the final display limit
+# (chunk_type=commit_message, true_user_limit=3) -- used only to explain WHY
+# a rank this far outside top-K can never surface regardless of the cap.
+DISPLAY_LIMIT_DOCUMENTED_WORST_CASE = 3
 
 INITIAL_NOISE_COMMIT_COUNT = 300
 NOISE_COMMIT_COUNT_INCREMENT = 100
@@ -273,6 +299,19 @@ def find_and_verify_boundary_case(
                 "capped_threshold": CAPPED_THRESHOLD,
                 "natural_threshold": NATURAL_THRESHOLD,
                 "attempts": attempts_log,
+                "characterization": "candidate_window_exclusion",
+                "display_limit": DISPLAY_LIMIT_DOCUMENTED_WORST_CASE,
+                "does_not_demonstrate": (
+                    "concrete recall loss -- with display_limit="
+                    f"{DISPLAY_LIMIT_DOCUMENTED_WORST_CASE}, a candidate ranked "
+                    f"{rank} can never appear in a top-"
+                    f"{DISPLAY_LIMIT_DOCUMENTED_WORST_CASE} by-score result "
+                    "regardless of whether the raw candidate pool includes it; "
+                    "the genuine recall-loss proof is the deterministic "
+                    "engineered-vector unit test "
+                    "tests/unit/storage/"
+                    "test_temporal_overfetch_1493_sharded_json_boundary_risk.py"
+                ),
             }
 
         # rank too low (target ranked too high in similarity, below the

@@ -34,7 +34,7 @@ REAL, reproducible instance of the theoretical recall risk the code review
 asked to see demonstrated, not merely asserted away. See
 reports/perf/temporal_overfetch_1493_*.json for the accompanying real-world
 (real embeddings) evidence showing this specific failure mode did not
-manifest across 8 real, natural-language queries -- the risk is real in the
+manifest across 7 real, natural-language queries -- the risk is real in the
 adversarial case constructed here, but requires an adversarial rank
 distribution (a genuine match ranked far behind a page's worth of unrelated
 near-duplicate candidates with NO other genuine matches in between) that
@@ -315,7 +315,7 @@ def test_capped_search_limit_drops_the_target(
     windowful of unrelated filler with no other genuine matches nearby),
     the cap CAN cause a real result to be dropped. This is documented, not
     hidden -- see the module docstring for why real-world (real-embedding)
-    testing across 8 natural-language queries did not reproduce this
+    testing across 7 natural-language queries did not reproduce this
     failure mode."""
     store, query_vector, target_point_id, total_vectors = engineered_collection
 
