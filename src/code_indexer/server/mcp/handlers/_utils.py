@@ -263,7 +263,12 @@ def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with content array
     """
-    return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
+    # Story #1491 AC7 (Finding C3): indent=2 forces CPython's pure-Python
+    # _iterencode fallback (5-10x slower, fully GIL-held) instead of the C
+    # encoder (c_make_encoder). Whitespace is not part of the MCP content
+    # contract -- clients parse this as JSON -- so dropping indentation is
+    # a pure performance fix with no semantic response change.
+    return {"content": [{"type": "text", "text": json.dumps(data)}]}
 
 
 def _get_golden_repos_dir() -> str:

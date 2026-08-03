@@ -115,7 +115,7 @@ router = APIRouter(prefix="/admin/research", tags=["research-assistant"])
 
 
 @router.get("", response_class=HTMLResponse)
-async def get_research_assistant_page(
+def get_research_assistant_page(
     request: Request,
     session_data: SessionData = Depends(require_admin_session),
 ) -> HTMLResponse:
@@ -169,7 +169,7 @@ async def get_research_assistant_page(
 
 
 @router.post("/send", response_class=HTMLResponse)
-async def send_message(
+def send_message(
     request: Request,
     user_prompt: str = Form(...),
     session_id: str = Form(None),
@@ -230,7 +230,7 @@ async def send_message(
 
 
 @router.get("/poll/{job_id}", response_class=HTMLResponse)
-async def poll_job(
+def poll_job(
     request: Request,
     job_id: str,
     session_id: Optional[str] = None,
@@ -309,7 +309,7 @@ async def poll_job(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def create_session(
+def create_session(
     request: Request,
     session_data: SessionData = Depends(require_admin_session),
 ) -> HTMLResponse:
@@ -348,7 +348,7 @@ async def create_session(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def rename_session(
+def rename_session(
     request: Request,
     session_id: str,
     new_name: str = Form(...),
@@ -402,7 +402,7 @@ async def rename_session(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def delete_session(
+def delete_session(
     request: Request,
     session_id: str,
     active_session_id: Optional[str] = None,
@@ -496,7 +496,7 @@ async def delete_session(
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def load_session(
+def load_session(
     request: Request,
     session_id: str,
     session_data: SessionData = Depends(require_admin_session),
@@ -551,7 +551,7 @@ async def load_session(
 
 
 @router.post("/sessions/{session_id}/upload")
-async def upload_file(
+def upload_file(
     request: Request,
     session_id: str,
     file: UploadFile = File(...),
@@ -583,7 +583,7 @@ async def upload_file(
 
 
 @router.get("/sessions/{session_id}/files")
-async def list_files(
+def list_files(
     request: Request,
     session_id: str,
     session_data: SessionData = Depends(require_admin_session),
@@ -612,7 +612,7 @@ async def list_files(
     "/sessions/{session_id}/files/{filename}",
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def delete_file(
+def delete_file(
     request: Request,
     session_id: str,
     filename: str,
@@ -651,7 +651,7 @@ async def delete_file(
 
 
 @router.get("/sessions/{session_id}/files/{filename}")
-async def download_file(
+def download_file(
     request: Request,
     session_id: str,
     filename: str,
