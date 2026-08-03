@@ -393,6 +393,7 @@ class FilesystemVectorStore:
         # eager top-level import this module deliberately avoids (Bug #1468
         # lazy-load discipline).
         chunk_store_cache: Optional[Any] = None,
+        hnsw_num_threads: Optional[int] = None,
     ):
         # collection_meta_cache: Story #1492 AC1 -- optional injected
         # CollectionMetaCache (server mode: a shared, cross-request
@@ -446,6 +447,16 @@ class FilesystemVectorStore:
                 Defaults to None for the CLI/solo/non-activated path, which
                 keeps today's pure path-derived cache key byte-for-byte
                 unchanged.
+            hnsw_num_threads: Story #1493 flakiness investigation -- optional
+                override forwarded to the HNSWIndexManager constructed by
+                end_indexing() for its full-rebuild path (build_index/
+                rebuild_from_vectors thread count for hnswlib's
+                add_items()). None (default, every existing caller)
+                preserves today's behavior exactly (HNSWIndexManager falls
+                back to DEFAULT_HNSW_NUM_THREADS, hnswlib's own -1 "use
+                every available core"). Tests needing fully deterministic,
+                race-free HNSW graph construction may pass
+                hnsw_num_threads=1; production never sets this.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -507,6 +518,12 @@ class FilesystemVectorStore:
         # Server mode injects get_memory_governor() via FilesystemBackend.get_vector_store_client().
         # CLI/solo leaves this None so eviction is byte-identical to Bug #1171.
         self.memory_governor: Optional[Any] = memory_governor
+
+        # Story #1493 flakiness investigation: optional HNSWIndexManager
+        # thread-count override, forwarded to the manager end_indexing()
+        # constructs for its full-rebuild path. None (every existing
+        # caller) preserves today's default multi-threaded behavior exactly.
+        self._hnsw_num_threads: Optional[int] = hnsw_num_threads
 
         # Story #1457 AC8: optional TemporalShardResolver, per-instance-gated.
         # None (default) preserves byte-identical direct construction for
@@ -989,7 +1006,12 @@ class FilesystemVectorStore:
         # Conditional HNSW rebuild based on watch mode
         from .hnsw_index_manager import HNSWIndexManager
 
-        hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
+        # Story #1493 flakiness investigation: self._hnsw_num_threads is
+        # None for every existing caller, resolving to HNSWIndexManager's
+        # own DEFAULT_HNSW_NUM_THREADS (-1) -- byte-identical to today.
+        hnsw_manager = HNSWIndexManager(
+            vector_dim=vector_size, space="cosine", num_threads=self._hnsw_num_threads
+        )
         hnsw_skipped = False
 
         # HNSW-002: Auto-detection for incremental vs full rebuild
@@ -4211,6 +4233,7 @@ class FilesystemVectorStore:
         parallel_executor: Optional["Executor"] = None,
         no_embedding_cache_shortcut: bool = False,
         precomputed_query_vector: Optional[List[float]] = None,
+        temporal_chunk_type: Optional[str] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -4257,6 +4280,18 @@ class FilesystemVectorStore:
         """
         import time
         from concurrent.futures import ThreadPoolExecutor
+
+        # Story #1493 AC2: validate early -- fail loud on a bad caller
+        # value rather than silently misclassifying every candidate as
+        # "opposite chunk type" later in the hydration loop.
+        if temporal_chunk_type is not None and temporal_chunk_type not in (
+            "commit_message",
+            "commit_diff",
+        ):
+            raise ValueError(
+                f"temporal_chunk_type must be 'commit_message' or "
+                f"'commit_diff', got {temporal_chunk_type!r}"
+            )
 
         timing: Dict[str, Any] = {}
 
@@ -4725,6 +4760,31 @@ class FilesystemVectorStore:
                 for point_id, similarity in zip(candidate_ids, candidate_similarities):
                     if score_threshold is not None and similarity < score_threshold:
                         continue
+                    # Story #1493 AC2 (report Finding C2): when the caller
+                    # (temporal query path) wants chunk_type="commit_message",
+                    # derive is_head PURELY from point_id (zero I/O, zero
+                    # decode -- temporal_point_builder.py's is_head_chunk_id)
+                    # and skip the full zstd+json decode entirely for any
+                    # candidate that is DEFINITELY a non-head chunk -- the
+                    # caller's own is_head post-filter would discard it
+                    # anyway. None (point_id doesn't parse as the unified
+                    # temporal scheme) is NEVER treated as a non-match --
+                    # falls through to a normal full decode, never silently
+                    # dropped. "commit_diff" has NO is_head filtering at all
+                    # (real semantics per temporal_search_service.py's
+                    # _filter_by_time_range: it keeps every chunk, head or
+                    # not) so only "commit_message" has anything to skip
+                    # here. Lazily imported so a non-temporal caller (every
+                    # semantic/FTS query, temporal_chunk_type=None) pays
+                    # zero extra import cost.
+                    if temporal_chunk_type == "commit_message":
+                        from code_indexer.services.temporal.temporal_point_builder import (
+                            is_head_chunk_id,
+                        )
+
+                        _is_head = is_head_chunk_id(point_id)
+                        if _is_head is False:
+                            continue
                     record = chunk_store.read(point_id)
                     if record is None:
                         continue

@@ -206,6 +206,24 @@ def discard_corrupt_index(collection_path: Path) -> None:
             )
 
 
+#: Default value hnswlib's own add_items() would use if we never passed
+#: num_threads at all (-1 == use every available core). This module-level
+#: constant is the fallback HNSWIndexManager.__init__ resolves to when its
+#: own num_threads constructor parameter is not explicitly overridden
+#: (Story #1493 flakiness investigation): a caller needing fully
+#: deterministic, race-free HNSW graph construction (e.g. an engineered
+#: test fixture asserting an exact analytic rank) passes
+#: HNSWIndexManager(num_threads=1) directly -- or, via
+#: FilesystemVectorStore(hnsw_num_threads=1), forwarded through to the
+#: HNSWIndexManager end_indexing() constructs -- rather than monkeypatching
+#: this constant or hnswlib's own add_items() method. This value itself
+#: never changes for real indexing workloads, which intentionally keep the
+#: parallelism (multi-threaded insertion is not itself a bug -- production
+#: accepts the resulting HNSW approximate-search variance as the price of
+#: build-time throughput).
+DEFAULT_HNSW_NUM_THREADS = -1
+
+
 class HNSWIndexManager:
     """Manages HNSW index for fast approximate nearest neighbor search.
 
@@ -219,12 +237,24 @@ class HNSWIndexManager:
     INDEX_FILENAME = "hnsw_index.bin"
     VALID_SPACES = {"cosine", "l2", "ip"}  # inner product
 
-    def __init__(self, vector_dim: int = 1536, space: str = "cosine"):
+    def __init__(
+        self,
+        vector_dim: int = 1536,
+        space: str = "cosine",
+        num_threads: Optional[int] = None,
+    ):
         """Initialize HNSW index manager.
 
         Args:
             vector_dim: Dimension of vectors (default 1536 for voyage-code-3)
             space: Distance metric ('cosine', 'l2', or 'ip')
+            num_threads: Threads hnswlib's add_items() should use when
+                building/rebuilding the index. None (default, every existing
+                caller) resolves to DEFAULT_HNSW_NUM_THREADS (-1, i.e.
+                hnswlib's own "use every available core" default) --
+                byte-identical to today's behavior. An explicit override
+                exists for tests needing deterministic, single-threaded
+                construction; production never passes this argument.
 
         Raises:
             ImportError: If hnswlib is not installed
@@ -242,6 +272,9 @@ class HNSWIndexManager:
 
         self.vector_dim = vector_dim
         self.space = space
+        self.num_threads = (
+            num_threads if num_threads is not None else DEFAULT_HNSW_NUM_THREADS
+        )
 
     def _hnswlib_has_fork_capability(self) -> bool:
         """Return True iff hnswlib.Index has the custom fork's
@@ -440,7 +473,10 @@ class HNSWIndexManager:
                 info=f"🔨 FULL HNSW INDEX BUILD: Creating index from scratch with {num_vectors} vectors",
             )
 
-        index.add_items(vectors, labels)
+        # Story #1493 flakiness investigation: pass through the (test-only)
+        # deterministic thread-count override instead of relying on
+        # hnswlib's own implicit default.
+        index.add_items(vectors, labels, num_threads=self.num_threads)
 
         # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
         # persisted, so a freshly-built index never finalizes with orphans.
@@ -847,7 +883,10 @@ class HNSWIndexManager:
             labels = np.arange(len(vectors))
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="🔧 Building HNSW index...")
-            index.add_items(vectors, labels)
+            # Story #1493 flakiness investigation: pass through the
+            # (test-only) deterministic thread-count override instead of
+            # relying on hnswlib's own implicit default.
+            index.add_items(vectors, labels, num_threads=self.num_threads)
 
             # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index
             # is persisted. ONE shared code path serves regular, temporal,
