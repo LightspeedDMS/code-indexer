@@ -385,7 +385,20 @@ class FilesystemVectorStore:
         use_chunks_db_for_new_collections: Optional[bool] = None,
         temporal_shard_resolver: Optional[Any] = None,
         activation_id: Optional[str] = None,
+        collection_meta_cache: Optional[Any] = None,
+        # chunk_store_cache: typed Any (like hnsw_index_cache/id_index_cache/
+        # collection_meta_cache above) to avoid a storage<->server import
+        # cycle -- ChunkStoreThreadCache lives in storage.shared and is
+        # lazily imported below; a precise type here would require an
+        # eager top-level import this module deliberately avoids (Bug #1468
+        # lazy-load discipline).
+        chunk_store_cache: Optional[Any] = None,
     ):
+        # collection_meta_cache: Story #1492 AC1 -- optional injected
+        # CollectionMetaCache (server mode: a shared, cross-request
+        # singleton; CLI/solo default: a fresh per-instance cache, still
+        # eliminating the 4-5 intra-search-call redundant parses).
+        # Constructed at the end of __init__ (see self._collection_meta_cache).
         """Initialize filesystem vector store.
 
         Args:
@@ -548,6 +561,31 @@ class FilesystemVectorStore:
         # CHUNKS_DB" -- consulted BEFORE the on-disk discriminator exists
         # (see _is_chunks_db_collection).
         self._chunks_db_mode: Dict[str, bool] = {}
+
+        # Story #1492 AC1: mtime-keyed cache of parsed collection_meta.json
+        # (Finding C1, SEVERE -- eliminates the 4-5 redundant reads+parses
+        # per search() call). Lazy-imported here (not module-level) to
+        # match this file's existing chunk_layout import convention.
+        if collection_meta_cache is None:
+            from code_indexer.storage.shared.collection_meta_cache import (
+                CollectionMetaCache,
+            )
+
+            collection_meta_cache = CollectionMetaCache()
+        self._collection_meta_cache: Any = collection_meta_cache
+
+        # Story #1492 AC3: per-thread cache of open ChunkStore handles
+        # (Finding C5 -- avoids re-running schema DDL/dim-load/codec
+        # construction on a repeat query against the same mutable
+        # collection). threading.local()-based: NEVER shares a connection
+        # across threads (Story #1456 AC7's binding sqlite3 contract).
+        if chunk_store_cache is None:
+            from code_indexer.storage.shared.chunk_store_cache import (
+                ChunkStoreThreadCache,
+            )
+
+            chunk_store_cache = ChunkStoreThreadCache()
+        self._chunk_store_cache: Any = chunk_store_cache
 
     def _is_chunks_db_collection(
         self, collection_name: str, collection_path: Path
@@ -786,18 +824,20 @@ class FilesystemVectorStore:
         Returns:
             True if collection exists with a valid metadata file
         """
+        # Story #1492 AC1: routed through the shared mtime-keyed cache so a
+        # search() call that follows this check with a vector_size read
+        # (and is_stale()/resolve_chunk_layout() calls) reuses the SAME
+        # parsed content instead of re-reading the file. Behavior is
+        # unchanged: a missing/empty/corrupt/non-dict file resolves to
+        # None from the cache, matching the prior try/except-False path
+        # exactly (isinstance/membership semantics preserved -- "vector_size"
+        # in meta is False for a dict lacking the key, and the cache never
+        # returns a non-dict value at all).
         collection_path = self._get_collection_path(collection_name, subdirectory)
-        metadata_path = collection_path / "collection_meta.json"
-        if not metadata_path.exists():
+        meta = self._collection_meta_cache.get(collection_path)
+        if meta is None:
             return False
-        try:
-            content = metadata_path.read_text()
-            if not content.strip():
-                return False
-            meta = json.loads(content)
-            return "vector_size" in meta
-        except (json.JSONDecodeError, OSError):
-            return False
+        return "vector_size" in meta
 
     def list_collections(self) -> List[str]:
         """List all collections.
@@ -4226,19 +4266,34 @@ class FilesystemVectorStore:
             return ([], timing) if return_timing else []
 
         # Load metadata to get vector size.
-        # A missing collection_meta.json (TOCTOU race, half-written clone, NFS hiccup)
-        # is a LOCAL storage failure — not a provider failure.  Catch FileNotFoundError
-        # here and re-raise as LocalIndexNotFoundError so the parallel-dispatch handler
-        # in semantic_query_manager.py skips sin-binning the embedding provider.
-        meta_file = collection_path / "collection_meta.json"
-        try:
-            with open(meta_file) as f:
-                metadata = json.load(f)
-        except FileNotFoundError as exc:
+        # Story #1492 AC1 (Finding C1, SEVERE): fetched via the SAME shared
+        # mtime-keyed CollectionMetaCache collection_exists() just consulted
+        # a moment ago -- in the common case (file unchanged) this is a
+        # cache HIT (zero additional read/parse), and every downstream
+        # consumer below (is_stale(), the first resolve_chunk_layout() call)
+        # reuses this SAME dict instead of independently re-reading the
+        # file.
+        #
+        # A missing collection_meta.json (TOCTOU race, half-written clone,
+        # NFS hiccup) is a LOCAL storage failure — not a provider failure —
+        # so a None result here (this call re-stats fresh; it is NOT
+        # reusing a stale snapshot) is re-raised as LocalIndexNotFoundError
+        # so the parallel-dispatch handler in semantic_query_manager.py
+        # skips sin-binning the embedding provider, identically to the
+        # pre-#1492 FileNotFoundError branch. Deliberate, LOUD (never
+        # silent) reclassification: the narrower TOCTOU sub-case where the
+        # file instead becomes malformed/corrupt in that same window (which
+        # used to propagate an uncaught json.JSONDecodeError) is now ALSO
+        # None from the cache (fail-closed) and takes this SAME well-typed
+        # LocalIndexNotFoundError path, rather than an ad hoc unhandled
+        # parse exception.
+        cached_meta = self._collection_meta_cache.get(collection_path)
+        if cached_meta is None:
             raise LocalIndexNotFoundError(
                 f"collection_meta.json missing for collection '{collection_name}'. "
                 f"Run: cidx index --rebuild-index"
-            ) from exc
+            )
+        metadata = cached_meta
 
         # === CHECK HNSW STALENESS ===
         # Bug #668: NEVER rebuild HNSW during a query. Rebuilding is the indexer's
@@ -4250,7 +4305,7 @@ class FilesystemVectorStore:
         vector_size = metadata.get("vector_size", 1536)
         hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
 
-        if hnsw_manager.is_stale(collection_path):
+        if hnsw_manager.is_stale(collection_path, cached_meta=metadata):
             if not hnsw_manager.index_exists(collection_path):
                 log_hnsw_stale(
                     self.logger,
@@ -4275,7 +4330,14 @@ class FilesystemVectorStore:
             resolve_chunk_layout,
         )
 
-        _search_chunk_layout = resolve_chunk_layout(collection_path)
+        # Story #1492 AC1: pass the SAME already-fetched metadata dict so
+        # this first resolve does not re-read the file (the SECOND
+        # resolve_chunk_layout() call below, after the parallel section,
+        # deliberately re-fetches via the cache instead -- see its comment
+        # for why that one MUST re-stat).
+        _search_chunk_layout = resolve_chunk_layout(
+            collection_path, cached_meta=metadata
+        )
 
         def load_index():
             """Load HNSW and ID indexes in parallel thread.
@@ -4519,19 +4581,29 @@ class FilesystemVectorStore:
         if _search_chunk_layout == ChunkLayout.CHUNKS_DB:
             _hydration_chunk_layout = ChunkLayout.CHUNKS_DB
         else:
-            _hydration_chunk_layout = resolve_chunk_layout(collection_path)
+            # Story #1492 AC1: routed through the SAME mtime-keyed cache.
+            # This re-stats the file's CURRENT mtime on every call, so a
+            # real concurrent flip (the exact race this re-resolve exists
+            # to catch) is still a fresh reparse; an unchanged file is now
+            # a cache HIT instead of an unconditional reparse.
+            _hydration_chunk_layout = resolve_chunk_layout(
+                collection_path,
+                cached_meta=self._collection_meta_cache.get(collection_path),
+            )
 
         # Story #1456 AC4/AC7: open the chunk store for hydration ONLY here,
         # on the MAIN thread -- NEVER inside load_index()'s worker closure.
         # sqlite3 connections are not safely shared across threads, which is
         # exactly why AC7 mandates this be resolved post-.result().
+        # Story #1492 AC3: routed through the per-THREAD ChunkStoreThreadCache
+        # instead of an unconditional fresh open() -- a repeat query against
+        # the same unchanged mutable collection, served by the same worker
+        # thread, reuses the already-open connection (no schema DDL /
+        # dim-load / codec re-construction). Never shared across threads
+        # (threading.local semantics) -- see chunk_store_cache.py.
         chunk_store_for_hydration: Optional[Any] = None
         if _hydration_chunk_layout == ChunkLayout.CHUNKS_DB:
-            from code_indexer.storage.sqlite_chunk_store import (
-                open_chunk_store_for_path,
-            )
-
-            chunk_store_for_hydration = open_chunk_store_for_path(
+            chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
                 collection_path / "chunks.db", str(collection_path)
             )
 
@@ -4796,15 +4868,14 @@ class FilesystemVectorStore:
             # ChunkStore here (Story #1456 AC7 -- main-thread only) and re-hydrate
             # from chunks.db into a FRESH results list (any partially-built
             # legacy result is discarded). A still-SHARDED_JSON collection is a
-            # genuine missing file -> fail loud (re-raise).
+            # genuine missing file -> fail loud (re-raise the ACTIVE
+            # FileNotFoundError this except clause is handling).
             if resolve_chunk_layout(collection_path) != ChunkLayout.CHUNKS_DB:
                 raise
             if chunk_store_for_hydration is None:
-                from code_indexer.storage.sqlite_chunk_store import (
-                    open_chunk_store_for_path,
-                )
-
-                chunk_store_for_hydration = open_chunk_store_for_path(
+                # Story #1492 AC3: routed through the per-thread cache
+                # (see the entry-point comment above).
+                chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
                     collection_path / "chunks.db", str(collection_path)
                 )
             results = _hydrate_from_chunk_store(chunk_store_for_hydration)
@@ -4834,19 +4905,17 @@ class FilesystemVectorStore:
                 resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
             ):
                 if chunk_store_for_hydration is None:
-                    from code_indexer.storage.sqlite_chunk_store import (
-                        open_chunk_store_for_path,
-                    )
-
-                    # Story #1456 AC7: ChunkStore open on the MAIN/calling thread
-                    # only; finally closes it.
-                    chunk_store_for_hydration = open_chunk_store_for_path(
+                    # Story #1456 AC7: ChunkStore open on the MAIN/calling
+                    # thread only. Story #1492 AC3: routed through the
+                    # per-thread cache instead of a fresh unconditional
+                    # open -- connection lifecycle now belongs to
+                    # ChunkStoreThreadCache, never closed at the end of
+                    # every search() call (see the removed `finally`
+                    # block below).
+                    chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
                         collection_path / "chunks.db", str(collection_path)
                     )
                 results = _hydrate_from_chunk_store(chunk_store_for_hydration)
-        finally:
-            if chunk_store_for_hydration is not None:
-                chunk_store_for_hydration.close()
 
         timing["candidate_load_ms"] = (time.time() - t0) * 1000
 

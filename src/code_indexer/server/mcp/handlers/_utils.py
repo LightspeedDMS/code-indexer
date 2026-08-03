@@ -376,6 +376,16 @@ def _apply_payload_truncation(
     Handles both 'content' field (REST API format) and 'code_snippet' field
     (semantic search QueryResult.to_dict() format).
 
+    Story #1492 AC2 (Finding C4): mirrors the already-correct
+    ``_apply_fts_payload_truncation`` implementation -- a single batched
+    ``payload_cache.store_batch()`` call for ALL oversized results in this
+    pass, instead of one ``PayloadCache.store()`` INSERT+commit per result
+    (Bug #1181's store_batch invariant, previously unmet on this specific
+    semantic path). Preview computation is inlined here (rather than calling
+    ``truncate_result()``, which internally calls the per-result ``store()``)
+    so the batching applies uniformly regardless of field name
+    (content vs code_snippet).
+
     Args:
         results: List of search result dicts with 'content' or 'code_snippet' field
 
@@ -387,7 +397,17 @@ def _apply_payload_truncation(
         # Cache not available, return results unchanged
         return results
 
-    for result_dict in results:
+    preview_size = payload_cache.config.preview_size_chars
+
+    # Track ORIGINAL LIST POSITIONS. Note: if the SAME dict object were ever
+    # aliased at two list positions, both positions are queued here and both
+    # get processed below via pop(field_name, None) (idempotent -- never a
+    # KeyError on the second pass, unlike `del`).
+    large_result_indices: List[int] = []
+    large_field_names: List[str] = []
+    large_contents: List[str] = []
+
+    for idx, result_dict in enumerate(results):
         # Handle both content and code_snippet fields (Bug Fix #683)
         # Logic for field selection:
         # - If ONLY code_snippet exists: truncate code_snippet (semantic search format)
@@ -416,29 +436,43 @@ def _apply_payload_truncation(
             result_dict["has_more"] = False
             continue
 
-        try:
-            truncated = payload_cache.truncate_result(content)  # Sync call
-            if truncated.get("has_more", False):
-                # Large content: replace with preview and cache handle
-                result_dict["preview"] = truncated["preview"]
-                result_dict["cache_handle"] = truncated["cache_handle"]
-                result_dict["has_more"] = True
-                result_dict["total_size"] = truncated["total_size"]
-                del result_dict[field_name]  # Remove full content
-            else:
-                # Small content: keep as-is, add metadata
-                result_dict["cache_handle"] = None
-                result_dict["has_more"] = False
-        except Exception as e:
-            # Log error but don't fail the search
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-023",
-                    f"Failed to truncate result: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+        if len(content) > preview_size:
+            large_result_indices.append(idx)
+            large_field_names.append(field_name)
+            large_contents.append(content)
+        else:
+            # Small content: keep as-is, add metadata
+            result_dict["cache_handle"] = None
+            result_dict["has_more"] = False
+
+    if not large_contents:
+        return results
+
+    try:
+        handles = payload_cache.store_batch(large_contents)  # ONE transaction
+        for result_idx, field_name, content, handle in zip(
+            large_result_indices, large_field_names, large_contents, handles
+        ):
+            result_dict = results[result_idx]
+            result_dict["preview"] = content[:preview_size]
+            result_dict["cache_handle"] = handle
+            result_dict["has_more"] = True
+            result_dict["total_size"] = len(content)
+            # pop(..., None) rather than `del`: idempotent against an
+            # aliased dict object visited twice (see comment above).
+            result_dict.pop(field_name, None)  # Remove full content
+    except Exception as e:
+        # Log error but don't fail the search
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-023",
+                f"Failed to batch-store results in payload truncation: {e}",
+                extra={"correlation_id": get_correlation_id()},
             )
-            # Keep original content on error
+        )
+        # Keep original content on error
+        for result_idx in large_result_indices:
+            result_dict = results[result_idx]
             result_dict["cache_handle"] = None
             result_dict["has_more"] = False
 
