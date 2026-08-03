@@ -4171,6 +4171,7 @@ class FilesystemVectorStore:
         parallel_executor: Optional["Executor"] = None,
         no_embedding_cache_shortcut: bool = False,
         precomputed_query_vector: Optional[List[float]] = None,
+        temporal_chunk_type: Optional[str] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -4217,6 +4218,18 @@ class FilesystemVectorStore:
         """
         import time
         from concurrent.futures import ThreadPoolExecutor
+
+        # Story #1493 AC2: validate early -- fail loud on a bad caller
+        # value rather than silently misclassifying every candidate as
+        # "opposite chunk type" later in the hydration loop.
+        if temporal_chunk_type is not None and temporal_chunk_type not in (
+            "commit_message",
+            "commit_diff",
+        ):
+            raise ValueError(
+                f"temporal_chunk_type must be 'commit_message' or "
+                f"'commit_diff', got {temporal_chunk_type!r}"
+            )
 
         timing: Dict[str, Any] = {}
 
@@ -4653,6 +4666,31 @@ class FilesystemVectorStore:
                 for point_id, similarity in zip(candidate_ids, candidate_similarities):
                     if score_threshold is not None and similarity < score_threshold:
                         continue
+                    # Story #1493 AC2 (report Finding C2): when the caller
+                    # (temporal query path) wants chunk_type="commit_message",
+                    # derive is_head PURELY from point_id (zero I/O, zero
+                    # decode -- temporal_point_builder.py's is_head_chunk_id)
+                    # and skip the full zstd+json decode entirely for any
+                    # candidate that is DEFINITELY a non-head chunk -- the
+                    # caller's own is_head post-filter would discard it
+                    # anyway. None (point_id doesn't parse as the unified
+                    # temporal scheme) is NEVER treated as a non-match --
+                    # falls through to a normal full decode, never silently
+                    # dropped. "commit_diff" has NO is_head filtering at all
+                    # (real semantics per temporal_search_service.py's
+                    # _filter_by_time_range: it keeps every chunk, head or
+                    # not) so only "commit_message" has anything to skip
+                    # here. Lazily imported so a non-temporal caller (every
+                    # semantic/FTS query, temporal_chunk_type=None) pays
+                    # zero extra import cost.
+                    if temporal_chunk_type == "commit_message":
+                        from code_indexer.services.temporal.temporal_point_builder import (
+                            is_head_chunk_id,
+                        )
+
+                        _is_head = is_head_chunk_id(point_id)
+                        if _is_head is False:
+                            continue
                     record = chunk_store.read(point_id)
                     if record is None:
                         continue
