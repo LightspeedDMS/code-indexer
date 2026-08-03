@@ -370,6 +370,49 @@ class SSHKeyManager:
 
                 return metadata
 
+    def _has_untracked_conflicting_file(self, key_name: str) -> bool:
+        """Bug #1519 provenance guard.
+
+        When no backend/JSON metadata exists for ``key_name``, this service
+        has no proof it ever created a file by that name -- it could be an
+        unrelated file (e.g. a user's personal SSH key) that merely shares
+        a filename with a previously backend-tracked key. Returns True (and
+        logs a WARNING) only when such a same-named file is actually
+        present in ``self.ssh_dir``, so the caller can refuse to delete it
+        instead of blindly trusting the name match.
+
+        Also hardens against path-traversal in ``key_name`` (e.g.
+        ``"../foo"``): any name whose resolved path would fall outside
+        ``self.ssh_dir`` is rejected up front, before any filesystem
+        existence check is performed.
+        """
+        default_private = self.ssh_dir / key_name
+        default_public = self.ssh_dir / f"{key_name}.pub"
+
+        ssh_dir_resolved = self.ssh_dir.resolve()
+        if not (
+            default_private.resolve().is_relative_to(ssh_dir_resolved)
+            and default_public.resolve().is_relative_to(ssh_dir_resolved)
+        ):
+            logger.warning(
+                "SSHKeyManager.delete_key('%s'): key name resolves outside "
+                "ssh_dir -- refusing (path-traversal guard)",
+                key_name,
+            )
+            return True
+
+        if not (default_private.exists() or default_public.exists()):
+            return False
+
+        logger.warning(
+            "SSHKeyManager.delete_key('%s'): no tracked metadata found, "
+            "but a same-named file exists in %s -- refusing to delete "
+            "an untracked file (Bug #1519 provenance guard)",
+            key_name,
+            self.ssh_dir,
+        )
+        return True
+
     def delete_key(self, key_name: str) -> bool:
         """
         Delete an SSH key, its config entries, and metadata.
@@ -378,15 +421,21 @@ class SSHKeyManager:
             key_name: Name of the key to delete
 
         Returns:
-            True (always succeeds, idempotent operation)
+            True on success, including the idempotent case where no
+            metadata AND no on-disk file exist for key_name (nothing to
+            delete). Returns False when no metadata exists for key_name but
+            a same-named file is present in ssh_dir (Bug #1519 provenance
+            guard) -- this service never proved it wrote that file, so it
+            refuses to delete it rather than blindly trusting the name.
         """
 
         with self._get_lock():
+            untracked_file_blocked = False
+
             if self._use_sqlite and self._sqlite_backend is not None:
                 # SQLite backend (Story #702)
                 key_data = self._sqlite_backend.get_key(key_name)
 
-                # Remove key files if they exist
                 if key_data:
                     private_path = Path(key_data["private_path"])
                     public_path = Path(key_data["public_path"])
@@ -395,13 +444,9 @@ class SSHKeyManager:
                     if public_path.exists():
                         public_path.unlink()
                 else:
-                    # Try standard location even without metadata
-                    default_private = self.ssh_dir / key_name
-                    default_public = self.ssh_dir / f"{key_name}.pub"
-                    if default_private.exists():
-                        default_private.unlink()
-                    if default_public.exists():
-                        default_public.unlink()
+                    untracked_file_blocked = self._has_untracked_conflicting_file(
+                        key_name
+                    )
 
                 # Remove from SQLite (cascade deletes hosts)
                 self._sqlite_backend.delete_key(key_name)
@@ -423,7 +468,6 @@ class SSHKeyManager:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
 
-                # Remove key files if they exist
                 if metadata:
                     private_path = Path(metadata.private_path)
                     public_path = Path(metadata.public_path)
@@ -432,13 +476,9 @@ class SSHKeyManager:
                     if public_path.exists():
                         public_path.unlink()
                 else:
-                    # Try standard location even without metadata
-                    default_private = self.ssh_dir / key_name
-                    default_public = self.ssh_dir / f"{key_name}.pub"
-                    if default_private.exists():
-                        default_private.unlink()
-                    if default_public.exists():
-                        default_public.unlink()
+                    untracked_file_blocked = self._has_untracked_conflicting_file(
+                        key_name
+                    )
 
                 # Remove metadata file
                 metadata_path = self.metadata_dir / f"{key_name}.json"
@@ -448,7 +488,7 @@ class SSHKeyManager:
             # Update SSH config to remove entries
             self._update_ssh_config()
 
-            return True
+            return not untracked_file_blocked
 
     def list_keys(self) -> KeyListResult:
         """

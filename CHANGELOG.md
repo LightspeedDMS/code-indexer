@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.104.0] - 2026-08-03
+
+### Fixed
+
+- Fixed #1519: `SSHKeySyncService.sync()` could delete a real, unrelated SSH key file it never wrote, if that file's name happened to collide with a backend-tracked key name that was later renamed/retired. The manifest of "keys managed by this service" now tracks actual write provenance (`(previously-verified-managed names still reported by backend) | (names written just now)`) instead of unconditionally recording every backend-reported name. `SSHKeyManager.delete_key()` had the same class of defect -- deleting an untracked same-named file when no backend metadata existed for the requested key name -- and now refuses that fallback instead of silently unlinking an unrelated file.
+- Fixed #1520: an E2E test (`test_19_temporal_live_wiring_1400.py`) could intermittently fail because its `TemporalDedupCache` signature (derived from query text) collided with another test's already-completed job elsewhere in the same large test-process run, causing a query expected to defer to a background job to instead return an already-cached synchronous result. Test query texts now include a per-process-unique token so this collision is structurally impossible.
+
 ## [11.103.0] - 2026-08-03
 
 ### Performance
