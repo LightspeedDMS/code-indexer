@@ -160,8 +160,18 @@ class SSHKeySyncService:
                 logger.error(f"Failed to remove stale SSH key '{name}': {exc}")
                 errors.append(f"remove {name}: {exc}")
 
-        # Update manifest with current backend names
-        self._update_manifest(backend_names)
+        # Update manifest with provenance-verified managed names only
+        # (Bug #1519): a name is only ever recorded as "managed" here if
+        # this service can prove it either (a) actually wrote it just now
+        # (in `written`), or (b) was already correctly verified-managed in
+        # a prior sync AND is still reported by the backend now
+        # (`managed_names & backend_names`). Never simply because the
+        # backend reports a name -- that previously let a skipped write
+        # (name collision with a pre-existing, unrelated file) get recorded
+        # as managed, causing a later stale-key sweep to unlink() a file
+        # this service never created.
+        provenance_verified_names = (managed_names & backend_names) | set(written)
+        self._update_manifest(provenance_verified_names)
 
         # Materialize the ~/.ssh/config Host->IdentityFile mapping so that git
         # SSH remotes (e.g. the cidx-meta backup remote git@github.com) resolve
