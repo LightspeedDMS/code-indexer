@@ -72,7 +72,7 @@ import os
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Union
+from typing import Any, Dict, Optional, Union
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
@@ -83,6 +83,12 @@ CHUNK_LAYOUT_DISCRIMINATOR_VERSION = 1
 _COLLECTION_META_FILENAME = "collection_meta.json"
 _DISCRIMINATOR_KEY = "chunks_db"
 
+#: Sentinel meaning "caller did not supply cached_meta" -- distinct from an
+#: explicitly-passed ``None`` (which means "the cache already determined
+#: this collection has no readable/valid metadata"). See
+#: ``resolve_chunk_layout``'s ``cached_meta`` parameter (Story #1492 AC1).
+_NOT_PROVIDED: Any = object()
+
 
 class ChunkLayout(Enum):
     """Which on-disk layout a collection's chunk data uses."""
@@ -91,7 +97,11 @@ class ChunkLayout(Enum):
     CHUNKS_DB = "chunks_db"
 
 
-def resolve_chunk_layout(collection_dir: Union[str, Path]) -> ChunkLayout:
+def resolve_chunk_layout(
+    collection_dir: Union[str, Path],
+    *,
+    cached_meta: Any = _NOT_PROVIDED,
+) -> ChunkLayout:
     """Return the :class:`ChunkLayout` for ``collection_dir``.
 
     Fails CLOSED to ``ChunkLayout.SHARDED_JSON`` on any absent, malformed, or
@@ -99,21 +109,35 @@ def resolve_chunk_layout(collection_dir: Union[str, Path]) -> ChunkLayout:
     This is the ONLY function in the codebase authorized to make this
     decision; callers must never independently probe for ``chunks.db``'s
     existence or hand-check the ``chunks_db`` field.
+
+    Args:
+        collection_dir: Collection directory to resolve.
+        cached_meta: Story #1492 AC1 -- optional PRE-PARSED
+            ``collection_meta.json`` content (e.g. from
+            ``storage.shared.collection_meta_cache.CollectionMetaCache``).
+            When supplied (a ``dict``, or explicitly ``None`` meaning "the
+            cache determined there is no valid metadata"), this function
+            evaluates the discriminator directly and performs NO file I/O
+            at all. When omitted (the default), behavior is BYTE-IDENTICAL
+            to every pre-existing caller: read+parse the real file.
     """
-    meta_path = Path(collection_dir) / _COLLECTION_META_FILENAME
+    if cached_meta is _NOT_PROVIDED:
+        meta_path = Path(collection_dir) / _COLLECTION_META_FILENAME
 
-    try:
-        content = meta_path.read_text()
-    except (OSError, UnicodeDecodeError):
-        return ChunkLayout.SHARDED_JSON
+        try:
+            content = meta_path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return ChunkLayout.SHARDED_JSON
 
-    if not content.strip():
-        return ChunkLayout.SHARDED_JSON
+        if not content.strip():
+            return ChunkLayout.SHARDED_JSON
 
-    try:
-        meta = json.loads(content)
-    except json.JSONDecodeError:
-        return ChunkLayout.SHARDED_JSON
+        try:
+            meta: Optional[Dict[str, Any]] = json.loads(content)
+        except json.JSONDecodeError:
+            return ChunkLayout.SHARDED_JSON
+    else:
+        meta = cached_meta
 
     if not isinstance(meta, dict):
         return ChunkLayout.SHARDED_JSON

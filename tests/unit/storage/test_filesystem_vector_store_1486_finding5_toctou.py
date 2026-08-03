@@ -301,9 +301,14 @@ class TestSearchPerfGateFinding3:
         real_resolve = chunk_layout_mod.resolve_chunk_layout
         calls: List[Path] = []
 
-        def counting_resolve(path: Any) -> ChunkLayout:
+        def counting_resolve(path: Any, **kwargs: Any) -> ChunkLayout:
+            # Story #1492 AC1: search() now also passes cached_meta=... --
+            # forwarded unchanged. Call-COUNT semantics (what this spy
+            # measures) are unaffected: the function is still invoked the
+            # same number of times per search(), only with a pre-fetched
+            # dict instead of re-reading the file internally.
             calls.append(Path(path))
-            return real_resolve(path)
+            return real_resolve(path, **kwargs)
 
         monkeypatch.setattr(chunk_layout_mod, "resolve_chunk_layout", counting_resolve)
 

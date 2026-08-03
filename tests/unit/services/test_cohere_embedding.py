@@ -744,6 +744,9 @@ def _setup_filesystem_store(tmp_path):
     from unittest.mock import MagicMock
     from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
+    from code_indexer.storage.shared.chunk_store_cache import ChunkStoreThreadCache
+    from code_indexer.storage.shared.collection_meta_cache import CollectionMetaCache
+
     store = FilesystemVectorStore.__new__(FilesystemVectorStore)
     store.logger = MagicMock()
     store.base_path = tmp_path
@@ -757,6 +760,13 @@ def _setup_filesystem_store(tmp_path):
     # behavior (no temporal resolver injected -- direct base_path
     # construction, byte-identical to before AC8).
     store._temporal_shard_resolver = None
+    # Story #1492 AC1/AC3: collection_exists()/search() read these two
+    # caches unconditionally; __new__() bypasses __init__'s assignment, so
+    # they must be set explicitly here too, same as every other attribute
+    # in this fixture. Fresh per-instance caches match __init__'s own
+    # default (None injected -> construct a fresh instance) exactly.
+    store._collection_meta_cache = CollectionMetaCache()
+    store._chunk_store_cache = ChunkStoreThreadCache()
 
     # Create collection directory with metadata so collection_exists() returns True
     col_path = tmp_path / "test_collection"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.102.0] - 2026-08-03
+
+### Performance
+
+- Story #1492: `FilesystemVectorStore.search()` no longer re-parses `collection_meta.json` 4-5 times per query on the server query hot path -- a mtime-keyed `CollectionMetaCache` and a per-thread `ChunkStoreThreadCache` are now genuinely shared, process-wide singletons (wired through `FilesystemBackend.get_vector_store_client()`, mirroring the existing `id_index_cache` server-mode pattern), so a repeat query against an unchanged collection is a structural cache hit instead of a fresh parse. MCP `search_code`/`multi_query_routes` payload truncation now batches its `payload_cache` writes into a single transaction instead of one commit per truncated result (mirroring Bug #1181's existing REST-path fix).
+
 ## [11.101.0] - 2026-08-03
 
 ### Performance

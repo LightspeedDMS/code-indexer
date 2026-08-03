@@ -25,6 +25,11 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+#: Sentinel meaning "caller did not supply cached_meta" to is_stale() --
+#: distinct from an explicitly-passed None (which means "the cache
+#: determined there is no valid metadata"). Story #1492 AC1.
+_NOT_PROVIDED: Any = object()
+
 # Try to import hnswlib, gracefully degrade if not available
 try:
     import hnswlib
@@ -1156,7 +1161,9 @@ class HNSWIndexManager:
         """
         self._write_stale_flag_durably(collection_path, is_stale=False)
 
-    def is_stale(self, collection_path: Path) -> bool:
+    def is_stale(
+        self, collection_path: Path, *, cached_meta: Any = _NOT_PROVIDED
+    ) -> bool:
         """Check if HNSW index needs rebuilding.
 
         Returns True if any of the following conditions are met:
@@ -1167,6 +1174,17 @@ class HNSWIndexManager:
 
         Args:
             collection_path: Path to collection directory
+            cached_meta: Story #1492 AC1 -- optional PRE-PARSED
+                collection_meta.json content (e.g. from
+                storage.shared.collection_meta_cache.CollectionMetaCache).
+                When supplied as a dict, this method evaluates staleness
+                directly and performs NO file I/O at all. Any non-dict
+                value explicitly supplied (including None, meaning "the
+                cache determined there is no valid metadata") is treated
+                identically to a missing/corrupted file. When omitted
+                entirely (the default sentinel), behavior is
+                BYTE-IDENTICAL to every pre-existing caller: read+parse
+                the real file.
 
         Returns:
             True if HNSW index needs rebuilding, False if fresh
@@ -1177,44 +1195,93 @@ class HNSWIndexManager:
             No filesystem scan (rglob) is performed - the explicit is_stale
             flag is the sole source of truth for non-filtered indexes.
         """
-        meta_file = collection_path / "collection_meta.json"
+        metadata = self._load_metadata_for_is_stale(collection_path, cached_meta)
+        if metadata is None:
+            return True  # No/invalid metadata = needs build
+        return self._evaluate_hnsw_staleness(metadata)
 
-        if not meta_file.exists():
-            return True  # No metadata = needs build
+    def _load_metadata_for_is_stale(
+        self, collection_path: Path, cached_meta: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the metadata dict is_stale() should evaluate, or None.
 
-        try:
-            with open(meta_file) as f:
-                metadata = json.load(f)
+        Story #1492 AC1: when ``cached_meta`` is the ``_NOT_PROVIDED``
+        sentinel (the default), reads+parses the real file exactly as
+        before this story. Otherwise validates the supplied value and
+        performs NO file I/O at all.
+        """
+        if cached_meta is _NOT_PROVIDED:
+            meta_file = collection_path / "collection_meta.json"
+            if not meta_file.exists():
+                return None
+            try:
+                with open(meta_file) as f:
+                    loaded: Any = json.load(f)
+            except json.JSONDecodeError:
+                logger.debug(
+                    "is_stale: corrupted collection_meta.json at %s -- "
+                    "treating as stale",
+                    collection_path,
+                )
+                return None
+            if not isinstance(loaded, dict):
+                logger.debug(
+                    "is_stale: collection_meta.json at %s did not parse to "
+                    "a JSON object -- treating as stale",
+                    collection_path,
+                )
+                return None
+            return loaded
 
-            if "hnsw_index" not in metadata:
-                return True  # No HNSW index = needs build
+        if not isinstance(cached_meta, dict):
+            # None (cache reports no valid metadata) or any other non-dict
+            # value -- treat identically to a missing/corrupted file.
+            logger.debug(
+                "is_stale: cached_meta for %s is not a dict (%r) -- treating as stale",
+                collection_path,
+                type(cached_meta),
+            )
+            return None
+        return cached_meta
 
-            hnsw_info = metadata["hnsw_index"]
+    def _evaluate_hnsw_staleness(self, metadata: Dict[str, Any]) -> bool:
+        """Evaluate the is_stale/vector_count logic against a parsed
+        collection_meta.json dict. Split out of is_stale() to keep both
+        the cached_meta and file-read paths sharing ONE implementation.
+        """
+        if "hnsw_index" not in metadata:
+            return True  # No HNSW index = needs build
 
-            # Check is_stale flag (default to True if missing for backward compatibility)
-            is_stale_flag = hnsw_info.get("is_stale", True)
-            if is_stale_flag:
-                return True
+        hnsw_info = metadata["hnsw_index"]
+        if not isinstance(hnsw_info, dict):
+            logger.debug(
+                "is_stale: metadata['hnsw_index'] is not a dict (%r) -- "
+                "treating as stale",
+                type(hnsw_info),
+            )
+            return True  # Malformed hnsw_index = needs rebuild
 
-            # Fallback detection: Check for vector count mismatch
-            # This catches incremental indexing that bypassed mark_stale()
-            # Only perform this check if there are actual vector files (not just HNSW index)
-            stored_count = hnsw_info.get("vector_count", 0)
+        # Check is_stale flag (default to True if missing for backward compatibility)
+        is_stale_flag = hnsw_info.get("is_stale", True)
+        if is_stale_flag:
+            return True
 
-            # Branch isolation fix: When this is a filtered rebuild, compare
-            # HNSW count against visible_count (not total disk count).
-            # This prevents false-positive staleness after filtered rebuilds where
-            # disk has MORE vectors than what's in the HNSW index (that's by design).
-            if hnsw_info.get("filtered", False):
-                visible_count = hnsw_info.get("visible_count", stored_count)
-                if stored_count != visible_count:
-                    return True  # HNSW count doesn't match what was rebuilt
-                return False  # Filtered rebuild is fresh
+        # Fallback detection: Check for vector count mismatch
+        # This catches incremental indexing that bypassed mark_stale()
+        # Only perform this check if there are actual vector files (not just HNSW index)
+        stored_count = hnsw_info.get("vector_count", 0)
 
-            return False  # Fresh index
+        # Branch isolation fix: When this is a filtered rebuild, compare
+        # HNSW count against visible_count (not total disk count).
+        # This prevents false-positive staleness after filtered rebuilds where
+        # disk has MORE vectors than what's in the HNSW index (that's by design).
+        if hnsw_info.get("filtered", False):
+            visible_count = hnsw_info.get("visible_count", stored_count)
+            if stored_count != visible_count:
+                return True  # HNSW count doesn't match what was rebuilt
+            return False  # Filtered rebuild is fresh
 
-        except (json.JSONDecodeError, KeyError):
-            return True  # Corrupted metadata = needs rebuild
+        return False  # Fresh index
 
     def _update_metadata(
         self,
