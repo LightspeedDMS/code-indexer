@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "target_commit_hash": "9472e63ffaab1d00e6d4d5d3b9799ac9d3992480",
+  "measured_rank": 301,
+  "noise_commit_count": 300,
+  "capped_threshold": 180,
+  "natural_threshold": 360,
+  "attempts": [
+    {
+      "attempt": 1,
+      "noise_commit_count": 300,
+      "measured_rank": 301
+    }
+  ]
+}

@@ -1,0 +1,226 @@
+{
+  "generated_at": "2026-08-03T08:51:11.319092+00:00",
+  "overall_verdict": "PASS",
+  "queries": [
+    {
+      "query_id": "Q1_commit_message_multi_shard",
+      "baseline_count": 10,
+      "postchange_count": 10,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "b2191b7",
+        "efe9e00",
+        "f8e5df6",
+        "93c8fd9",
+        "752db94",
+        "0a0ebe1",
+        "664349d",
+        "334cb4a",
+        "b030703",
+        "f251ccf"
+      ],
+      "postchange_order": [
+        "b2191b7",
+        "efe9e00",
+        "f8e5df6",
+        "93c8fd9",
+        "752db94",
+        "0a0ebe1",
+        "664349d",
+        "334cb4a",
+        "b030703",
+        "f251ccf"
+      ]
+    },
+    {
+      "query_id": "Q2_commit_message_small_limit",
+      "baseline_count": 5,
+      "postchange_count": 5,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "d873c57",
+        "bbfa3e5",
+        "7f82da8",
+        "da4ba69",
+        "d2846b1"
+      ],
+      "postchange_order": [
+        "d873c57",
+        "bbfa3e5",
+        "7f82da8",
+        "da4ba69",
+        "d2846b1"
+      ]
+    },
+    {
+      "query_id": "Q3_commit_diff",
+      "baseline_count": 10,
+      "postchange_count": 10,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "2fb0908",
+        "e24f3ec",
+        "e910300",
+        "6720af7",
+        "8be50c0",
+        "fc374bf",
+        "5fb682c",
+        "66462d6",
+        "c687eda",
+        "a742ff7"
+      ],
+      "postchange_order": [
+        "2fb0908",
+        "e24f3ec",
+        "e910300",
+        "6720af7",
+        "8be50c0",
+        "fc374bf",
+        "5fb682c",
+        "66462d6",
+        "c687eda",
+        "a742ff7"
+      ]
+    },
+    {
+      "query_id": "Q4_no_chunk_type",
+      "baseline_count": 10,
+      "postchange_count": 10,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "08f6953",
+        "0214105",
+        "2a9446e",
+        "a2e23e3",
+        "25173a8",
+        "30c054b",
+        "82687b2",
+        "dd0816b",
+        "e35e763",
+        "f06a3a2"
+      ],
+      "postchange_order": [
+        "08f6953",
+        "0214105",
+        "2a9446e",
+        "a2e23e3",
+        "25173a8",
+        "30c054b",
+        "82687b2",
+        "dd0816b",
+        "e35e763",
+        "f06a3a2"
+      ]
+    },
+    {
+      "query_id": "Q5_commit_message_larger_limit",
+      "baseline_count": 20,
+      "postchange_count": 20,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "5263793",
+        "3d9425e",
+        "edd53a2",
+        "eebe655",
+        "cb7c687",
+        "66192aa",
+        "48d28f4",
+        "375758e",
+        "7380c86",
+        "47b32e7",
+        "5ee55c9",
+        "e0ff510",
+        "467eb2e",
+        "3ae2ca8",
+        "67b2416",
+        "406ccc5",
+        "2df5ac4",
+        "64628d5",
+        "f4b3903",
+        "be78a15"
+      ],
+      "postchange_order": [
+        "5263793",
+        "3d9425e",
+        "edd53a2",
+        "eebe655",
+        "cb7c687",
+        "66192aa",
+        "48d28f4",
+        "375758e",
+        "7380c86",
+        "47b32e7",
+        "5ee55c9",
+        "e0ff510",
+        "467eb2e",
+        "3ae2ca8",
+        "67b2416",
+        "406ccc5",
+        "2df5ac4",
+        "64628d5",
+        "f4b3903",
+        "be78a15"
+      ]
+    },
+    {
+      "query_id": "Q6_commit_diff_single_shard",
+      "baseline_count": 10,
+      "postchange_count": 10,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "9f3fa1f",
+        "04dd95c",
+        "eea805b",
+        "ee438bf",
+        "93e53ae",
+        "365d97a",
+        "ea857fd",
+        "a242f52",
+        "265ccc5",
+        "47f5b25"
+      ],
+      "postchange_order": [
+        "9f3fa1f",
+        "04dd95c",
+        "eea805b",
+        "ee438bf",
+        "93e53ae",
+        "365d97a",
+        "ea857fd",
+        "a242f52",
+        "265ccc5",
+        "47f5b25"
+      ]
+    },
+    {
+      "query_id": "Q7_commit_message_worst_case_small_limit",
+      "baseline_count": 3,
+      "postchange_count": 3,
+      "overlap_jaccard": 1.0,
+      "recall_vs_baseline": 1.0,
+      "verdict": "IDENTICAL",
+      "baseline_order": [
+        "467eb2e",
+        "a59d02b",
+        "67b2416"
+      ],
+      "postchange_order": [
+        "467eb2e",
+        "a59d02b",
+        "67b2416"
+      ]
+    }
+  ]
+}
